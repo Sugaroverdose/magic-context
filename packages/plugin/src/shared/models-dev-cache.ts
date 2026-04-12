@@ -34,27 +34,42 @@ function getModelsJsonPath(): string {
     return join(cacheBase, "opencode", "models.json");
 }
 
+function getOpencodeConfigPath(): string | null {
+    const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
+    const configDir = envDir
+        ? envDir
+        : platform() === "win32"
+          ? join(homedir(), ".config", "opencode")
+          : join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode");
+
+    // Check jsonc first, then json (matches OpenCode's own lookup order)
+    const jsonc = join(configDir, "opencode.jsonc");
+    if (existsSync(jsonc)) return jsonc;
+    const json = join(configDir, "opencode.json");
+    if (existsSync(json)) return json;
+    return null;
+}
+
 function loadModelsDevLimits(): Map<string, number> {
     const limits = new Map<string, number>();
-    const filePath = getModelsJsonPath();
 
+    // 1. Load from OpenCode's models.dev cache (base layer — all known public models)
+    const modelsJsonPath = getModelsJsonPath();
     try {
-        if (!existsSync(filePath)) {
-            return limits;
-        }
+        if (existsSync(modelsJsonPath)) {
+            const raw = readFileSync(modelsJsonPath, "utf-8");
+            const data = JSON.parse(raw) as Record<
+                string,
+                { models?: Record<string, { limit?: { context?: number } }> }
+            >;
 
-        const raw = readFileSync(filePath, "utf-8");
-        const data = JSON.parse(raw) as Record<
-            string,
-            { models?: Record<string, { limit?: { context?: number } }> }
-        >;
-
-        for (const [providerId, provider] of Object.entries(data)) {
-            if (!provider?.models || typeof provider.models !== "object") continue;
-            for (const [modelId, model] of Object.entries(provider.models)) {
-                const context = model?.limit?.context;
-                if (typeof context === "number" && context > 0) {
-                    limits.set(`${providerId}/${modelId}`, context);
+            for (const [providerId, provider] of Object.entries(data)) {
+                if (!provider?.models || typeof provider.models !== "object") continue;
+                for (const [modelId, model] of Object.entries(provider.models)) {
+                    const context = model?.limit?.context;
+                    if (typeof context === "number" && context > 0) {
+                        limits.set(`${providerId}/${modelId}`, context);
+                    }
                 }
             }
         }
@@ -62,6 +77,42 @@ function loadModelsDevLimits(): Map<string, number> {
         sessionLog(
             "global",
             "models-dev-cache: failed to read models.json:",
+            error instanceof Error ? error.message : String(error),
+        );
+    }
+
+    // 2. Overlay custom provider models from OpenCode config (higher priority).
+    // Users define custom/proxy models via provider.<id>.models.<name>.limit.context
+    // in opencode.json(c). These override models.dev entries for the same key.
+    try {
+        const configPath = getOpencodeConfigPath();
+        if (configPath && existsSync(configPath)) {
+            let raw = readFileSync(configPath, "utf-8");
+            // Strip JSONC comments (single-line only — sufficient for OpenCode configs)
+            raw = raw.replace(/\/\/.*$/gm, "");
+            const config = JSON.parse(raw) as {
+                provider?: Record<
+                    string,
+                    { models?: Record<string, { limit?: { context?: number } }> }
+                >;
+            };
+
+            if (config.provider && typeof config.provider === "object") {
+                for (const [providerId, provider] of Object.entries(config.provider)) {
+                    if (!provider?.models || typeof provider.models !== "object") continue;
+                    for (const [modelId, model] of Object.entries(provider.models)) {
+                        const context = model?.limit?.context;
+                        if (typeof context === "number" && context > 0) {
+                            limits.set(`${providerId}/${modelId}`, context);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        sessionLog(
+            "global",
+            "models-dev-cache: failed to read opencode config for custom models:",
             error instanceof Error ? error.message : String(error),
         );
     }
