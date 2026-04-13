@@ -104,8 +104,11 @@ function loadModelsDevLimits(): Map<string, number> {
         const configPath = getOpencodeConfigPath();
         if (configPath && existsSync(configPath)) {
             let raw = readFileSync(configPath, "utf-8");
-            // Strip JSONC comments (single-line only — sufficient for OpenCode configs)
-            raw = raw.replace(/\/\/.*$/gm, "");
+            // Strip JSONC single-line comments while preserving // inside strings.
+            // Match strings first (to skip them), then match comments outside strings.
+            raw = raw.replace(/"(?:[^"\\]|\\.)*"|\/\/.*$/gm, (match) =>
+                match.startsWith('"') ? match : "",
+            );
             const config = JSON.parse(raw) as {
                 provider?: Record<
                     string,
