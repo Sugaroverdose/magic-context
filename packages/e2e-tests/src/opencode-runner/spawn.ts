@@ -132,8 +132,18 @@ function writeConfigs(
     };
 
     writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+
+    // The plugin's loadPluginConfig() looks for magic-context.jsonc under
+    // ${XDG_CONFIG_HOME}/opencode/magic-context.jsonc (user config) or
+    // <workdir>/magic-context.jsonc (project root).
+    //
+    // We set XDG_CONFIG_HOME=env.configDir in the child env, so the user
+    // config path resolves to env.configDir/opencode/magic-context.jsonc.
+    // Put the file there; a sibling one in env.configDir is never read.
+    const userConfigDir = join(env.configDir, "opencode");
+    mkdirSync(userConfigDir, { recursive: true });
     writeFileSync(
-        join(env.configDir, "magic-context.jsonc"),
+        join(userConfigDir, "magic-context.jsonc"),
         JSON.stringify(magicContext, null, 2),
     );
 
