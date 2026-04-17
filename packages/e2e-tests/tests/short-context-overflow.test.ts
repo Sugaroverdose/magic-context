@@ -2,7 +2,8 @@
 
 /**
  * Small-context overflow probe — documents a real gap in overflow prevention
- * on short-context models for pure-text workflows.
+ * on short-context models when main turns hit back-to-back faster than
+ * historian can finish.
  *
  * ## Scenario
  *
@@ -11,47 +12,56 @@
  * request body (the mock counts request bytes and reports tokens ≈ bytes/4,
  * mirroring how real providers compute usage). Each turn the mock returns
  * a ~60KB text block that becomes part of the assistant history, so the
- * next user turn ships a bigger request. This simulates a verbose reasoning
- * conversation with no tool calls.
+ * next user turn ships a bigger request. Historian is delayed 3 seconds to
+ * simulate a slow summarizer model. Turns fire back-to-back with no user
+ * pause — the autonomous-loop scenario.
  *
  * ## What we observed
  *
  * Peak provider-visible request reached 169% of 128K after 16 turns, even
- * with `compaction_markers: true` and `execute_threshold_percentage: 40`.
- * The plugin did its job on the signal side (fired historian 16 times,
- * published 16 compartments, blocked turn 8 for 12s at 98% threshold) but
- * the outgoing body kept growing because:
+ * with `compaction_markers: true`, `execute_threshold_percentage: 40`, and
+ * historian producing valid compartments. Inspection of the test's
+ * context.db showed: 1 compartment published, 14 pending drops queued by
+ * `queueDropsForCompartmentalizedMessages`, and ZERO tags in `dropped`
+ * status. The drops were queued correctly but never applied.
  *
- *   1. Compartments are ADDITIVE: historian writes a summary to
- *      `<session-history>`, but the raw messages covered by that compartment
- *      are not automatically dropped from the outgoing request body.
- *   2. Heuristic cleanup only targets tool parts (`tool_use`, `tool_result`,
- *      `tool-invocation`, `tool`). Plain text parts from the assistant are
- *      never dropped by the transform pipeline.
- *   3. Compaction markers inject a `type: "compaction"` boundary into
- *      OpenCode's DB, which `filterCompacted` uses to trim pre-boundary
- *      messages. In production, this works (see session ses_331acff95 with
- *      117 compartments comfortably under 1M context). In this probe
- *      compartments were published but outgoing size kept climbing —
- *      possibly the marker/boundary placement didn't advance as fast as
- *      history grew, possibly OpenCode's `filterCompacted` skipped our
- *      marker because the accompanying summary message wasn't considered
- *      "completed" in the expected way. Needs deeper debugging.
+ * ## Root cause (verified)
  *
- * ## Why this is less severe in real sessions
+ * `transform-postprocess-phase.ts:113-114` gates pending-op application on:
  *
- * Real sessions are tool-heavy. A typical assistant turn contains small
- * text + large tool_use/tool_result blocks (often 50-100KB of tool output).
- * Heuristic cleanup drops those tool parts on every execute pass, reclaiming
- * 70%+ of context. The pure-text scenario this probe exercises is rare
- * outside of chat-only use cases.
+ *     shouldApplyPendingOps =
+ *         (schedulerDecision === "execute" || isExplicitFlush) &&
+ *         !compartmentRunning
+ *
+ * The `!compartmentRunning` guard defers drops while historian is active
+ * to avoid mid-mutation conflicts. With a fast main agent firing turns
+ * back-to-back during sustained high pressure, every transform pass sees
+ * `compartmentRunning=true` (historian either still processing the previous
+ * range or starting a new one). Drops accumulate in pending_ops but never
+ * materialize. The outgoing body never shrinks; the provider rejects the
+ * request once input exceeds 100%.
+ *
+ * ## Why this is less severe in production
+ *
+ * Real users pause 5-15 seconds between turns (reading, thinking). Between
+ * pauses historian finishes, `compartmentRunning` flips to false, and the
+ * next turn's transform materializes the pending drops before the next
+ * request goes out. The body shrinks, overflow is avoided. Fast autonomous
+ * agent loops without pauses break this assumption.
  *
  * ## Why the test is skipped
  *
- * Fixing this surfaces larger design questions (should compartments
- * auto-drop their covered messages? should compaction-marker behavior
- * change?) that the user should decide. The probe is preserved, ready to
- * re-run after that decision. Remove `.skip` to reproduce.
+ * Fixing this requires a design decision on which approach:
+ *   (a) Apply pending drops for already-PUBLISHED compartments even when a
+ *       NEW historian run is in progress (drops for published ranges are
+ *       safe — they don't touch the in-progress chunk)
+ *   (b) Allow emergency drop materialization at >=95% regardless of
+ *       compartmentRunning
+ *   (c) Make historian start-of-run atomically apply queued drops from
+ *       prior compartments before taking the "running" lock
+ *
+ * The probe is preserved as a runnable reproducer. Remove `.skip` once the
+ * fix approach is chosen.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
