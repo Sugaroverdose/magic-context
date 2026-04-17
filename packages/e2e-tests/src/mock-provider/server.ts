@@ -1,0 +1,290 @@
+/**
+ * Minimal Anthropic-compatible mock server.
+ *
+ * Accepts POST to /messages (matching `${baseURL}/messages` path used by @ai-sdk/anthropic),
+ * captures each request body, and returns a scripted response with full control over
+ * input/output/cache_read/cache_write token counts.
+ *
+ * Supports both Anthropic Messages SSE streaming (OpenCode's default transport) and
+ * single-shot JSON responses (useful for direct unit-level probing of the mock).
+ */
+
+export interface MockUsage {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+}
+
+export interface MockResponse {
+    /** Simple text response. Will be converted into an Anthropic content array. */
+    text?: string;
+    /** Override content block array directly (for tool calls, multi-block). */
+    content?: unknown[];
+    /** Stop reason reported to the caller. */
+    stop_reason?: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
+    /** Token usage reported to the caller — critical for threshold tests. */
+    usage: MockUsage;
+    /** Delay before responding (simulate slow historian). */
+    delayMs?: number;
+    /** Optional model name echoed back in the response. Defaults to request's model. */
+    model?: string;
+}
+
+export interface CapturedRequest {
+    receivedAt: number;
+    method: string;
+    path: string;
+    headers: Record<string, string>;
+    body: {
+        model?: string;
+        messages?: Array<{ role: string; content: unknown }>;
+        system?: unknown;
+        tools?: unknown;
+        [k: string]: unknown;
+    };
+}
+
+export interface MockServerOptions {
+    port?: number;
+}
+
+export class MockProvider {
+    private server: ReturnType<typeof Bun.serve> | null = null;
+    private responses: MockResponse[] = [];
+    private captured: CapturedRequest[] = [];
+    private defaultResponse: MockResponse | null = null;
+
+    async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
+        const port = options.port ?? 0; // 0 = pick any available port
+        this.server = Bun.serve({
+            port,
+            fetch: async (req) => this.handle(req),
+        });
+        const actualPort = this.server.port ?? 0;
+        if (!actualPort) throw new Error("mock server failed to bind a port");
+        return { port: actualPort, baseURL: `http://127.0.0.1:${actualPort}` };
+    }
+
+    async stop(): Promise<void> {
+        if (this.server) {
+            this.server.stop(true);
+            this.server = null;
+        }
+    }
+
+    /** Queue a list of responses (consumed in order per request). */
+    script(responses: MockResponse[]): void {
+        this.responses = [...responses];
+    }
+
+    /** Set a default response to return when the queue is empty. */
+    setDefault(response: MockResponse): void {
+        this.defaultResponse = response;
+    }
+
+    /** Append a single response to the queue. */
+    enqueue(response: MockResponse): void {
+        this.responses.push(response);
+    }
+
+    /** All captured requests, in order. */
+    requests(): CapturedRequest[] {
+        return [...this.captured];
+    }
+
+    /** Most recent request, or null if none. */
+    lastRequest(): CapturedRequest | null {
+        return this.captured[this.captured.length - 1] ?? null;
+    }
+
+    /** Clear both the response queue and captured request log. */
+    reset(): void {
+        this.responses = [];
+        this.captured = [];
+        this.defaultResponse = null;
+    }
+
+    private async handle(req: Request): Promise<Response> {
+        const url = new URL(req.url);
+        const method = req.method;
+
+        // Accept both /messages and /v1/messages (depending on how baseURL is configured).
+        const isMessages = url.pathname === "/messages" || url.pathname === "/v1/messages";
+
+        if (method === "POST" && isMessages) {
+            let body: Record<string, unknown> = {};
+            try {
+                body = (await req.json()) as Record<string, unknown>;
+            } catch {
+                body = {};
+            }
+
+            const headers: Record<string, string> = {};
+            req.headers.forEach((value, key) => {
+                headers[key] = value;
+            });
+
+            this.captured.push({
+                receivedAt: Date.now(),
+                method,
+                path: url.pathname,
+                headers,
+                body,
+            });
+
+            const scripted = this.responses.shift() ?? this.defaultResponse;
+            if (!scripted) {
+                return new Response(
+                    JSON.stringify({
+                        type: "error",
+                        error: { type: "mock_error", message: "No scripted response available" },
+                    }),
+                    {
+                        status: 500,
+                        headers: { "content-type": "application/json" },
+                    },
+                );
+            }
+
+            if (scripted.delayMs && scripted.delayMs > 0) {
+                await Bun.sleep(scripted.delayMs);
+            }
+
+            const content =
+                scripted.content ??
+                [{ type: "text", text: scripted.text ?? "OK" }];
+
+            const respModel =
+                scripted.model ??
+                (typeof body.model === "string" ? body.model : "mock-model");
+
+            const wantsStream = body.stream === true;
+            const messageId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+
+            if (wantsStream) {
+                // Emit a minimal but complete Anthropic messages SSE sequence.
+                // Events: message_start → content_block_start → content_block_delta(s) →
+                //         content_block_stop → message_delta (with final usage) → message_stop.
+                // The @ai-sdk/anthropic client consumes this standard order to reconstruct
+                // the full response including token usage counts we scripted.
+                const encoder = new TextEncoder();
+                const stream = new ReadableStream({
+                    start(controller) {
+                        const send = (event: string, data: Record<string, unknown>) => {
+                            controller.enqueue(
+                                encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+                            );
+                        };
+
+                        send("message_start", {
+                            type: "message_start",
+                            message: {
+                                id: messageId,
+                                type: "message",
+                                role: "assistant",
+                                model: respModel,
+                                content: [],
+                                stop_reason: null,
+                                stop_sequence: null,
+                                usage: {
+                                    input_tokens: scripted.usage.input_tokens,
+                                    output_tokens: 0,
+                                    cache_creation_input_tokens:
+                                        scripted.usage.cache_creation_input_tokens ?? 0,
+                                    cache_read_input_tokens:
+                                        scripted.usage.cache_read_input_tokens ?? 0,
+                                },
+                            },
+                        });
+
+                        // Emit each content block from the scripted `content` array.
+                        content.forEach((block: unknown, index: number) => {
+                            const blk = block as { type?: string; text?: string };
+                            const blockType = blk.type ?? "text";
+
+                            if (blockType === "text") {
+                                send("content_block_start", {
+                                    type: "content_block_start",
+                                    index,
+                                    content_block: { type: "text", text: "" },
+                                });
+                                send("content_block_delta", {
+                                    type: "content_block_delta",
+                                    index,
+                                    delta: { type: "text_delta", text: blk.text ?? "" },
+                                });
+                                send("content_block_stop", {
+                                    type: "content_block_stop",
+                                    index,
+                                });
+                            } else {
+                                // Pass through non-text blocks as-is (tool_use, etc.)
+                                send("content_block_start", {
+                                    type: "content_block_start",
+                                    index,
+                                    content_block: block,
+                                });
+                                send("content_block_stop", {
+                                    type: "content_block_stop",
+                                    index,
+                                });
+                            }
+                        });
+
+                        send("message_delta", {
+                            type: "message_delta",
+                            delta: {
+                                stop_reason: scripted.stop_reason ?? "end_turn",
+                                stop_sequence: null,
+                            },
+                            usage: {
+                                output_tokens: scripted.usage.output_tokens,
+                            },
+                        });
+
+                        send("message_stop", { type: "message_stop" });
+                        controller.close();
+                    },
+                });
+
+                return new Response(stream, {
+                    status: 200,
+                    headers: {
+                        "content-type": "text/event-stream",
+                        "cache-control": "no-cache",
+                        connection: "keep-alive",
+                    },
+                });
+            }
+
+            // Non-streaming fallback — rarely used by OpenCode but kept for direct tests.
+            const responseBody = {
+                id: messageId,
+                type: "message",
+                role: "assistant",
+                model: respModel,
+                content,
+                stop_reason: scripted.stop_reason ?? "end_turn",
+                stop_sequence: null,
+                usage: {
+                    input_tokens: scripted.usage.input_tokens,
+                    output_tokens: scripted.usage.output_tokens,
+                    cache_creation_input_tokens: scripted.usage.cache_creation_input_tokens ?? 0,
+                    cache_read_input_tokens: scripted.usage.cache_read_input_tokens ?? 0,
+                },
+            };
+
+            return new Response(JSON.stringify(responseBody), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+            });
+        }
+
+        // Unknown path — return 404
+        return new Response(JSON.stringify({ error: "not_found", path: url.pathname }), {
+            status: 404,
+            headers: { "content-type": "application/json" },
+        });
+    }
+}
