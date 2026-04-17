@@ -25,7 +25,7 @@ import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { createMagicContextCommandHandler } from "./command-handler";
-import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from './derive-budgets';
+import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
 import { createEventHandler } from "./event-handler";
 import { resolveModelKey } from "./event-resolvers";
 import { clearInjectionCache } from "./inject-compartments";

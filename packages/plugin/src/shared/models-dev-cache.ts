@@ -18,8 +18,9 @@
  * the API cache first, then the file cache. The plugin warms and refreshes
  * the API cache from `src/index.ts` at startup and on a timer.
  */
-import { existsSync, readFileSync } from "node:fs";
+
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import type { createOpencodeClient } from "@opencode-ai/sdk";
@@ -61,7 +62,10 @@ function getModelsJsonPath(): string {
     // 2. Custom models source → hashed filename (matches OpenCode).
     //    source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`
     const source = process.env.OPENCODE_MODELS_URL?.trim();
-    const filename = source && source !== "https://models.dev" ? `models-${hashFast(source)}.json` : "models.json";
+    const filename =
+        source && source !== "https://models.dev"
+            ? `models-${hashFast(source)}.json`
+            : "models.json";
 
     return join(cacheBase, "opencode", filename);
 }

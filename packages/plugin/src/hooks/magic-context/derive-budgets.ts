@@ -18,10 +18,7 @@
  */
 
 import { HISTORIAN_AGENT } from "../../agents/historian";
-import {
-    AGENT_MODEL_REQUIREMENTS,
-    expandFallbackChain,
-} from "../../shared/model-requirements";
+import { AGENT_MODEL_REQUIREMENTS, expandFallbackChain } from "../../shared/model-requirements";
 import { getModelsDevContextLimit } from "../../shared/models-dev-cache";
 
 // 5% of (main_context × execute_threshold) is the "working usable × 5%" basis.

@@ -24,7 +24,7 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import { checkCompartmentTrigger } from "./compartment-trigger";
-import { deriveTriggerBudget } from './derive-budgets';
+import { deriveTriggerBudget } from "./derive-budgets";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,

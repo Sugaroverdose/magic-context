@@ -135,11 +135,7 @@ const TAIL_INFO_DEFAULTS: TailInfo = {
     commitClusterCount: 0,
 };
 
-function getUnsummarizedTailInfo(
-    db: Database,
-    sessionId: string,
-    triggerBudget: number,
-): TailInfo {
+function getUnsummarizedTailInfo(db: Database, sessionId: string, triggerBudget: number): TailInfo {
     return withRawSessionMessageCache(() => {
         try {
             const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);

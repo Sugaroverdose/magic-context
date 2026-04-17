@@ -47,7 +47,7 @@ describe("deriveTriggerBudget", () => {
         // matching the legacy static behavior that worked well there.
         const budget = deriveTriggerBudget(1_000_000, 40);
         const tailSize = budget * 3;
-        const usable = 1_000_000 * 0.40;
+        const usable = 1_000_000 * 0.4;
         expect(tailSize).toBe(60_000);
         expect(tailSize / usable).toBeCloseTo(0.15, 2);
     });
