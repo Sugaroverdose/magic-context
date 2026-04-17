@@ -106,17 +106,33 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
         args.canRunCompartments &&
         !args.awaitedCompartmentRun &&
         activeCompartmentRun !== undefined;
+    // Emergency bypass: at forceMaterialization threshold (>=85%), allow both
+    // pending-op materialization and heuristic cleanup to run even while a
+    // historian run is in progress. This is safe because:
+    //   - Historian reads raw messages from opencode.db and writes to
+    //     compartments/session_facts/memories tables. It does not read or
+    //     write `tags` or `pending_ops`.
+    //   - Drops mutate `tags` and `pending_ops` only.
+    //   - The only shared mutation point is `queueDropsForCompartmentalizedMessages`,
+    //     which historian calls AFTER publication from a DB transaction — safe
+    //     against concurrent reads in SQLite WAL mode.
+    // Without this bypass, fast autonomous loops with sustained pressure can
+    // keep compartmentRunning=true across every turn, so drops queued for
+    // already-published compartments accumulate forever and context overflows.
+    // At emergency levels we prioritize overflow prevention over cache stability.
+    const emergencyBypassCompartmentGate = forceMaterialization;
     const shouldReadPendingOps =
         isExplicitFlush || args.schedulerDecision === "execute" || compartmentRunning;
     const pendingOps = shouldReadPendingOps ? getPendingOps(args.db, args.sessionId) : [];
     const hasPendingUserOps = pendingOps.length > 0;
     const shouldApplyPendingOps =
-        (args.schedulerDecision === "execute" || isExplicitFlush) && !compartmentRunning;
+        (args.schedulerDecision === "execute" || isExplicitFlush) &&
+        (!compartmentRunning || emergencyBypassCompartmentGate);
     // Central cache-busting gate used by all mutation paths below.
     const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps;
     const shouldRunHeuristics =
         args.fullFeatureMode &&
-        !compartmentRunning &&
+        (!compartmentRunning || emergencyBypassCompartmentGate) &&
         (isExplicitFlush ||
             forceMaterialization ||
             (args.schedulerDecision === "execute" && !alreadyRanThisTurn));
@@ -138,10 +154,17 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
         );
     }
     if (compartmentRunning && hasPendingUserOps) {
-        sessionLog(
-            args.sessionId,
-            "transform: deferring pending ops — compartment agent in progress",
-        );
+        if (emergencyBypassCompartmentGate) {
+            sessionLog(
+                args.sessionId,
+                `transform: emergency bypass — applying ${pendingOps.length} pending ops while compartment agent runs (${args.contextUsage.percentage.toFixed(1)}%)`,
+            );
+        } else {
+            sessionLog(
+                args.sessionId,
+                "transform: deferring pending ops — compartment agent in progress",
+            );
+        }
     }
     try {
         if (shouldApplyPendingOps) {

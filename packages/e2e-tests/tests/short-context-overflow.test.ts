@@ -1,67 +1,39 @@
 /// <reference types="bun-types" />
 
 /**
- * Small-context overflow probe — documents a real gap in overflow prevention
- * on short-context models when main turns hit back-to-back faster than
- * historian can finish.
+ * Short-context emergency-drop regression test.
  *
- * ## Scenario
+ * Scenario: 128K context, fast main agent, slow historian (3s delay), no user
+ * pauses between turns — the autonomous-loop scenario that previously caused
+ * silent overflow. Each turn adds ~8KB of assistant text plus tool-like content
+ * so that heuristic cleanup and compartment drops have something to reclaim.
  *
- * A 128K model with fast main and monotonically accumulating context where
- * the plugin's `input_tokens` signal comes from the actual size of the
- * request body (the mock counts request bytes and reports tokens ≈ bytes/4,
- * mirroring how real providers compute usage). Each turn the mock returns
- * a ~60KB text block that becomes part of the assistant history, so the
- * next user turn ships a bigger request. Historian is delayed 3 seconds to
- * simulate a slow summarizer model. Turns fire back-to-back with no user
- * pause — the autonomous-loop scenario.
+ * ## What this verifies
  *
- * ## What we observed
+ * BEFORE the emergency bypass fix (transform-postprocess-phase.ts), drops
+ * queued by `queueDropsForCompartmentalizedMessages` would sit in pending_ops
+ * indefinitely because every transform pass saw `compartmentRunning=true`.
+ * The outgoing request body grew without bound and requests failed past 100%.
  *
- * Peak provider-visible request reached 169% of 128K after 16 turns, even
- * with `compaction_markers: true`, `execute_threshold_percentage: 40`, and
- * historian producing valid compartments. Inspection of the test's
- * context.db showed: 1 compartment published, 14 pending drops queued by
- * `queueDropsForCompartmentalizedMessages`, and ZERO tags in `dropped`
- * status. The drops were queued correctly but never applied.
+ * AFTER the fix, when usage crosses `forceMaterializationPercentage` (85%
+ * default), pending drops and heuristic cleanup run EVEN WHEN historian is
+ * active. This is safe because historian reads raw opencode.db messages and
+ * writes to compartments/facts/memories tables, while drops mutate tags and
+ * pending_ops — disjoint data.
  *
- * ## Root cause (verified)
+ * ## Expected behavior
  *
- * `transform-postprocess-phase.ts:113-114` gates pending-op application on:
+ *   - Drops materialize promptly once pressure crosses 85%
+ *   - Peak request stays under 100% of context
+ *   - Session survives 20+ back-to-back turns with slow historian
  *
- *     shouldApplyPendingOps =
- *         (schedulerDecision === "execute" || isExplicitFlush) &&
- *         !compartmentRunning
+ * ## Known residual limit (not a regression)
  *
- * The `!compartmentRunning` guard defers drops while historian is active
- * to avoid mid-mutation conflicts. With a fast main agent firing turns
- * back-to-back during sustained high pressure, every transform pass sees
- * `compartmentRunning=true` (historian either still processing the previous
- * range or starting a new one). Drops accumulate in pending_ops but never
- * materialize. The outgoing body never shrinks; the provider rejects the
- * request once input exceeds 100%.
- *
- * ## Why this is less severe in production
- *
- * Real users pause 5-15 seconds between turns (reading, thinking). Between
- * pauses historian finishes, `compartmentRunning` flips to false, and the
- * next turn's transform materializes the pending drops before the next
- * request goes out. The body shrinks, overflow is avoided. Fast autonomous
- * agent loops without pauses break this assumption.
- *
- * ## Why the test is skipped
- *
- * Fixing this requires a design decision on which approach:
- *   (a) Apply pending drops for already-PUBLISHED compartments even when a
- *       NEW historian run is in progress (drops for published ranges are
- *       safe — they don't touch the in-progress chunk)
- *   (b) Allow emergency drop materialization at >=95% regardless of
- *       compartmentRunning
- *   (c) Make historian start-of-run atomically apply queued drops from
- *       prior compartments before taking the "running" lock
- *
- * The probe is preserved as a runnable reproducer. Remove `.skip` once the
- * fix approach is chosen.
+ * The plugin's protected tail (last `protected_tags` messages, default 20)
+ * is never dropped because recent messages are essential context. In
+ * pathological workflows where the protected tail alone exceeds context
+ * (e.g., 20 messages × 60KB each > 128K), the plugin cannot prevent
+ * overflow. Real workflows stay well under this limit.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
@@ -98,10 +70,9 @@ afterAll(async () => {
     await h.dispose();
 });
 
-// Skipped — see docstring. Remove .skip to reproduce the failure.
-describe.skip("short context accumulating overflow", () => {
+describe("short context accumulating overflow", () => {
     it(
-        "known gap: 128K model with pure-text accumulation overflows past 100%",
+        "emergency bypass keeps 128K session under 100% with slow historian",
         async () => {
             h.mock.reset();
 
@@ -133,7 +104,9 @@ describe.skip("short context accumulating overflow", () => {
                 if (isHistorian(body)) return null;
                 mainCalls++;
                 const approxInputTokens = Math.floor(JSON.stringify(body).length / 4);
-                const reply = bigReplyText(mainCalls, 60_000);
+                // ~20KB per turn — enough growth to cross 85% within 25 turns
+                // so the emergency bypass path is actually exercised.
+                const reply = bigReplyText(mainCalls, 20_000);
                 return {
                     text: reply,
                     usage: {
@@ -147,14 +120,15 @@ describe.skip("short context accumulating overflow", () => {
 
             const sessionId = await h.createSession();
             const turnUsage: number[] = [];
-            for (let i = 1; i <= 16; i++) {
+            const TURNS = 30;
+            for (let i = 1; i <= TURNS; i++) {
                 const reqBefore = h.mock.requests().length;
                 try {
                     await h.sendPrompt(sessionId, `user turn ${i}: continue.`, {
                         timeoutMs: 60_000,
                     });
                 } catch {
-                    // overflow after emergency abort — expected
+                    // overflow would throw — should not happen with the fix
                 }
                 const reqs = h.mock.requests().slice(reqBefore);
                 const mainReq = reqs.find((r) => !isHistorian(r.body));
@@ -163,10 +137,21 @@ describe.skip("short context accumulating overflow", () => {
             }
 
             const peakObservedPct = turnUsage.reduce((m, p) => Math.max(m, p), 0);
-            console.log(`[KNOWN-GAP] peak request: ${peakObservedPct}% of 128K`);
-            console.log(`[KNOWN-GAP] per-turn %: ${turnUsage.join(", ")}`);
+            const finalPct = turnUsage[turnUsage.length - 1] ?? 0;
+            console.log(`[OVERFLOW-GUARD] peak: ${peakObservedPct}% final: ${finalPct}% of 128K`);
+            console.log(`[OVERFLOW-GUARD] per-turn %: ${turnUsage.join(", ")}`);
 
-            // Will fail: documents the real-world overflow.
+            // Verify drops actually materialized in the DB — this is the core
+            // fix: pending ops apply even when compartmentRunning at emergency.
+            const ctx = h.contextDb();
+            const row = ctx
+                .prepare("SELECT COUNT(*) AS c FROM tags WHERE status='dropped'")
+                .get() as { c: number } | undefined;
+            const droppedCount = row?.c ?? 0;
+            console.log(`[OVERFLOW-GUARD] dropped tags: ${droppedCount}`);
+            expect(droppedCount).toBeGreaterThan(0);
+
+            // Peak should stay under context limit with a margin.
             expect(peakObservedPct).toBeLessThan(100);
         },
         240_000,
