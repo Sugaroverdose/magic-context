@@ -333,9 +333,15 @@ describe("createTransform index staleness regressions", () => {
         expect(
             secondPass[1].parts.some((p) => (p as ThinkingPart).thinking === "reasoning a"),
         ).toBe(false);
-        // m-reason-b is now at index 2 after dropped messages were pruned; tag 5 > ageCutoff=4, thinking preserved
+        // m-reason-b is now at index 2 after dropped messages were pruned — becoming the
+        // second assistant in a consecutive run with m-reason-a and m-drop. The merged-
+        // assistants workaround (stripReasoningFromMergedAssistants) strips thinking from
+        // every assistant except the first in a run to keep Opus 4.7's position-0 thinking
+        // invariant, so m-reason-b's thinking is correctly removed even though its tag 5 is
+        // above the watermark ageCutoff=4. This tests the interaction between pruning and
+        // merge-strip, not the watermark path.
         expect(
             secondPass[2].parts.some((p) => (p as ThinkingPart).thinking === "reasoning b"),
-        ).toBe(true);
+        ).toBe(false);
     });
 });

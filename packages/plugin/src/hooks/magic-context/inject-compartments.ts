@@ -9,6 +9,7 @@ import { CATEGORY_PRIORITY } from "../../features/magic-context/memory/constants
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import type { Memory, MemoryCategory } from "../../features/magic-context/memory/types";
 import { sessionLog } from "../../shared/logger";
+import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 
 export interface PreparedCompartmentInjection {
@@ -72,8 +73,6 @@ export function renderMemoryBlock(memories: Memory[]): string | null {
     return `<project-memory>\n${sections.join("\n")}\n</project-memory>`;
 }
 
-const CHARS_PER_TOKEN_ESTIMATE = 4;
-
 /** Constraint keywords that signal a memory encodes a rule rather than a description. */
 const CONSTRAINT_KEYWORDS = /\b(must|never|always|cannot|should not|must not)\b/i;
 
@@ -101,7 +100,10 @@ function utilityTier(m: Memory): number {
  *   4. shorter content first (fit more memories in budget)
  *   5. deterministic id tiebreaker for cache stability
  *
- * Estimates ~4 chars per token for budget enforcement.
+ * Uses the real Claude tokenizer (via estimateTokens) so the trim stays
+ * consistent with the rest of the plugin's token math — mismatching units
+ * (chars/4 here vs real tokens elsewhere) caused either under- or
+ * over-injection of memories, depending on memory content shape.
  */
 function trimMemoriesToBudget(
     sessionId: string,
@@ -129,8 +131,10 @@ function trimMemoriesToBudget(
     let usedTokens = 0;
 
     for (const memory of sorted) {
-        // Estimate: category tag overhead (~20 chars) + "- " prefix + content
-        const memoryTokens = Math.ceil((memory.content.length + 22) / CHARS_PER_TOKEN_ESTIMATE);
+        // Estimate the rendered memory line ("- {content}") plus category-tag
+        // overhead using the real tokenizer. The 22-char overhead models the
+        // opening/closing XML tags amortized per item.
+        const memoryTokens = estimateTokens(`- ${memory.content}`) + 6;
         if (usedTokens + memoryTokens > budgetTokens) {
             break;
         }

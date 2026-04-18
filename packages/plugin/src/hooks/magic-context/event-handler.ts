@@ -39,7 +39,7 @@ import {
     resolveSessionId,
 } from "./event-resolvers";
 import { clearNoteNudgeState } from "./note-nudger";
-import type { NudgePlacementStore } from "./transform";
+import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
 import { clearCompressorCooldown } from "./transform-compartment-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -213,6 +213,17 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     );
                 }
                 return;
+            }
+
+            // Invalidate this message's cached token contribution. The message
+            // content is finalized at this event — if a prior transform pass
+            // happened to cache partial/streaming content (or the message is
+            // being edited/retried), the next pass must recompute. We fall
+            // back to session-wide clear when the event lacks a message id.
+            if (info.messageID) {
+                clearMessageTokensCache(info.sessionID, info.messageID);
+            } else {
+                clearMessageTokensCache(info.sessionID);
             }
 
             const now = Date.now();
@@ -400,6 +411,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     );
                 }
 
+                // Invalidate this message's cached token contribution so the
+                // next transform pass recomputes without stale data.
+                clearMessageTokensCache(info.sessionID, info.messageID);
+
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(
                     info.sessionID,
@@ -429,6 +444,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
             } catch (error) {
                 sessionLog(sessionId, "event session.compacted marker cleanup failed:", error);
             }
+            // Compaction restructures messages (deletes/replaces some). Clear the
+            // per-message token cache for the whole session so the next transform
+            // pass recomputes against the new shape instead of serving stale counts.
+            clearMessageTokensCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }
@@ -453,6 +472,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.contextUsageMap.delete(sessionId);
             deps.tagger.cleanup(sessionId);
             clearCompressorCooldown(sessionId);
+            clearMessageTokensCache(sessionId);
             return;
         }
     };

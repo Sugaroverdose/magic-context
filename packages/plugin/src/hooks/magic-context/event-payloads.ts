@@ -23,6 +23,9 @@ export interface MessageUpdatedAssistantInfo {
     role: "assistant";
     finish?: string;
     sessionID: string;
+    /** OpenCode assistant message id. Undefined only when the event payload
+     *  doesn't include one (older SDK versions or malformed events). */
+    messageID?: string;
     providerID?: string;
     modelID?: string;
     tokens?: {
@@ -92,6 +95,7 @@ export function getMessageUpdatedAssistantInfo(
         role: "assistant",
         finish: typeof info.finish === "string" ? info.finish : undefined,
         sessionID: info.sessionID,
+        messageID: typeof info.id === "string" ? info.id : undefined,
         providerID: typeof info.providerID === "string" ? info.providerID : undefined,
         modelID: typeof info.modelID === "string" ? info.modelID : undefined,
         tokens: {

@@ -395,50 +395,120 @@ export function truncateErroredTools(
     return truncated;
 }
 
+// Parts that the AI SDK ignores when converting OpenCode messages to the
+// Anthropic request body. Treating them as invisible when deciding whether
+// a reasoning part lands at the start of the eventual assistant block.
+const REASONING_IGNORED_PART_TYPES = new Set([
+    "step-start",
+    "step-finish",
+    "snapshot",
+    "patch",
+    "agent",
+    "retry",
+    "subtask",
+    "compaction",
+]);
+
+// Every part type that becomes an Anthropic thinking/redacted_thinking block
+// on the wire. OpenCode's internal "reasoning" gets converted by @ai-sdk
+// into a thinking block, while "thinking" and "redacted_thinking" are the
+// wire-format types (seen on opus-4.7 with interleaved thinking). All three
+// must be considered when deciding which to keep/strip so the merged
+// Anthropic block ends with thinking at position 0 and at most one present.
+const REASONING_PART_TYPES = new Set(["reasoning", "thinking", "redacted_thinking"]);
+
 /**
- * Work around @ai-sdk/anthropic's groupIntoBlocks behavior. When multiple
- * consecutive OpenCode assistant messages (each carrying its own signed
- * reasoning part) are sent to the Anthropic provider, the SDK merges them
- * into a single Anthropic assistant block with thinking blocks INTERLEAVED
- * between text blocks — e.g. [thinking, text, thinking, text, thinking, text].
+ * Work around @ai-sdk/anthropic's groupIntoBlocks behavior plus opus-4.7's
+ * strict thinking-block position validation.
  *
- * Claude Opus 4.7's server-side validation rejects this layout with:
+ * Two structural sources of invalid payloads exist, both triggering:
  *   "thinking or redacted_thinking blocks in the latest assistant message
  *    cannot be modified. These blocks must remain as they were in the
  *    original response."
  *
- * The only safe layout is thinking blocks at the START of the merged
- * assistant block. We strip reasoning parts from every assistant except the
- * first in each consecutive assistant run. After AI SDK merges the run, the
- * assistant content becomes [thinking, text, text, tool_use, text, …] — valid.
+ * (1) ACROSS assistants: @ai-sdk/anthropic's groupIntoBlocks merges
+ *     consecutive OpenCode assistant messages into one Anthropic assistant
+ *     block. Each source assistant's signed reasoning gets emitted as its
+ *     own thinking block — the merged block ends up with thinking
+ *     INTERLEAVED between text/tool_use.
  *
- * Trade-off: the model loses visibility into its own intermediate step
- * reasoning for earlier steps of a multi-step turn. The first step's reasoning
- * is preserved, which carries enough cache continuity for Anthropic.
+ * (2) WITHIN ONE assistant: opus-4.7 with interleaved thinking produces
+ *     multiple reasoning parts in a single OpenCode assistant message
+ *     (observed: up to 12 reasoning parts per message). AI SDK passes each
+ *     through verbatim, again producing interleaved thinking.
  *
- * This is an upstream bug in @ai-sdk/anthropic's `groupIntoBlocks`:
- *   https://github.com/vercel/ai/blob/main/packages/anthropic/src/
- *     convert-to-anthropic-messages-prompt.ts  (case 'assistant')
- * Same class of bug was fixed for Bedrock in vercel/ai#13583/#13972.
+ * Both cases can coexist. The only layout opus-4.7 reliably accepts is:
+ *   [thinking at index 0 (optional)] followed by text/tool_use only,
+ * i.e. AT MOST ONE thinking block per consecutive assistant run, and that
+ * thinking block must be the very first non-metadata part.
+ *
+ * Rule enforced here:
+ *   - For each consecutive assistant run, keep AT MOST ONE reasoning part.
+ *   - That reasoning part must be the first non-metadata content part of
+ *     the first assistant in the run. Otherwise strip all reasoning from
+ *     the run.
+ *
+ * Trade-off: the model loses visibility into its own intermediate-step
+ * reasoning for multi-step turns. The first step's reasoning is preserved
+ * when possible, which carries enough cache continuity for Anthropic.
+ *
+ * Upstream bug (track with smart note #38, remove this workaround when
+ * fixed): @ai-sdk/anthropic's groupIntoBlocks +
+ * convert-to-anthropic-messages-prompt.ts (case 'assistant'). Same class
+ * fixed for Bedrock in vercel/ai#13583/#13972.
  */
 export function stripReasoningFromMergedAssistants(messages: MessageLike[]): number {
     let stripped = 0;
     let prevRole: string | undefined;
+    let keptReasoningInRun = false;
 
     for (const message of messages) {
         const role = message.info.role;
-        if (role === "assistant" && prevRole === "assistant") {
-            // Not the first of a consecutive assistant run — strip reasoning.
-            for (let i = message.parts.length - 1; i >= 0; i--) {
+
+        if (role !== "assistant") {
+            prevRole = role;
+            keptReasoningInRun = false;
+            continue;
+        }
+
+        const firstInRun = prevRole !== "assistant";
+        if (firstInRun) keptReasoningInRun = false;
+
+        // Determine which reasoning/thinking part (if any) to KEEP for this
+        // run. Only eligible: the first assistant in a run, no reasoning
+        // kept yet, AND the first non-metadata content part is a
+        // reasoning/thinking/redacted_thinking part.
+        let keepIndex = -1;
+        if (firstInRun && !keptReasoningInRun) {
+            for (let i = 0; i < message.parts.length; i++) {
                 const part = message.parts[i];
                 if (!isRecord(part)) continue;
                 const partType = part.type as string;
-                if (partType === "reasoning") {
-                    message.parts.splice(i, 1);
-                    stripped++;
+                if (REASONING_IGNORED_PART_TYPES.has(partType)) continue;
+                if (part.ignored === true) continue;
+                // First non-metadata part found — is it reasoning-like?
+                if (REASONING_PART_TYPES.has(partType)) {
+                    keepIndex = i;
                 }
+                break;
             }
         }
+
+        // Backward pass: strip all reasoning/thinking/redacted_thinking parts
+        // except the one we decided to keep (if any). Splice from the tail so
+        // indices ahead stay valid.
+        for (let i = message.parts.length - 1; i >= 0; i--) {
+            const part = message.parts[i];
+            if (!isRecord(part)) continue;
+            if (!REASONING_PART_TYPES.has(part.type as string)) continue;
+            if (i === keepIndex) {
+                keptReasoningInRun = true;
+                continue;
+            }
+            message.parts.splice(i, 1);
+            stripped++;
+        }
+
         prevRole = role;
     }
 

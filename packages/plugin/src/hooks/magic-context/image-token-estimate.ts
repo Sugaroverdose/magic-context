@@ -133,9 +133,11 @@ function parseWebpDimensions(b: Uint8Array): { w: number; h: number } | null {
     if (b[8] !== 0x57 || b[9] !== 0x45 || b[10] !== 0x42 || b[11] !== 0x50) return null; // WEBP
     const variant = String.fromCharCode(b[12]!, b[13]!, b[14]!, b[15]!);
     if (variant === "VP8 ") {
-        // Lossy: width/height at bytes 26-29 (14-bit each, little-endian)
-        const w = ((b[26]! | (b[27]! << 8)) & 0x3fff) || 0;
-        const h = ((b[28]! | (b[29]! << 8)) & 0x3fff) || 0;
+        // Lossy: width/height at bytes 26-29 (14-bit each, little-endian).
+        // The `& 0x3fff` already produces a non-negative 14-bit result; no
+        // extra `|| 0` fallback is needed.
+        const w = (b[26]! | (b[27]! << 8)) & 0x3fff;
+        const h = (b[28]! | (b[29]! << 8)) & 0x3fff;
         if (w && h) return { w, h };
     } else if (variant === "VP8L") {
         // Lossless: 14-bit width/height starting byte 21
@@ -166,5 +168,11 @@ function parseGifDimensions(b: Uint8Array): { w: number; h: number } | null {
 }
 
 function readUint32BE(b: Uint8Array, offset: number): number {
-    return (b[offset]! << 24) | (b[offset + 1]! << 16) | (b[offset + 2]! << 8) | b[offset + 3]!;
+    // `>>> 0` coerces to an unsigned 32-bit integer. Without it, a byte with
+    // the MSB set produces a negative value (JS bitwise ops are 32-bit
+    // signed), which would bypass downstream `< 1` guards and produce
+    // wrong token counts for malformed/untrusted PNG headers.
+    return (
+        ((b[offset]! << 24) | (b[offset + 1]! << 16) | (b[offset + 2]! << 8) | b[offset + 3]!) >>> 0
+    );
 }

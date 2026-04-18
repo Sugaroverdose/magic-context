@@ -724,5 +724,177 @@ describe("strip-content", () => {
                 expect(a2.parts).toHaveLength(1);
             });
         });
+
+        describe("#given a single assistant with reasoning NOT at content position 0", () => {
+            it("#then strips the reasoning (would land at non-zero in merged block)", () => {
+                const u = message("u", "user", [{ type: "text", text: "q" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "text", text: "t1" },
+                    { type: "reasoning", text: "r1" },
+                    { type: "text", text: "t2" },
+                ]);
+                const messages = [u, a1];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(1);
+                expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual(["text", "text"]);
+            });
+        });
+
+        describe("#given a single assistant with step-start before reasoning", () => {
+            it("#then keeps the reasoning (step-start is metadata AI SDK ignores)", () => {
+                const u = message("u", "user", [{ type: "text", text: "q" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "step-start" },
+                    { type: "reasoning", text: "r1" },
+                    { type: "text", text: "t1" },
+                ]);
+                const messages = [u, a1];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(0);
+                expect(a1.parts).toHaveLength(3);
+            });
+        });
+
+        describe("#given a single assistant with many interleaved reasoning parts", () => {
+            it("#then keeps only the first reasoning and strips the rest", () => {
+                // Mirrors the worst-case observed in opus-4.7 output: one OpenCode
+                // message with many reasoning parts interleaved with text/tool.
+                const u = message("u", "user", [{ type: "text", text: "go" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "step-start" },
+                    { type: "reasoning", text: "r1" },
+                    { type: "text", text: "t1" },
+                    { type: "reasoning", text: "r2" },
+                    { type: "reasoning", text: "r3" },
+                    { type: "reasoning", text: "r4" },
+                    { type: "reasoning", text: "r5" },
+                    { type: "tool", state: { status: "completed" } },
+                    { type: "step-finish" },
+                ]);
+                const messages = [u, a1];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(4);
+                expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual([
+                    "step-start",
+                    "reasoning",
+                    "text",
+                    "tool",
+                    "step-finish",
+                ]);
+            });
+        });
+
+        describe("#given first assistant has text before reasoning, second has reasoning at pos 0", () => {
+            it("#then strips reasoning from BOTH (can't repair the run)", () => {
+                // Because reasoning in a1 is NOT at content position 0, we strip
+                // it. Subsequent assistants in the same run lose reasoning too,
+                // since only one reasoning per run is allowed.
+                const u = message("u", "user", [{ type: "text", text: "q" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "text", text: "t1" },
+                    { type: "reasoning", text: "r1" },
+                ]);
+                const a2 = message("a2", "assistant", [
+                    { type: "reasoning", text: "r2" },
+                    { type: "text", text: "t2" },
+                ]);
+                const messages = [u, a1, a2];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(2);
+                expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+                expect(a2.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+            });
+        });
+
+        describe("#given two consecutive assistants each with 'thinking' (wire-format) parts", () => {
+            it("#then keeps thinking on the first and strips from the second", () => {
+                // opus-4.7 can produce wire-format "thinking" parts (not just
+                // OpenCode's internal "reasoning"). The merge-workaround must
+                // treat them the same, otherwise the merged Anthropic block
+                // ends up with thinking interleaved — the exact 400 error this
+                // function exists to prevent.
+                const u = message("u", "user", [{ type: "text", text: "go" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "thinking", thinking: "t1-think", signature: "sig1" },
+                    { type: "text", text: "r1" },
+                ]);
+                const a2 = message("a2", "assistant", [
+                    { type: "thinking", thinking: "t2-think", signature: "sig2" },
+                    { type: "text", text: "r2" },
+                ]);
+                const messages = [u, a1, a2];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(1);
+                expect(a1.parts).toHaveLength(2);
+                expect((a1.parts[0] as { type: string }).type).toBe("thinking");
+                expect(a2.parts).toHaveLength(1);
+                expect((a2.parts[0] as { type: string }).type).toBe("text");
+            });
+        });
+
+        describe("#given mixed reasoning/thinking/redacted_thinking types across a run", () => {
+            it("#then treats all three as reasoning-like (keep first, strip rest)", () => {
+                const u = message("u", "user", [{ type: "text", text: "go" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "reasoning", text: "r1" },
+                    { type: "text", text: "answer1" },
+                ]);
+                const a2 = message("a2", "assistant", [
+                    { type: "thinking", thinking: "t2", signature: "sig2" },
+                    { type: "text", text: "answer2" },
+                ]);
+                const a3 = message("a3", "assistant", [
+                    { type: "redacted_thinking", data: "opaque3" },
+                    { type: "text", text: "answer3" },
+                ]);
+                const messages = [u, a1, a2, a3];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                // Keep a1.reasoning (first-in-run, position 0), strip a2.thinking
+                // and a3.redacted_thinking.
+                expect(stripped).toBe(2);
+                expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual([
+                    "reasoning",
+                    "text",
+                ]);
+                expect(a2.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+                expect(a3.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+            });
+        });
+
+        describe("#given first assistant has text before a thinking-typed block", () => {
+            it("#then strips the thinking block from first AND second assistant", () => {
+                // If thinking is NOT at content position 0 in the first
+                // assistant, no thinking can land at position 0 of the merged
+                // block — so strip from every assistant in the run.
+                const u = message("u", "user", [{ type: "text", text: "q" }]);
+                const a1 = message("a1", "assistant", [
+                    { type: "text", text: "prelude" },
+                    { type: "thinking", thinking: "t1", signature: "sig1" },
+                ]);
+                const a2 = message("a2", "assistant", [
+                    { type: "thinking", thinking: "t2", signature: "sig2" },
+                    { type: "text", text: "answer" },
+                ]);
+                const messages = [u, a1, a2];
+
+                const stripped = stripReasoningFromMergedAssistants(messages);
+
+                expect(stripped).toBe(2);
+                expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+                expect(a2.parts.map((p) => (p as { type: string }).type)).toEqual(["text"]);
+            });
+        });
     });
 });
