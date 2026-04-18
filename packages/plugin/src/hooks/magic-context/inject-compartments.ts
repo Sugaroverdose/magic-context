@@ -211,10 +211,28 @@ export function prepareCompartmentInjection(
             memoryCount = memories.length;
             memoryBlock = renderMemoryBlock(memories) ?? undefined;
 
-            // Snapshot so subsequent turns reuse the same block without cache bust
-            db.prepare(
-                "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ? WHERE session_id = ?",
-            ).run(memoryBlock ?? "", memoryCount, sessionId);
+            // Snapshot so subsequent turns reuse the same block without cache bust.
+            // Swallow SQLITE_BUSY: the cache is a pure optimization (the block itself
+            // is already computed and returned below). If another writer holds the DB
+            // past busy_timeout=5s — typically a concurrent dreamer/historian child
+            // session or a second OpenCode process — we'd rather let the transform
+            // proceed with a one-turn cache miss than crash the user's prompt.
+            // Issue: https://github.com/cortexkit/opencode-magic-context/issues/23
+            try {
+                db.prepare(
+                    "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ? WHERE session_id = ?",
+                ).run(memoryBlock ?? "", memoryCount, sessionId);
+            } catch (error) {
+                const code = (error as { code?: string } | null)?.code;
+                if (code === "SQLITE_BUSY") {
+                    sessionLog(
+                        sessionId,
+                        "memory_block_cache UPDATE hit SQLITE_BUSY, skipping snapshot for this turn",
+                    );
+                } else {
+                    throw error;
+                }
+            }
         }
     }
 

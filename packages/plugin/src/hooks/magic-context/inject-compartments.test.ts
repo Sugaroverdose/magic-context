@@ -243,3 +243,95 @@ describe("prepareCompartmentInjection — transition from empty to compartment",
         expect(deferMessages.length).toBe(2);
     });
 });
+
+describe("prepareCompartmentInjection — SQLITE_BUSY handling (issue #23)", () => {
+    it("swallows SQLITE_BUSY on memory_block_cache UPDATE and returns computed block anyway", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "never run migrations manually",
+        });
+
+        // Proxy the db to throw SQLITE_BUSY specifically on the UPDATE statement
+        // used by memory_block_cache. Other prepares pass through unchanged so
+        // the rest of prepareCompartmentInjection can complete normally.
+        const busyProxy: Database = new Proxy(db, {
+            get(target, prop, receiver) {
+                if (prop === "prepare") {
+                    return (sql: string) => {
+                        if (sql.includes("UPDATE session_meta SET memory_block_cache")) {
+                            return {
+                                run: () => {
+                                    const err = new Error("database is locked") as Error & {
+                                        code: string;
+                                        errno: number;
+                                    };
+                                    err.code = "SQLITE_BUSY";
+                                    err.errno = 5;
+                                    throw err;
+                                },
+                                get: () => null,
+                                all: () => [],
+                            };
+                        }
+                        return target.prepare(sql);
+                    };
+                }
+                return Reflect.get(target, prop, receiver);
+            },
+        });
+
+        const messages: MessageLike[] = [userMessage("m1", "hello")];
+        // Should not throw — the BUSY on the optional cache write must be swallowed.
+        const result = prepareCompartmentInjection(
+            busyProxy,
+            SESSION_ID,
+            messages,
+            true,
+            PROJECT_PATH,
+        );
+
+        expect(result).not.toBeNull();
+        expect(result?.memoryCount).toBe(1);
+        expect(result?.block).toContain("never run migrations manually");
+    });
+
+    it("rethrows non-BUSY errors from memory_block_cache UPDATE", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "test directive",
+        });
+
+        const errorProxy: Database = new Proxy(db, {
+            get(target, prop, receiver) {
+                if (prop === "prepare") {
+                    return (sql: string) => {
+                        if (sql.includes("UPDATE session_meta SET memory_block_cache")) {
+                            return {
+                                run: () => {
+                                    const err = new Error("schema mismatch") as Error & {
+                                        code: string;
+                                    };
+                                    err.code = "SQLITE_CORRUPT";
+                                    throw err;
+                                },
+                                get: () => null,
+                                all: () => [],
+                            };
+                        }
+                        return target.prepare(sql);
+                    };
+                }
+                return Reflect.get(target, prop, receiver);
+            },
+        });
+
+        const messages: MessageLike[] = [userMessage("m1", "hello")];
+        expect(() =>
+            prepareCompartmentInjection(errorProxy, SESSION_ID, messages, true, PROJECT_PATH),
+        ).toThrow("schema mismatch");
+    });
+});
