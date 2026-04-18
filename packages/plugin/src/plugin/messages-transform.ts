@@ -1,6 +1,13 @@
-import { openDatabase } from "../features/magic-context/storage";
+import { getOrCreateSessionMeta, openDatabase } from "../features/magic-context/storage";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import { log } from "../shared/logger";
+
+// Error codes that SQLite raises for transient contention — should be retried
+// on next transform pass rather than surfaced as persistent failures. BUSY is
+// by far the most common in WAL mode; LOCKED is theoretically possible when a
+// shared-cache conflict occurs (extremely rare in our single-DB setup but
+// covered defensively).
+const TRANSIENT_SQLITE_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED"]);
 
 type MessageWithParts = {
     info: import("@opencode-ai/sdk").Message;
@@ -56,20 +63,20 @@ export function createMessagesTransformHandler(args: {
             const code = (error as { code?: string } | null)?.code;
             const name = (error as { name?: string } | null)?.name;
             const message = error instanceof Error ? error.message : String(error);
-            const isBusy = code === "SQLITE_BUSY";
+            const isTransient = typeof code === "string" && TRANSIENT_SQLITE_CODES.has(code);
 
-            if (isBusy) {
+            if (isTransient) {
                 log(
-                    `[magic-context] transform skipped this pass — SQLITE_BUSY (another writer holds lock, retrying next pass): ${message}`,
+                    `[magic-context] transform skipped this pass — ${code} (transient; retrying next pass): ${message}`,
                 );
                 return;
             }
 
-            // Persistent non-BUSY errors are the real risk: silent forever
+            // Persistent non-transient errors are the real risk: silent forever
             // disable unless we surface them. Persist to session_meta so the
             // sidebar shows an obvious failure indicator.
             log(
-                `[magic-context] transform FAILED (non-BUSY) code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
+                `[magic-context] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
                 error,
             );
 
@@ -81,7 +88,14 @@ export function createMessagesTransformHandler(args: {
                 try {
                     const db = openDatabase();
                     const summary = truncateError(name, code, message);
-                    updateSessionMeta(db, sessionId, { lastTransformError: summary });
+                    // Write-if-changed guard: when the same error repeats on
+                    // every transform pass (e.g. persistent schema corruption),
+                    // skip the DB write if lastTransformError already matches.
+                    // Prevents needless WAL churn during degraded operation.
+                    const current = getOrCreateSessionMeta(db, sessionId).lastTransformError;
+                    if (current !== summary) {
+                        updateSessionMeta(db, sessionId, { lastTransformError: summary });
+                    }
                 } catch (persistError) {
                     // Swallow — if we can't even write the error, we definitely
                     // can't recover. Next pass may succeed.

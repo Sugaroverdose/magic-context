@@ -131,9 +131,12 @@ function trimMemoriesToBudget(
     let usedTokens = 0;
 
     for (const memory of sorted) {
-        // Estimate the rendered memory line ("- {content}") plus category-tag
-        // overhead using the real tokenizer. The 22-char overhead models the
-        // opening/closing XML tags amortized per item.
+        // Estimate the rendered memory line ("- {content}") with the real
+        // Claude tokenizer, plus a fixed ~6-token allowance for opening and
+        // closing XML category tags amortized per item. Keeps units
+        // consistent with rpc-handlers.ts / transform.ts / system-prompt-hash.ts
+        // so the sidebar's "Memories" segment matches what actually lands in
+        // the injection block.
         const memoryTokens = estimateTokens(`- ${memory.content}`) + 6;
         if (usedTokens + memoryTokens > budgetTokens) {
             break;

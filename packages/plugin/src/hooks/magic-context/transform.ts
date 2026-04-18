@@ -86,6 +86,17 @@ export function clearMessageTokensCache(sessionId: string, messageId?: string): 
 }
 
 /**
+ * Test-only accessor that returns (and lazily creates) the per-session token
+ * cache map so tests can seed and inspect entries without running the full
+ * transform pipeline. Not exported from any barrel.
+ */
+export function __getMessageTokensCacheForTest(
+    sessionId: string,
+): Map<string, { conversation: number; toolCall: number }> {
+    return getMessageTokensCache(sessionId);
+}
+
+/**
  * Extract the provider/model from the last assistant message in the array.
  * Used for early model-change detection before loadContextUsage.
  */
