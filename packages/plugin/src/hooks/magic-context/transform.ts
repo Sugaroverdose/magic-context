@@ -228,10 +228,17 @@ export function createTransform(deps: TransformDeps) {
             const lastAssistantModel = findLastAssistantModel(messages);
             if (lastAssistantModel) {
                 const knownModel = deps.liveModelBySession.get(sessionId);
-                if (
-                    knownModel &&
-                    (knownModel.providerID !== lastAssistantModel.providerID ||
-                        knownModel.modelID !== lastAssistantModel.modelID)
+                if (!knownModel) {
+                    // No known model yet — populate from message history so the
+                    // scheduler can resolve per-model execute_threshold_percentage
+                    // immediately. Without this, after a plugin restart the map
+                    // stays empty until a new message.updated event fires, and
+                    // any transform in between uses the default threshold even
+                    // for sessions with explicit per-model config.
+                    deps.liveModelBySession.set(sessionId, lastAssistantModel);
+                } else if (
+                    knownModel.providerID !== lastAssistantModel.providerID ||
+                    knownModel.modelID !== lastAssistantModel.modelID
                 ) {
                     sessionLog(
                         sessionId,

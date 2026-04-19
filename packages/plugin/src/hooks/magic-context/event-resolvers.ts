@@ -47,6 +47,35 @@ export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | und
 
 type ExecuteThresholdConfig = number | { default: number; [modelKey: string]: number };
 
+/**
+ * Yield progressively-less-specific lookup keys for a given `provider/model`.
+ *
+ * OpenCode's `experimental.modes` feature derives model IDs like
+ * `gpt-5.4-fast` from a base model `gpt-5.4`. Users may put EITHER the
+ * derived key OR the base key in their per-model config. This generator
+ * returns keys in specificity order so we pick the most specific match
+ * the user actually wrote:
+ *
+ *   "openai/gpt-5.4-fast"  (exact)
+ *   "gpt-5.4-fast"         (bare, derived)
+ *   "openai/gpt-5.4"       (base, with provider)
+ *   "gpt-5.4"              (base, bare)
+ *   ...etc. stripping one "-segment" at a time
+ */
+function* modelKeyLookupOrder(modelKey: string): Generator<string> {
+    const slash = modelKey.indexOf("/");
+    const provider = slash >= 0 ? modelKey.slice(0, slash) : "";
+    let modelId = slash >= 0 ? modelKey.slice(slash + 1) : modelKey;
+
+    while (modelId.length > 0) {
+        if (provider) yield `${provider}/${modelId}`;
+        yield modelId;
+        const lastDash = modelId.lastIndexOf("-");
+        if (lastDash <= 0) break;
+        modelId = modelId.slice(0, lastDash);
+    }
+}
+
 export function resolveExecuteThreshold(
     config: ExecuteThresholdConfig,
     modelKey: string | undefined,
@@ -57,15 +86,15 @@ export function resolveExecuteThreshold(
 
     if (typeof config === "number") {
         resolved = config;
-    } else if (modelKey && typeof config[modelKey] === "number") {
-        resolved = config[modelKey];
     } else if (modelKey) {
-        const bareModelId = modelKey.split("/").slice(1).join("/");
-        if (bareModelId && typeof config[bareModelId] === "number") {
-            resolved = config[bareModelId];
-        } else {
-            resolved = config.default ?? fallback;
+        let matched: number | undefined;
+        for (const candidate of modelKeyLookupOrder(modelKey)) {
+            if (typeof config[candidate] === "number") {
+                matched = config[candidate];
+                break;
+            }
         }
+        resolved = matched ?? config.default ?? fallback;
     } else {
         resolved = config.default ?? fallback;
     }

@@ -86,6 +86,24 @@ function getOpencodeConfigPath(): string | null {
     return null;
 }
 
+/**
+ * Resolve the effective pressure limit for a model's `limit` object.
+ *
+ * Prefers `limit.input` (max prompt tokens the provider will accept) over
+ * `limit.context` (total window including output). For GitHub Copilot and
+ * several proxy providers, `context` is the marketing number (input + output
+ * combined), and sending a prompt sized against `context` gets rejected.
+ * OpenCode's own `session/overflow.ts` uses `input ?? context` for the same
+ * reason — the denominator that drives overflow/pressure must be the number
+ * the provider actually enforces on input.
+ */
+function resolveLimit(limit: { context?: number; input?: number } | undefined): number | undefined {
+    if (!limit) return undefined;
+    if (typeof limit.input === "number" && limit.input > 0) return limit.input;
+    if (typeof limit.context === "number" && limit.context > 0) return limit.context;
+    return undefined;
+}
+
 function loadModelsDevLimitsFromFile(): Map<string, number> {
     const limits = new Map<string, number>();
 
@@ -102,7 +120,7 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
                     models?: Record<
                         string,
                         {
-                            limit?: { context?: number };
+                            limit?: { context?: number; input?: number };
                             experimental?: { modes?: Record<string, unknown> };
                         }
                     >;
@@ -112,15 +130,15 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
             for (const [providerId, provider] of Object.entries(data)) {
                 if (!provider?.models || typeof provider.models !== "object") continue;
                 for (const [modelId, model] of Object.entries(provider.models)) {
-                    const context = model?.limit?.context;
-                    if (typeof context === "number" && context > 0) {
-                        limits.set(`${providerId}/${modelId}`, context);
+                    const effective = resolveLimit(model?.limit);
+                    if (typeof effective === "number" && effective > 0) {
+                        limits.set(`${providerId}/${modelId}`, effective);
                         // OpenCode creates derived model IDs from experimental.modes
                         // e.g. gpt-5.4 + modes.fast → gpt-5.4-fast (inherits parent limit).
                         const modes = model?.experimental?.modes;
                         if (modes && typeof modes === "object") {
                             for (const mode of Object.keys(modes)) {
-                                limits.set(`${providerId}/${modelId}-${mode}`, context);
+                                limits.set(`${providerId}/${modelId}-${mode}`, effective);
                             }
                         }
                     }
@@ -136,7 +154,7 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
     }
 
     // 2. Overlay custom provider models from OpenCode config (higher priority).
-    // Users define custom/proxy models via provider.<id>.models.<name>.limit.context
+    // Users define custom/proxy models via provider.<id>.models.<name>.limit.{input,context}
     // in opencode.json(c). These override models.dev entries for the same key.
     try {
         const configPath = getOpencodeConfigPath();
@@ -149,7 +167,9 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
             const config = JSON.parse(raw) as {
                 provider?: Record<
                     string,
-                    { models?: Record<string, { limit?: { context?: number } }> }
+                    {
+                        models?: Record<string, { limit?: { context?: number; input?: number } }>;
+                    }
                 >;
             };
 
@@ -157,9 +177,9 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
                 for (const [providerId, provider] of Object.entries(config.provider)) {
                     if (!provider?.models || typeof provider.models !== "object") continue;
                     for (const [modelId, model] of Object.entries(provider.models)) {
-                        const context = model?.limit?.context;
-                        if (typeof context === "number" && context > 0) {
-                            limits.set(`${providerId}/${modelId}`, context);
+                        const effective = resolveLimit(model?.limit);
+                        if (typeof effective === "number" && effective > 0) {
+                            limits.set(`${providerId}/${modelId}`, effective);
                         }
                     }
                 }
@@ -206,13 +226,13 @@ export async function refreshModelLimitsFromApi(client: OpencodeClient): Promise
         for (const entry of providers) {
             const p = entry as {
                 id?: string;
-                models?: Record<string, { limit?: { context?: number } }>;
+                models?: Record<string, { limit?: { context?: number; input?: number } }>;
             };
             if (!p?.id || !p.models || typeof p.models !== "object") continue;
             for (const [modelId, model] of Object.entries(p.models)) {
-                const context = model?.limit?.context;
-                if (typeof context === "number" && context > 0) {
-                    map.set(`${p.id}/${modelId}`, context);
+                const effective = resolveLimit(model?.limit);
+                if (typeof effective === "number" && effective > 0) {
+                    map.set(`${p.id}/${modelId}`, effective);
                 }
             }
         }
