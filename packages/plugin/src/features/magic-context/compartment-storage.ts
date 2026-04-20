@@ -444,7 +444,64 @@ export function clearRecompStaging(db: Database, sessionId: string): void {
     db.transaction(() => {
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
+        // Clear the partial-range marker so a future full recomp doesn't
+        // resume under a partial range. Best-effort — column may not exist
+        // in very old test DBs.
+        try {
+            db.prepare(
+                "UPDATE session_meta SET recomp_partial_range_start = 0, recomp_partial_range_end = 0 WHERE session_id = ?",
+            ).run(sessionId);
+        } catch {
+            // column missing in very old schemas — ignore
+        }
     })();
+}
+
+// ── Partial recomp range marker ─────────────────────────────────────────────
+
+/**
+ * Returns the stored partial recomp range for this session, or null when the
+ * active staging (if any) is for a full recomp.
+ *
+ * A zero-valued row means "no partial range recorded" — either no staging or
+ * full-recomp staging.
+ */
+export function getRecompPartialRange(
+    db: Database,
+    sessionId: string,
+): { start: number; end: number } | null {
+    try {
+        const row = db
+            .prepare(
+                "SELECT recomp_partial_range_start AS start, recomp_partial_range_end AS end FROM session_meta WHERE session_id = ?",
+            )
+            .get(sessionId) as { start?: number; end?: number } | null;
+        const start = typeof row?.start === "number" ? row.start : 0;
+        const end = typeof row?.end === "number" ? row.end : 0;
+        if (start <= 0 || end <= 0) return null;
+        return { start, end };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Record the active partial recomp range. Must be called inside or alongside
+ * saveRecompStagingPass so staging and range marker stay in sync.
+ */
+export function setRecompPartialRange(
+    db: Database,
+    sessionId: string,
+    range: { start: number; end: number } | null,
+): void {
+    const start = range ? range.start : 0;
+    const end = range ? range.end : 0;
+    // Ensure the session_meta row exists so UPDATE takes effect. Mirrors the
+    // pattern used elsewhere in this module.
+    db.prepare("INSERT OR IGNORE INTO session_meta (session_id) VALUES (?)").run(sessionId);
+    db.prepare(
+        "UPDATE session_meta SET recomp_partial_range_start = ?, recomp_partial_range_end = ? WHERE session_id = ?",
+    ).run(start, end, sessionId);
 }
 
 interface RecompCompartmentRow {

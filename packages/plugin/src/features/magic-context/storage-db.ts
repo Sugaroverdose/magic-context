@@ -308,6 +308,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // inside messages. Separate from conversation_tokens so the sidebar can show an
     // actionable "Tool Calls" slice that users can reduce via ctx_reduce.
     ensureColumn(db, "session_meta", "tool_call_tokens", "INTEGER DEFAULT 0");
+    // Partial recomp staging: when non-zero, the active recomp staging is for a
+    // partial range rebuild (snapStart..snapEnd). Used to discriminate staging
+    // resume between full and partial recomp, and to refuse resume if the user
+    // requests a different range than what is already staged.
+    ensureColumn(db, "session_meta", "recomp_partial_range_start", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "recomp_partial_range_end", "INTEGER DEFAULT 0");
 
     // One-time heal: when ensureColumn adds a new TEXT DEFAULT '' or
     // INTEGER DEFAULT N column, SQLite leaves pre-existing rows with NULL

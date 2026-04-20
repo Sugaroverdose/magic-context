@@ -376,7 +376,8 @@ When enabled, dreamer analyzes which files each session's agent reads most frequ
 |---------|-------------|
 | `/ctx-status` | Show current context usage, tag counts, pending queue, nudge state, and history compression info. |
 | `/ctx-flush` | Force-execute all pending operations and heuristic cleanup immediately. |
-| `/ctx-recomp` | Rebuild compartments and facts from raw session history. Resumable across restarts. |
+| `/ctx-recomp` | Rebuild all compartments and facts from raw session history. Resumable across restarts. |
+| `/ctx-recomp <start>-<end>` | Partial rebuild of a message range (e.g. `/ctx-recomp 1-11322`). Snaps to enclosing compartment boundaries, rebuilds only those compartments using current historian rules, and leaves prior/tail compartments and all session facts untouched. Useful after upgrading historian prompt versions or model quality. Resumable across restarts; running with a different range while partial-recomp staging exists is rejected. Currently Desktop/Web-only (TUI falls back to full-recomp dialog; ranged TUI dialog is planned). |
 | `/ctx-dream` | Enqueue the current project for a dream run and process immediately. |
 | `/ctx-aug` | Run sidekick augmentation on the provided prompt. |
 

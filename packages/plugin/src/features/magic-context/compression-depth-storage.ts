@@ -103,3 +103,23 @@ export function getMaxCompressionDepth(db: Database, sessionId: string): number 
 export function clearCompressionDepth(db: Database, sessionId: string): void {
     getClearDepthStatement(db).run(sessionId);
 }
+
+/**
+ * Clear compression depth counters for a specific message range.
+ * Used by partial recomp: rebuilt compartments start fresh at depth 0, so
+ * depth rows for the rebuilt ordinals must be removed. Existing depth for
+ * ordinals outside the range (prior and tail compartments) is preserved.
+ */
+export function clearCompressionDepthRange(
+    db: Database,
+    sessionId: string,
+    startOrdinal: number,
+    endOrdinal: number,
+): void {
+    if (endOrdinal < startOrdinal) {
+        return;
+    }
+    db.prepare(
+        "DELETE FROM compression_depth WHERE session_id = ? AND message_ordinal BETWEEN ? AND ?",
+    ).run(sessionId, startOrdinal, endOrdinal);
+}

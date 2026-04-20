@@ -306,28 +306,31 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             return resolveContextLimit(model.providerID, model.modelID);
         },
         onFlush: (sessionId) => flushedSessions.add(sessionId),
-        executeRecomp: async (sessionId) =>
-            executeContextRecomp({
-                client: deps.client,
-                db,
-                sessionId,
-                historianChunkTokens: getHistorianChunkTokens(),
-                historianTimeoutMs:
-                    deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-                directory: deps.directory,
-                fallbackModelId: (() => {
-                    const model = liveModelBySession.get(sessionId);
-                    return model ? `${model.providerID}/${model.modelID}` : undefined;
-                })(),
-                getNotificationParams: () =>
-                    getLiveNotificationParams(
-                        sessionId,
-                        liveModelBySession,
-                        variantBySession,
-                        agentBySession,
-                    ),
-                historianTwoPass: deps.config.historian?.two_pass === true,
-            }),
+        executeRecomp: async (sessionId, options) =>
+            executeContextRecomp(
+                {
+                    client: deps.client,
+                    db,
+                    sessionId,
+                    historianChunkTokens: getHistorianChunkTokens(),
+                    historianTimeoutMs:
+                        deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                    directory: deps.directory,
+                    fallbackModelId: (() => {
+                        const model = liveModelBySession.get(sessionId);
+                        return model ? `${model.providerID}/${model.modelID}` : undefined;
+                    })(),
+                    getNotificationParams: () =>
+                        getLiveNotificationParams(
+                            sessionId,
+                            liveModelBySession,
+                            variantBySession,
+                            agentBySession,
+                        ),
+                    historianTwoPass: deps.config.historian?.two_pass === true,
+                },
+                options,
+            ),
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {
                 ...getLiveNotificationParams(

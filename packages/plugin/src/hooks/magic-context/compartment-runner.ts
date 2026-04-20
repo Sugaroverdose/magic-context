@@ -1,6 +1,10 @@
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { sessionLog } from "../../shared/logger";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
+import {
+    executePartialRecompInternal,
+    type PartialRecompRange,
+} from "./compartment-runner-partial-recomp";
 import { executeContextRecompInternal } from "./compartment-runner-recomp";
 import type { CompartmentRunnerDeps } from "./compartment-runner-types";
 
@@ -38,13 +42,31 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
     activeRuns.set(deps.sessionId, promise);
 }
 
-export async function executeContextRecomp(deps: CompartmentRunnerDeps): Promise<string> {
+export interface ExecuteContextRecompOptions {
+    /**
+     * Optional partial range (inclusive raw message ordinals). When provided,
+     * runs partial recomp — snaps to enclosing compartment boundaries and
+     * rebuilds only the matching compartments, preserving prior/tail
+     * compartments and all session facts.
+     *
+     * When omitted, runs full recomp from message 1 to the protected tail,
+     * replacing all compartments and facts.
+     */
+    range?: PartialRecompRange;
+}
+
+export async function executeContextRecomp(
+    deps: CompartmentRunnerDeps,
+    options: ExecuteContextRecompOptions = {},
+): Promise<string> {
     const { sessionId } = deps;
     if (activeRuns.has(sessionId)) {
         return "## Magic Recomp\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.";
     }
 
-    const promise = executeContextRecompInternal(deps);
+    const promise = options.range
+        ? executePartialRecompInternal(deps, options.range)
+        : executeContextRecompInternal(deps);
     activeRuns.set(
         sessionId,
         promise
@@ -61,3 +83,4 @@ export async function executeContextRecomp(deps: CompartmentRunnerDeps): Promise
 }
 
 export { runCompartmentAgent } from "./compartment-runner-incremental";
+export type { PartialRecompRange } from "./compartment-runner-partial-recomp";

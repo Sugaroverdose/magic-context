@@ -10,14 +10,70 @@ import { getCompartments } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
+import {
+    type PartialRecompRange,
+    snapRangeToCompartments,
+} from "./compartment-runner-partial-recomp";
 import { executeFlush } from "./execute-flush";
 import { executeStatus } from "./execute-status";
 import type { NotificationParams } from "./send-session-notification";
 import { sendUserPrompt } from "./send-session-notification";
 
-/** Track per-session recomp confirmation for Desktop (no dialog available). */
-const recompConfirmationBySession = new Map<string, number>();
+/**
+ * Track per-session recomp confirmation for Desktop (no dialog available).
+ * Stores the timestamp of the first tap and the normalized range argument
+ * so switching ranges between taps counts as a new intent requiring fresh
+ * confirmation.
+ */
+interface RecompConfirmation {
+    timestamp: number;
+    /** Normalized range arg or "" for full recomp. */
+    argsKey: string;
+}
+const recompConfirmationBySession = new Map<string, RecompConfirmation>();
 const RECOMP_CONFIRMATION_WINDOW_MS = 60_000;
+
+/** Parse `/ctx-recomp` arguments.
+ *
+ *  Accepted forms:
+ *  - empty / whitespace-only → full recomp
+ *  - `<start>-<end>`         → partial recomp with explicit inclusive range
+ *
+ *  Returns an error object for unparseable or nonsensical inputs. */
+export function parseRecompArgs(
+    raw: string,
+):
+    | { kind: "full" }
+    | { kind: "partial"; range: PartialRecompRange }
+    | { kind: "error"; message: string } {
+    const trimmed = raw.trim();
+    if (trimmed === "") return { kind: "full" };
+
+    const match = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (!match) {
+        return {
+            kind: "error",
+            message: `Invalid /ctx-recomp arguments: \`${trimmed}\`.\n\nUsage:\n- \`/ctx-recomp\` — full rebuild from message 1 to the protected tail\n- \`/ctx-recomp <start>-<end>\` — partial rebuild of a message range (e.g. \`/ctx-recomp 1-11322\`)`,
+        };
+    }
+
+    const start = Number.parseInt(match[1], 10);
+    const end = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        return { kind: "error", message: "Range values must be finite integers." };
+    }
+    if (start < 1) {
+        return { kind: "error", message: `Start must be >= 1 (got ${start}).` };
+    }
+    if (end < start) {
+        return {
+            kind: "error",
+            message: `End must be >= start (got ${start}-${end}).`,
+        };
+    }
+
+    return { kind: "partial", range: { start, end } };
+}
 
 export interface CommandExecuteInput {
     command: string;
@@ -211,7 +267,13 @@ export function createMagicContextCommandHandler(deps: {
     /** Optional live context limit resolver — used for tokens-based threshold display. */
     getContextLimit?: (sessionId: string) => number | undefined;
     onFlush?: (sessionId: string) => void;
-    executeRecomp?: (sessionId: string) => Promise<string>;
+    /** Runs /ctx-recomp. When `range` is provided, runs partial recomp over
+     *  that range (snapped to enclosing compartment boundaries). When omitted,
+     *  runs full recomp from message 1 to the protected tail. */
+    executeRecomp?: (
+        sessionId: string,
+        options?: { range?: PartialRecompRange },
+    ) => Promise<string>;
     sendNotification: (
         sessionId: string,
         text: string,
@@ -302,51 +364,109 @@ export function createMagicContextCommandHandler(deps: {
             }
 
             if (isRecomp) {
-                if (isTuiConnected()) {
-                    // In TUI, push an RPC action so the TUI poller shows a confirmation dialog
+                const parsedArgs = parseRecompArgs(input.arguments);
+                if (parsedArgs.kind === "error") {
+                    result = `## Magic Recomp — Invalid Arguments\n\n${parsedArgs.message}`;
+                } else if (isTuiConnected()) {
+                    // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.
+                    // Partial-range args fall through to the full-recomp dialog for now — TUI
+                    // range UI is tracked as a phase-2 enhancement; typed args are ignored here.
                     pushNotification("action", { action: "show-recomp-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-recomp: pushed show-recomp-dialog to TUI");
                     throwSentinel(input.command);
-                }
-                if (!deps.executeRecomp) {
+                } else if (!deps.executeRecomp) {
                     result =
                         "## Magic Recomp\n\n/ctx-recomp is unavailable because the recomp handler is not configured.";
                 } else {
                     // Desktop double-tap confirmation (no native dialog available).
+                    const argsKey =
+                        parsedArgs.kind === "partial"
+                            ? `${parsedArgs.range.start}-${parsedArgs.range.end}`
+                            : "";
                     const lastConfirmation = recompConfirmationBySession.get(sessionId);
                     const now = Date.now();
-
-                    if (
+                    const confirmationValid =
                         lastConfirmation &&
-                        now - lastConfirmation < RECOMP_CONFIRMATION_WINDOW_MS
-                    ) {
-                        // Confirmed — second /ctx-recomp within 60s
+                        now - lastConfirmation.timestamp < RECOMP_CONFIRMATION_WINDOW_MS &&
+                        lastConfirmation.argsKey === argsKey;
+
+                    if (confirmationValid) {
+                        // Confirmed — second /ctx-recomp within 60s with same args
                         recompConfirmationBySession.delete(sessionId);
-                        await deps.sendNotification(
-                            sessionId,
-                            "## Magic Recomp\n\nHistorian recomp started. Rebuilding compartments and facts from raw session history now.",
-                            {},
-                        );
-                        result = await deps.executeRecomp(sessionId);
+                        if (parsedArgs.kind === "partial") {
+                            await deps.sendNotification(
+                                sessionId,
+                                `## Magic Recomp\n\nPartial recomp started for range ${parsedArgs.range.start}-${parsedArgs.range.end}. Rebuilding the matching compartments now (facts unchanged).`,
+                                {},
+                            );
+                            result = await deps.executeRecomp(sessionId, {
+                                range: parsedArgs.range,
+                            });
+                        } else {
+                            await deps.sendNotification(
+                                sessionId,
+                                "## Magic Recomp\n\nHistorian recomp started. Rebuilding compartments and facts from raw session history now.",
+                                {},
+                            );
+                            result = await deps.executeRecomp(sessionId);
+                        }
                     } else {
                         // First attempt — show warning
-                        recompConfirmationBySession.set(sessionId, now);
+                        recompConfirmationBySession.set(sessionId, {
+                            timestamp: now,
+                            argsKey,
+                        });
                         const compartments = getCompartments(deps.db, sessionId);
                         const compartmentCount = compartments.length;
-                        const warningLines = [
-                            "## ⚠️ Recomp Confirmation Required",
-                            "",
-                            `You currently have **${compartmentCount}** compartments.`,
-                            "Running /ctx-recomp will **regenerate all compartments and facts** from raw session history.",
-                            "",
-                            "This operation:",
-                            "- May take a long time (minutes to hours for long sessions)",
-                            "- Will consume significant tokens on your historian model",
-                            "- Cannot be interrupted cleanly once started",
-                            "",
-                            "**To confirm, run `/ctx-recomp` again within 60 seconds.**",
-                        ];
-                        result = warningLines.join("\n");
+
+                        if (parsedArgs.kind === "partial") {
+                            // Compute snap preview so the user sees what will actually be replaced.
+                            const snap = snapRangeToCompartments(compartments, parsedArgs.range);
+                            if ("error" in snap) {
+                                // Clear stale confirmation — a snap error is not a pending intent.
+                                recompConfirmationBySession.delete(sessionId);
+                                result = `## Magic Recomp — Failed\n\n${snap.error}`;
+                            } else {
+                                const replaced = snap.rangeCompartments.length;
+                                const preserved =
+                                    snap.priorCompartments.length + snap.tailCompartments.length;
+                                const warningLines = [
+                                    "## ⚠️ Partial Recomp Confirmation Required",
+                                    "",
+                                    `Requested range: \`${parsedArgs.range.start}-${parsedArgs.range.end}\``,
+                                    `Snapped to compartment boundaries: **messages ${snap.snapStart}-${snap.snapEnd}**`,
+                                    "",
+                                    `This will **rebuild ${replaced} compartment(s)** in the snapped range.`,
+                                    `**${preserved} compartment(s)** outside the range will be preserved unchanged.`,
+                                    "Facts will not be re-extracted.",
+                                    "",
+                                    "This operation:",
+                                    "- May take several minutes to tens of minutes depending on range size",
+                                    "- Will consume historian-model tokens for each chunk",
+                                    "- Is resumable if interrupted (staging preserved on failure)",
+                                    "",
+                                    `**To confirm, run \`/ctx-recomp ${parsedArgs.range.start}-${parsedArgs.range.end}\` again within 60 seconds.**`,
+                                ];
+                                result = warningLines.join("\n");
+                            }
+                        } else {
+                            const warningLines = [
+                                "## ⚠️ Recomp Confirmation Required",
+                                "",
+                                `You currently have **${compartmentCount}** compartments.`,
+                                "Running /ctx-recomp will **regenerate all compartments and facts** from raw session history.",
+                                "",
+                                "This operation:",
+                                "- May take a long time (minutes to hours for long sessions)",
+                                "- Will consume significant tokens on your historian model",
+                                "- Cannot be interrupted cleanly once started",
+                                "",
+                                "Tip: to rebuild only a specific message range, use `/ctx-recomp <start>-<end>` (e.g. `/ctx-recomp 1-11322`).",
+                                "",
+                                "**To confirm, run `/ctx-recomp` again within 60 seconds.**",
+                            ];
+                            result = warningLines.join("\n");
+                        }
                     }
                 }
             }
