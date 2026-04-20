@@ -1,6 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "./agents/dreamer";
-import { HISTORIAN_AGENT } from "./agents/historian";
+import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import { SIDEKICK_AGENT } from "./agents/sidekick";
 import { loadPluginConfig } from "./config";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
@@ -8,6 +8,7 @@ import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-pro
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
+    HISTORIAN_EDITOR_SYSTEM_PROMPT,
     USER_OBSERVATIONS_APPENDIX,
 } from "./hooks/magic-context/compartment-prompt";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
@@ -257,6 +258,15 @@ const plugin: Plugin = async (ctx) => {
                       return agentOverrides;
                   })()
                 : undefined;
+            // Strip two_pass from historian overrides — it's consumed by the runner,
+            // not a valid OpenCode agent config field. Both historian and historian-editor
+            // agents use the remaining overrides (same model, fallbacks, etc.).
+            const historianAgentOverrides = pluginConfig.historian
+                ? (() => {
+                      const { two_pass: _twoPass, ...agentOverrides } = pluginConfig.historian;
+                      return agentOverrides;
+                  })()
+                : undefined;
 
             config.agent = {
                 ...(config.agent ?? {}),
@@ -270,7 +280,12 @@ const plugin: Plugin = async (ctx) => {
                     pluginConfig.experimental?.user_memories?.enabled
                         ? COMPARTMENT_AGENT_SYSTEM_PROMPT + USER_OBSERVATIONS_APPENDIX
                         : COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                    pluginConfig.historian,
+                    historianAgentOverrides,
+                ),
+                [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
+                    HISTORIAN_EDITOR_AGENT,
+                    HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                    historianAgentOverrides,
                 ),
                 [SIDEKICK_AGENT]: buildHiddenAgentConfig(
                     SIDEKICK_AGENT,

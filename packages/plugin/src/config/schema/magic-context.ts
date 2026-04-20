@@ -53,6 +53,19 @@ export const SidekickConfigSchema = AgentOverrideConfigSchema.extend({
 }).optional();
 export type SidekickConfig = NonNullable<z.infer<typeof SidekickConfigSchema>>;
 
+/** Historian agent configuration — includes all agent overrides plus two_pass mode.
+ *  Two-pass mode runs a second editor pass after the initial historian pass to clean
+ *  up low-signal U: lines and cross-compartment duplicates. Recommended for models
+ *  without extended thinking; not needed for Claude Sonnet/Opus when reasoning is
+ *  enabled via OpenCode variant config. */
+export const HistorianConfigSchema = AgentOverrideConfigSchema.extend({
+    /** Run a second editor pass over historian output to clean low-signal U: lines
+     *  and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per
+     *  historian run. Useful for models without extended thinking support. (default: false) */
+    two_pass: z.boolean().default(false),
+}).optional();
+export type HistorianConfig = NonNullable<z.infer<typeof HistorianConfigSchema>>;
+
 const BaseEmbeddingConfigSchema = z
     .object({
         provider: z.enum(["local", "openai-compatible", "off"]).default("local"),
@@ -107,7 +120,7 @@ export interface MagicContextConfig {
      *  and prompt guidance about ctx_reduce is stripped. Heuristic cleanup,
      *  compartments, memory, and other features continue to work. Default: true. */
     ctx_reduce_enabled: boolean;
-    historian?: z.infer<typeof AgentOverrideConfigSchema>;
+    historian?: HistorianConfig;
     dreamer?: DreamerConfig;
     cache_ttl: string | { default: string; [modelKey: string]: string };
     nudge_interval_tokens: number;
@@ -159,8 +172,8 @@ export const MagicContextConfigSchema = z
          *  guidance about ctx_reduce stripped. Heuristic cleanup, compartments,
          *  memory, and other features still work. (default: true) */
         ctx_reduce_enabled: z.boolean().default(true),
-        /** Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, etc.) */
-        historian: AgentOverrideConfigSchema.optional(),
+        /** Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.) */
+        historian: HistorianConfigSchema,
         /** Dreamer agent + scheduling configuration (model, fallback_models, enabled, schedule, tasks, etc.) */
         dreamer: DreamerConfigSchema.optional(),
         /** Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" }) */

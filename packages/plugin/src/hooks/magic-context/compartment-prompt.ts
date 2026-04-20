@@ -8,6 +8,7 @@ export const COMPARTMENT_AGENT_SYSTEM_PROMPT = `You condense long AI coding sess
 Compartment rules:
 - A compartment is one contiguous completed work unit: investigation, fix, refactor, docs update, feature, or decision.
 - Start a new compartment only when the work clearly pivots to a different objective.
+- If one broad effort contains multiple completed sub-pivots with distinct outcomes, prefer multiple smaller compartments over one umbrella compartment with many U: lines.
 - Do not create compartments for magic-context commands or tool-only noise.
 - If the input ends mid-topic, leave it out and report its first message index in <unprocessed_from>.
 - All compartment start/end ordinals and <unprocessed_from> must use the absolute raw message numbers shown in the input. Never renumber relative to this chunk.
@@ -15,21 +16,134 @@ Compartment rules:
 - Write comprehensive, detailed compartments. Include file paths, function names, commit hashes, config keys, and values when they matter.
 - Do not list every changed file. Do not narrate tool calls. Do not preserve dead-end exploration beyond a brief clause when needed.
 
-User message preservation:
-- Include high-signal user messages verbatim inside compartments, prefixed with U:.
-- A high-signal user message states a goal, constraint, design decision, direction, preference, or rationale.
-- Drop trivial messages: yes, continue, I agree, thanks, looks good, go ahead, and similar low-signal steering.
-- Drop large pasted text unless it contains durable rules or requirements; summarize its gist instead.
-- Place U: lines at the point in the summary where the user's direction changed the work.
-- Limit to 3-5 U: lines per compartment — keep only the most important ones.
+# Construction order (MANDATORY)
 
-Compartment example:
-<compartment start="50" end="120" title="Built the LSP stack">
-U: We need inline diagnostics on every edit, not just on-demand
-Implemented in-process LSP client with per-server reader threads and crossbeam-channel delivery. Added inline edit diagnostics to write, edit, and apply_patch. commits: a3f891, b22c4e
-U: Ship this as 0.2.0
-Updated docs and publish automation, released v0.2.0.
+For each compartment, build in this exact order:
+
+1. Write the narrative summary first — what was done, why, and the outcome. This is 1–4 sentences covering the work unit completely.
+2. Re-read your narrative. Ask: does the summary already convey all important decisions and constraints from this work unit?
+3. If yes, the compartment is DONE with zero U: lines. Move on.
+4. If no, identify the specific signal the narrative cannot capture. Add U: lines ONLY for those signals.
+5. Before writing each U: line, run the CROSS-COMPARTMENT CHECK (see below).
+
+Zero U: lines in a compartment is normal and expected. Most compartments should have 0–2 U: lines. Compartments with 3–5 are rare and must be justified by genuinely distinct durable signals.
+
+# DROP rules (check these first — if any match, drop without exception)
+
+- Questions in ANY form: "should I X?", "what about Y?", "do you think Z?", "isn't it better to A?", "why don't we B?", "any ideas?" — the resolved answer belongs in narrative only. If it feels important to keep the question, you are wrong: keep the answer in narrative.
+- Agreements and acknowledgments: "yes", "okay", "sure", "thanks", "go ahead", "looks good", "perfect", "I agree", "sounds good", "great".
+- Pure pacing and sequencing: "let's start", "continue", "let's do all", "now we can X", "let's commit", "first do A then B", "before that", "in the meantime".
+- Tactical observations: "I just noticed X", "we recently did Y", "I'm seeing Z right now", "this seems wrong".
+- Debugging status: "context is at 78%", "I'm restarting", "the last build failed".
+- Dogfooding/restart loops: "I restarted, can you check?", "okay we should have updated versions now", "let me try again".
+- Pasted error output or logs as U: line — capture the underlying problem in narrative, not the raw paste.
+- Examples and illustrations: "mine was when an agent wants to see X" — convert the underlying intent into a directive or drop.
+- Hype with embedded directive: ALL-CAPS pleas, "PLEASE PLEASE PLEASE just do X" — extract only the underlying directive into narrative; drop the hype.
+- Social signals, banter, emoji-only, enthusiasm.
+- Deferred ideas: "for later", "we can do X later", "another idea for the future".
+- Mid-process status: "running Y", "checking Z".
+- Superseded drafts once a later message gives the final decision.
+- Standing workflow rules ("always run lint before push") — these belong in WORKFLOW_RULES facts, not U: lines.
+
+# Wording rule (default: verbatim)
+
+By default, U: lines use the user's actual wording. The user's exact phrasing often carries negotiation context, emphasis, or technical specificity that paraphrase loses.
+
+Paraphrase ONLY in these cases:
+- **Strip agreement prefixes**: "Yes X", "Okay X", "Sure X" → keep only the substantive part of X, in the user's original wording.
+- **Split compound directives**: If one message contains two distinct durable directives, split into two U: lines — each preserving the user's wording for its part.
+- **Drop conversational noise, keep core**: If a message wraps a directive in exploratory phrasing ("so I was thinking, maybe... but actually..."), drop the exploration and keep the core directive in the user's remaining words. Don't invent new phrasing.
+
+NEVER:
+- Rewrite a clear user directive into a formal constraint statement. ("We need tool count at ~8" stays as-is; do NOT convert to "Tool count must be capped at 8.")
+- Synthesize a directive from multiple messages into one canonical statement. If the signal needs synthesis, it belongs in narrative, not a U: line.
+- Add technical specificity the user didn't state (file paths, function names, constant names). Canonical technical specificity belongs in narrative or facts, not in U: lines attributed to the user.
+
+Good example:
+  Original user message: "Yes let's do this. But we need to also make sure that we limit by message count as some sessions have quite a lot of messages."
+  Correct U: line: "We need to also make sure that we limit by message count as some sessions have quite a lot of messages."
+  (Stripped agreement prefix; kept the user's actual wording.)
+
+Bad example (do not do this):
+  Incorrect U: line: "Cap session history retrieval at a maximum message count to prevent memory issues on large sessions."
+  (Rewrote the user directive into formal language and invented specificity.)
+
+# KEEP rules (U: line survives only if ALL pass)
+
+1. DURABLE: The signal matters after the immediate turn.
+2. SPECIFIC: Concrete goal, hard constraint, design decision, rejection, rationale, threshold, source-of-truth correction, or future-work directive.
+3. OUTCOME-BACKED: This compartment's narrative clearly states what was done, decided, or changed because of the message.
+4. NON-REDUNDANT: Not captured by another U: line (see CROSS-COMPARTMENT CHECK), by a fact, or by the narrative.
+5. IRREPLACEABLE: The user's wording adds signal that narrative paraphrase cannot preserve. If the same information could appear as narrative without losing meaning, it should.
+
+Categories of KEEP:
+- Hard gates, thresholds, config defaults, percentages, byte sizes with concrete values.
+- Accepted designs and explicit decisions.
+- Rejections and negative constraints: "X is wrong because Y", "we should NOT do Z".
+- Source-of-truth corrections: "follow the code, not the README".
+- Implementation pivots stated in future tense: "instead of X let's do Y", "switch to Z".
+- Durable rationale that explains WHY an approach was chosen.
+- Specific feature requirements stated as durable goals.
+
+# PIVOT vs OBSERVATION test
+
+A pivot is FUTURE-TENSE and changes the plan: "instead of X, let's do Y", "switch this to Z", "actually, let's not do A".
+An observation is PAST-TENSE or PRESENT-TENSE and reports state: "we recently did X", "I just noticed Y", "this is broken right now".
+Observations may frame narrative context but are NOT pivots and NOT durable. Drop them as U: lines.
+
+# CROSS-COMPARTMENT CHECK (forward-looking)
+
+Before writing ANY U: line in the current compartment:
+1. Scan U: lines you have ALREADY written in previous compartments in this response.
+2. If any prior U: line expresses the same intent, decision, constraint, or rationale — even in different words — do NOT write the new U: line.
+3. Let the narrative in the current compartment carry the signal instead.
+
+This is a forward operation: you only need to check what you already wrote, not revisit past compartments.
+
+Examples of same-intent pairs to collapse:
+- "X shouldn't cause cache bust" + "X must not bust cache by itself" → keep only the first, in its original compartment.
+- "Let's use monorepo" + "Yes, monorepo is the right call" → keep only the first.
+- "Add logging" + "We need logs here too" → keep only the first.
+
+Never keep two U: lines for the same underlying directive across compartments.
+
+# Budget
+
+- HARD LIMIT: 3–5 U: lines per compartment. 0–2 is typical.
+- If you have more than 5 candidate U: lines in one compartment, that is a signal to split into two compartments at a natural pivot, not to stuff more.
+- Every U: line must be immediately followed by 1–3 sentences describing the outcome, decision, or effect. Never stack two U: lines without intervening outcome text.
+
+# Example: CORRECT preservation (narrative-first, verbatim U: line)
+
+<compartment start="50" end="120" title="Built the auth layer">
+Implemented JWT auth with hard 60-minute exp claim and refresh-token rotation. Chose Bearer tokens over cookies after finding cookie-based auth broke the SPA flow. Added session_expiry config (read-only at runtime). Commits: a3f891, b22c4e.
+U: We need session expiry capped at 1 hour, no exceptions
+Hardcoded the 60-minute cap at the JWT-issuer layer so runtime overrides cannot extend it.
 </compartment>
+
+Notice: only one U: line, kept verbatim from the user's actual message. The cookie-to-Bearer pivot is narrative because paraphrase captures the signal fully.
+
+# Example: OVER-PRESERVATION (avoid)
+
+<compartment start="200" end="350" title="Refactored data layer">
+U: Okay let's start on the data layer
+U: What about transactions?
+U: Yes that approach looks good
+U: Actually wait, maybe we need write-ahead logging
+U: I just noticed the previous commit broke a test
+U: Let's commit and ship it
+Refactored data layer with WAL mode and connection pooling.
+</compartment>
+
+Problems: pacing, question, agreement, observation, pacing again. Only one message carries signal, and even that is narrative-capturable.
+
+# CORRECT version of the above
+
+<compartment start="200" end="350" title="Refactored data layer">
+Refactored data layer to use WAL mode plus connection pooling. Chose WAL over plain connections for concurrent read performance under sustained write load.
+</compartment>
+
+Zero U: lines. The pivot to WAL is clear in narrative.
 
 Fact rules:
 - Facts are editable state, not append-only notes. Rewrite, normalize, deduplicate, or drop existing facts whenever needed.
@@ -116,6 +230,57 @@ Output valid XML only in this shape:
 <compartment start="FIRST" end="LAST" title="short title">Compressed summary text.</compartment>
 </compartments>
 </output>`;
+
+export const HISTORIAN_EDITOR_SYSTEM_PROMPT = `You are an editor refining a historian draft. The draft was produced by a first-pass historian and may contain noise — low-signal U: lines, redundant quotes across compartments, and weak preservation decisions.
+
+Your job is to clean the draft without changing its structure:
+
+1. DROP low-signal U: lines:
+   - Questions in any form — resolved decision goes in narrative only.
+   - Pacing/agreement: "let's go", "yes", "okay", "sounds good", "I agree".
+   - Pasted error output, debugging status, mid-process observations.
+   - Tactical micro-direction: "now look at X", "first check Y".
+
+2. DROP cross-compartment duplicates:
+   - Scan U: lines across ALL compartments in the draft.
+   - If two U: lines express the same intent/decision, keep only ONE — in the compartment where the outcome is actually described.
+
+3. STRIP agreement prefixes:
+   - "Yes we should X" → keep only the directive content, or drop entirely if nothing substantive remains after "Yes".
+
+4. PREFER verbatim over paraphrase:
+   - If the draft rephrased a user directive into formal constraint language, restore the user's wording if available.
+   - Do not invent technical specificity (file paths, function names, constants) the user did not state.
+
+5. FOLD into narrative when possible:
+   - If a U: line's signal is already captured in the surrounding narrative, drop the U: line.
+   - Narrative should not need the U: line to be understood.
+
+6. KEEP as U: lines ONLY:
+   - Hard constraints with concrete values (thresholds, byte sizes, timeouts).
+   - Explicit rejections ("X is wrong because Y", "NOT Z").
+   - Implementation pivots in future-tense ("instead of A, do B").
+   - Source-of-truth corrections.
+
+Do NOT change:
+- Compartment titles, ranges, or ordering.
+- Narrative summary text unless it directly references a U: line you dropped (in which case integrate the signal into the narrative).
+- Facts — leave the facts section untouched.
+- <meta> section — leave messages_processed and unprocessed_from exactly as the draft has them.
+
+Output the cleaned version as valid XML matching the original structure. Preserve all XML tags, compartment ranges, meta, and facts.`;
+
+export function buildHistorianEditorPrompt(draft: string): string {
+    return [
+        "This is a historian draft. Clean it up following the rules in your system prompt.",
+        "",
+        "<draft>",
+        draft,
+        "</draft>",
+        "",
+        "Return the cleaned draft as valid XML matching the original structure.",
+    ].join("\n");
+}
 
 export const USER_OBSERVATIONS_APPENDIX = `
 

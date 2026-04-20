@@ -1,5 +1,5 @@
 import { DREAMER_AGENT } from "../agents/dreamer";
-import { HISTORIAN_AGENT } from "../agents/historian";
+import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../agents/historian";
 import { SIDEKICK_AGENT } from "../agents/sidekick";
 
 /**
@@ -55,6 +55,8 @@ const SIDEKICK_FALLBACK_CHAIN: FallbackEntry[] = [
 
 export const AGENT_MODEL_REQUIREMENTS: Record<string, AgentModelRequirement> = {
     [HISTORIAN_AGENT]: { fallbackChain: HISTORIAN_FALLBACK_CHAIN },
+    // Editor reuses historian's fallback chain — same input profile (long single prompt).
+    [HISTORIAN_EDITOR_AGENT]: { fallbackChain: HISTORIAN_FALLBACK_CHAIN },
     [DREAMER_AGENT]: { fallbackChain: DREAMER_FALLBACK_CHAIN },
     [SIDEKICK_AGENT]: { fallbackChain: SIDEKICK_FALLBACK_CHAIN },
 };

@@ -1,12 +1,13 @@
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HISTORIAN_AGENT } from "../../agents/historian";
+import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../../agents/historian";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../shared/error-message";
+import { buildHistorianEditorPrompt } from "./compartment-prompt";
 import type {
     HistorianProgressCallbacks,
     HistorianRunResult,
@@ -45,6 +46,10 @@ export async function runValidatedHistorianPass(args: {
     timeoutMs?: number;
     fallbackModelId?: string;
     callbacks?: HistorianProgressCallbacks;
+    /** When true, run a second editor pass after successful historian output
+     *  to clean low-signal U: lines and cross-compartment duplicates. If editor
+     *  validation fails, falls back to the draft (first-pass) result. */
+    twoPass?: boolean;
 }): Promise<ValidatedHistorianPassResult> {
     const firstRun = await runHistorianPrompt({
         ...args,
@@ -67,8 +72,16 @@ export async function runValidatedHistorianPass(args: {
         args.sequenceOffset,
     );
     if (firstValidation.ok) {
+        const finalResult = args.twoPass
+            ? await runEditorPassOrFallback({
+                  ...args,
+                  draftXml: firstRun.result,
+                  draftValidation: firstValidation,
+                  draftDumpPath: firstRun.dumpPath,
+              })
+            : firstValidation;
         cleanupHistorianDump(args.parentSessionId, firstRun.dumpPath);
-        return firstValidation;
+        return finalResult;
     }
 
     await args.callbacks?.onRepairRetry?.(firstValidation.error ?? "invalid compartment output");
@@ -99,10 +112,18 @@ export async function runValidatedHistorianPass(args: {
         args.sequenceOffset,
     );
     if (repairValidation.ok) {
+        const finalResult = args.twoPass
+            ? await runEditorPassOrFallback({
+                  ...args,
+                  draftXml: repairRun.result,
+                  draftValidation: repairValidation,
+                  draftDumpPath: repairRun.dumpPath,
+              })
+            : repairValidation;
         // Keep firstRun.dumpPath (initial failure) for debugging.
         // Only cleanup the successful repair run's dump.
         cleanupHistorianDump(args.parentSessionId, repairRun.dumpPath);
-        return repairValidation;
+        return finalResult;
     }
 
     return runFallbackHistorianPass({
@@ -113,6 +134,69 @@ export async function runValidatedHistorianPass(args: {
     });
 }
 
+/**
+ * Run the historian-editor agent on a validated historian draft. Returns the
+ * editor's validated result if successful; falls back to the draft on any
+ * failure (editor call, validation, or invalid structure). Editor can never
+ * regress behavior — worst case we return the same validated draft.
+ */
+async function runEditorPassOrFallback(args: {
+    client: PluginContext["client"];
+    parentSessionId: string;
+    sessionDirectory: string;
+    chunk: {
+        startIndex: number;
+        endIndex: number;
+        lines: Array<{ ordinal: number; messageId: string }>;
+    };
+    priorCompartments: StoredCompartmentRange[];
+    sequenceOffset: number;
+    dumpLabelBase: string;
+    timeoutMs?: number;
+    draftXml: string;
+    draftValidation: ValidatedHistorianPassResult;
+    draftDumpPath?: string;
+}): Promise<ValidatedHistorianPassResult> {
+    shared.sessionLog(args.parentSessionId, "historian two-pass: running editor on draft");
+    const editorRun = await runHistorianPrompt({
+        client: args.client,
+        parentSessionId: args.parentSessionId,
+        sessionDirectory: args.sessionDirectory,
+        prompt: buildHistorianEditorPrompt(args.draftXml),
+        timeoutMs: args.timeoutMs,
+        dumpLabel: `${args.dumpLabelBase}-editor`,
+        agentId: HISTORIAN_EDITOR_AGENT,
+    });
+
+    if (!editorRun.ok || !editorRun.result) {
+        shared.sessionLog(args.parentSessionId, "historian two-pass: editor call failed", {
+            error: editorRun.error,
+        });
+        return args.draftValidation;
+    }
+
+    const editorValidation = validateHistorianOutput(
+        editorRun.result,
+        args.parentSessionId,
+        args.chunk,
+        args.priorCompartments,
+        args.sequenceOffset,
+    );
+    if (!editorValidation.ok) {
+        shared.sessionLog(
+            args.parentSessionId,
+            "historian two-pass: editor validation failed, falling back to draft",
+            { error: editorValidation.error },
+        );
+        // Editor output was bad — keep editor dump for debugging.
+        return args.draftValidation;
+    }
+
+    cleanupHistorianDump(args.parentSessionId, editorRun.dumpPath);
+    shared.sessionLog(args.parentSessionId, "historian two-pass: editor accepted");
+    return editorValidation;
+}
+
 async function runHistorianPrompt(args: {
     client: PluginContext["client"];
     parentSessionId: string;
@@ -121,6 +205,9 @@ async function runHistorianPrompt(args: {
     timeoutMs?: number;
     dumpLabel?: string;
     modelOverride?: HistorianModelOverride;
+    /** Agent identifier to route the request to. Defaults to HISTORIAN_AGENT.
+     *  Use HISTORIAN_EDITOR_AGENT for the second pass in two-pass mode. */
+    agentId?: string;
 }): Promise<HistorianRunResult> {
     const {
         client,
@@ -130,13 +217,14 @@ async function runHistorianPrompt(args: {
         timeoutMs,
         dumpLabel,
         modelOverride,
+        agentId = HISTORIAN_AGENT,
     } = args;
     let agentSessionId: string | null = null;
 
     try {
         shared.sessionLog(
             parentSessionId,
-            `historian: creating child session (model=${modelOverride ? `${modelOverride.providerID}/${modelOverride.modelID}` : `agent:${HISTORIAN_AGENT}`})`,
+            `historian: creating child session (agent=${agentId}, model=${modelOverride ? `${modelOverride.providerID}/${modelOverride.modelID}` : `agent:${agentId}`})`,
         );
         const createResponse = await client.session.create({
             body: {
@@ -165,10 +253,12 @@ async function runHistorianPrompt(args: {
                         path: { id: agentSessionId },
                         query: { directory: sessionDirectory },
                         body: {
-                            // Always use the historian agent for its system prompt.
-                            // When modelOverride is set, OpenCode uses the override model
-                            // but still loads the historian agent's registered system prompt.
-                            agent: HISTORIAN_AGENT,
+                            // Use the specified agent (HISTORIAN_AGENT by default, or
+                            // HISTORIAN_EDITOR_AGENT for two-pass editor pass) so OpenCode
+                            // loads the right system prompt. When modelOverride is set,
+                            // OpenCode uses the override model but still loads the agent's
+                            // registered system prompt.
+                            agent: agentId,
                             ...(modelOverride ? { model: modelOverride } : {}),
                             parts: [{ type: "text", text: prompt }],
                         },

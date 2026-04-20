@@ -198,6 +198,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 dumpLabelBase: `recomp-${sessionId}-${chunk.startIndex}-${chunk.endIndex}-pass-${passCount + 1}`,
                 timeoutMs: historianTimeoutMs,
                 fallbackModelId: deps.fallbackModelId,
+                twoPass: deps.historianTwoPass,
                 callbacks: {
                     onRepairRetry: async (error) => {
                         await sendIgnoredMessage(

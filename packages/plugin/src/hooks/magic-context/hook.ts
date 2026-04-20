@@ -1,9 +1,8 @@
-import type { z } from "zod";
-import type { AgentOverrideConfigSchema } from "../../config/schema/agent-overrides";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
     type DreamerConfig,
+    type HistorianConfig,
     type SidekickConfig,
 } from "../../config/schema/magic-context";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
@@ -71,7 +70,7 @@ export interface MagicContextDeps {
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
         cache_ttl: string | Record<string, string>;
 
-        historian?: z.infer<typeof AgentOverrideConfigSchema>;
+        historian?: HistorianConfig;
         history_budget_percentage?: number;
         historian_timeout_ms?: number;
         memory?: {
@@ -229,6 +228,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         projectPath,
         experimentalCompactionMarkers: deps.config.compaction_markers,
         experimentalUserMemories: deps.config.experimental?.user_memories?.enabled,
+        historianTwoPass: deps.config.historian?.two_pass === true,
         liveModelBySession,
     });
     const eventHandler = createEventHandler({
@@ -326,6 +326,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                         variantBySession,
                         agentBySession,
                     ),
+                historianTwoPass: deps.config.historian?.two_pass === true,
             }),
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {

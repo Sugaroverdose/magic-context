@@ -21,6 +21,9 @@ export interface CompartmentRunnerDeps {
     experimentalCompactionMarkers?: boolean;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
+    /** When true, run an editor pass after successful historian output to clean
+     *  low-signal U: lines and cross-compartment duplicates. */
+    historianTwoPass?: boolean;
 }
 
 export interface CandidateCompartment {

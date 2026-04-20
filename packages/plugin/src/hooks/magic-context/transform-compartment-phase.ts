@@ -57,6 +57,8 @@ interface RunCompartmentPhaseArgs {
     experimentalCompactionMarkers?: boolean;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
+    /** When true, run a second editor pass after historian to clean U: lines. */
+    historianTwoPass?: boolean;
 }
 
 export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promise<{
@@ -152,6 +154,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 getNotificationParams: args.getNotificationParams,
                 experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,
+                historianTwoPass: args.historianTwoPass,
             });
             compartmentInProgress = true;
         }
@@ -187,6 +190,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 getNotificationParams: args.getNotificationParams,
                 experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,
+                historianTwoPass: args.historianTwoPass,
             });
             activeRun = getActiveCompartmentRun(args.sessionId);
         } else if (!activeRun && hasEligibleHistoryForCompartment()) {

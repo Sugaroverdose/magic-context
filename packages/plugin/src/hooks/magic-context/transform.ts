@@ -165,6 +165,9 @@ export interface TransformDeps {
     projectPath?: string;
     experimentalCompactionMarkers?: boolean;
     experimentalUserMemories?: boolean;
+    /** When true, run a second editor pass after historian to clean U: lines.
+     *  Enables the historian-editor agent. Controlled by `historian.two_pass` config. */
+    historianTwoPass?: boolean;
     liveModelBySession?: LiveModelBySession;
 }
 
@@ -349,6 +352,7 @@ export function createTransform(deps: TransformDeps) {
                 getNotificationParams: () => notificationParams,
                 experimentalCompactionMarkers: deps.experimentalCompactionMarkers,
                 experimentalUserMemories: deps.experimentalUserMemories,
+                historianTwoPass: deps.historianTwoPass,
             });
             skipCompartmentAwaitForThisPass = true;
             return true;
@@ -595,6 +599,7 @@ export function createTransform(deps: TransformDeps) {
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalCompactionMarkers: deps.experimentalCompactionMarkers,
             experimentalUserMemories: deps.experimentalUserMemories,
+            historianTwoPass: deps.historianTwoPass,
         });
         pendingCompartmentInjection = compartmentPhase.pendingCompartmentInjection;
         const awaitedCompartmentRun = compartmentPhase.awaitedCompartmentRun;

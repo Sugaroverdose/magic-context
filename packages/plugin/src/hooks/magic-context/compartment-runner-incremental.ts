@@ -148,6 +148,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             dumpLabelBase: `incremental-${sessionId}-${chunk.startIndex}-${chunk.endIndex}`,
             timeoutMs: historianTimeoutMs,
             fallbackModelId: deps.fallbackModelId,
+            twoPass: deps.historianTwoPass,
         });
         if (!validatedPass.ok) {
             // Always track historian failures regardless of usage percentage.

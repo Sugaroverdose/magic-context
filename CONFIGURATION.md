@@ -183,7 +183,8 @@ Configures the background historian agent that compresses session history into c
     "fallback_models": [
       "anthropic/claude-sonnet-4-6",
       "bailian-coding-plan/kimi-k2.5"
-    ]
+    ],
+    "two_pass": false
   }
 }
 ```
@@ -195,6 +196,7 @@ Configures the background historian agent that compresses session history into c
 | `temperature` | `number` (0–2) | Sampling temperature. |
 | `variant` | `string` | Agent variant. |
 | `prompt` | `string` | Custom system prompt override. |
+| `two_pass` | `boolean` | Default `false`. When `true`, runs a second editor pass after each successful historian output. The editor (a separate hidden `historian-editor` agent using the same fallback chain) re-reads the draft and removes low-signal `U:` lines, redundant paraphrases, and cross-compartment duplicates, producing cleaner narrative-first summaries. Falls back to the draft if the editor call or its validation fails, so it can never regress behavior. Adds one extra historian-scale call per compartment publication. Recommended for non-reasoning models and open-weight local models where the single-pass draft is noisier. For models with extended thinking/reasoning enabled in OpenCode (Claude 4+, GPT-5.x reasoning variants), the single-pass output is usually already clean and `two_pass` can stay `false`. |
 
 ---
 
