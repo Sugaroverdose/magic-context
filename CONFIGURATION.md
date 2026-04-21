@@ -333,10 +333,14 @@ When `provider: "off"`:
     "provider": "openai-compatible",
     "model": "text-embedding-3-small",
     "endpoint": "https://api.openai.com/v1",
-    "api_key": "sk-..."
+    "api_key": "{env:OPENAI_API_KEY}"
   }
 }
 ```
+
+> **Note:** Any string in `magic-context.jsonc` can use `{env:VAR}` to reference an environment variable, or `{file:path}` to inline the contents of an external file (matching OpenCode's own config substitution). Paths are resolved relative to the config file's directory; `~/` expands to the home directory. Use `doctor` after editing — it probes the configured embedding endpoint and reports missing env vars, wrong URLs, auth failures, or providers that don't implement the embeddings API.
+
+> **Not every provider offers embeddings.** OpenRouter and Anthropic's public API do not expose `/embeddings`; use OpenAI, Voyage, Together, LM Studio, or the bundled `"local"` provider instead. `doctor` will flag 404/405 responses and show the actual error.
 
 ---
 

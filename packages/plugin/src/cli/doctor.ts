@@ -4,6 +4,11 @@ import { createRequire } from "node:module";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { substituteConfigVariables } from "../config/variable";
+import {
+    type EmbeddingProbeOutcome,
+    probeEmbeddingEndpoint,
+} from "../features/magic-context/memory/embedding-probe";
 import { detectConflicts } from "../shared/conflict-detector";
 import { fixConflicts } from "../shared/conflict-fixer";
 import { ensureTuiPluginEntry } from "../shared/tui-config";
@@ -197,6 +202,180 @@ async function runIssueFlow(): Promise<number> {
         log.error(error instanceof Error ? error.message : String(error));
         outro("Issue report failed");
         return 1;
+    }
+}
+
+// ── Embedding configuration check ───────────────────────────────────
+
+/**
+ * Validate the user's embedding configuration by probing the configured
+ * endpoint. Runs only for `openai-compatible` providers — `local` needs no
+ * network check and `off` degrades cleanly by design.
+ *
+ * Known footguns we surface specifically:
+ *   - `{env:VAR}` in api_key when VAR is not exported → auth will fail with
+ *     a literal `Bearer {env:VAR}` header.
+ *   - Endpoint pointing at a specific route (e.g. `.../chat/completions`)
+ *     rather than the provider base (e.g. `.../v1`) — gets detected by the
+ *     real probe returning 404/405.
+ *   - Provider that accepts the URL shape but doesn't implement embeddings
+ *     (OpenRouter's /v1 for example) — same detection path.
+ */
+async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ issues: number }> {
+    if (!existsSync(magicContextConfigPath)) {
+        // No config → local provider defaults apply, nothing to check.
+        return { issues: 0 };
+    }
+
+    let rawText: string;
+    try {
+        rawText = readFileSync(magicContextConfigPath, "utf-8");
+    } catch {
+        log.warn("Could not read magic-context.jsonc for embedding check");
+        return { issues: 1 };
+    }
+
+    // Substitute {env:} and {file:} before parsing so api_key / endpoint
+    // reflect the values the runtime will actually see, and so we can report
+    // unresolved tokens as concrete issues.
+    const substituted = substituteConfigVariables({
+        text: rawText,
+        configPath: magicContextConfigPath,
+    });
+
+    let parsedConfig: Record<string, unknown>;
+    try {
+        parsedConfig = parse(substituted.text) as Record<string, unknown>;
+    } catch (error) {
+        log.warn(
+            `Embedding check skipped — could not parse magic-context.jsonc: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return { issues: 1 };
+    }
+
+    const embedding = parsedConfig?.embedding as Record<string, unknown> | undefined;
+    const provider = embedding?.provider;
+
+    if (provider === "off") {
+        log.info("Embedding provider disabled — semantic memory search is off");
+        return { issues: 0 };
+    }
+
+    if (provider === undefined || provider === "local") {
+        log.success("Embedding provider: local (Xenova/all-MiniLM-L6-v2 bundled)");
+        return { issues: 0 };
+    }
+
+    if (provider !== "openai-compatible") {
+        log.warn(
+            `Unknown embedding provider: ${String(provider)} (expected local | openai-compatible | off)`,
+        );
+        return { issues: 1 };
+    }
+
+    const endpoint = typeof embedding?.endpoint === "string" ? embedding.endpoint.trim() : "";
+    const model = typeof embedding?.model === "string" ? embedding.model.trim() : "";
+    const apiKey = typeof embedding?.api_key === "string" ? embedding.api_key : undefined;
+
+    let localIssues = 0;
+
+    // Static configuration hygiene checks — raise before the network probe so
+    // users get the specific guidance even when they're offline.
+    if (!endpoint) {
+        log.error("Embedding provider is openai-compatible but 'endpoint' is missing");
+        return { issues: 1 };
+    }
+    if (!model) {
+        log.error("Embedding provider is openai-compatible but 'model' is missing");
+        return { issues: 1 };
+    }
+
+    // Flag unresolved {env:} residue — the substitution pass above would have
+    // replaced resolved tokens, so any leftover {env: here means either the
+    // env var was missing or the user wrote the literal text.
+    if (apiKey && /\{env:[^}]+\}/.test(apiKey)) {
+        log.warn(
+            "api_key still contains {env:...} after substitution — the referenced environment variable is not set in this shell",
+        );
+        log.info(`  Raw value: ${apiKey}`);
+        log.info(
+            "  Export the variable before launching OpenCode (e.g. in ~/.zshrc, ~/.bashrc, or a shell profile)",
+        );
+        localIssues++;
+    }
+
+    // Surface any substitution warnings for the *user* config — we can't
+    // tell which substitutions fed the embedding block specifically, but if
+    // the block is broken and there are env-var warnings, they're almost
+    // certainly related.
+    if (substituted.warnings.length > 0) {
+        for (const w of substituted.warnings.slice(0, 3)) {
+            log.info(`  ${w}`);
+        }
+        if (substituted.warnings.length > 3) {
+            log.info(`  ... and ${substituted.warnings.length - 3} more`);
+        }
+    }
+
+    // Run the live probe.
+    const probeSpinner = spinner();
+    probeSpinner.start(`Testing embedding endpoint ${endpoint} (model: ${model})`);
+
+    let outcome: EmbeddingProbeOutcome;
+    try {
+        outcome = await probeEmbeddingEndpoint({
+            endpoint,
+            model,
+            apiKey: apiKey,
+            timeoutMs: 10_000,
+        });
+    } catch (error) {
+        probeSpinner.stop("Embedding probe failed unexpectedly");
+        log.error(`Probe threw: ${error instanceof Error ? error.message : String(error)}`);
+        return { issues: localIssues + 1 };
+    }
+
+    probeSpinner.stop("Embedding endpoint probed");
+
+    switch (outcome.kind) {
+        case "ok":
+            log.success(
+                `Embedding endpoint OK (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
+            );
+            return { issues: localIssues };
+        case "auth_failed":
+            log.error(
+                `Embedding endpoint rejected credentials (${outcome.status}) — check api_key / env var`,
+            );
+            if (outcome.preview) log.info(`  ${outcome.preview}`);
+            return { issues: localIssues + 1 };
+        case "endpoint_unsupported":
+            log.error(`Embedding endpoint does not support embeddings (${outcome.status})`);
+            if (outcome.preview) log.info(`  ${outcome.preview}`);
+            log.info(
+                "  Common causes: endpoint points at a chat-completion route (should be the provider base, e.g. '.../v1'), or the provider doesn't offer an embeddings API",
+            );
+            log.info(
+                "  Known non-embedding providers: OpenRouter (chat proxy), Anthropic (no embeddings endpoint). Use OpenAI, Voyage, Together, or a local provider instead.",
+            );
+            return { issues: localIssues + 1 };
+        case "http_error":
+            log.error(`Embedding endpoint returned ${outcome.status}`);
+            if (outcome.preview) log.info(`  ${outcome.preview}`);
+            return { issues: localIssues + 1 };
+        case "timeout":
+            log.warn(
+                `Embedding endpoint did not respond within ${outcome.timeoutMs}ms — check endpoint URL and network`,
+            );
+            return { issues: localIssues + 1 };
+        case "network_error":
+            log.error(`Could not reach embedding endpoint: ${outcome.message}`);
+            return { issues: localIssues + 1 };
+        case "invalid_scheme":
+            log.error(
+                `Embedding endpoint must start with http:// or https://: ${outcome.endpoint}`,
+            );
+            return { issues: localIssues + 1 };
     }
 }
 
@@ -436,6 +615,12 @@ export async function runDoctor(
             // Config parse failed — skip this check
         }
     }
+
+    // 7b. Validate embedding configuration — runs a real probe against the
+    // configured endpoint so users catch misconfigured URL / missing env var /
+    // wrong provider issues before relying on semantic memory search.
+    const embeddingCheck = await checkEmbeddingConfig(paths.magicContextConfig);
+    issues += embeddingCheck.issues;
 
     // 8. Check plugin npm cache — clear only if outdated
     const cacheResult = await clearPluginCache(options.force);
