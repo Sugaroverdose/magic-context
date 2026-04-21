@@ -425,6 +425,21 @@ When enabled, dreamer analyzes which files each session's agent reads most frequ
 - `token_budget`: maximum total tokens for all pinned files combined (2000–30000, default 10000). Files are selected by a knapsack solver to fit within this budget.
 - `min_reads`: minimum number of full-file reads before a file is considered for pinning (2–20, default 4). Lower values are more aggressive but risk pinning task-specific files.
 
+### `experimental.temporal_awareness`
+
+| Key | Type | Default |
+|-----|------|---------|
+| `experimental.temporal_awareness` | `boolean` | `false` |
+
+When enabled, Magic Context surfaces wall-clock time to the agent in two cache-safe ways:
+
+1. **User-message gap markers.** Each user message is prefixed with an HTML comment like `<!-- +5m -->`, `<!-- +2h 15m -->`, or `<!-- +3d 4h -->` indicating time elapsed since the previous message's completion. Only shown when the gap exceeds 5 minutes. Derived from immutable `message.time.completed ?? message.time.created` timestamps.
+2. **Compartment date ranges.** Each `<compartment>` element in `<session-history>` carries `start-date="YYYY-MM-DD"` and `end-date="YYYY-MM-DD"` attributes showing real-time boundaries.
+
+Lets agents reason correctly about workflow pacing, log durations, build times, "how long ago" references, and session age. Without this flag the agent has no sense of time at all.
+
+**Cache safety.** Markers are idempotent by regex detection and derive from static message timestamps — re-running the injector on any transform pass produces the same output, so enabling the flag busts cache once (on the first pass after flip) and then stays stable. Historian input is untouched.
+
 ## Commands
 
 | Command | Description |

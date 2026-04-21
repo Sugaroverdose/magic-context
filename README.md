@@ -50,6 +50,8 @@ Your agent should never stop working to manage its own context. Magic Context is
 
 **Key File Pinning** — dreamer analyzes which files your agent reads most frequently across the session. Core orientation files (architecture, config, types) that get re-read after every context drop are pinned into the system prompt as `<key-files>`, so the agent always has them without needing to re-read from disk. Files are read fresh on each cache-busting pass. Enable with `experimental.pin_key_files.enabled: true` (requires dreamer).
 
+**Temporal Awareness** — gives the agent real-time perception. Each user message gets a small `<!-- +5m -->`/`<!-- +2h 15m -->`/`<!-- +3d 4h -->` gap marker showing time since the previous message, and every compartment in `<session-history>` carries `start-date`/`end-date` attributes. Lets the agent reason correctly about how long a build ran, when a decision was made, or how stale a prior session is. Cache-safe — markers derive from immutable timestamps. Enable with `experimental.temporal_awareness: true`.
+
 ---
 
 ## Get Started
