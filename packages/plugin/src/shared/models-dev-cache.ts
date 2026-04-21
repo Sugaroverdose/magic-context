@@ -237,9 +237,19 @@ export async function refreshModelLimitsFromApi(client: OpencodeClient): Promise
             }
         }
 
+        const previousSize = apiCache?.size ?? null;
         apiCache = map;
         apiLoadedAt = Date.now();
-        sessionLog("global", `models-dev-cache: API layer loaded ${map.size} model limits`);
+        // Log only on first successful load or when the model count changes,
+        // so the 5-minute periodic refresh doesn't spam the log.
+        if (previousSize === null || previousSize !== map.size) {
+            sessionLog(
+                "global",
+                `models-dev-cache: API layer loaded ${map.size} model limits${
+                    previousSize !== null ? ` (was ${previousSize})` : ""
+                }`,
+            );
+        }
     } catch (error) {
         sessionLog(
             "global",
