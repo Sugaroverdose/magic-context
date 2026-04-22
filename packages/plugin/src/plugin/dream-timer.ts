@@ -13,18 +13,13 @@ import type { PluginContext } from "./types";
 /** Check interval for dream schedule (15 minutes). */
 const DREAM_TIMER_INTERVAL_MS = 15 * 60 * 1000;
 
-/** Singleton guard — only one timer per process. */
-let activeTimer: ReturnType<typeof setInterval> | null = null;
-let activeCleanup: (() => void) | null = null;
-
 /**
- * Start an independent timer that checks the dreamer schedule and processes
- * the dream queue. This runs regardless of user activity so overnight
- * dreaming triggers even when the user isn't chatting.
- *
- * The timer is unref'd so it doesn't prevent the process from exiting.
+ * Per-project work registered with the timer. The timer is a process-wide
+ * singleton, but Desktop OpenCode can load the same plugin once per project
+ * within one process — every load needs its directory's git commits indexed,
+ * its dream schedule checked, and its experimental config respected.
  */
-export function startDreamScheduleTimer(args: {
+interface ProjectRegistration {
     directory: string;
     client: PluginContext["client"];
     dreamerConfig?: DreamerConfig;
@@ -36,51 +31,106 @@ export function startDreamScheduleTimer(args: {
         token_budget: number;
         min_reads: number;
     };
-    /** When set, periodically index git commits from `directory` into the
-     *  current project's commit table. Embeddings are drained as part of the
-     *  same tick when embedding is enabled. */
     gitCommitIndexing?: {
         enabled: boolean;
         since_days: number;
         max_commits: number;
     };
-}): (() => void) | undefined {
-    // Singleton guard — only one timer per process
-    if (activeTimer) {
-        log("[dreamer] schedule timer already running, skipping duplicate start");
-        return activeCleanup ?? undefined;
-    }
+}
 
-    const {
-        directory,
-        client,
-        dreamerConfig,
-        embeddingConfig,
-        memoryEnabled,
-        experimentalUserMemories,
-        experimentalPinKeyFiles,
-        gitCommitIndexing,
-    } = args;
-    const dreamingEnabled = Boolean(dreamerConfig?.enabled && dreamerConfig.schedule?.trim());
-    const embeddingSweepEnabled = memoryEnabled && embeddingConfig.provider !== "off";
-    const commitIndexingEnabled = gitCommitIndexing?.enabled === true;
+/** Singleton timer state. */
+let activeTimer: ReturnType<typeof setInterval> | null = null;
+/** All projects that have called startDreamScheduleTimer in this process,
+ *  keyed by directory so re-registration of the same directory is idempotent. */
+const registeredProjects = new Map<string, ProjectRegistration>();
+
+/**
+ * Register the calling project with the process-wide dream + maintenance
+ * timer. The timer itself is a singleton (we only need one setInterval per
+ * process), but every registered project gets its per-directory work — git
+ * commit indexing, dream schedule check, dream queue processing — on each
+ * tick. The first registration also kicks off an immediate startup tick so
+ * fresh installs and restarts don't wait 15 minutes for first-time indexing.
+ *
+ * Returns a cleanup that removes this project's registration. The timer
+ * itself stops only when the last project unregisters.
+ */
+export function startDreamScheduleTimer(args: ProjectRegistration): (() => void) | undefined {
+    const dreamingEnabled = Boolean(args.dreamerConfig?.enabled && args.dreamerConfig.schedule?.trim());
+    const embeddingSweepEnabled = args.memoryEnabled && args.embeddingConfig.provider !== "off";
+    const commitIndexingEnabled = args.gitCommitIndexing?.enabled === true;
 
     if (!dreamingEnabled && !embeddingSweepEnabled && !commitIndexingEnabled) {
         return;
     }
 
-    // Kick off a startup sweep for git commits so first-time indexing doesn't
-    // wait 15 minutes. Fire-and-forget — any failure is logged and recovered
-    // on the next interval.
-    if (commitIndexingEnabled && gitCommitIndexing) {
-        void sweepGitCommits({ directory, gitCommitIndexing, embeddingConfig });
+    // Idempotent registration — re-registering the same directory replaces
+    // the prior config (e.g., if config was reloaded for that project).
+    const isNewRegistration = !registeredProjects.has(args.directory);
+    registeredProjects.set(args.directory, args);
+
+    if (isNewRegistration) {
+        log(
+            `[dreamer] registered project ${args.directory} (dreaming=${dreamingEnabled} embeddings=${embeddingSweepEnabled} commits=${commitIndexingEnabled}; total=${registeredProjects.size})`,
+        );
     }
 
-    const timer = setInterval(() => {
-        log("[dreamer] timer tick — checking schedule and embeddings");
-        try {
-            if (embeddingSweepEnabled) {
-                void embedAllUnembeddedMemories(openDatabase(), embeddingConfig)
+    if (!activeTimer) {
+        // First registration in this process — start the timer and run an
+        // immediate startup tick so embedding backfill, commit indexing, and
+        // dream schedule checks don't wait 15 minutes after a fresh install.
+        log(
+            `[dreamer] started independent schedule timer (every ${DREAM_TIMER_INTERVAL_MS / 60_000}m)`,
+        );
+
+        runTick("startup");
+
+        const timer = setInterval(() => runTick("interval"), DREAM_TIMER_INTERVAL_MS);
+        if (typeof timer === "object" && "unref" in timer) {
+            timer.unref();
+        }
+        activeTimer = timer;
+    } else if (isNewRegistration) {
+        // Timer is already running, but this is a brand-new project — give
+        // it the same "no 15-minute wait" treatment by sweeping just this
+        // project immediately. Existing projects keep their tick cadence.
+        void sweepProject(args, "startup");
+    }
+
+    return () => {
+        registeredProjects.delete(args.directory);
+        log(
+            `[dreamer] unregistered project ${args.directory} (remaining=${registeredProjects.size})`,
+        );
+        if (registeredProjects.size === 0 && activeTimer) {
+            clearInterval(activeTimer);
+            activeTimer = null;
+            log("[dreamer] stopped dream schedule timer (no projects left)");
+        }
+    };
+}
+
+/**
+ * Single tick body. Runs the global memory embedding sweep once, then
+ * iterates every registered project for its per-directory work.
+ */
+function runTick(origin: "startup" | "interval"): void {
+    log(
+        `[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`,
+    );
+    try {
+        // Memory embedding sweep is global (iterates all projects in DB),
+        // so we only need to call it once per tick — not per registered
+        // project.
+        const anyEmbeddingEnabled = Array.from(registeredProjects.values()).some(
+            (r) => r.memoryEnabled && r.embeddingConfig.provider !== "off",
+        );
+        if (anyEmbeddingEnabled) {
+            // Use the first registered project's embeddingConfig — they
+            // should all match (it's a top-level user config).
+            const first = registeredProjects.values().next().value;
+            if (first) {
+                void embedAllUnembeddedMemories(openDatabase(), first.embeddingConfig)
                     .then((embeddedCount) => {
                         if (embeddedCount > 0) {
                             log(
@@ -89,59 +139,72 @@ export function startDreamScheduleTimer(args: {
                         }
                     })
                     .catch((error: unknown) => {
-                        log("[magic-context] periodic memory embedding sweep failed:", error);
+                        log(
+                            "[magic-context] periodic memory embedding sweep failed:",
+                            error,
+                        );
                     });
             }
-
-            if (commitIndexingEnabled && gitCommitIndexing) {
-                void sweepGitCommits({ directory, gitCommitIndexing, embeddingConfig });
-            }
-
-            if (!dreamingEnabled || !dreamerConfig?.schedule?.trim()) {
-                log("[dreamer] timer tick — dreaming disabled, skipping schedule check");
-                return;
-            }
-
-            const db = openDatabase();
-            log(`[dreamer] timer tick — checking schedule window "${dreamerConfig.schedule}"`);
-            checkScheduleAndEnqueue(db, dreamerConfig.schedule);
-
-            void processDreamQueue({
-                db,
-                client,
-                tasks: dreamerConfig.tasks,
-                taskTimeoutMinutes: dreamerConfig.task_timeout_minutes,
-                maxRuntimeMinutes: dreamerConfig.max_runtime_minutes,
-                experimentalUserMemories,
-                experimentalPinKeyFiles,
-            }).catch((error: unknown) => {
-                log("[dreamer] timer-triggered queue processing failed:", error);
-            });
-        } catch (error) {
-            log("[magic-context] timer-triggered maintenance check failed:", error);
         }
-    }, DREAM_TIMER_INTERVAL_MS);
 
-    // Unref so the timer doesn't prevent the process from exiting.
-    if (typeof timer === "object" && "unref" in timer) {
-        timer.unref();
+        // Per-project work — git commit indexing, dream schedule check,
+        // dream queue processing. We iterate all registered projects so
+        // Desktop's "open all projects at once" workflow indexes every one,
+        // not just whichever project happened to register the timer first.
+        for (const reg of registeredProjects.values()) {
+            void sweepProject(reg, origin);
+        }
+    } catch (error) {
+        log("[magic-context] timer-triggered maintenance check failed:", error);
+    }
+}
+
+/**
+ * Run all per-project maintenance for one registration: git commit indexing
+ * (when enabled) plus dream schedule check + queue processing (when enabled).
+ *
+ * Each registered project gets its own pass per tick — Desktop loads the
+ * plugin once per project in the same process, and every project needs its
+ * own commits indexed and its own dream schedule honored.
+ */
+async function sweepProject(reg: ProjectRegistration, origin: "startup" | "interval"): Promise<void> {
+    const dreamingEnabled = Boolean(reg.dreamerConfig?.enabled && reg.dreamerConfig.schedule?.trim());
+    const commitIndexingEnabled = reg.gitCommitIndexing?.enabled === true;
+
+    if (commitIndexingEnabled && reg.gitCommitIndexing) {
+        await sweepGitCommits({
+            directory: reg.directory,
+            gitCommitIndexing: reg.gitCommitIndexing,
+            embeddingConfig: reg.embeddingConfig,
+        });
     }
 
-    const cleanup = () => {
-        clearInterval(timer);
-        activeTimer = null;
-        activeCleanup = null;
-        log("[dreamer] stopped dream schedule timer");
-    };
+    if (!dreamingEnabled || !reg.dreamerConfig?.schedule?.trim()) {
+        return;
+    }
 
-    activeTimer = timer;
-    activeCleanup = cleanup;
+    try {
+        const db = openDatabase();
+        log(
+            `[dreamer] timer tick (${origin}) ${reg.directory} — checking schedule window "${reg.dreamerConfig.schedule}"`,
+        );
+        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule);
 
-    log(
-        `[dreamer] started independent schedule timer (every ${DREAM_TIMER_INTERVAL_MS / 60_000}m)`,
-    );
-
-    return cleanup;
+        await processDreamQueue({
+            db,
+            client: reg.client,
+            tasks: reg.dreamerConfig.tasks,
+            taskTimeoutMinutes: reg.dreamerConfig.task_timeout_minutes,
+            maxRuntimeMinutes: reg.dreamerConfig.max_runtime_minutes,
+            experimentalUserMemories: reg.experimentalUserMemories,
+            experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
+        });
+    } catch (error) {
+        log(
+            `[dreamer] timer-triggered queue processing failed for ${reg.directory}:`,
+            error,
+        );
+    }
 }
 
 /**
@@ -157,6 +220,10 @@ async function sweepGitCommits(args: {
     embeddingConfig: EmbeddingConfig;
 }): Promise<void> {
     const { directory, gitCommitIndexing, embeddingConfig } = args;
+    const startedAt = Date.now();
+    log(
+        `[git-commits] sweep starting for ${directory} (sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits} embedding=${embeddingConfig.provider})`,
+    );
     try {
         const db = openDatabase();
         const projectPath = resolveProjectIdentity(directory);
@@ -165,12 +232,18 @@ async function sweepGitCommits(args: {
             maxCommits: gitCommitIndexing.max_commits,
         });
         // Drain any remaining embedding backlog (indexer caps per run).
+        let drainedEmbeddings = 0;
         if (embeddingConfig.provider !== "off" && result.embedded > 0) {
-            await embedUnembeddedCommits(db, projectPath, embeddingConfig);
+            drainedEmbeddings = await embedUnembeddedCommits(db, projectPath, embeddingConfig);
         }
-    } catch (error) {
+        const elapsedMs = Date.now() - startedAt;
         log(
-            `[git-commits] sweep failed for ${directory}: ${error instanceof Error ? error.message : String(error)}`,
+            `[git-commits] sweep finished for ${projectPath} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings}`,
+        );
+    } catch (error) {
+        const elapsedMs = Date.now() - startedAt;
+        log(
+            `[git-commits] sweep failed for ${directory} after ${elapsedMs}ms: ${error instanceof Error ? error.message : String(error)}`,
         );
     }
 }
