@@ -2,18 +2,25 @@
  * Read git commit history from a working directory using `git log`.
  *
  * Wraps a single `git log` invocation with controlled flags and parses the
- * null-delimited output. Runs synchronously with a timeout guard — indexing
+ * delimited output. Runs synchronously with a timeout guard — indexing
  * happens on a plugin timer, not on the hot transform path, so blocking for
  * a few hundred milliseconds once per refresh is acceptable.
  *
  * Parsing contract:
- *   - We request `--format=%H%x00%s%x00%ae%x00%ct%x00%b%x1e`:
+ *   - We request `--format=%H%x1f%s%x1f%ae%x1f%ct%x1f%b%x1e`:
  *       %H = full 40-char SHA
  *       %s = subject (one line)
  *       %ae = author email
  *       %ct = committer time (seconds since epoch)
  *       %b = body (multi-line)
- *     Fields are separated by NUL (\0), records by RS (0x1e).
+ *     Fields are separated by US (0x1f, ASCII Unit Separator), records by RS
+ *     (0x1e, ASCII Record Separator). We deliberately AVOID NUL (0x00) here:
+ *     Node's `child_process.execFile` validation rejects argv elements that
+ *     contain embedded NUL bytes ("must be a string without null bytes"),
+ *     even when the underlying program (git) would happily accept them via
+ *     other entry points. Bun's execFile is more permissive, which masked
+ *     this in unit tests until live OpenCode runtime exposed it. US/RS
+ *     never appear naturally in commit subjects, emails, or bodies.
  *   - Subject + trimmed body combine into the searchable message.
  *   - We skip merge commits via `--no-merges` so merge "Merge branch 'x'"
  *     noise doesn't fill the index.
@@ -21,6 +28,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { log } from "../../../shared/logger";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +37,7 @@ const GIT_TIMEOUT_MS = 10_000;
  *  if it needs more history. */
 const DEFAULT_MAX_COMMITS = 5000;
 const RECORD_SEPARATOR = "\x1e";
-const FIELD_SEPARATOR = "\x00";
+const FIELD_SEPARATOR = "\x1f";
 
 export interface GitCommit {
     /** Full 40-char SHA. */
@@ -88,12 +96,23 @@ export async function readGitCommits(
             encoding: "utf8",
         });
         stdout = result.stdout;
-    } catch {
+    } catch (error) {
         // Intentional: git may not be installed, directory may not be a repo,
         // or the invocation may time out. All are "skip indexing this cycle"
         // conditions, not crashes. We return empty and the next sweep will
-        // retry.
+        // retry. We DO log the reason though — a silent empty-result masked a
+        // real cwd / PATH / timeout bug during the v0.14 git-commits rollout.
+        const message = error instanceof Error ? error.message : String(error);
+        log(
+            `[git-commits] readGitCommits failed at cwd=${directory}: ${message.slice(0, 500)}`,
+        );
         return [];
+    }
+
+    if (stdout.trim().length === 0) {
+        log(
+            `[git-commits] readGitCommits returned empty stdout at cwd=${directory} (sinceMs=${options.sinceMs ?? "none"} args=${args.slice(0, 4).join(" ")})`,
+        );
     }
 
     return parseGitLogOutput(stdout);
