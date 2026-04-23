@@ -852,7 +852,10 @@ describe("createTransform", () => {
         await transform({}, { messages });
 
         //#then
-        expect(text(messages[0], 0)).toBe("§1§ do not touch");
+        // Subagents: DB tag records still exist so drops/heuristics work,
+        // but agent-visible §N§ prefix is skipped (subagents are treated as
+        // ctx_reduce_enabled=false since they have no nudge to act on tags).
+        expect(text(messages[0], 0)).toBe("do not touch");
         expect(text(messages[0], 0)).not.toContain("do not inject this nudge");
         expect(getTagsBySession(db, "ses-sub")).toHaveLength(1);
         expect(scheduler.shouldExecute).toHaveBeenCalled();
@@ -1017,9 +1020,10 @@ describe("createTransform", () => {
 
         await transform({}, { messages: secondPass });
 
-        // Sentinel replacement preserves array length.
+        // Sentinel replacement preserves array length. Subagent sessions
+        // skip §N§ prefix injection, so user text appears verbatim.
         expect(secondPass).toHaveLength(2);
-        expect(text(secondPass[0], 0)).toBe("§1§ keep this");
+        expect(text(secondPass[0], 0)).toBe("keep this");
         expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });

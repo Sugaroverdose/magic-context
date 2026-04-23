@@ -100,6 +100,10 @@ export interface MagicContextDeps {
                 score_threshold: number;
                 min_prompt_chars: number;
             };
+            caveman_text_compression?: {
+                enabled: boolean;
+                min_chars: number;
+            };
         };
     };
 }
@@ -244,6 +248,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         nudgePlacements,
         protectedTags: deps.config.protected_tags,
+        ctxReduceEnabled,
         autoDropToolAge: deps.config.auto_drop_tool_age ?? 100,
         dropToolStructure: deps.config.drop_tool_structure ?? true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
@@ -311,6 +316,18 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       deps.config.experimental?.git_commit_indexing?.enabled === true,
               }
             : undefined,
+        // Age-tier caveman text compression — only honored when
+        // ctx_reduce_enabled: false. Transform gates this itself too, but we
+        // avoid wiring the feature at all when ctx_reduce is on so the
+        // transform deps stay clean.
+        cavemanTextCompression:
+            ctxReduceEnabled === false &&
+            deps.config.experimental?.caveman_text_compression?.enabled === true
+                ? {
+                      enabled: true,
+                      minChars: deps.config.experimental.caveman_text_compression.min_chars ?? 500,
+                  }
+                : undefined,
     });
     const eventHandler = createEventHandler({
         contextUsageMap,

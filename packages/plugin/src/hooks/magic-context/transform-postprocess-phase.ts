@@ -113,6 +113,15 @@ interface RunPostTransformPhaseArgs {
         embeddingEnabled: boolean;
         gitCommitsEnabled: boolean;
     };
+    /**
+     * Age-tier caveman compression (experimental). Only honored when
+     * ctx_reduce_enabled is false. Caller is responsible for zeroing this
+     * out when ctx_reduce is on. Passed through to `applyHeuristicCleanup`.
+     */
+    cavemanTextCompression?: {
+        enabled: boolean;
+        minChars: number;
+    };
 }
 
 export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Promise<void> {
@@ -182,8 +191,17 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
     // flush-only. Historian publication bridges the two via
     // `flushedSessions.add` (see council Finding #9, fixed in v0.14.1).
     const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps;
+    // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
+    // previously skipped heuristics entirely (via fullFeatureMode gate), which
+    // meant their context grew unchecked until overflow. With this change,
+    // subagents run tool drops and reasoning clearing at execute threshold just
+    // like primary sessions, giving them a cache-safe reduction path without
+    // needing historian/compartments.
+    //
+    // `forceMaterialization` remains gated by `fullFeatureMode` above (line ~125)
+    // so subagents do NOT get 85% force-drop-all-tools or 95% block. Subagents
+    // rely on normal overflow detection + clean failure if they exhaust context.
     const shouldRunHeuristics =
-        args.fullFeatureMode &&
         (!compartmentRunning || emergencyBypassCompartmentGate) &&
         (isExplicitFlush ||
             forceMaterialization ||
@@ -245,6 +263,16 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         }
         if (shouldRunHeuristics) {
             const t5 = performance.now();
+            // Caveman config is only passed through when ctx_reduce_enabled is
+            // false AND the experimental flag is true. Caller (transform) wires
+            // both conditions so this postprocess path doesn't need to re-check
+            // them. Kept undefined otherwise so the heuristic pass skips entirely.
+            const cavemanConfig = args.cavemanTextCompression?.enabled
+                ? {
+                      enabled: true,
+                      minChars: args.cavemanTextCompression.minChars,
+                  }
+                : undefined;
             const cleanup = applyHeuristicCleanup(
                 args.sessionId,
                 args.db,
@@ -255,13 +283,15 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                     dropToolStructure: args.dropToolStructure,
                     protectedTags: args.protectedTags,
                     dropAllTools: forceMaterialization,
+                    caveman: cavemanConfig,
                 },
                 args.tags,
             );
             if (
                 cleanup.droppedTools > 0 ||
                 cleanup.deduplicatedTools > 0 ||
-                cleanup.droppedInjections > 0
+                cleanup.droppedInjections > 0 ||
+                cleanup.compressedTextTags > 0
             ) {
                 didMutateFromPendingOperations = true;
             }
@@ -269,7 +299,7 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                 args.sessionId,
                 "applyHeuristicCleanup",
                 t5,
-                `droppedTools=${cleanup.droppedTools} deduplicatedTools=${cleanup.deduplicatedTools} droppedInjections=${cleanup.droppedInjections}`,
+                `droppedTools=${cleanup.droppedTools} deduplicatedTools=${cleanup.deduplicatedTools} droppedInjections=${cleanup.droppedInjections} compressedTextTags=${cleanup.compressedTextTags}`,
             );
             if (args.watermark > 0) {
                 const t6 = performance.now();
@@ -539,9 +569,11 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         args.nudgePlacements.clear(args.sessionId);
     }
 
-    // Note nudges run outside fullFeatureMode — they should work in all sessions
-    // including subagent sessions where fullFeatureMode is false.
-    const stickyNoteNudge = getStickyNoteNudge(args.db, args.sessionId);
+    // Note nudges only run in full-feature sessions. Subagents don't need
+    // reminders — they're driven by the main agent's prompt, not the user.
+    const stickyNoteNudge = args.fullFeatureMode
+        ? getStickyNoteNudge(args.db, args.sessionId)
+        : null;
     if (stickyNoteNudge) {
         const reinjected = appendReminderToUserMessageById(
             args.messages,
@@ -568,12 +600,9 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         }
     }
 
-    const deferredNoteText = peekNoteNudgeText(
-        args.db,
-        args.sessionId,
-        args.currentTurnId,
-        args.projectPath,
-    );
+    const deferredNoteText = args.fullFeatureMode
+        ? peekNoteNudgeText(args.db, args.sessionId, args.currentTurnId, args.projectPath)
+        : null;
     if (deferredNoteText) {
         const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
         const anchoredMessageId = appendReminderToLatestUserMessage(args.messages, noteInstruction);

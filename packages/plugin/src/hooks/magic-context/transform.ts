@@ -15,6 +15,7 @@ import type { ContextUsage, TagEntry } from "../../features/magic-context/types"
 import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { replayCavemanCompression } from "./caveman-cleanup";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
 import { FORCE_MATERIALIZE_PERCENTAGE } from "./compartment-trigger";
 import { resolveExecuteThreshold } from "./event-resolvers";
@@ -142,6 +143,14 @@ export interface TransformDeps {
     db: ContextDatabase;
     nudgePlacements: NudgePlacementStore;
     protectedTags: number;
+    /**
+     * Primary-session ctx_reduce setting. When false, tag prefix injection is
+     * skipped for ALL sessions (primary + subagent). When true, primary sessions
+     * get prefixes but subagent sessions still skip (subagents are always
+     * treated as ctx_reduce_enabled=false). See tag-messages.ts for the gate.
+     * Defaults to true when omitted (preserves legacy behavior for tests).
+     */
+    ctxReduceEnabled?: boolean;
     autoDropToolAge: number;
     dropToolStructure?: boolean;
     clearReasoningAge: number;
@@ -199,6 +208,17 @@ export interface TransformDeps {
         memoryEnabled: boolean;
         embeddingEnabled: boolean;
         gitCommitsEnabled: boolean;
+    };
+    /**
+     * Experimental age-tier caveman text compression — rewrites long
+     * user/assistant text parts with progressively aggressive caveman
+     * rules based on their position in the eligible tag window. Only
+     * honored when `ctx_reduce_enabled: false` (transform zeroes this
+     * out when ctx_reduce is on so the postprocess path stays unaware).
+     */
+    cavemanTextCompression?: {
+        enabled: boolean;
+        minChars: number;
     };
 }
 
@@ -567,7 +587,17 @@ export function createTransform(deps: TransformDeps) {
         try {
             const t0 = performance.now();
             deps.tagger.initFromDb(sessionId, db);
-            const result = tagMessages(sessionId, messages, deps.tagger, db);
+            // Skip §N§ prefix injection when either:
+            // - ctx_reduce_enabled is false (agents have no tool to act on tags)
+            // - This is a subagent session (always treated as ctx_reduce_enabled=false)
+            // DB tag records are still maintained either way so heuristics and
+            // drops continue to work — only the agent-visible prefix is skipped.
+            // ctxReduceEnabled defaults to true (undefined === true for this gate).
+            const ctxReduceEnabledEffective = deps.ctxReduceEnabled !== false;
+            const skipPrefixInjection = !ctxReduceEnabledEffective || reducedMode;
+            const result = tagMessages(sessionId, messages, deps.tagger, db, {
+                skipPrefixInjection,
+            });
             targets = result.targets;
             reasoningByMessage = result.reasoningByMessage;
             messageTagNumbers = result.messageTagNumbers;
@@ -649,6 +679,23 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
             logTransformTiming(sessionId, "replayReasoningClearing", tReplay);
+        }
+
+        // Re-apply persisted caveman compression on EVERY pass (defer too).
+        // tagMessages restores the pristine original from source_contents on
+        // every pass, so without this replay step compressed text would
+        // oscillate between compressed (post-execute) and original (defer),
+        // busting the provider prompt cache. Cheap when no tags carry
+        // caveman_depth > 0 (early exit). Only forwarded when ctx_reduce
+        // is disabled AND not a subagent — matches the gate that lets
+        // applyCavemanCleanup deepen depth in the first place.
+        if (!deps.ctxReduceEnabled && !reducedMode && deps.cavemanTextCompression?.enabled) {
+            const tCavemanReplay = performance.now();
+            const replayedCaveman = replayCavemanCompression(sessionId, db, targets, tags);
+            if (replayedCaveman > 0) {
+                sessionLog(sessionId, `caveman replay: re-applied ${replayedCaveman} text tags`);
+            }
+            logTransformTiming(sessionId, "replayCavemanCompression", tCavemanReplay);
         }
 
         const t4 = performance.now();
@@ -786,6 +833,21 @@ export function createTransform(deps: TransformDeps) {
             skipTypedReasoningCleanup,
             projectPath: deps.projectPath,
             autoSearch: deps.autoSearch,
+            // Only forward caveman config when ctx_reduce is disabled — the
+            // feature replaces manual ctx_reduce text-dropping for users
+            // who opted out of agent-driven reduction. Keeping it gated here
+            // means the postprocess/heuristic paths can stay config-agnostic.
+            // Only forward caveman config when ctx_reduce is explicitly
+            // disabled AND this is not a subagent. The feature replaces
+            // manual ctx_reduce text-dropping for users who opted out of
+            // agent-driven reduction; subagents should never receive their
+            // own caveman compression because they have no equivalent
+            // recovery path and their context is already curated by the
+            // primary agent that spawned them.
+            cavemanTextCompression:
+                deps.ctxReduceEnabled === false && !reducedMode
+                    ? deps.cavemanTextCompression
+                    : undefined,
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 
