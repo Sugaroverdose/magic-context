@@ -154,6 +154,26 @@ describe("historian success path", () => {
             });
             await h.sendPrompt(sessionId, "turn 11: trigger turn with real content.");
 
+            // Reset to small responses so subsequent turns don't keep piling
+            // on pressure. The 90K spike on turn 11 set compartment_in_progress;
+            // historian actually STARTS on the next transform pass, which we
+            // provide below.
+            h.mock.setDefault({
+                text: "after-trigger",
+                usage: {
+                    input_tokens: 500,
+                    output_tokens: 10,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 500,
+                },
+            });
+            // Turn 12: gives the transform a fresh pass to actually start
+            // historian after the event handler flipped compartment_in_progress.
+            // Historian was previously kicked off implicitly by the 80%
+            // emergency nudge's promptAsync call; since that path was removed
+            // in v0.14.1, tests need to provide the follow-up turn explicitly.
+            await h.sendPrompt(sessionId, "turn 12: post-trigger follow-up.");
+
             // Wait for historian to publish at least one compartment.
             await h.waitFor(
                 () => {
