@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { isSentinel, makeSentinel } from "./sentinel";
 import type { MessageLike } from "./tag-messages";
 
 const STALE_TOOL_NAMES = new Set(["ctx_reduce"]);
@@ -46,21 +47,32 @@ function hasAnyMeaningfulPart(parts: unknown[]): boolean {
 export function dropStaleReduceCalls(messages: MessageLike[], protectedCount: number = 0): boolean {
     let didDrop = false;
     const protectedStart = messages.length - protectedCount;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (i >= protectedStart) continue;
+    // Sentinel-based replacement (council Finding #1) — preserve message and
+    // part array length so proxy providers that hash the serialized body see
+    // a stable prefix. Each stripped ctx_reduce tool part becomes an empty-
+    // text sentinel; messages left with no meaningful content become
+    // single-sentinel-part shells.
+    for (let i = 0; i < messages.length; i++) {
+        if (i >= protectedStart) break;
         const message = messages[i];
-        const originalLength = message.parts.length;
+        let touched = false;
 
-        for (let j = message.parts.length - 1; j >= 0; j -= 1) {
-            if (isReduceToolPart(message.parts[j])) {
-                message.parts.splice(j, 1);
+        for (let j = 0; j < message.parts.length; j++) {
+            const part = message.parts[j];
+            if (isSentinel(part)) continue;
+            if (isReduceToolPart(part)) {
+                message.parts[j] = makeSentinel(part);
+                touched = true;
             }
         }
 
-        if (message.parts.length < originalLength) {
+        if (touched) {
             didDrop = true;
             if (!hasAnyMeaningfulPart(message.parts)) {
-                messages.splice(i, 1);
+                // Whole message becomes a single-sentinel-part shell. Preserves
+                // messages.length so proxy cache hashes stay stable.
+                message.parts.length = 0;
+                message.parts.push(makeSentinel(undefined));
             }
         }
     }

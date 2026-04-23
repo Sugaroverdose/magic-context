@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { describe, expect, it } from "bun:test";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
+import { isSentinel } from "./sentinel";
 import type { MessageLike } from "./tag-messages";
 
 function makeMessage(role: string, parts: unknown[]): MessageLike {
@@ -15,10 +16,10 @@ function makeTextPart(text: string) {
     return { type: "text", text };
 }
 
-describe("dropStaleReduceCalls", () => {
+describe("dropStaleReduceCalls (sentinel-based)", () => {
     describe("#given messages with ctx_reduce tool results", () => {
         describe("#when dropping stale calls", () => {
-            it("#then removes ctx_reduce tool parts", () => {
+            it("#then sentinels ctx_reduce parts but preserves messages.length", () => {
                 //#given
                 const messages = [
                     makeMessage("user", [makeTextPart("hello")]),
@@ -32,10 +33,15 @@ describe("dropStaleReduceCalls", () => {
 
                 //#then
                 expect(didDrop).toBe(true);
-                expect(messages).toHaveLength(3);
+                // Array length preserved — proxy cache stability invariant
+                expect(messages).toHaveLength(4);
+                // Non-sentinel messages unchanged
                 expect(messages[0].parts[0]).toEqual(makeTextPart("hello"));
                 expect(messages[1].parts[0]).toEqual(makeTextPart("thinking..."));
-                expect(messages[2].parts[0]).toEqual(makeTextPart("continue"));
+                expect(messages[3].parts[0]).toEqual(makeTextPart("continue"));
+                // The ctx_reduce-only message became a single-sentinel shell
+                expect(messages[2].parts).toHaveLength(1);
+                expect(isSentinel(messages[2].parts[0])).toBe(true);
             });
         });
     });
@@ -55,6 +61,9 @@ describe("dropStaleReduceCalls", () => {
                 //#then
                 expect(didDrop).toBe(false);
                 expect(messages).toHaveLength(2);
+                // Parts unchanged
+                expect((messages[0].parts[0] as { tool: string }).tool).toBe("grep");
+                expect((messages[1].parts[0] as { tool: string }).tool).toBe("bash");
             });
         });
     });
@@ -70,7 +79,7 @@ describe("dropStaleReduceCalls", () => {
 
     describe("#given message with mixed tool parts including ctx_reduce", () => {
         describe("#when one part is ctx_reduce and another is a different tool", () => {
-            it("#then removes only the ctx_reduce part and keeps the message", () => {
+            it("#then sentinels only the ctx_reduce part and preserves parts.length", () => {
                 //#given
                 const messages = [
                     makeMessage("tool", [
@@ -85,8 +94,12 @@ describe("dropStaleReduceCalls", () => {
                 //#then
                 expect(didDrop).toBe(true);
                 expect(messages).toHaveLength(1);
-                expect(messages[0].parts).toHaveLength(1);
+                // Parts length preserved
+                expect(messages[0].parts).toHaveLength(2);
+                // First part untouched
                 expect((messages[0].parts[0] as { tool: string }).tool).toBe("bash");
+                // Second part is now a sentinel
+                expect(isSentinel(messages[0].parts[1])).toBe(true);
             });
         });
     });
@@ -105,12 +118,16 @@ describe("dropStaleReduceCalls", () => {
                 //#when — protect last 2 messages
                 const didDrop = dropStaleReduceCalls(messages, 2);
 
-                //#then — only the old reduce call (index 1) is removed
+                //#then — only the old reduce call (index 1) is sentineled
                 expect(didDrop).toBe(true);
-                expect(messages).toHaveLength(3);
+                expect(messages).toHaveLength(4);
                 expect(messages[0].parts[0]).toEqual(makeTextPart("old message"));
-                expect(messages[1].parts[0]).toEqual(makeTextPart("recent message"));
-                expect((messages[2].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
+                // Index 1 is the neutralized reduce — single-sentinel shell
+                expect(messages[1].parts).toHaveLength(1);
+                expect(isSentinel(messages[1].parts[0])).toBe(true);
+                expect(messages[2].parts[0]).toEqual(makeTextPart("recent message"));
+                // Protected reduce call stays untouched
+                expect((messages[3].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
             });
         });
     });
@@ -130,6 +147,29 @@ describe("dropStaleReduceCalls", () => {
                 //#then
                 expect(didDrop).toBe(false);
                 expect(messages).toHaveLength(2);
+                // Parts unchanged
+                expect((messages[0].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
+            });
+        });
+    });
+
+    describe("#given a message that's already been sentineled on a prior pass", () => {
+        describe("#when the sentinel is in the sweep range", () => {
+            it("#then skips the sentinel idempotently", () => {
+                //#given — message[0] was already sentineled on a previous pass
+                const messages = [
+                    makeMessage("tool", [{ type: "text", text: "" }]),
+                    makeMessage("user", [makeTextPart("hello")]),
+                ];
+
+                //#when
+                const didDrop = dropStaleReduceCalls(messages);
+
+                //#then — no new mutations, shape identical
+                expect(didDrop).toBe(false);
+                expect(messages).toHaveLength(2);
+                expect(messages[0].parts).toHaveLength(1);
+                expect(isSentinel(messages[0].parts[0])).toBe(true);
             });
         });
     });
