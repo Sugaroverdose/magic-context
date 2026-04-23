@@ -76,7 +76,10 @@ export function replaySentinelByMessageIds(
         // Idempotent skip — already neutralized on an earlier pass in this turn
         if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
         msg.parts.length = 0;
-        msg.parts.push({ type: "text", text: "" });
+        // Use makeSentinel so the replayed shape stays identical to fresh
+        // sentineling — even though we don't have an original part here, the
+        // factory handles the bare-literal case defensively.
+        msg.parts.push(makeSentinel(undefined));
         replayed++;
     }
     const missingIds: string[] = [];

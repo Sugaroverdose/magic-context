@@ -191,8 +191,17 @@ export function checkCompactionMarkerConsistency(db: Database): void {
 
             // Inconsistent — best-effort clean up any surviving half-written rows,
             // then clear persisted state so next publication can re-inject.
+            //
+            // Only clear persisted state after verified successful cleanup
+            // (council Finding #11). If `removeCompactionMarker` fails (DB
+            // locked, IO error), keeping persisted state lets a retry on the
+            // next startup try again; clearing would leave orphaned rows in
+            // OpenCode's DB that filterCompacted still respects. The natural
+            // healing path via the next historian publication still exists as
+            // a backup when the state IS cleared after a success.
+            let removedOk = false;
             try {
-                removeCompactionMarker(state);
+                removedOk = removeCompactionMarker(state);
             } catch (error) {
                 // Partial failure during half-written cleanup is expected and
                 // not worth warning about — we just want to get the DBs back
@@ -204,12 +213,19 @@ export function checkCompactionMarkerConsistency(db: Database): void {
                 );
             }
 
-            setPersistedCompactionMarkerState(db, row.session_id, null);
-            sessionLog(
-                row.session_id,
-                `compaction-marker consistency: cleared orphaned state (boundary=${boundaryExists} summary=${summaryMessageExists} cPart=${compactionPartExists} sPart=${summaryPartExists}); next publication will re-inject`,
-            );
-            reconciledCount++;
+            if (removedOk) {
+                setPersistedCompactionMarkerState(db, row.session_id, null);
+                sessionLog(
+                    row.session_id,
+                    `compaction-marker consistency: cleared orphaned state (boundary=${boundaryExists} summary=${summaryMessageExists} cPart=${compactionPartExists} sPart=${summaryPartExists}); next publication will re-inject`,
+                );
+                reconciledCount++;
+            } else {
+                sessionLog(
+                    row.session_id,
+                    `compaction-marker consistency: cleanup failed for orphaned state (boundary=${boundaryExists} summary=${summaryMessageExists} cPart=${compactionPartExists} sPart=${summaryPartExists}); will retry on next startup`,
+                );
+            }
         }
 
         if (reconciledCount > 0) {
