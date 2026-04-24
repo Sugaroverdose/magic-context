@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
 import { parseCompartmentOutput } from "../hooks/magic-context/compartment-parser";
 import { detectConflicts } from "../shared/conflict-detector";
+import { getOpenCodeCacheDir } from "../shared/data-path";
 import { type ConfigPaths, detectConfigPaths } from "./config-paths";
 import { getOpenCodeVersion, isOpenCodeInstalled } from "./opencode-helpers";
 
@@ -111,17 +112,6 @@ function getSelfVersion(): string {
         }
     }
     return "unknown";
-}
-
-function getOpenCodeCacheDir(): string {
-    const xdgCache = process.env.XDG_CACHE_HOME;
-    if (xdgCache) return join(xdgCache, "opencode");
-
-    if (process.platform === "win32") {
-        const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-        return join(localAppData, "opencode");
-    }
-    return join(homedir(), ".cache", "opencode");
 }
 
 function getPluginCacheInfo(): { path: string; cached?: string; latest?: string } {

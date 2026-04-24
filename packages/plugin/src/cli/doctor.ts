@@ -1,7 +1,7 @@
 import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, platform, tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "comment-json";
 import { substituteConfigVariables } from "../config/variable";
@@ -11,6 +11,7 @@ import {
 } from "../features/magic-context/memory/embedding-probe";
 import { detectConflicts } from "../shared/conflict-detector";
 import { fixConflicts } from "../shared/conflict-fixer";
+import { getOpenCodeCacheDir } from "../shared/data-path";
 import { ensureTuiPluginEntry } from "../shared/tui-config";
 import { detectConfigPaths } from "./config-paths";
 import { collectDiagnostics } from "./diagnostics";
@@ -20,26 +21,6 @@ import { confirm, intro, log, outro, spinner, text } from "./prompts";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
-
-/**
- * Resolve OpenCode's XDG-based cache directory.
- * OpenCode uses `xdg-basedir` which resolves to:
- * - macOS/Linux: $XDG_CACHE_HOME or ~/.cache
- * - Windows: $XDG_CACHE_HOME or %LOCALAPPDATA%
- * Plugin cache lives at <cacheDir>/opencode/packages/<pkg>/
- */
-function getOpenCodeCacheDir(): string {
-    const xdgCache = process.env.XDG_CACHE_HOME;
-    if (xdgCache) return join(xdgCache, "opencode");
-
-    const os = platform();
-    if (os === "win32") {
-        const localAppData = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-        return join(localAppData, "opencode");
-    }
-    // macOS + Linux
-    return join(homedir(), ".cache", "opencode");
-}
 
 async function clearPluginCache(force = false): Promise<{
     action: "cleared" | "up_to_date" | "not_found" | "error";

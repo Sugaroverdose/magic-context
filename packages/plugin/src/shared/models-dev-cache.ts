@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { getCacheDir } from "./data-path";
 import { sessionLog } from "./logger";
 
 interface OpencodeClientLike {
@@ -59,16 +60,10 @@ function getModelsJsonPath(): string {
     const explicit = process.env.OPENCODE_MODELS_PATH?.trim();
     if (explicit) return explicit;
 
-    const xdgCache = process.env.XDG_CACHE_HOME;
-    const os = platform();
-    let cacheBase: string;
-    if (xdgCache) {
-        cacheBase = xdgCache;
-    } else if (os === "win32") {
-        cacheBase = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-    } else {
-        cacheBase = join(homedir(), ".cache");
-    }
+    // OpenCode uses `xdg-basedir`, which falls back to `<homedir>/.cache` on
+    // every platform (including Windows) when XDG_CACHE_HOME is unset. See
+    // shared/data-path.ts#getCacheDir for the shared helper.
+    const cacheBase = getCacheDir();
 
     // 2. Custom models source → hashed filename (matches OpenCode).
     //    source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`
