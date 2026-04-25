@@ -167,9 +167,60 @@ function readUserCompaction(): { auto: boolean; prune: boolean; resolved: boolea
 
 // --- DCP detection ---
 
+/**
+ * Canonical npm package names that represent the conflicting plugin.
+ * Matched against the npm-style segment of each plugin entry, so:
+ *   - "@tarquinen/opencode-dcp"           ✓ direct match
+ *   - "@tarquinen/opencode-dcp@latest"    ✓ version suffix stripped
+ *   - "@tarquinen/opencode-dcp@^3.1.0"    ✓ semver suffix stripped
+ *   - "file:///path/to/opencode-dcp-fork" ✗ unrelated path
+ *
+ * forks/renames that don't ship the conflicting transform/system hooks are
+ * intentionally NOT matched.
+ */
+const DCP_PACKAGE_NAMES = new Set(["@tarquinen/opencode-dcp"]);
+
 function checkDcpPlugin(directory: string): boolean {
     const plugins = collectPluginEntries(directory);
-    return plugins.some((p) => p.includes("opencode-dcp"));
+    return plugins.some((p) => matchesPackageName(p, DCP_PACKAGE_NAMES));
+}
+
+/**
+ * Match a plugin entry against a set of canonical npm package names.
+ *
+ * A plugin entry can be:
+ *   - "pkg-name"
+ *   - "pkg-name@version"
+ *   - "@scope/pkg-name"
+ *   - "@scope/pkg-name@version"
+ *   - "file://..." or other URL/path forms (never matched here)
+ *
+ * For the canonical-name path we only match the exact package name (with
+ * optional version suffix). file:// paths and forks with different
+ * package names are intentionally NOT matched — even if a path string
+ * happens to contain a substring like "oh-my-opencode" (e.g. forks like
+ * "oh-my-opencode-slim" published under a different package name).
+ */
+function matchesPackageName(entry: string, canonicalNames: Set<string>): boolean {
+    // Skip URL/path forms — only npm-style entries can be canonically matched.
+    // (Local file:// checkouts of canonical plugins are rare; users running
+    // those need to ensure the path itself doesn't match a fork's name.)
+    if (
+        entry.startsWith("file:") ||
+        entry.startsWith("http:") ||
+        entry.startsWith("https:") ||
+        entry.startsWith("/") ||
+        entry.startsWith("./") ||
+        entry.startsWith("../")
+    ) {
+        return false;
+    }
+
+    // Strip version suffix: "@scope/pkg@1.2.3" → "@scope/pkg"
+    // Careful with scoped packages: the leading "@" is part of the name.
+    const lastAt = entry.lastIndexOf("@");
+    const nameOnly = lastAt > 0 ? entry.slice(0, lastAt) : entry;
+    return canonicalNames.has(nameOnly);
 }
 
 function collectPluginEntries(directory: string): string[] {
@@ -206,6 +257,21 @@ function collectPluginEntries(directory: string): string[] {
 
 // --- OMO hook detection ---
 
+/**
+ * Canonical OMO npm package names. The plugin publishes under both names as
+ * a versioned alias (latest 3.17.5 on npm at time of writing).
+ *
+ * Forks under a different package name (e.g. `oh-my-opencode-slim`,
+ * `oh-my-opencode-cli`, etc.) are intentionally NOT matched here — they
+ * don't ship the `preemptive-compaction`, `context-window-monitor`, or
+ * `anthropic-context-window-limit-recovery` hooks that conflict with
+ * Magic Context. See https://github.com/cortexkit/opencode-magic-context/issues/43.
+ *
+ * The legacy `@code-yeongyu/` scope is no longer used — both names are
+ * unscoped on npm.
+ */
+const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
+
 function checkOmoHooks(directory: string): {
     preemptiveCompaction: boolean;
     contextWindowMonitor: boolean;
@@ -219,12 +285,7 @@ function checkOmoHooks(directory: string): {
 
     // First check if OMO is even installed
     const plugins = collectPluginEntries(directory);
-    const hasOmo = plugins.some(
-        (p) =>
-            p.includes("oh-my-opencode") ||
-            p.includes("oh-my-openagent") ||
-            p.includes("@code-yeongyu/"),
-    );
+    const hasOmo = plugins.some((p) => matchesPackageName(p, OMO_PACKAGE_NAMES));
     if (!hasOmo) return result;
 
     // Read OMO config to check disabled_hooks
