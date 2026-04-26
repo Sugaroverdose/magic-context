@@ -134,7 +134,13 @@ describe("createTransform heuristic cleanup persistence", () => {
 
         const schedulerDecision = mock<Scheduler["shouldExecute"]>(() => "defer");
         const scheduler: Scheduler = { shouldExecute: schedulerDecision };
-        const flushedSessions = new Set<string>();
+        // Three-set cache-busting signals replace the old single
+        // `flushedSessions`. To simulate a `/ctx-flush` we add to the
+        // persistent `pendingMaterializationSessions` set (read by
+        // postprocess `isExplicitFlush`). History/system sets are not
+        // needed for this heuristic test.
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -147,7 +153,8 @@ describe("createTransform heuristic cleanup persistence", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
@@ -161,7 +168,7 @@ describe("createTransform heuristic cleanup persistence", () => {
         await transform({}, { messages: buildMessages() });
 
         schedulerDecision.mockImplementation(() => "execute");
-        flushedSessions.add("ses-heuristic-persist");
+        pendingMaterializationSessions.add("ses-heuristic-persist");
         const executePass = buildMessages();
         await transform({}, { messages: executePass });
 
@@ -188,7 +195,8 @@ describe("createTransform heuristic cleanup persistence", () => {
 
         const schedulerDecision = mock<Scheduler["shouldExecute"]>(() => "defer");
         const scheduler: Scheduler = { shouldExecute: schedulerDecision };
-        const flushedSessions = new Set<string>();
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -201,7 +209,8 @@ describe("createTransform heuristic cleanup persistence", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
@@ -215,7 +224,7 @@ describe("createTransform heuristic cleanup persistence", () => {
         await transform({}, { messages: buildInjectionOnlyMessages() });
 
         schedulerDecision.mockImplementation(() => "execute");
-        flushedSessions.add("ses-heuristic-persist-empty");
+        pendingMaterializationSessions.add("ses-heuristic-persist-empty");
         const executePass = buildInjectionOnlyMessages();
         await transform({}, { messages: executePass });
 

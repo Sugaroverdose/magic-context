@@ -196,7 +196,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deriveHistorianChunkTokens(resolveHistorianContextLimit(deps.config.historian?.model));
 
     const nudgePlacements = createNudgePlacementStore(db);
-    const flushedSessions = new Set<string>();
+    // Three independent cache-busting signal sets, sourced from the
+    // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
+    // share the same instances as the hook (server /ctx-recomp). When
+    // `liveSessionState` is omitted (test-only path), fall back to local
+    // sets — the production index.ts always provides one. See
+    // live-session-state.ts and hook-handlers.ts doc-comments for the
+    // full split rationale.
+    const historyRefreshSessions =
+        deps.liveSessionState?.historyRefreshSessions ?? new Set<string>();
+    const systemPromptRefreshSessions =
+        deps.liveSessionState?.systemPromptRefreshSessions ?? new Set<string>();
+    const pendingMaterializationSessions =
+        deps.liveSessionState?.pendingMaterializationSessions ?? new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
     const commitSeenLastPass = new Map<string, boolean>();
     const variantBySession =
@@ -255,7 +267,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         autoDropToolAge: deps.config.auto_drop_tool_age ?? 100,
         dropToolStructure: deps.config.drop_tool_structure ?? true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
-        flushedSessions,
+        historyRefreshSessions,
+        pendingMaterializationSessions,
         lastHeuristicsTurnId,
         commitSeenLastPass,
         client: deps.client,
@@ -420,7 +433,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             if (!model) return undefined;
             return resolveContextLimit(model.providerID, model.modelID);
         },
-        onFlush: (sessionId) => flushedSessions.add(sessionId),
+        // /ctx-flush is a user-initiated full refresh: signal all three sets.
+        // History rebuild + system-prompt adjuncts + force materialize.
+        onFlush: (sessionId) => {
+            historyRefreshSessions.add(sessionId);
+            systemPromptRefreshSessions.add(sessionId);
+            pendingMaterializationSessions.add(sessionId);
+        },
         executeRecomp: async (sessionId, options) =>
             executeContextRecomp(
                 {
@@ -448,12 +467,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     // Issue #44: respect memory feature gates from /ctx-recomp too.
                     memoryEnabled: deps.config.memory?.enabled,
                     autoPromote: deps.config.memory?.auto_promote ?? true,
-                    // Recomp invalidates injection cache after promotion. Mark
-                    // the next transform as cache-busting so the new history
-                    // block renders on a pass that's already flushing — see
-                    // council Finding #9.
+                    // Recomp invalidates injection cache and queues drop ops
+                    // via queueDropsForCompartmentalizedMessages. Signal both
+                    // history-rebuild (one-shot for the next transform) and
+                    // pending-materialization (persistent until heuristics
+                    // succeed). NOT systemPromptRefresh — recomp doesn't
+                    // touch disk-backed adjuncts. See council Finding #9.
                     onInjectionCacheCleared: (sid) => {
-                        flushedSessions.add(sid);
+                        historyRefreshSessions.add(sid);
+                        pendingMaterializationSessions.add(sid);
                     },
                 },
                 options,
@@ -509,7 +531,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         dreamerEnabled: deps.config.dreamer?.enabled === true,
         injectDocs: deps.config.dreamer?.inject_docs !== false,
         directory: deps.directory,
-        flushedSessions,
+        // System-prompt-hash handler reads systemPromptRefreshSessions to
+        // decide whether to re-read disk-backed adjuncts (docs, profile,
+        // key files, sticky date), and adds to all three sets when it
+        // detects a real prompt-content change.
+        historyRefreshSessions,
+        systemPromptRefreshSessions,
+        pendingMaterializationSessions,
         lastHeuristicsTurnId,
         experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
@@ -527,7 +555,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         agentBySession,
         recentReduceBySession,
         toolUsageSinceUserTurn,
-        flushedSessions,
+        historyRefreshSessions,
+        systemPromptRefreshSessions,
+        pendingMaterializationSessions,
         lastHeuristicsTurnId,
         commitSeenLastPass,
         client: deps.client,
@@ -546,7 +576,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             liveModelBySession,
             variantBySession,
             agentBySession,
-            flushedSessions,
+            historyRefreshSessions,
+            systemPromptRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId,
             ctxReduceEnabled,
         }),

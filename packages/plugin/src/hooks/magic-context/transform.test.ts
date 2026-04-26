@@ -125,7 +125,8 @@ describe("createTransform", () => {
             nudger,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -178,7 +179,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -247,7 +249,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -306,7 +309,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -343,8 +347,12 @@ describe("createTransform", () => {
             "dropped",
         );
         // Placeholder stripping now requires a cache-busting pass to detect new
-        // empty shells. Adding session to flushedSessions simulates that.
-        const flushed = new Set<string>(["ses-compartment-dropped-carrier"]);
+        // empty shells. After the three-set refactor, an explicit-flush
+        // simulation seeds `pendingMaterializationSessions` (read by
+        // postprocess `isExplicitFlush`) — that's what gates heuristic
+        // execution and `isCacheBustingPass`.
+        const flushedHistory = new Set<string>(["ses-compartment-dropped-carrier"]);
+        const flushedMaterialization = new Set<string>(["ses-compartment-dropped-carrier"]);
         replaceAllCompartments(db, "ses-compartment-dropped-carrier", [
             {
                 sequence: 0,
@@ -369,7 +377,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: flushed,
+            historyRefreshSessions: flushedHistory,
+            pendingMaterializationSessions: flushedMaterialization,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -436,7 +445,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -489,7 +499,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -535,7 +546,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -580,7 +592,8 @@ describe("createTransform", () => {
             nudger: () => ({ type: "assistant", text: nudgeText }),
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -636,7 +649,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 10,
@@ -692,7 +706,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -747,9 +762,11 @@ describe("createTransform", () => {
         //#given
         useTempDataHome("context-transform-flushed-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        // Placeholder stripping requires a cache-busting pass. Use flushedSessions
-        // so the second pass (which sees the dropped tag) is treated as a bust.
-        const flushedSessions = new Set<string>();
+        // Placeholder stripping requires a cache-busting pass. After the
+        // three-set refactor, an explicit-flush simulation seeds
+        // `pendingMaterializationSessions` (postprocess `isExplicitFlush`).
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -762,7 +779,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -786,7 +804,11 @@ describe("createTransform", () => {
         updateTagStatus(db, "ses-1", 2, "dropped");
         const pendingOps = getPendingOps(db, "ses-1");
         expect(pendingOps).toHaveLength(0);
-        flushedSessions.add("ses-1");
+        // Three-set refactor: flush simulation now seeds the persistent
+        // pending-materialization signal (read by postprocess as
+        // isExplicitFlush) plus history-refresh (consumed by transform).
+        pendingMaterializationSessions.add("ses-1");
+        historyRefreshSessions.add("ses-1");
 
         const secondPass: TestMessage[] = [
             {
@@ -830,7 +852,8 @@ describe("createTransform", () => {
             nudger,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -896,13 +919,14 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
             autoDropToolAge: 1000,
             directory: "/repo/project",
-            memoryConfig: { enabled: true, injectionBudgetTokens: 500 },
+            memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
         const messages: TestMessage[] = [
             {
@@ -946,13 +970,14 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
             autoDropToolAge: 1000,
             directory: "/repo/project",
-            memoryConfig: { enabled: true, injectionBudgetTokens: 500 },
+            memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
         const messages: TestMessage[] = [
             {
@@ -985,7 +1010,8 @@ describe("createTransform", () => {
             nudger: mock(() => null),
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1047,7 +1073,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1092,7 +1119,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1163,7 +1191,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1233,7 +1262,8 @@ describe("createTransform", () => {
             nudger,
             db: failingDb,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1279,7 +1309,8 @@ describe("createTransform", () => {
             nudger,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1322,7 +1353,8 @@ describe("createTransform", () => {
             nudger: () => ({ type: "assistant", text: nudgeText }),
             db: openDatabase(),
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1370,7 +1402,8 @@ describe("createTransform", () => {
             nudger,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1424,7 +1457,8 @@ describe("createTransform", () => {
             nudger,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1490,7 +1524,9 @@ describe("createTransform", () => {
 
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
         const db = openDatabase();
-        const flushedSessions = new Set<string>(["ses-kimi"]);
+        // Three-set refactor: pre-seed both sets to simulate active flush.
+        const historyRefreshSessions = new Set<string>(["ses-kimi"]);
+        const pendingMaterializationSessions = new Set<string>(["ses-kimi"]);
         const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
             ["ses-kimi", { providerID: "opencode-go", modelID: "kimi-k2.6" }],
         ]);
@@ -1506,7 +1542,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 0,
             protectedTags: 0,
@@ -1541,7 +1578,11 @@ describe("createTransform", () => {
         expect(getOrCreateSessionMeta(db, "ses-kimi").clearedReasoningThroughTag).toBe(0);
 
         updateSessionMeta(db, "ses-kimi", { clearedReasoningThroughTag: 99 });
-        flushedSessions.add("ses-kimi");
+        // Three-set refactor: re-add to history-refresh after first pass
+        // drained it. Pending-materialization persists until heuristics run,
+        // so it's still set from the initial seeding.
+        historyRefreshSessions.add("ses-kimi");
+        pendingMaterializationSessions.add("ses-kimi");
         const secondPass: TestMessage[] = [
             {
                 info: { id: "m-user", role: "user", sessionID: "ses-kimi" },
@@ -1601,7 +1642,8 @@ describe("createTransform", () => {
 
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
         const db = openDatabase();
-        const flushedSessions = new Set<string>(["ses-kimi-run"]);
+        const historyRefreshSessions = new Set<string>(["ses-kimi-run"]);
+        const pendingMaterializationSessions = new Set<string>(["ses-kimi-run"]);
         const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
             ["ses-kimi-run", { providerID: "opencode-go", modelID: "kimi-k2.6" }],
         ]);
@@ -1617,7 +1659,8 @@ describe("createTransform", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 0,
             protectedTags: 0,
@@ -1761,7 +1804,8 @@ describe("createTransform protected tail", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1820,7 +1864,8 @@ describe("createTransform protected tail", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -1861,7 +1906,8 @@ describe("createTransform protected tail", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 10,
@@ -1927,7 +1973,8 @@ describe("createTransform historian failure handling", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
@@ -2021,7 +2068,8 @@ describe("createTransform historian failure handling", () => {
             nudger: () => null,
             db,
             nudgePlacements: createNudgePlacementStore(),
-            flushedSessions: new Set<string>(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,

@@ -97,7 +97,23 @@ export function createSystemPromptHashHandler(deps: {
     injectDocs: boolean;
     /** Project root directory for reading doc files */
     directory: string;
-    flushedSessions: Set<string>;
+    /**
+     * One-shot signal that disk-backed adjuncts (project docs, user
+     * profile, key files, sticky date) need to be re-read on this pass.
+     * Drained at the end of the handler regardless of whether anything
+     * actually refreshed — defer passes after this point MUST hit cached
+     * values to keep the system prompt cache-stable.
+     */
+    systemPromptRefreshSessions: Set<string>;
+    /**
+     * Producer side: when this handler detects a real prompt-content hash
+     * change, it adds the session to all three sets so downstream consumers
+     * (transform `prepareCompartmentInjection`, postprocess heuristics)
+     * react on the same cycle. The hash change usually pairs with a new
+     * agent identity, so all three are appropriate.
+     */
+    historyRefreshSessions: Set<string>;
+    pendingMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
     /** When true, inject stable user memories as <user-profile> into system prompt */
     experimentalUserMemories?: boolean;
@@ -163,23 +179,26 @@ export function createSystemPromptHashHandler(deps: {
 
         // ── Step 1.5: Inject dreamer-maintained project docs ──
         //
-        // `isCacheBusting` here is FLUSH-ONLY (`flushedSessions.has(sessionId)`),
-        // NOT flush-OR-execute. This asymmetry is intentional — see also
-        // `inject-compartments.ts` which uses the same flush-only rule, versus
-        // `transform-postprocess-phase.ts` which uses flush-OR-execute.
+        // `isCacheBusting` here uses ONLY `systemPromptRefreshSessions`, the
+        // narrow signal for adjunct refresh. NOT `historyRefreshSessions` and
+        // NOT `pendingMaterializationSessions` — those are independent
+        // lifetimes consumed by other handlers.
         //
-        // Why flush-only here: system-prompt adjuncts (docs, user profile,
-        // sticky date) are disk/config-derived state, not pending-op state. A
-        // scheduler "execute" pass applies queued drops but does NOT touch any
-        // of this state. Treating it as cache-busting would trigger an
-        // unnecessary re-read of every adjunct on every execute pass, even
-        // though nothing adjunct-related has changed. Flush-only ensures this
-        // state only refreshes on explicit user-driven events (ctx-flush,
-        // variant/model switch, historian publication via
-        // `flushedSessions.add`).
+        // Why this narrow signal: system-prompt adjuncts (docs, user profile,
+        // key files, sticky date) are disk/config-derived state, not pending-
+        // op state and not history-block state. A historian publication
+        // changes `<session-history>` but does NOT change disk adjuncts;
+        // re-reading them on every historian publish would burn IO for no
+        // reason. Producers that DO change adjuncts (`/ctx-flush`, real
+        // variant change, system-prompt hash change) explicitly add to
+        // `systemPromptRefreshSessions` alongside the other sets.
         //
-        // See council Finding #12 for the full design rationale.
-        const isCacheBusting = deps.flushedSessions.has(sessionId);
+        // Drained at end of handler (one-shot semantics): future defer
+        // passes hit cached values until a producer re-signals.
+        //
+        // See council Finding #12 for the original asymmetry design rationale,
+        // and Oracle review 2026-04-26 for the current three-set split.
+        const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
 
         if (shouldInjectDocs && !isSubagentSession) {
             const hasCached = cachedDocsBySession.has(sessionId);
@@ -375,7 +394,13 @@ export function createSystemPromptHashHandler(deps: {
                 sessionId,
                 `system prompt hash changed: ${previousHash} → ${currentHash} (len=${systemContent.length}), triggering flush`,
             );
-            deps.flushedSessions.add(sessionId);
+            // Real prompt-content change: signal all three independent
+            // refresh lifetimes. The Anthropic prompt-cache prefix is already
+            // busted on this turn, so we want history rebuild + adjunct
+            // refresh + materialization on the same cycle.
+            deps.historyRefreshSessions.add(sessionId);
+            deps.systemPromptRefreshSessions.add(sessionId);
+            deps.pendingMaterializationSessions.add(sessionId);
             deps.lastHeuristicsTurnId.delete(sessionId);
         } else if (previousHash === "" || previousHash === "0") {
             sessionLog(
@@ -399,6 +424,15 @@ export function createSystemPromptHashHandler(deps: {
         } else if (Math.abs(sessionMeta.systemPromptTokens - systemPromptTokens) > 50) {
             updateSessionMeta(deps.db, sessionId, { systemPromptTokens });
         }
+
+        // ── Step 4: Drain systemPromptRefreshSessions (one-shot semantics) ──
+        // We've consumed the signal: adjuncts have been re-read or kept
+        // cached as appropriate, sticky date has been updated or frozen,
+        // and the hash has been re-evaluated. Future defer passes within
+        // the same TTL window MUST hit cached adjunct values to keep the
+        // system-prompt cache prefix stable. Drain even if isCacheBusting
+        // was false — repeat reads of an already-drained set are no-ops.
+        deps.systemPromptRefreshSessions.delete(sessionId);
     };
 
     return {

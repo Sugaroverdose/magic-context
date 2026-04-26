@@ -70,7 +70,14 @@ interface RunPostTransformPhaseArgs {
     compartmentInProgress: boolean;
     sessionMeta: SessionMeta;
     currentTurnId: string | null;
-    flushedSessions: Set<string>;
+    /**
+     * Persistent signal that pending ops + heuristics need to materialize.
+     * Survives across defer passes when `compartmentRunning` blocks the
+     * heuristic pass. Drained ONLY after `shouldRunHeuristics` succeeds —
+     * preserving `/ctx-flush` intent across blocked passes is the entire
+     * reason for the three-set split (see Oracle review 2026-04-26).
+     */
+    pendingMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
     autoDropToolAge: number;
     dropToolStructure: boolean;
@@ -126,7 +133,11 @@ interface RunPostTransformPhaseArgs {
 
 export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Promise<void> {
     let didMutateFromPendingOperations = false;
-    const isExplicitFlush = args.flushedSessions.has(args.sessionId);
+    // `isExplicitFlush` reads pendingMaterializationSessions — the persistent
+    // "user wants pending ops + heuristics to run" signal. Survives across
+    // blocked defer passes (compartmentRunning) so /ctx-flush intent is not
+    // lost when historian races the user's command.
+    const isExplicitFlush = args.pendingMaterializationSessions.has(args.sessionId);
     const alreadyRanThisTurn =
         args.currentTurnId !== null &&
         args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
@@ -172,25 +183,6 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
     const shouldApplyPendingOps =
         (args.schedulerDecision === "execute" || isExplicitFlush || forceMaterialization) &&
         (!compartmentRunning || emergencyBypassCompartmentGate);
-    // Central cache-busting gate used by all mutation paths below.
-    //
-    // `isCacheBustingPass` here is FLUSH-OR-EXECUTE (via `shouldApplyPendingOps`
-    // which includes `schedulerDecision === "execute"`), NOT flush-only. This
-    // asymmetry versus `system-prompt-hash.ts` and `inject-compartments.ts`
-    // (which use flush-only) is intentional — see council Finding #12.
-    //
-    // Why flush-OR-execute here: message-level mutations (pending ops, stripped
-    // placeholder registration, tool-drop finalization) run on scheduler
-    // "execute" passes because that's when queued user drops get materialized.
-    // System-prompt adjuncts (docs, profile, sticky date) are unrelated to
-    // queued ops, so they stay flush-only. Running execute passes through the
-    // adjunct path would refresh disk-backed state for no reason and leak that
-    // refresh into cached `message[0]` injection.
-    //
-    // Summary: mutation passes = flush-OR-execute. Adjunct/injection state =
-    // flush-only. Historian publication bridges the two via
-    // `flushedSessions.add` (see council Finding #9, fixed in v0.14.1).
-    const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps;
     // Heuristic cleanup runs for ALL sessions — primary and subagent. Subagents
     // previously skipped heuristics entirely (via fullFeatureMode gate), which
     // meant their context grew unchecked until overflow. With this change,
@@ -206,6 +198,26 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         (isExplicitFlush ||
             forceMaterialization ||
             (args.schedulerDecision === "execute" && !alreadyRanThisTurn));
+    // Central cache-busting gate used by all mutation paths below.
+    //
+    // Definition: TRUE only when this pass actually mutates message state —
+    // either by applying pending ops or by running heuristic cleanup. This
+    // is the Oracle 2026-04-26 fix: the previous `isExplicitFlush ||
+    // shouldApplyPendingOps` definition was unsafe because `isExplicitFlush`
+    // could be true even on a defer pass where compartmentRunning blocked
+    // both materialization and heuristics, causing cache-busting-only
+    // cleanup (placeholder detection, sticky reminder retirement, nudge
+    // anchor retirement) to fire on a pass that produced no real mutations.
+    //
+    // Both `shouldApplyPendingOps` and `shouldRunHeuristics` already gate on
+    // `(!compartmentRunning || emergencyBypassCompartmentGate)` so they're
+    // genuine "will-actually-mutate" booleans. ORing them is the precise
+    // "did we mutate this pass" signal.
+    //
+    // Symmetry note: `system-prompt-hash.ts` and `inject-compartments.ts`
+    // remain narrow (each reads its own dedicated set) so adjunct refresh
+    // and history rebuild are decoupled from materialization timing.
+    const isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics;
     if (shouldRunHeuristics) {
         const reason = isExplicitFlush
             ? "explicit_flush"
@@ -347,7 +359,15 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                 }
             }
             logTransformTiming(args.sessionId, "clearOldReasoning", t7);
-            args.flushedSessions.delete(args.sessionId);
+            // ── Drain pendingMaterializationSessions ──
+            // Heuristics + materialization successfully ran on this pass.
+            // We've fulfilled every reason the set was added (user
+            // /ctx-flush, variant change, system-prompt hash change,
+            // historian publish), so clear the persistent signal. If
+            // compartmentRunning had blocked us above, this drain is
+            // intentionally NOT reached — the flag survives so the next
+            // safe pass picks up the work.
+            args.pendingMaterializationSessions.delete(args.sessionId);
             if (args.currentTurnId) {
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
             }

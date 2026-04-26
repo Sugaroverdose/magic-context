@@ -161,7 +161,19 @@ export interface TransformDeps {
     autoDropToolAge: number;
     dropToolStructure?: boolean;
     clearReasoningAge: number;
-    flushedSessions: Set<string>;
+    /**
+     * One-shot signal that `<session-history>` injection cache is stale and
+     * `prepareCompartmentInjection` should rebuild on this pass. Drained
+     * after the rebuild so subsequent defer passes hit the fresh cache.
+     * See Oracle review 2026-04-26 for the three-set split rationale.
+     */
+    historyRefreshSessions: Set<string>;
+    /**
+     * Persistent signal that pending ops + heuristics need to materialize.
+     * Survives across defer passes when `compartmentRunning` blocks the
+     * heuristic pass. Drained only after `shouldRunHeuristics` succeeds.
+     */
+    pendingMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
     commitSeenLastPass?: Map<string, boolean>;
     client?: PluginContext["client"];
@@ -419,8 +431,17 @@ export function createTransform(deps: TransformDeps) {
             deps.getModelKey?.(sessionId),
         );
         // isCacheBusting controls whether the injection cache is bypassed.
-        // Only true on explicit flushes — NOT on scheduler "execute" passes.
-        const isCacheBusting = deps.flushedSessions.has(sessionId);
+        // Reads ONLY `historyRefreshSessions` (the narrow injection-rebuild
+        // signal) — NOT `pendingMaterializationSessions`. This separation
+        // is the core of Oracle's review fix: a blocked materialization
+        // request (e.g. compartmentRunning during /ctx-flush) keeps the
+        // pending-materialization flag alive but does NOT keep forcing
+        // injection rebuilds on every defer pass.
+        //
+        // Drained right after `prepareCompartmentInjection` finishes (see
+        // below), so two consecutive defer passes after one historian
+        // publish only rebuild once.
+        const isCacheBusting = deps.historyRefreshSessions.has(sessionId);
         if (historianFailureState.failureCount === 0) {
             lastEmergencyNotificationCount.delete(sessionId);
         }
@@ -468,11 +489,19 @@ export function createTransform(deps: TransformDeps) {
                 memoryEnabled: deps.memoryConfig?.enabled,
                 autoPromote: deps.memoryConfig?.autoPromote,
                 // Historian publication invalidates the injection cache AND
-                // changes compartments/facts that render into message[0]. Mark
-                // the next transform as cache-busting so the rebuild happens on
-                // a pass that's already flushing — not on a defer pass.
+                // changes compartments/facts that render into message[0]. We
+                // signal:
+                //   - historyRefreshSessions: triggers ONE rebuild on the next
+                //     transform pass (drained immediately after rebuild).
+                //   - pendingMaterializationSessions: queues drops that
+                //     historian published; persists until heuristics actually
+                //     run (e.g. when compartmentRunning lifts).
+                // We deliberately do NOT signal systemPromptRefreshSessions —
+                // historian doesn't change disk-backed adjuncts (docs/profile/
+                // key-files), so re-reading them would burn IO for nothing.
                 onInjectionCacheCleared: (sid) => {
-                    deps.flushedSessions.add(sid);
+                    deps.historyRefreshSessions.add(sid);
+                    deps.pendingMaterializationSessions.add(sid);
                 },
             });
             skipCompartmentAwaitForThisPass = true;
@@ -565,6 +594,25 @@ export function createTransform(deps: TransformDeps) {
                 deps.experimentalTemporalAwareness,
             );
             logTransformTiming(sessionId, "prepareCompartmentInjection", tInj);
+
+            // ── Drain historyRefreshSessions (one-shot semantics) ──
+            // The injection rebuild — the only consumer of this signal in
+            // the messages-transform path — has now run. Future defer
+            // passes within the same TTL window MUST hit the cached
+            // injection result so the Anthropic prompt-cache prefix
+            // stays stable. The captured local `isCacheBusting` const
+            // above retains its value for downstream `cacheAlreadyBusting`
+            // gating, so this drain doesn't affect later behavior in this
+            // pass — only future passes.
+            //
+            // This is the core of the Oracle 2026-04-26 fix: the previous
+            // single-set design left the flush flag alive whenever
+            // compartmentRunning blocked heuristics, so every defer pass
+            // re-fired prepareCompartmentInjection with isCacheBusting=true
+            // and burned cache reuse for nothing.
+            if (isCacheBusting) {
+                deps.historyRefreshSessions.delete(sessionId);
+            }
         }
 
         let targets = new Map<number, TagTarget>();
@@ -820,9 +868,12 @@ export function createTransform(deps: TransformDeps) {
             // memory.auto_promote.
             memoryEnabled: deps.memoryConfig?.enabled,
             autoPromote: deps.memoryConfig?.autoPromote,
-            // See startRecoveryRun above — same rationale.
+            // See startRecoveryRun above for the full rationale —
+            // historian/recomp publication signals history rebuild +
+            // pending materialization, but NOT system-prompt adjuncts.
             onInjectionCacheCleared: (sid) => {
-                deps.flushedSessions.add(sid);
+                deps.historyRefreshSessions.add(sid);
+                deps.pendingMaterializationSessions.add(sid);
             },
         });
         pendingCompartmentInjection = compartmentPhase.pendingCompartmentInjection;
@@ -849,7 +900,11 @@ export function createTransform(deps: TransformDeps) {
             compartmentInProgress,
             sessionMeta,
             currentTurnId,
-            flushedSessions: deps.flushedSessions,
+            // Postprocess reads pendingMaterializationSessions to decide
+            // whether `/ctx-flush`-style materialization is queued, and
+            // drains it after heuristics actually run. NOT the history
+            // set — postprocess doesn't refresh `<session-history>`.
+            pendingMaterializationSessions: deps.pendingMaterializationSessions,
             lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
             autoDropToolAge: deps.autoDropToolAge,
             dropToolStructure: deps.dropToolStructure ?? true,

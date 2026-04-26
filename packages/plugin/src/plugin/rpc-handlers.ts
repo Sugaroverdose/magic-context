@@ -601,7 +601,25 @@ export function registerRpcHandlers(
             historianChunkTokens,
             historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             directory,
+            // Issue #44: TUI-triggered recomp must respect memory feature gates
+            // exactly the same way as server-triggered /ctx-recomp does.
+            memoryEnabled: config.memory?.enabled,
+            autoPromote: config.memory?.auto_promote ?? true,
             getNotificationParams: () => getNotificationParams(sessionId),
+            // Recomp publication invalidates the injection cache and queues
+            // drop ops. Signal the same two sets the hook-side recomp
+            // signals (history rebuild + pending materialization) so the
+            // next transform pass rebuilds `<session-history>` and
+            // materializes the new drops. NOT systemPromptRefresh — recomp
+            // doesn't change disk-backed adjuncts.
+            //
+            // Without these signals the TUI recomp would silently leave
+            // injection cache stale, causing defer passes to render an
+            // outdated history block until the next natural cache bust.
+            onInjectionCacheCleared: (sid) => {
+                liveSessionState.historyRefreshSessions.add(sid);
+                liveSessionState.pendingMaterializationSessions.add(sid);
+            },
         })
             .then((result: string) => {
                 void sendIgnoredMessage(
