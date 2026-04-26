@@ -1,0 +1,68 @@
+{
+	"name": "@cortexkit/pi-magic-context",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Pi coding agent extension for Magic Context — cross-session memory and context management",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"license": "MIT",
+	"author": "ualtinok",
+	"keywords": [
+		"pi",
+		"pi-coding-agent",
+		"extension",
+		"context",
+		"memory",
+		"magic-context",
+		"ai",
+		"llm"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/cortexkit/opencode-magic-context",
+		"directory": "packages/pi-plugin"
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @huggingface/transformers --external better-sqlite3",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test",
+		"lint": "biome check src",
+		"lint:fix": "biome check --write src",
+		"format": "biome format --write src",
+		"clean": "rm -rf dist",
+		"prepublishOnly": "bun run build"
+	},
+	"dependencies": {
+		"@huggingface/transformers": "^4.1.0",
+		"ai-tokenizer": "^1.0.6",
+		"better-sqlite3": "^12.9.0",
+		"comment-json": "^4.6.2",
+		"typebox": "^1.1.24",
+		"zod": "^4.1.8"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@mariozechner/pi-coding-agent": "*",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^22.0.0",
+		"typescript": "^5.8.0"
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": "*"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"pi": {
+		"extensions": [
+			"./dist/index.js"
+		]
+	}
+}
