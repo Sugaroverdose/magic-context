@@ -117,7 +117,8 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // cache-busting. See council Finding #9.
             deps.onInjectionCacheCleared?.(sessionId);
 
-            if (deps.directory) {
+            // Issue #44: respect memory.enabled and memory.auto_promote.
+            if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
                 promoteSessionFactsToMemory(
                     db,
                     sessionId,
@@ -307,7 +308,8 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         const finalCompartments = promoted?.compartments ?? candidateCompartments;
         const finalFacts = promoted?.facts ?? candidateFacts;
 
-        if (deps.directory) {
+        // Issue #44: respect memory.enabled and memory.auto_promote.
+        if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
             promoteSessionFactsToMemory(
                 db,
                 sessionId,

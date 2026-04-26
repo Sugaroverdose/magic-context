@@ -227,7 +227,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         // new compartments and silently change message[0] → provider cache bust
         // without a legitimate scheduler signal. See council Finding #9.
         deps.onInjectionCacheCleared?.(sessionId);
-        if (deps.directory) {
+        // Issue #44: gate promotion behind both `memory.enabled` and
+        // `memory.auto_promote`. Without this, historian unconditionally
+        // wrote project memories (with embeddings) even for users who
+        // explicitly disabled the memory feature in config.
+        if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
             promoteSessionFactsToMemory(
                 db,
                 sessionId,

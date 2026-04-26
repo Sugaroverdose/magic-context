@@ -69,6 +69,9 @@ export function startTuiActionConsumer(args: {
                         historianTimeoutMs:
                             config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
                         directory,
+                        // Issue #44: respect memory feature gates from TUI-triggered recomp.
+                        memoryEnabled: config.memory?.enabled,
+                        autoPromote: config.memory?.auto_promote ?? true,
                         getNotificationParams: () => getNotificationParams(sessionId),
                     })
                         .then((result: string) => {

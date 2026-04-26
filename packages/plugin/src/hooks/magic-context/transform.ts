@@ -169,6 +169,10 @@ export interface TransformDeps {
     memoryConfig?: {
         enabled: boolean;
         injectionBudgetTokens: number;
+        /** When true, historian/recomp auto-promote eligible session facts
+         *  to project memories. When false, promotion is skipped — agents can
+         *  still write memories explicitly via `ctx_memory write`. Issue #44. */
+        autoPromote: boolean;
     };
     /**
      * Returns the historian chunk budget. Called at each historian spawn site
@@ -459,6 +463,10 @@ export function createTransform(deps: TransformDeps) {
                 historianTwoPass: deps.historianTwoPass,
                 compressorMinCompartmentRatio: deps.compressorMinCompartmentRatio,
                 compressorMaxMergeDepth: deps.compressorMaxMergeDepth,
+                // Issue #44: gate historian-driven memory promotion so users
+                // who disable the feature actually see no memories created.
+                memoryEnabled: deps.memoryConfig?.enabled,
+                autoPromote: deps.memoryConfig?.autoPromote,
                 // Historian publication invalidates the injection cache AND
                 // changes compartments/facts that render into message[0]. Mark
                 // the next transform as cache-busting so the rebuild happens on
@@ -807,6 +815,11 @@ export function createTransform(deps: TransformDeps) {
             compressorMinCompartmentRatio: deps.compressorMinCompartmentRatio,
             compressorMaxMergeDepth: deps.compressorMaxMergeDepth,
             compressorCooldownMs: deps.compressorCooldownMs,
+            // Issue #44: forward memory gating so the normal historian path
+            // (not just the recovery path above) honors memory.enabled and
+            // memory.auto_promote.
+            memoryEnabled: deps.memoryConfig?.enabled,
+            autoPromote: deps.memoryConfig?.autoPromote,
             // See startRecoveryRun above — same rationale.
             onInjectionCacheCleared: (sid) => {
                 deps.flushedSessions.add(sid);

@@ -72,6 +72,10 @@ interface RunCompartmentPhaseArgs {
     compressorMaxMergeDepth?: number;
     /** Compressor cooldown in milliseconds between background runs. */
     compressorCooldownMs?: number;
+    /** Cross-session memory feature gate (`memory.enabled`). Issue #44. */
+    memoryEnabled?: boolean;
+    /** Auto-promotion gate (`memory.auto_promote`). Issue #44. */
+    autoPromote?: boolean;
     /** Forwarded to compartment runner — see CompartmentRunnerDeps.onInjectionCacheCleared. */
     onInjectionCacheCleared?: (sessionId: string) => void;
 }
@@ -173,6 +177,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 historianTwoPass: args.historianTwoPass,
                 compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,
                 compressorMaxMergeDepth: args.compressorMaxMergeDepth,
+                memoryEnabled: args.memoryEnabled,
+                autoPromote: args.autoPromote,
                 onInjectionCacheCleared: args.onInjectionCacheCleared,
             });
             compartmentInProgress = true;
@@ -212,6 +218,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 historianTwoPass: args.historianTwoPass,
                 compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,
                 compressorMaxMergeDepth: args.compressorMaxMergeDepth,
+                memoryEnabled: args.memoryEnabled,
+                autoPromote: args.autoPromote,
                 onInjectionCacheCleared: args.onInjectionCacheCleared,
             });
             activeRun = getActiveCompartmentRun(args.sessionId);

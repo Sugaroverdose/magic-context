@@ -31,6 +31,19 @@ export interface CompartmentRunnerDeps {
     /** Compressor max merge depth (1-5). Compartments at or above this depth are skipped. */
     compressorMaxMergeDepth?: number;
     /**
+     * Cross-session memory feature gate (`memory.enabled` config). When false,
+     * historian/recomp must NOT promote session facts into project memories
+     * and must NOT generate or store embeddings. Issue #44.
+     */
+    memoryEnabled?: boolean;
+    /**
+     * Automatic-promotion gate (`memory.auto_promote` config). When false (and
+     * memory is otherwise enabled), tools and search still work, but historian
+     * does not auto-promote session facts to memories. Users can still write
+     * memories explicitly via `ctx_memory write`. Issue #44.
+     */
+    autoPromote?: boolean;
+    /**
      * Called after the runner invalidates the in-memory injection cache
      * (post-historian publication, post-recomp promotion, post-partial-recomp
      * promotion). The caller should register the session as flush-pending so

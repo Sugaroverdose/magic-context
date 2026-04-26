@@ -78,6 +78,9 @@ export interface MagicContextDeps {
         memory?: {
             enabled: boolean;
             injection_budget_tokens: number;
+            /** When true, historian/recomp auto-promote eligible session facts
+             *  to project memories. When false, promotion is skipped. Issue #44. */
+            auto_promote?: boolean;
         };
         embedding?: {
             provider?: "local" | "openai-compatible" | "off";
@@ -261,6 +264,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             ? {
                   enabled: deps.config.memory.enabled,
                   injectionBudgetTokens: deps.config.memory.injection_budget_tokens,
+                  // Issue #44: thread auto_promote through. Default true to
+                  // preserve historical behavior when the field is missing.
+                  autoPromote: deps.config.memory.auto_promote ?? true,
               }
             : undefined,
         getHistorianChunkTokens,
@@ -439,6 +445,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                             agentBySession,
                         ),
                     historianTwoPass: deps.config.historian?.two_pass === true,
+                    // Issue #44: respect memory feature gates from /ctx-recomp too.
+                    memoryEnabled: deps.config.memory?.enabled,
+                    autoPromote: deps.config.memory?.auto_promote ?? true,
                     // Recomp invalidates injection cache after promotion. Mark
                     // the next transform as cache-busting so the new history
                     // block renders on a pass that's already flushing — see
