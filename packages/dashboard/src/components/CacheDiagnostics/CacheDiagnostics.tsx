@@ -16,10 +16,17 @@ export default function CacheDiagnostics() {
   const [hideSubagents, setHideSubagents] = createSignal(true);
   const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
 
+  // The Rust backend windows by session: each session_id gets up to PER_SESSION
+  // recent events, capped globally at PER_SESSION × 10. With this client-side
+  // cap matching the global ceiling, every visible session keeps a full bar
+  // chart even when many sessions are active in parallel.
+  const PER_SESSION = 200;
+  const TOTAL_CAP = PER_SESSION * 10;
+
   const fetchData = async () => {
     try {
       const [newEvents, sessions] = await Promise.all([
-        getCacheEventsFromDb(200, cachedWatermark),
+        getCacheEventsFromDb(PER_SESSION, cachedWatermark),
         getSessions(),
       ]);
 
@@ -28,8 +35,8 @@ export default function CacheDiagnostics() {
         setEvents(newEvents);
       } else if (newEvents.length > 0) {
         // Incremental — prepend new events (they're newest-first from DB, but
-        // build_db_cache_events reverses to chronological), trim to 200
-        setEvents((prev) => [...prev, ...newEvents].slice(-200));
+        // build_db_cache_events reverses to chronological), trim to total cap
+        setEvents((prev) => [...prev, ...newEvents].slice(-TOTAL_CAP));
       }
 
       // Sync to module-level cache and update watermark

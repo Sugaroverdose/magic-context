@@ -533,38 +533,71 @@ fn load_raw_db_cache_events(
 
     let conn = open_readonly(&opencode_db_path)?;
 
+    // Per-session windowing: each session gets up to `limit` recent events
+    // (so a session-filtered timeline always has full bar coverage), capped
+    // globally at `limit * 10` to bound memory across many concurrent sessions.
+    // Without this, a 200-event global window split across e.g. 4 active
+    // sessions left each session with only ~50 bars on the chart.
+    let per_session_limit = limit as i64;
+    let global_cap = per_session_limit.saturating_mul(10);
+
     let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(since) =
         since_timestamp
     {
         (
-            "SELECT CAST(m.id AS TEXT), m.session_id, m.time_created,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0) AS input_tokens,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0) AS cache_read,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
-                    CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent
-             FROM message m
-             WHERE json_extract(m.data, '$.role') = 'assistant'
-               AND COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) > 0
-               AND m.time_created > ?1
-             ORDER BY m.time_created DESC
-             LIMIT ?2".to_string(),
-            vec![Box::new(since) as Box<dyn rusqlite::types::ToSql>, Box::new(limit as i64)],
+            "WITH ranked AS (
+                SELECT CAST(m.id AS TEXT) AS msg_id,
+                       m.session_id,
+                       m.time_created,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0) AS input_tokens,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0) AS cache_read,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
+                       CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent,
+                       ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.time_created DESC) AS rn
+                FROM message m
+                WHERE json_extract(m.data, '$.role') = 'assistant'
+                  AND COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) > 0
+                  AND m.time_created > ?1
+            )
+            SELECT msg_id, session_id, time_created, input_tokens, cache_read,
+                   cache_write, total_tokens, agent
+            FROM ranked
+            WHERE rn <= ?2
+            ORDER BY time_created DESC
+            LIMIT ?3".to_string(),
+            vec![
+                Box::new(since) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(per_session_limit),
+                Box::new(global_cap),
+            ],
         )
     } else {
         (
-            "SELECT CAST(m.id AS TEXT), m.session_id, m.time_created,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0) AS input_tokens,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0) AS cache_read,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
-                    COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
-                    CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent
-             FROM message m
-             WHERE json_extract(m.data, '$.role') = 'assistant'
-               AND COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) > 0
-             ORDER BY m.time_created DESC
-             LIMIT ?1".to_string(),
-            vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
+            "WITH ranked AS (
+                SELECT CAST(m.id AS TEXT) AS msg_id,
+                       m.session_id,
+                       m.time_created,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.input') AS INTEGER), 0) AS input_tokens,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.cache.read') AS INTEGER), 0) AS cache_read,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
+                       COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
+                       CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent,
+                       ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.time_created DESC) AS rn
+                FROM message m
+                WHERE json_extract(m.data, '$.role') = 'assistant'
+                  AND COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) > 0
+            )
+            SELECT msg_id, session_id, time_created, input_tokens, cache_read,
+                   cache_write, total_tokens, agent
+            FROM ranked
+            WHERE rn <= ?1
+            ORDER BY time_created DESC
+            LIMIT ?2".to_string(),
+            vec![
+                Box::new(per_session_limit) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(global_cap),
+            ],
         )
     };
 
