@@ -133,9 +133,17 @@ type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
  * Wrap a Pi `AgentMessage[]` as a Transcript. Builds the normalized
  * view (folding tool results into user messages) up front, then proxies
  * mutations through the adapter's dirty-message tracking.
+ *
+ * Accepts `unknown[]` rather than the actual `AgentMessage[]` from
+ * `@mariozechner/pi-agent-core` because that type embeds CustomAgentMessages
+ * declared via module augmentation, which makes generic inference brittle
+ * across pi-coding-agent versions. We narrow to our recognized roles
+ * (user/assistant/toolResult) at runtime; messages with other roles fall
+ * through to the opaque path that touches no fields. Safe under TS's
+ * structural typing.
  */
 export function createPiTranscript(
-	source: PiAgentMessage[],
+	source: unknown[],
 	sessionId: string | undefined,
 ): Transcript & {
 	/**
@@ -144,12 +152,9 @@ export function createPiTranscript(
 	 * the original array if no mutations occurred — preserves identity
 	 * so Pi can short-circuit downstream cache invalidation.
 	 */
-	getOutputMessages(): PiAgentMessage[];
+	getOutputMessages(): unknown[];
 } {
-	// `source` is the original array. We hold a parallel `working` copy
-	// where dirty messages get replaced with new objects. Unchanged
-	// messages share identity with `source`.
-	const working: PiAgentMessage[] = source.slice();
+	const working = source.slice() as unknown as PiAgentMessage[];
 	const dirtyMessages = new Set<number>();
 
 	// Normalize: fold consecutive toolResult runs into the immediately
@@ -176,7 +181,7 @@ export function createPiTranscript(
 			// — we just lock in the result. The actual rebuild happens
 			// in writeBack* helpers when mutations fire.
 		},
-		getOutputMessages(): PiAgentMessage[] {
+		getOutputMessages(): unknown[] {
 			// If nothing changed, return source identity so Pi can
 			// detect the no-op case. Otherwise return the working copy.
 			return dirtyMessages.size > 0 ? working : source;

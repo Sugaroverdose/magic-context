@@ -36,6 +36,7 @@ import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
+import { registerPiContextHandler } from "./context-handler";
 import { buildMagicContextBlock } from "./system-prompt";
 import { registerMagicContextTools } from "./tools";
 
@@ -283,6 +284,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		gitCommitsEnabled: false,
 	});
 	info("registered tools: ctx_search, ctx_memory, ctx_note");
+
+	// Register the per-LLM-call transform pipeline (Step 4b.2). Tags
+	// eligible message parts via the shared Tagger and applies queued
+	// drops from `pending_ops` so /ctx-flush and ctx_reduce both work
+	// against Pi sessions. ctx_reduce is exposed in the tool registry so
+	// agents can invoke it; ctx_reduce_enabled is hardcoded to `true`
+	// here pending the Step 5b config loader.
+	registerPiContextHandler(pi, {
+		db,
+		ctxReduceEnabled: true,
+	});
 
 	// Register the /ctx-aug slash command. Sidekick is "off" by default
 	// for Step 5a — users opt in by writing a sidekick.model setting in
