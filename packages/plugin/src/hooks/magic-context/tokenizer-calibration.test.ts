@@ -61,6 +61,23 @@ describe("resolveModelCalibration", () => {
         const opus45 = resolveModelCalibration("anthropic", "claude-opus-4-5");
         expect(opus47.systemRatio).not.toBe(opus45.systemRatio);
     });
+
+    it("matches Opus 4.7 routed via OpenRouter and GitHub Copilot (regression: A2)", () => {
+        // Without explicit prefixes for these routes, the longest-prefix
+        // matcher fell through to NEUTRAL and the sidebar misattributed
+        // ~30K tokens from System+ToolDefs into Conversation/ToolCalls.
+        const cases = [
+            ["openrouter/anthropic", "claude-opus-4-7"],
+            ["openrouter/anthropic", "claude-opus-4.7"],
+            ["github-copilot", "claude-opus-4-7"],
+            ["github-copilot", "claude-opus-4.7"],
+        ];
+        for (const [provider, model] of cases) {
+            const calib = resolveModelCalibration(provider, model);
+            expect(calib.systemRatio).toBeCloseTo(1.51, 2);
+            expect(calib.toolsRatio).toBeCloseTo(1.57, 2);
+        }
+    });
 });
 
 describe("calibrateBuckets", () => {
@@ -219,6 +236,44 @@ describe("calibrateBuckets", () => {
         expect(sum).toBeLessThanOrEqual(1_000);
         // After rounding correction, sum equals exactly 1000.
         expect(sum).toBe(1_000);
+    });
+
+    it("clamp + zero residuals: rounding overshoot does NOT exceed inputTokens (regression: A1)", () => {
+        // Council A1: with heavy calibration ratios AND zero conversation/tool-call
+        // locals, the clamp path's `Math.round(x * ratio)` overshoots and the
+        // residual buckets can't absorb the negative delta (Math.max clamps to 0).
+        // Pre-fix, this produced sum=inputTokens+1 in pathological cases.
+        // Reproducer from the audit:
+        //   inputTokens=1000, system=500, toolDefs=500, compartments=500,
+        //   conversation=0, toolCalls=0, ratio 5x → all rounded up by ~0.45 → 1001.
+        const out = calibrateBuckets({
+            inputTokens: 1_000,
+            systemLocal: 500,
+            toolDefsLocal: 500,
+            compartmentsLocal: 500,
+            factsLocal: 0,
+            memoriesLocal: 0,
+            conversationLocal: 0,
+            toolCallsLocal: 0,
+            calibration: { systemRatio: 5.0, toolsRatio: 5.0 },
+        });
+        const sum =
+            out.systemTokens +
+            out.toolDefinitionTokens +
+            out.compartmentTokens +
+            out.factTokens +
+            out.memoryTokens +
+            out.conversationTokens +
+            out.toolCallTokens;
+        // Final sum must be EXACTLY inputTokens — never +1.
+        expect(sum).toBe(1_000);
+        // Residuals stay zero — they have no local content to scale from.
+        expect(out.conversationTokens).toBe(0);
+        expect(out.toolCallTokens).toBe(0);
+        // No bucket goes negative.
+        expect(out.systemTokens).toBeGreaterThanOrEqual(0);
+        expect(out.toolDefinitionTokens).toBeGreaterThanOrEqual(0);
+        expect(out.compartmentTokens).toBeGreaterThanOrEqual(0);
     });
 
     it("real-world Opus 4.7 example: verbatim history matches /ctx-status, residual absorbs drift", () => {

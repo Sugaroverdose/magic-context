@@ -641,29 +641,55 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             .or_insert(row.timestamp);
     }
 
-    // Check which sessions truly have their first-ever assistant message in our window
-    // by querying whether an earlier assistant message exists in the DB.
+    // Check which sessions truly have their first-ever assistant message in our
+    // window by computing each session's true-first assistant message timestamp
+    // in a single GROUP BY query, then comparing to our window's earliest. With
+    // N concurrent sessions this used to issue N sequential `EXISTS` queries
+    // (one per session) — now it's one CTE-style aggregate scan.
     let true_first_sessions: HashSet<String> =
-        if let Some(opencode_db_path) = resolve_opencode_db_path() {
-            if let Ok(conn) = open_readonly(&opencode_db_path) {
-                earliest_ts_in_window
-                    .iter()
-                    .filter(|(session_id, &earliest_ts)| {
-                        // If there's any assistant message with tokens BEFORE our earliest, it's not the first
-                        let has_earlier: bool = conn
-                            .query_row(
-                                "SELECT EXISTS(SELECT 1 FROM message WHERE session_id = ?1
-                     AND json_extract(data, '$.role') = 'assistant'
-                     AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
-                     AND time_created < ?2)",
-                                rusqlite::params![session_id, earliest_ts],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or(false);
-                        !has_earlier
-                    })
-                    .map(|(sid, _)| sid.clone())
-                    .collect()
+        if !earliest_ts_in_window.is_empty() {
+            if let Some(opencode_db_path) = resolve_opencode_db_path() {
+                if let Ok(conn) = open_readonly(&opencode_db_path) {
+                    // Build IN-clause with placeholders for each session_id we care about.
+                    let session_ids: Vec<String> = earliest_ts_in_window.keys().cloned().collect();
+                    let placeholders = vec!["?"; session_ids.len()].join(",");
+                    let sql = format!(
+                        "SELECT session_id, MIN(time_created) AS first_ts
+                         FROM message
+                         WHERE session_id IN ({})
+                           AND json_extract(data, '$.role') = 'assistant'
+                           AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
+                         GROUP BY session_id",
+                        placeholders
+                    );
+                    let session_id_refs: Vec<&dyn rusqlite::types::ToSql> =
+                        session_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+                    if let Ok(mut stmt) = conn.prepare(&sql) {
+                        let rows = stmt.query_map(session_id_refs.as_slice(), |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                        });
+                        if let Ok(rows) = rows {
+                            // A session is "truly first" in our window if its
+                            // window-earliest timestamp matches its DB-wide
+                            // earliest assistant timestamp.
+                            rows.filter_map(|r| r.ok())
+                                .filter(|(sid, db_earliest)| {
+                                    earliest_ts_in_window
+                                        .get(sid)
+                                        .map(|window_earliest| *window_earliest <= *db_earliest)
+                                        .unwrap_or(false)
+                                })
+                                .map(|(sid, _)| sid)
+                                .collect()
+                        } else {
+                            HashSet::new()
+                        }
+                    } else {
+                        HashSet::new()
+                    }
+                } else {
+                    HashSet::new()
+                }
             } else {
                 HashSet::new()
             }

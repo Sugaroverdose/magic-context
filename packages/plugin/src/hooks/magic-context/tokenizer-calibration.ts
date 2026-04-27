@@ -49,6 +49,15 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
     { prefix: "anthropic/claude-haiku-4-5", systemRatio: 1.02, toolsRatio: 1.16 },
     { prefix: "anthropic/claude-haiku-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
     // Claude through OpenRouter / GitHub Copilot — same upstream tokenizer.
+    // Opus 4.7 routed via OpenRouter / GitHub Copilot uses Anthropic's new
+    // tokenizer too; without these entries the longest-prefix matcher falls
+    // through to NEUTRAL (1.0/1.0) and the sidebar misattributes ~30K tokens
+    // from System+ToolDefs into Conversation/ToolCalls. Sum-to-inputTokens is
+    // still preserved (residuals absorb), but the per-bucket numbers drift.
+    { prefix: "openrouter/anthropic/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "openrouter/anthropic/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "github-copilot/claude-opus-4-7", systemRatio: 1.51, toolsRatio: 1.57 },
+    { prefix: "github-copilot/claude-opus-4.7", systemRatio: 1.51, toolsRatio: 1.57 },
     { prefix: "openrouter/anthropic/claude-sonnet-4.6", systemRatio: 1.02, toolsRatio: 1.14 },
     { prefix: "github-copilot/claude-sonnet-4.6", systemRatio: 1.02, toolsRatio: 1.14 },
     { prefix: "github-copilot/claude-sonnet-4.5", systemRatio: 1.02, toolsRatio: 1.16 },
@@ -227,13 +236,44 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
         memories +
         conversation +
         toolCalls;
-    const delta = input.inputTokens - provisionalSum;
+    let delta = input.inputTokens - provisionalSum;
     if (delta !== 0) {
         if (conversation >= toolCalls) {
-            conversation = Math.max(0, conversation + delta);
+            const adjusted = Math.max(0, conversation + delta);
+            delta -= adjusted - conversation;
+            conversation = adjusted;
         } else {
-            toolCalls = Math.max(0, toolCalls + delta);
+            const adjusted = Math.max(0, toolCalls + delta);
+            delta -= adjusted - toolCalls;
+            toolCalls = adjusted;
         }
+    }
+
+    // Edge case: in the clamp path with both residuals already at zero, the
+    // round-up overshoot from `Math.round(x * ratio)` can't be absorbed by
+    // residuals (Math.max clamps the negative delta to 0). Subtract the
+    // remaining overshoot from the largest non-residual bucket so the final
+    // sum equals inputTokens exactly. Without this, the sidebar bar can
+    // render at 100.1% in pathological cases (heavy calibration ratio + zero
+    // conversation/tool-call locals).
+    if (delta < 0) {
+        const buckets: Array<
+            ["system" | "toolDefs" | "compartments" | "facts" | "memories", number]
+        > = [
+            ["system", calibratedSystem],
+            ["toolDefs", calibratedToolDefs],
+            ["compartments", compartments],
+            ["facts", facts],
+            ["memories", memories],
+        ];
+        buckets.sort((a, b) => b[1] - a[1]);
+        const [name, value] = buckets[0];
+        const adjustment = Math.min(value, -delta);
+        if (name === "system") calibratedSystem -= adjustment;
+        else if (name === "toolDefs") calibratedToolDefs -= adjustment;
+        else if (name === "compartments") compartments -= adjustment;
+        else if (name === "facts") facts -= adjustment;
+        else if (name === "memories") memories -= adjustment;
     }
 
     return {
