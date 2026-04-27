@@ -117,13 +117,18 @@ export async function loadSidebarSnapshot(
         if ((result as unknown as Record<string, unknown>).error) {
             return recallSidebarSnapshot(sessionId, empty);
         }
-        // Treat zero inputTokens as a transient blip — fall back to last
-        // good snapshot if we have one. The server-side cache already does
-        // the same thing; this layer covers the cases where the call fails
-        // before the server sees it.
-        if (result.inputTokens <= 0) {
-            return recallSidebarSnapshot(sessionId, result);
-        }
+        // Trust successful server responses. The server has its own sticky
+        // sidebar cache (`sidebar-snapshot-cache.ts`) that handles transient
+        // zero-token windows by hybriding cached breakdown values into a
+        // fresh snapshot, AND clears that cache on `session.deleted`. If the
+        // server reaches us with `inputTokens === 0`, that's its considered
+        // answer — typically because the session was deleted, reverted, or
+        // is brand-new with no responses yet.
+        //
+        // Falling back to the client cache here would resurrect old token
+        // data for a deleted session (the client never sees `session.deleted`
+        // events, so its cache TTL is the only expiry). Sticky behavior is
+        // owned exclusively by the server side.
         rememberSidebarSnapshot(result);
         return result;
     } catch {

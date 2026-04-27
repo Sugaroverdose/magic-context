@@ -252,28 +252,39 @@ export function calibrateBuckets(input: CalibrationInput): CalibratedBuckets {
     // Edge case: in the clamp path with both residuals already at zero, the
     // round-up overshoot from `Math.round(x * ratio)` can't be absorbed by
     // residuals (Math.max clamps the negative delta to 0). Subtract the
-    // remaining overshoot from the largest non-residual bucket so the final
-    // sum equals inputTokens exactly. Without this, the sidebar bar can
-    // render at 100.1% in pathological cases (heavy calibration ratio + zero
-    // conversation/tool-call locals).
+    // remaining overshoot from non-residual buckets in descending-size
+    // order until delta reaches zero, so the final sum equals inputTokens
+    // exactly. Loops because a single bucket may not be large enough to
+    // absorb the entire overshoot (rare but possible at tiny inputTokens
+    // with heavy calibration ratios). Without this loop, pathological inputs
+    // could leave a residual of +1 or +2 tokens.
     if (delta < 0) {
-        const buckets: Array<
-            ["system" | "toolDefs" | "compartments" | "facts" | "memories", number]
-        > = [
-            ["system", calibratedSystem],
-            ["toolDefs", calibratedToolDefs],
-            ["compartments", compartments],
-            ["facts", facts],
-            ["memories", memories],
-        ];
-        buckets.sort((a, b) => b[1] - a[1]);
-        const [name, value] = buckets[0];
-        const adjustment = Math.min(value, -delta);
-        if (name === "system") calibratedSystem -= adjustment;
-        else if (name === "toolDefs") calibratedToolDefs -= adjustment;
-        else if (name === "compartments") compartments -= adjustment;
-        else if (name === "facts") facts -= adjustment;
-        else if (name === "memories") memories -= adjustment;
+        type BucketName = "system" | "toolDefs" | "compartments" | "facts" | "memories";
+        const get = (name: BucketName): number => {
+            if (name === "system") return calibratedSystem;
+            if (name === "toolDefs") return calibratedToolDefs;
+            if (name === "compartments") return compartments;
+            if (name === "facts") return facts;
+            return memories;
+        };
+        const subtract = (name: BucketName, amount: number): void => {
+            if (name === "system") calibratedSystem -= amount;
+            else if (name === "toolDefs") calibratedToolDefs -= amount;
+            else if (name === "compartments") compartments -= amount;
+            else if (name === "facts") facts -= amount;
+            else memories -= amount;
+        };
+        const buckets: BucketName[] = ["system", "toolDefs", "compartments", "facts", "memories"];
+        // Sort by current value descending so we drain the largest first.
+        buckets.sort((a, b) => get(b) - get(a));
+        for (const name of buckets) {
+            if (delta >= 0) break;
+            const value = get(name);
+            if (value <= 0) continue;
+            const adjustment = Math.min(value, -delta);
+            subtract(name, adjustment);
+            delta += adjustment;
+        }
     }
 
     return {

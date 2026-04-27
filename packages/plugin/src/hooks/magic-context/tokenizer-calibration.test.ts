@@ -238,6 +238,45 @@ describe("calibrateBuckets", () => {
         expect(sum).toBe(1_000);
     });
 
+    it("tiny inputTokens with clamp path: still sums exactly (regression: Oracle final review)", () => {
+        // Oracle final-review reproducer: with very small inputTokens, the
+        // single-bucket fix from the original A1 patch couldn't absorb a
+        // residual overshoot that exceeded that bucket's value. The fix
+        // loops through non-residual buckets descending until delta=0.
+        const out = calibrateBuckets({
+            inputTokens: 2,
+            systemLocal: 1,
+            toolDefsLocal: 1,
+            compartmentsLocal: 2,
+            factsLocal: 2,
+            memoriesLocal: 0,
+            conversationLocal: 1,
+            toolCallsLocal: 0,
+            calibration: { systemRatio: 1.51, toolsRatio: 1.57 },
+        });
+        const sum =
+            out.systemTokens +
+            out.toolDefinitionTokens +
+            out.compartmentTokens +
+            out.factTokens +
+            out.memoryTokens +
+            out.conversationTokens +
+            out.toolCallTokens;
+        expect(sum).toBe(2);
+        // No bucket goes negative.
+        for (const v of [
+            out.systemTokens,
+            out.toolDefinitionTokens,
+            out.compartmentTokens,
+            out.factTokens,
+            out.memoryTokens,
+            out.conversationTokens,
+            out.toolCallTokens,
+        ]) {
+            expect(v).toBeGreaterThanOrEqual(0);
+        }
+    });
+
     it("clamp + zero residuals: rounding overshoot does NOT exceed inputTokens (regression: A1)", () => {
         // Council A1: with heavy calibration ratios AND zero conversation/tool-call
         // locals, the clamp path's `Math.round(x * ratio)` overshoots and the
