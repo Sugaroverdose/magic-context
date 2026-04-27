@@ -7,11 +7,16 @@ Write-Host "  ──────────────────────
 Write-Host ""
 
 $package = "@cortexkit/opencode-magic-context"
+# Always pin "@latest": without an explicit version, bun x / npx resolve from
+# their local on-disk cache rather than re-resolving the npm dist-tag, so a
+# user who already installed an older version would keep getting the cached
+# bundle even after a patch ships. "@latest" forces a registry round-trip.
+$packageLatest = "$package@latest"
 
 if (Get-Command bun -ErrorAction SilentlyContinue) {
     Write-Host "  → Using bun" -ForegroundColor Gray
     Write-Host ""
-    & bun x --bun $package setup
+    & bun x --bun $packageLatest setup
 } elseif (Get-Command npx -ErrorAction SilentlyContinue) {
     # Check Node version — @clack/prompts requires styleText from node:util (Node >= 20.12)
     $nodeVer = (node -v 2>$null) -replace '^v',''
@@ -29,7 +34,7 @@ if (Get-Command bun -ErrorAction SilentlyContinue) {
     }
     Write-Host "  → Using npx (Node $nodeVer)" -ForegroundColor Gray
     Write-Host ""
-    & npx -y $package setup
+    & npx -y $packageLatest setup
 } else {
     Write-Host "  ✗ Neither bun nor npx found." -ForegroundColor Red
     Write-Host ""
