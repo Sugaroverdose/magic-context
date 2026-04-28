@@ -1,4 +1,7 @@
-import type { DreamerConfig } from "@magic-context/core/config/schema/magic-context";
+import type {
+	DreamerConfig,
+	EmbeddingConfig,
+} from "@magic-context/core/config/schema/magic-context";
 import { registerDreamProjectDirectory } from "@magic-context/core/features/magic-context/dreamer";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
@@ -10,6 +13,21 @@ export interface PiDreamerOptions {
 	projectIdentity: string;
 	/** Resolved DreamerConfig from loadPiConfig(). When .enabled is false, the function is a no-op. */
 	config: DreamerConfig;
+	/**
+	 * Council finding #7: dreamer needs the real embedding config so it can
+	 * (a) consolidate near-duplicate memories using cosine similarity and
+	 * (b) re-embed memory content when it gets rewritten by `improve`.
+	 * Hardcoded `{provider:"off"}` previously meant dreamer skipped both
+	 * paths even when the user had a real embedding model configured.
+	 */
+	embeddingConfig: EmbeddingConfig;
+	/**
+	 * Council finding #7: dreamer needs the real memory.enabled gate so the
+	 * memory-promotion pipeline (consolidation + improve + archive) can
+	 * actually write to the project memory store. Hardcoded `false`
+	 * previously made dreamer's memory tasks a no-op.
+	 */
+	memoryEnabled: boolean;
 }
 
 type DreamTimerRegistration = Parameters<typeof startDreamScheduleTimer>[0];
@@ -69,8 +87,8 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		directory: opts.projectDir,
 		client: createPiDreamerClient(opts),
 		dreamerConfig: opts.config,
-		embeddingConfig: { provider: "off" },
-		memoryEnabled: false,
+		embeddingConfig: opts.embeddingConfig,
+		memoryEnabled: opts.memoryEnabled,
 		experimentalUserMemories: opts.config.user_memories.enabled
 			? {
 					enabled: true,

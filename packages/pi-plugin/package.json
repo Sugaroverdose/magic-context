@@ -4,7 +4,6 @@
 	"type": "module",
 	"description": "Pi coding agent extension for Magic Context — cross-session memory and context management",
 	"main": "dist/index.js",
-	"types": "dist/index.d.ts",
 	"bin": {
 		"magic-context-pi": "dist/cli.js"
 	},
@@ -60,7 +59,6 @@
 	},
 	"exports": {
 		".": {
-			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		}
 	},

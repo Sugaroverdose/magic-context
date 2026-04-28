@@ -173,6 +173,20 @@ export interface PiContextHandlerOptions {
 	 */
 	ctxReduceEnabled: boolean;
 	/**
+	 * Number of most-recent tags treated as protected (mirrors OpenCode
+	 * `protected_tags`). Drops with tag IDs in the protected window are
+	 * deferred — `applyPendingOperations` requeues them as deferred so
+	 * they re-evaluate next pass instead of being lost. Critical for
+	 * keeping the agent's recent working context intact.
+	 *
+	 * Defaults from the schema to 20; can be 1-100. Optional so existing
+	 * test fixtures don't need updating; callers in production (`index.ts`)
+	 * always thread the loaded config value. A previous bug used a
+	 * hardcoded `0` here — the council audit caught that recent turns
+	 * were getting dropped mid-task.
+	 */
+	protectedTags?: number;
+	/**
 	 * Optional historian wiring (Step 4b.3b). When omitted, the trigger
 	 * check is skipped — context events still tag + drop normally, and
 	 * historian state stays untouched. When provided, the trigger fires
@@ -285,6 +299,9 @@ export function registerPiContextHandler(
 				projectIdentity,
 				messages: event.messages,
 				ctxReduceEnabled: options.ctxReduceEnabled,
+				// Default to 20 (matches schema default) when caller doesn't
+				// thread an explicit value — tests rely on this fallback.
+				protectedTags: options.protectedTags ?? 20,
 			});
 
 			// After tagging+drops have committed, check whether historian
@@ -545,6 +562,7 @@ interface RunPipelineArgs {
 	projectIdentity: string;
 	messages: Parameters<typeof createPiTranscript>[0];
 	ctxReduceEnabled: boolean;
+	protectedTags: number;
 }
 
 async function runPipeline(args: RunPipelineArgs) {
@@ -568,12 +586,11 @@ async function runPipeline(args: RunPipelineArgs) {
 	// numbers; the actual mutation goes through the TagTarget surface
 	// we built above and lands in the underlying AgentMessage content.
 	//
-	// `protectedTags` is hardcoded to 0 for Pi here because we don't
-	// have a magic-context.jsonc config loader yet; once 5b lands the
-	// configured value flows in. 0 is the existing OpenCode default
-	// for unprotected behavior — at this stage Pi sessions don't have
-	// the recent-turn protection that primary OpenCode sessions get.
-	applyPendingOperations(args.sessionId, args.db, targets, 0);
+	// `protectedTags` flows from the loaded `magic-context.jsonc` config
+	// (Step 5b) — drops in the protected window are deferred via
+	// `applyPendingOperations` so the agent's recent working context
+	// stays intact. Default is 20 (matches OpenCode); range is 1-100.
+	applyPendingOperations(args.sessionId, args.db, targets, args.protectedTags);
 
 	// Apply persistent dropped/truncated tag statuses so cross-pass
 	// drops survive even if pending_ops was already drained on a

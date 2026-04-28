@@ -74,6 +74,10 @@ describe("registerPiContextHandler", () => {
 			registerPiContextHandler(fake.pi as never, {
 				db,
 				ctxReduceEnabled: true,
+				// Disable protection so the immediate drop on tag #2 actually
+				// materializes; otherwise the schema default (20) defers the
+				// drop because tag #2 is in the protected window.
+				protectedTags: 0,
 			});
 			const handler = fake.handlers.get("context") as (
 				event: { messages: never[] },

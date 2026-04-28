@@ -305,6 +305,47 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				: ""),
 	);
 
+	// Council finding #5: warn loudly if Pi's configured embedding model
+	// disagrees with the model that the project's stored embedding vectors
+	// were produced under. Cross-harness search relies on cosine similarity
+	// between vectors from the SAME model — a mismatch silently returns
+	// zero hits because the embedding spaces are unrelated.
+	//
+	// We only warn (don't crash) because:
+	//   - The user may be intentionally rotating embedding models.
+	//   - Existing vectors will be re-embedded as part of the periodic
+	//     dreamer sweep + on-demand re-embedding when memories update.
+	//   - Hard-failing on mismatch would prevent the upgrade path from
+	//     ever completing.
+	//
+	// The warning surfaces in `magic-context.log` so users debugging
+	// "why is search returning nothing?" see a clear pointer.
+	if (config.embedding.provider !== "off") {
+		try {
+			const { getStoredModelId } = await import(
+				"@magic-context/core/features/magic-context/memory/storage-memory-embeddings"
+			);
+			const { getEmbeddingModelId } = await import(
+				"@magic-context/core/features/magic-context/memory/embedding"
+			);
+			const stored = getStoredModelId(db, projectIdentity);
+			const current = getEmbeddingModelId();
+			if (stored && current && stored !== current) {
+				warn(
+					`embedding model mismatch detected for project ${projectIdentity}: ` +
+						`stored vectors use "${stored}" but Pi is configured with "${current}". ` +
+						"Cross-harness search will return zero results until vectors are re-embedded. " +
+						"Either restore the previous embedding model in magic-context.jsonc, or wait " +
+						"for the dreamer's periodic embedding sweep to backfill new vectors.",
+				);
+			}
+		} catch (err) {
+			// Embedding-model lookup is best-effort — if it throws (e.g. DB
+			// schema race during first boot), don't block plugin load.
+			warn("embedding model coherence check failed (non-fatal):", err);
+		}
+	}
+
 	// Register the agent-facing tools. Reuses the same business logic
 	// the OpenCode plugin uses (insertMemory, unifiedSearch, addNote, …)
 	// via the shared cortexkit DB. Cross-harness memory sharing is automatic
@@ -328,6 +369,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerPiContextHandler(pi, {
 		db,
 		ctxReduceEnabled: config.ctx_reduce_enabled,
+		// `protected_tags` flows here from the loaded magic-context.jsonc
+		// config (Step 5b). Defaults to schema value (20) when unset.
+		// Council finding #1 (unanimous CRITICAL): a hardcoded `0` here
+		// silently let recent-turn drops mid-task; use real config value.
+		protectedTags: config.protected_tags ?? 20,
 		historian: historianConfig,
 		nudge: nudgeConfig,
 		autoSearch: autoSearchConfig,
@@ -414,6 +460,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			projectDir,
 			projectIdentity,
 			config: dreamerConfig,
+			// Council finding #7: thread real embedding + memory config so
+			// dreamer can do semantic dedup AND can write memory updates.
+			// Previously hardcoded to off/false, making most dreamer tasks
+			// useless on Pi.
+			embeddingConfig: config.embedding,
+			memoryEnabled: config.memory.enabled,
 		});
 		info(
 			dreamerConfig.enabled
@@ -453,8 +505,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				db,
 				cwd: ctx.cwd,
 				sessionId,
-				memoryEnabled: true,
-				injectDocs: true,
+				// Council finding #3: respect memory.enabled and dreamer.inject_docs
+				// from config. Hardcoded `true` previously meant the user's explicit
+				// disable was ignored — memories injected into every prompt even
+				// when memory.enabled=false. Same for project docs.
+				memoryEnabled: config.memory.enabled,
+				injectDocs: config.dreamer?.inject_docs ?? true,
 			});
 			if (!block) return;
 			return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
