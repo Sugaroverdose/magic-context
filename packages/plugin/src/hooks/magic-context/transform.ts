@@ -654,6 +654,7 @@ export function createTransform(deps: TransformDeps) {
             logTransformTiming(sessionId, "injectTemporalMarkers", tTemporal);
         }
 
+        let taggingSucceeded = false;
         try {
             const t0 = performance.now();
             deps.tagger.initFromDb(sessionId, db);
@@ -689,12 +690,24 @@ export function createTransform(deps: TransformDeps) {
             }
             deps.commitSeenLastPass?.set(sessionId, result.hasRecentCommit);
             logTransformTiming(sessionId, "tagMessages", t0);
+            taggingSucceeded = true;
         } catch (error) {
             sessionLog(
                 sessionId,
                 "transform tag persistence failed; continuing without tagging:",
                 error,
             );
+            // Drop in-memory tagger state for this session so the next pass
+            // re-loads from the DB. Without this, a stale counter or stale
+            // assignments map can keep producing the same UNIQUE collision
+            // turn after turn until the process restarts. With the DB-
+            // authoritative allocation in tagger.assignTag, a fresh load
+            // typically self-heals in one pass.
+            try {
+                deps.tagger.cleanup(sessionId);
+            } catch (cleanupError) {
+                sessionLog(sessionId, "tagger cleanup after failure threw:", cleanupError);
+            }
         }
 
         const t1 = performance.now();
@@ -702,16 +715,25 @@ export function createTransform(deps: TransformDeps) {
         logTransformTiming(sessionId, "getTagsBySession", t1, `count=${tags.length}`);
 
         let didMutateFromFlushedStatuses = false;
-        try {
-            const t2 = performance.now();
-            didMutateFromFlushedStatuses = applyFlushedStatuses(sessionId, db, targets, tags);
-            logTransformTiming(sessionId, "applyFlushedStatuses", t2);
-            batch?.finalize();
-            logTransformTiming(sessionId, "batchFinalize:flushed", t2);
-        } catch (error) {
-            sessionLog(sessionId, "transform failed applying flushed statuses:", error);
-            // Only clear on cache-busting passes to avoid re-anchor on next defer (Finding 2).
-            if (isCacheBusting) deps.nudgePlacements.clear(sessionId);
+        // Only run mutation stages when tagging succeeded. With targets={}
+        // applyFlushedStatuses can't drive any of the persisted drops/
+        // truncates/source restores it's responsible for, and running it
+        // anyway risks fanning out partial work that can't be undone on the
+        // next pass. Skip it cleanly so the session enters the next pass
+        // with consistent state and the next initFromDb refresh re-binds
+        // tags from the DB.
+        if (taggingSucceeded) {
+            try {
+                const t2 = performance.now();
+                didMutateFromFlushedStatuses = applyFlushedStatuses(sessionId, db, targets, tags);
+                logTransformTiming(sessionId, "applyFlushedStatuses", t2);
+                batch?.finalize();
+                logTransformTiming(sessionId, "batchFinalize:flushed", t2);
+            } catch (error) {
+                sessionLog(sessionId, "transform failed applying flushed statuses:", error);
+                // Only clear on cache-busting passes to avoid re-anchor on next defer (Finding 2).
+                if (isCacheBusting) deps.nudgePlacements.clear(sessionId);
+            }
         }
         if (didMutateFromFlushedStatuses && isCacheBusting) {
             deps.nudgePlacements.clear(sessionId);

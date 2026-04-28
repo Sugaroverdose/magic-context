@@ -216,6 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     );
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
+    CREATE INDEX IF NOT EXISTS idx_tags_session_message_id ON tags(session_id, message_id);
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session ON pending_ops(session_id);
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session_tag_id ON pending_ops(session_id, tag_id);
     CREATE INDEX IF NOT EXISTS idx_source_contents_session ON source_contents(session_id);

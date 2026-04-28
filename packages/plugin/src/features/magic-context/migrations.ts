@@ -241,6 +241,50 @@ const MIGRATIONS: Migration[] = [
             healAllNullColumns(db);
         },
     },
+    {
+        version: 6,
+        description: "Heal session_meta.counter drift below MAX(tag_number)",
+        // Tagger counter and tags.tag_number can diverge for several reasons,
+        // most of them now fixed:
+        //   - Pre-v0.15.7 the outer db.transaction in tagMessages would
+        //     rollback ALL tag inserts in a pass on a single UNIQUE collision,
+        //     leaving inner-savepoint tag inserts already committed but the
+        //     counter upsert undone. Net effect: max(tag_number) > counter.
+        //   - Multi-process bursts could hit similar races even though tag
+        //     numbers were per-session.
+        //   - Pre-v0.15.7 ON CONFLICT counter upsert used `excluded.counter`
+        //     unconditionally (non-monotonic), so any low writer could undo
+        //     a higher writer's update.
+        //
+        // Once divergence existed, the old initFromDb early-returned when the
+        // session was already known in memory, so the counter could never
+        // self-heal: every assignTag would propose `counter + 1`, which often
+        // collided with a tag_number an old writer had already claimed, and
+        // the old recovery (lookup by message_id) returned null for new
+        // messages and threw — cascading into the cache-bust loop we shipped
+        // a fix for in v0.15.7.
+        //
+        // This one-shot heal brings every divergent session back into sync.
+        // Cheap (one indexed scan over tags + one targeted UPDATE per
+        // affected session) and idempotent — a fresh DB or already-healed DB
+        // updates zero rows.
+        up: (db: Database) => {
+            db.prepare(
+                `UPDATE session_meta
+                 SET counter = (
+                     SELECT MAX(tag_number)
+                     FROM tags
+                     WHERE tags.session_id = session_meta.session_id
+                 )
+                 WHERE EXISTS (
+                     SELECT 1
+                     FROM tags
+                     WHERE tags.session_id = session_meta.session_id
+                       AND tags.tag_number > session_meta.counter
+                 )`,
+            ).run();
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

@@ -10,6 +10,7 @@ const updateTagMessageIdStatements = new WeakMap<Database, PreparedStatement>();
 const getTagNumbersByMessageIdStatements = new WeakMap<Database, PreparedStatement>();
 const deleteTagsByMessageIdStatements = new WeakMap<Database, PreparedStatement>();
 const getMaxTagNumberBySessionStatements = new WeakMap<Database, PreparedStatement>();
+const getTagNumberByMessageIdStatements = new WeakMap<Database, PreparedStatement>();
 
 function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
@@ -78,6 +79,17 @@ function getMaxTagNumberBySessionStatement(db: Database): PreparedStatement {
             "SELECT COALESCE(MAX(tag_number), 0) AS max_tag_number FROM tags WHERE session_id = ?",
         );
         getMaxTagNumberBySessionStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getTagNumberByMessageIdStatement(db: Database): PreparedStatement {
+    let stmt = getTagNumberByMessageIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT tag_number FROM tags WHERE session_id = ? AND message_id = ? ORDER BY tag_number ASC LIMIT 1",
+        );
+        getTagNumberByMessageIdStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -261,6 +273,22 @@ export function deleteTagsByMessageId(
 export function getMaxTagNumberBySession(db: Database, sessionId: string): number {
     const row = getMaxTagNumberBySessionStatement(db).get(sessionId);
     return isMaxTagNumberRow(row) ? row.max_tag_number : 0;
+}
+
+/**
+ * Look up the tag_number assigned to a specific (session_id, message_id).
+ *
+ * Used by the tagger's recovery path to bind an existing DB-assigned tag back
+ * into the in-memory assignment map without bumping the counter past the DB's
+ * actual max. Returns null when no tag exists for that message yet.
+ */
+export function getTagNumberByMessageId(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): number | null {
+    const row = getTagNumberByMessageIdStatement(db).get(sessionId, messageId);
+    return isTagNumberRow(row) ? row.tag_number : null;
 }
 
 export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
