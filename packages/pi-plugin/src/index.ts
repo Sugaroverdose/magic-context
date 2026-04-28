@@ -38,7 +38,9 @@ import {
 } from "./commands/ctx-aug";
 import {
 	awaitInFlightHistorians,
+	type PiAutoSearchHandlerOptions,
 	type PiHistorianOptions,
+	type PiNudgeOptions,
 	registerPiContextHandler,
 } from "./context-handler";
 import { PiSubagentRunner } from "./subagent-runner";
@@ -177,6 +179,104 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 	if (!value) return fallback;
 	const n = Number.parseInt(value, 10);
 	return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parseFloat01(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const n = Number.parseFloat(value);
+	return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
+}
+
+function parseBoolEnv(value: string | undefined, fallback: boolean): boolean {
+	if (value === undefined) return fallback;
+	const v = value.trim().toLowerCase();
+	if (v === "1" || v === "true" || v === "yes") return true;
+	if (v === "0" || v === "false" || v === "no") return false;
+	return fallback;
+}
+
+/**
+ * Step 4b.4 stop-gap nudge config resolver. Defaults match the OpenCode
+ * plugin's defaults from `magic-context.ts` schema:
+ *   protected_tags=10, nudge_interval_tokens=10000,
+ *   iteration_nudge_threshold=10, execute_threshold_percentage=65.
+ *
+ * Returns config unconditionally (no opt-in env var) because nudges are
+ * a low-risk, agent-friendly default in the OpenCode plugin too. Users
+ * who want them off can set MAGIC_CONTEXT_PI_NUDGES=false. Step 5b's
+ * config loader will replace this with `magic-context.jsonc` discovery.
+ *
+ * Env vars supported:
+ *   - `MAGIC_CONTEXT_PI_NUDGES` ("false" disables entirely)
+ *   - `MAGIC_CONTEXT_PI_PROTECTED_TAGS` (default 10)
+ *   - `MAGIC_CONTEXT_PI_NUDGE_INTERVAL_TOKENS` (default 10000)
+ *   - `MAGIC_CONTEXT_PI_ITERATION_NUDGE_THRESHOLD` (default 10)
+ *   - `MAGIC_CONTEXT_PI_EXECUTE_THRESHOLD` (% 1-100; default 65)
+ */
+function resolveNudgeConfig(): PiNudgeOptions | undefined {
+	if (!parseBoolEnv(process.env.MAGIC_CONTEXT_PI_NUDGES, true)) {
+		return undefined;
+	}
+	return {
+		protectedTags: parsePositiveInt(
+			process.env.MAGIC_CONTEXT_PI_PROTECTED_TAGS,
+			10,
+		),
+		nudgeIntervalTokens: parsePositiveInt(
+			process.env.MAGIC_CONTEXT_PI_NUDGE_INTERVAL_TOKENS,
+			10_000,
+		),
+		iterationNudgeThreshold: parsePositiveInt(
+			process.env.MAGIC_CONTEXT_PI_ITERATION_NUDGE_THRESHOLD,
+			10,
+		),
+		executeThresholdPercentage: parsePositiveInt(
+			process.env.MAGIC_CONTEXT_PI_EXECUTE_THRESHOLD,
+			65,
+		),
+	};
+}
+
+/**
+ * Step 4b.4 stop-gap auto-search config resolver. Defaults match the
+ * OpenCode plugin's `experimental.auto_search` defaults:
+ *   enabled=false, score_threshold=0.55, min_prompt_chars=20.
+ *
+ * Auto-search is opt-in (default disabled) because it costs an embedding
+ * round-trip per user turn. Users running a fast local embedding endpoint
+ * can flip it on with `MAGIC_CONTEXT_PI_AUTO_SEARCH=true`.
+ *
+ * Env vars supported:
+ *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH` ("true" enables; default false)
+ *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_THRESHOLD` (0.0-1.0; default 0.55)
+ *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_MIN_CHARS` (default 20)
+ *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_GIT` ("true"/"false"; default true)
+ */
+function resolveAutoSearchConfig(): PiAutoSearchHandlerOptions {
+	const enabled = parseBoolEnv(process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH, false);
+	return {
+		enabled,
+		scoreThreshold: parseFloat01(
+			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_THRESHOLD,
+			0.55,
+		),
+		minPromptChars: parsePositiveInt(
+			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_MIN_CHARS,
+			20,
+		),
+		// Memory + embedding are required for the cross-harness recall
+		// design — Pi sees the same shared memories OpenCode injects.
+		memoryEnabled: true,
+		embeddingEnabled: true,
+		// Git commit indexing defaults to true so commits accumulated by
+		// OpenCode's dreamer surface in Pi auto-hints. Step 5b's config
+		// loader will read `experimental.git_commit_indexing.enabled`
+		// directly.
+		gitCommitsEnabled: parseBoolEnv(
+			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_GIT,
+			true,
+		),
+	};
 }
 
 /**
@@ -361,16 +461,34 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// against Pi sessions. ctx_reduce is exposed in the tool registry so
 	// agents can invoke it; ctx_reduce_enabled is hardcoded to `true`
 	// here pending the Step 5b config loader.
+	//
+	// Step 4b.4: nudge + auto-search config layered on top. Both default
+	// to OpenCode-equivalent defaults (rolling nudges on, auto-search off)
+	// so existing Pi users get the same baseline behavior as OpenCode.
 	const historianConfig = resolveHistorianConfig();
+	const nudgeConfig = resolveNudgeConfig();
+	const autoSearchConfig = resolveAutoSearchConfig();
 	registerPiContextHandler(pi, {
 		db,
 		ctxReduceEnabled: true,
 		historian: historianConfig,
+		nudge: nudgeConfig,
+		autoSearch: autoSearchConfig,
 	});
 	info(
 		historianConfig
 			? `registered historian trigger (model=${historianConfig.model}, executeThreshold=${historianConfig.executeThresholdPercentage ?? 65}%)`
 			: "registered historian trigger: DISABLED (set MAGIC_CONTEXT_PI_HISTORIAN_MODEL to enable)",
+	);
+	info(
+		nudgeConfig
+			? `registered nudges (protected=${nudgeConfig.protectedTags}, interval=${nudgeConfig.nudgeIntervalTokens}, iter=${nudgeConfig.iterationNudgeThreshold})`
+			: "registered nudges: DISABLED (MAGIC_CONTEXT_PI_NUDGES=false)",
+	);
+	info(
+		autoSearchConfig.enabled
+			? `registered auto-search hint (threshold=${autoSearchConfig.scoreThreshold}, minChars=${autoSearchConfig.minPromptChars})`
+			: "registered auto-search hint: DISABLED (set MAGIC_CONTEXT_PI_AUTO_SEARCH=true to enable)",
 	);
 
 	// Register the /ctx-aug slash command. Sidekick is "off" by default

@@ -35,7 +35,11 @@
  */
 
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import {
+	type ContextDatabase,
+	getTagsBySession,
+	getTopNBySize,
+} from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	createTagger,
@@ -46,17 +50,43 @@ import {
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
+import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import {
+	clearNoteNudgeState,
+	getStickyNoteNudge,
+	markNoteNudgeDelivered,
+	peekNoteNudgeText,
+} from "@magic-context/core/hooks/magic-context/note-nudger";
+import { createNudger } from "@magic-context/core/hooks/magic-context/nudger";
 import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import type {
+	ContextEvent,
 	ExtensionAPI,
 	ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import {
+	clearAutoSearchForPiSession,
+	runAutoSearchHintForPi,
+} from "./auto-search-pi";
+import { injectPiNudge } from "./nudge-injector";
 import { runPiHistorian } from "./pi-historian-runner";
 import { readPiSessionMessages } from "./read-session-pi";
 import { createPiTranscript } from "./transcript-pi";
+
+/**
+ * Pi's full AgentMessage union (user | assistant | toolResult | custom).
+ * Sourced from the live ContextEvent payload so the type stays in sync
+ * with @mariozechner/pi-coding-agent without us re-declaring it.
+ *
+ * The nudge / note-nudge / auto-search helpers below operate on this
+ * union but only inspect/mutate user and (rarely) assistant messages —
+ * `toolResult` and `custom` flow through unchanged. Each helper guards
+ * its mutations with role checks so the wider union is safe.
+ */
+type PiAgentMessage = ContextEvent["messages"][number];
 
 /**
  * Optional historian config. When provided, the context handler checks
@@ -95,6 +125,40 @@ export interface PiHistorianOptions {
 	triggerBudget?: number;
 }
 
+/**
+ * Optional rolling/iteration nudge config (Step 4b.4). When omitted,
+ * Pi runs without any rolling reminder text appended to the LLM input —
+ * existing tagging + drop behavior is unchanged. When provided, the
+ * shared `createNudger` is used to evaluate band-based reminders after
+ * each tagging pass and injects them as a synthetic assistant message
+ * via `injectPiNudge`.
+ */
+export interface PiNudgeOptions {
+	/** Number of most-recent tags treated as protected (mirrors OpenCode `protected_tags`). */
+	protectedTags: number;
+	/** Base interval between rolling reminders, in tokens (mirrors OpenCode `nudge_interval_tokens`). */
+	nudgeIntervalTokens: number;
+	/** Tool-iteration threshold — N+ tool calls without user input fires the iteration nudge. */
+	iterationNudgeThreshold: number;
+	/** Same execute threshold the historian trigger uses (default 65). */
+	executeThresholdPercentage: number;
+}
+
+/**
+ * Optional auto-search hint config (Step 4b.4). When enabled, runs
+ * `unifiedSearch` against new user prompts and appends a compact
+ * vague-recall hint to the user message. Cross-harness coherent: hints
+ * are computed against the same shared cortexkit DB OpenCode uses.
+ */
+export interface PiAutoSearchHandlerOptions {
+	enabled: boolean;
+	scoreThreshold: number;
+	minPromptChars: number;
+	memoryEnabled: boolean;
+	embeddingEnabled: boolean;
+	gitCommitsEnabled: boolean;
+}
+
 export interface PiContextHandlerOptions {
 	db: ContextDatabase;
 	/**
@@ -115,6 +179,18 @@ export interface PiContextHandlerOptions {
 	 * async after each tagging pass.
 	 */
 	historian?: PiHistorianOptions;
+	/**
+	 * Optional rolling/iteration nudge wiring (Step 4b.4). When omitted,
+	 * no nudges are injected. When provided, evaluated AFTER each tagging
+	 * pass and injected via `injectPiNudge`.
+	 */
+	nudge?: PiNudgeOptions;
+	/**
+	 * Optional auto-search hint wiring (Step 4b.4). When omitted or
+	 * disabled, no hint computation runs. Notes that auto-search shares
+	 * the cortexkit DB with OpenCode, so memories ARE cross-harness.
+	 */
+	autoSearch?: PiAutoSearchHandlerOptions;
 }
 
 /**
@@ -165,6 +241,25 @@ export function registerPiContextHandler(
 	const tagger = createTagger();
 	const projectIdentity = resolveProjectIdentity(process.cwd());
 
+	// Map: sessionId -> last ctx_reduce timestamp (used by the shared nudger
+	// to suppress reminders right after the agent reduces). Pi never persists
+	// this — restart resets cooldown, which is the OpenCode behavior too.
+	const recentReduceBySession = new Map<string, number>();
+
+	// Build the rolling/iteration nudger lazily — it's stateless across
+	// invocations apart from the `recentReduceBySession` map and the per-
+	// session meta it reads from the DB. Skipped when no `options.nudge` is
+	// configured (returns null below at the call site).
+	const nudgerFn = options.nudge
+		? createNudger({
+				protected_tags: options.nudge.protectedTags,
+				nudge_interval_tokens: options.nudge.nudgeIntervalTokens,
+				iteration_nudge_threshold: options.nudge.iterationNudgeThreshold,
+				execute_threshold_percentage: options.nudge.executeThresholdPercentage,
+				recentReduceBySession,
+			})
+		: null;
+
 	pi.on("context", async (event, ctx) => {
 		try {
 			const sessionId = resolveSessionId(ctx);
@@ -191,12 +286,6 @@ export function registerPiContextHandler(
 				messages: event.messages,
 				ctxReduceEnabled: options.ctxReduceEnabled,
 			});
-			// Cast the rebuilt unknown[] back to the AgentMessage[] shape
-			// Pi's ContextEventResult expects. The transcript adapter
-			// preserves source-identity for unchanged messages and only
-			// rebuilds the mutated ones, all of which keep the same
-			// (or symmetric-text) shape — so this cast is safe at
-			// runtime even though TS can't see the relationship.
 
 			// After tagging+drops have committed, check whether historian
 			// should fire. Historian config is optional — tagging-only
@@ -211,7 +300,77 @@ export function registerPiContextHandler(
 				});
 			}
 
-			return result as { messages: typeof event.messages };
+			// Step 4b.4: nudge + note-nudge + auto-search hint. All three
+			// run AFTER tagging/drops finish so they see the post-mutation
+			// message shape. Each is independently optional and fail-open —
+			// any thrown error is logged and the pipeline returns the
+			// already-mutated messages unchanged.
+			let outputMessages = result.messages as PiAgentMessage[];
+
+			if (nudgerFn && options.nudge) {
+				try {
+					outputMessages = applyRollingNudge({
+						sessionId,
+						db: options.db,
+						messages: outputMessages,
+						ctx,
+						nudgerFn,
+					});
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`pi rolling nudge failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+
+			try {
+				outputMessages = applyNoteNudges({
+					sessionId,
+					db: options.db,
+					messages: outputMessages,
+					projectIdentity,
+				});
+			} catch (err) {
+				sessionLog(
+					sessionId,
+					`pi note nudges failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+
+			if (options.autoSearch?.enabled) {
+				try {
+					outputMessages = await runAutoSearchHintForPi({
+						sessionId,
+						db: options.db,
+						messages: outputMessages,
+						options: {
+							enabled: true,
+							scoreThreshold: options.autoSearch.scoreThreshold,
+							minPromptChars: options.autoSearch.minPromptChars,
+							projectPath: projectIdentity,
+							memoryEnabled: options.autoSearch.memoryEnabled,
+							embeddingEnabled: options.autoSearch.embeddingEnabled,
+							gitCommitsEnabled: options.autoSearch.gitCommitsEnabled,
+							visibleMemoryIds:
+								getVisibleMemoryIds(options.db, sessionId) ?? null,
+						},
+					});
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`pi auto-search failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+
+			// Cast the rebuilt array back to the AgentMessage[] shape Pi's
+			// ContextEventResult expects. The nudge/note/auto-search paths
+			// preserve message identity for unchanged messages and only
+			// rebuild the mutated ones, so this cast is safe at runtime.
+			return { messages: outputMessages } as {
+				messages: typeof event.messages;
+			};
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
@@ -224,7 +383,9 @@ export function registerPiContextHandler(
 			return;
 		}
 	});
-	log("[magic-context][pi] registered context handler (tagging + drops)");
+	log(
+		"[magic-context][pi] registered context handler (tagging + drops + nudges)",
+	);
 }
 
 /**
@@ -432,4 +593,309 @@ async function runPipeline(args: RunPipelineArgs) {
 	// (see createPiTranscript), so Pi can short-circuit downstream
 	// work via reference equality.
 	return { messages: outputMessages };
+}
+
+// ---------------------------------------------------------------------------
+// Nudge / note-nudge helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply the rolling/iteration nudge after tagging. Mirrors OpenCode's
+ * `transform-postprocess-phase.ts` (around lines 568-604) — but for Pi
+ * there is no anchored-assistant cache, so we use the simpler
+ * insert-before-latest-user strategy from `injectPiNudge`.
+ *
+ * Pi delivers a fresh `AgentMessage[]` per `context` event, so every
+ * pass behaves like an OpenCode "cache-busting" pass: nudges always
+ * apply when the nudger says so, and there is no defer-pass replay or
+ * anchor retirement to manage.
+ */
+function applyRollingNudge(args: {
+	sessionId: string;
+	db: ContextDatabase;
+	messages: PiAgentMessage[];
+	ctx: ExtensionContext;
+	nudgerFn: ReturnType<typeof createNudger>;
+}): PiAgentMessage[] {
+	const { sessionId, db, messages, ctx, nudgerFn } = args;
+
+	const piUsage = ctx.getContextUsage?.();
+	if (
+		!piUsage ||
+		piUsage.tokens === null ||
+		piUsage.percent === null ||
+		piUsage.contextWindow === 0
+	) {
+		// No usage info yet — nudger requires real numbers, so skip.
+		return messages;
+	}
+
+	const usage = {
+		percentage: piUsage.percent,
+		inputTokens: piUsage.tokens,
+		// Nudger's ContextUsage type carries a contextLimit too; pass it
+		// for completeness even though the rolling-nudge math doesn't
+		// consume it directly.
+		contextLimit: piUsage.contextWindow,
+	};
+
+	const tags = getTagsBySession(db, sessionId);
+	const messagesSinceLastUser = countMessagesSinceLastUserPi(messages);
+
+	const nudge = nudgerFn(
+		sessionId,
+		usage,
+		db,
+		getTopNBySize,
+		tags,
+		messagesSinceLastUser,
+		// Let the nudger fetch session meta itself — Pi doesn't have the
+		// preloaded-meta optimization the OpenCode transform uses.
+		undefined,
+	);
+	if (!nudge) return messages;
+
+	return injectPiNudge(messages, nudge);
+}
+
+/**
+ * Apply note-nudge replay + delivery. Mirrors OpenCode's
+ * `transform-postprocess-phase.ts` (around lines 611-650).
+ *
+ * Two paths:
+ *   1. Sticky replay: a previously-delivered nudge anchored to a user
+ *      message id replays into that same message every pass (idempotent
+ *      because `appendReminderToUserMessageById` checks for the exact
+ *      reminder text before appending).
+ *   2. Fresh delivery: when a note trigger has fired since the last
+ *      delivery and the agent hasn't already read the note state,
+ *      append a `<instruction name="deferred_notes">…` block to the
+ *      latest user message and mark delivered.
+ *
+ * Both paths fail-open: if no eligible user message exists, the call
+ * simply returns the messages unchanged.
+ */
+function applyNoteNudges(args: {
+	sessionId: string;
+	db: ContextDatabase;
+	messages: PiAgentMessage[];
+	projectIdentity: string;
+}): PiAgentMessage[] {
+	const { sessionId, db, messages, projectIdentity } = args;
+
+	// Path 1: sticky replay first, so any newly-delivered nudge below
+	// doesn't get double-attached on the same pass.
+	const sticky = getStickyNoteNudge(db, sessionId);
+	if (sticky) {
+		const reinjected = appendReminderToUserMessageByIdPi(
+			messages,
+			sticky.messageId,
+			sticky.text,
+		);
+		if (!reinjected) {
+			// Anchor message gone — clear stale state. Mirrors OpenCode
+			// transform-postprocess-phase.ts:621-630. New nudges only
+			// re-appear when a fresh trigger fires.
+			clearNoteNudgeState(db, sessionId);
+			sessionLog(
+				sessionId,
+				`pi note-nudge: sticky anchor ${sticky.messageId} gone, cleared`,
+			);
+		}
+	}
+
+	// Path 2: fresh delivery. Use the latest user message id (or null if
+	// no user messages yet) as the trigger-message hint to peekNoteNudgeText.
+	const latestUserId = findLatestUserMessageIdPi(messages);
+	const deferredNoteText = peekNoteNudgeText(
+		db,
+		sessionId,
+		latestUserId,
+		projectIdentity,
+	);
+	if (deferredNoteText) {
+		const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
+		const anchoredId = appendReminderToLatestUserMessagePi(
+			messages,
+			noteInstruction,
+		);
+		// Always mark delivered once text is generated — the trigger is
+		// consumed even if no anchor was found, so future passes don't
+		// re-fire on every transform.
+		markNoteNudgeDelivered(db, sessionId, noteInstruction, anchoredId);
+	}
+
+	return messages;
+}
+
+/**
+ * Count messages since the latest meaningful user message. "Meaningful"
+ * here means a `user` role with non-empty text content. Mirrors
+ * `countMessagesSinceLastUser` from
+ * `packages/plugin/src/hooks/magic-context/transform-message-helpers.ts`,
+ * adapted to the Pi `AgentMessage` shape.
+ */
+function countMessagesSinceLastUserPi(messages: PiAgentMessage[]): number {
+	let count = 0;
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i];
+		if (msg?.role === "user" && hasMeaningfulUserTextPi(msg)) break;
+		count += 1;
+	}
+	return count;
+}
+
+/** Returns true when the message is a user role with non-empty text content. */
+function hasMeaningfulUserTextPi(message: PiAgentMessage): boolean {
+	if (message.role !== "user") return false;
+	const content = (message as { content: unknown }).content;
+	if (typeof content === "string") return content.trim().length > 0;
+	if (!Array.isArray(content)) return false;
+	for (const part of content as Array<{ type?: unknown; text?: unknown }>) {
+		if (
+			part &&
+			part.type === "text" &&
+			typeof part.text === "string" &&
+			part.text.trim().length > 0
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Find the id of the latest meaningful user message. Pi messages don't
+ * carry a stable id field per `AgentMessage`, so we synthesize one from
+ * timestamp + index. Same approach as `auto-search-pi.ts`'s
+ * `buildUserMessageTurnId` — duplicated locally to keep the modules
+ * decoupled (note-nudge anchor and auto-search cache key are independent
+ * concerns even though both currently use the same id shape).
+ */
+function findLatestUserMessageIdPi(messages: PiAgentMessage[]): string | null {
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i];
+		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
+		const ts = readTimestamp(msg);
+		return `pi:${i}:${ts}`;
+	}
+	return null;
+}
+
+/**
+ * Append `reminder` to the user message at `messageId` (synthetic id
+ * built by `findLatestUserMessageIdPi`). Idempotent: skips if the exact
+ * reminder text is already present. Mirrors
+ * `appendReminderToUserMessageById` from OpenCode's
+ * `transform-message-helpers.ts:54`.
+ */
+function appendReminderToUserMessageByIdPi(
+	messages: PiAgentMessage[],
+	messageId: string,
+	reminder: string,
+): boolean {
+	for (let i = 0; i < messages.length; i += 1) {
+		const msg = messages[i];
+		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
+		const ts = readTimestamp(msg);
+		const synthId = `pi:${i}:${ts}`;
+		if (synthId !== messageId) continue;
+		appendReminderToPiUserMessage(msg, reminder);
+		return true;
+	}
+	return false;
+}
+
+/**
+ * Append `reminder` to the latest meaningful user message. Returns the
+ * synthetic id for sticky anchor tracking, or null when no user message
+ * exists. Mirrors `appendReminderToLatestUserMessage` from
+ * `transform-message-helpers.ts:37`.
+ */
+function appendReminderToLatestUserMessagePi(
+	messages: PiAgentMessage[],
+	reminder: string,
+): string | null {
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i];
+		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
+		appendReminderToPiUserMessage(msg, reminder);
+		const ts = readTimestamp(msg);
+		return `pi:${i}:${ts}`;
+	}
+	return null;
+}
+
+/**
+ * Read the optional `timestamp` property from any message role without
+ * tripping the structural type checker on roles that don't carry one.
+ * Falls back to `"no-ts"` so synthetic ids stay stable across passes.
+ */
+function readTimestamp(message: PiAgentMessage): string {
+	const ts = (message as { timestamp?: unknown }).timestamp;
+	return typeof ts === "number" && Number.isFinite(ts) ? String(ts) : "no-ts";
+}
+
+/**
+ * Append text to a user message, preserving its existing content shape:
+ *   - `string`: direct concat (Pi accepts string user content).
+ *   - array: append to the first text block, or push a new text block
+ *     when the message is image-only.
+ *
+ * Idempotent — skips when the reminder is already present.
+ */
+function appendReminderToPiUserMessage(
+	message: PiAgentMessage,
+	reminder: string,
+): void {
+	// Only `user` messages carry a string-or-array content shape we can
+	// safely append to. Other roles (toolResult, custom, bashExecution)
+	// don't get nudge text.
+	if (message.role !== "user") return;
+	const userMsg = message as { content: unknown };
+
+	if (typeof userMsg.content === "string") {
+		if (!userMsg.content.includes(reminder)) {
+			userMsg.content = userMsg.content + reminder;
+		}
+		return;
+	}
+	if (!Array.isArray(userMsg.content)) return;
+
+	const contentArr = userMsg.content as Array<{
+		type?: unknown;
+		text?: unknown;
+	}>;
+	for (let i = 0; i < contentArr.length; i += 1) {
+		const part = contentArr[i];
+		if (
+			part &&
+			part.type === "text" &&
+			typeof (part as { text?: string }).text === "string"
+		) {
+			const text = (part as { text: string }).text;
+			if (!text.includes(reminder)) {
+				(part as { text: string }).text = text + reminder;
+			}
+			return;
+		}
+	}
+	// Image-only or empty array — push a new text block. Trim leading
+	// `\n\n` because there's nothing to separate from.
+	contentArr.push({ type: "text", text: reminder.trimStart() });
+}
+
+/**
+ * Session cleanup hook called from Pi's `session_deleted` lifecycle.
+ * Drains per-session caches owned by this module so a deleted session
+ * doesn't leave dangling state in process memory. Counterpart to the
+ * OpenCode `session.deleted` cleanup in `event-handler.ts`.
+ */
+export function clearContextHandlerSession(sessionId: string): void {
+	clearAutoSearchForPiSession(sessionId);
+	// Note: in-flight historian + recentReduceBySession + nudge placement
+	// are all module-private inside this file or its dependencies.
+	// recentReduceBySession lives on the captured closure of the
+	// registered handler; if Pi exposes session_deleted we can wire a
+	// dedicated cleanup later (Step 5b territory).
 }
