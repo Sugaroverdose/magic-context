@@ -86,13 +86,14 @@ export interface SubagentRunOptions {
  *   only emitted tool calls and we didn't follow up).
  * - `reason`: failure category, one of:
  *     - `"timeout"`: hit `timeoutMs` before the child finished
- *     - `"aborted"`: caller's `signal` was triggered
+ *     - `"abort"`: caller's `signal` was triggered
  *     - `"model_failed"`: every configured model + fallback returned an error
  *     - `"spawn_failed"`: subprocess couldn't start (Pi only — binary missing,
  *       permission denied, etc.)
- *     - `"protocol_error"`: child emitted output we couldn't parse (Pi only —
+ *     - `"non_zero_exit"`: child exited unsuccessfully before a final answer
+ *     - `"no_assistant"`: child completed without a final assistant message
+ *     - `"parse_failed"`: child emitted output we couldn't parse (Pi only —
  *       JSON malformed or unexpected event ordering)
- *     - `"unknown"`: catch-all so the agent layer always has a reason to log
  * - `error`: human-readable detail; safe to log, may include stack info.
  * - `durationMs`: wall-clock time from runner-call to runner-return.
  * - `meta`: optional harness-specific debug payload. Currently unused; left
@@ -110,11 +111,12 @@ export type SubagentRunResult =
           ok: false;
           reason:
               | "timeout"
-              | "aborted"
+              | "abort"
               | "model_failed"
               | "spawn_failed"
-              | "protocol_error"
-              | "unknown";
+              | "non_zero_exit"
+              | "no_assistant"
+              | "parse_failed";
           error: string;
           durationMs: number;
           meta?: Record<string, unknown>;

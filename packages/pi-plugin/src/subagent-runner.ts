@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import * as childProcess from "node:child_process";
 import { createInterface } from "node:readline";
 import type {
 	SubagentRunner,
@@ -43,9 +43,11 @@ import type {
  * Failure modes we handle explicitly:
  * - `agent_end` arrives but the last assistant message has stopReason
  *   "error" or "aborted" → `model_failed` with the embedded errorMessage.
- * - Process exits before `agent_end` is observed → `protocol_error`.
+ * - Process exits non-zero before `agent_end` is observed → `non_zero_exit`.
+ * - Process exits zero with no assistant result → `no_assistant`.
+ * - Malformed JSON output before completion → `parse_failed`.
  * - Spawn itself fails (binary missing, permission denied) → `spawn_failed`.
- * - Caller's AbortSignal fires → kill the child + return `aborted`.
+ * - Caller's AbortSignal fires → kill the child + return `abort`.
  * - `timeoutMs` elapses before `agent_end` → kill + return `timeout`.
  *
  * What we deliberately don't expose:
@@ -64,21 +66,26 @@ export class PiSubagentRunner implements SubagentRunner {
 
 	/** Path to the `pi` binary. Defaults to whatever's on $PATH. */
 	private readonly piBinary: string;
+	private readonly spawnImpl: typeof childProcess.spawn;
 
-	constructor(options: { piBinary?: string } = {}) {
+	constructor(
+		options: {
+			piBinary?: string;
+			/** Test seam for subprocess lifecycle tests. Production uses child_process.spawn. */
+			spawnImpl?: typeof childProcess.spawn;
+		} = {},
+	) {
 		this.piBinary = options.piBinary ?? "pi";
+		this.spawnImpl = options.spawnImpl ?? childProcess.spawn;
 	}
 
 	async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
 		const startTime = Date.now();
-		const args = this.buildArgs(options);
+		const args = buildArgs(options);
 
 		// The model spec is `provider/model` — Pi accepts that directly via
-		// `--model provider/id` (no separate `--provider` flag needed).
-		// Fallback chain handling: Pi has `--models a,b,c` for cycling, but
-		// for the subagent contract we keep it simple and try the primary
-		// first; fallbacks would require a wrapper retry loop, which we'll
-		// add only if real-world failure rates demand it.
+		// `--model provider/id` (no separate `--provider` flag needed). When a
+		// fallback chain is configured, `buildArgs` emits Pi's `--models a,b,c`.
 
 		return new Promise<SubagentRunResult>((resolve) => {
 			// Track whether we've already resolved so timeout/abort/exit don't
@@ -93,9 +100,9 @@ export class PiSubagentRunner implements SubagentRunner {
 				resolve(result);
 			};
 
-			let child: ReturnType<typeof spawn>;
+			let child: ReturnType<typeof childProcess.spawn>;
 			try {
-				child = spawn(this.piBinary, args, {
+				child = this.spawnImpl(this.piBinary, args, {
 					cwd: options.cwd,
 					// Inherit env so OAuth tokens (~/.pi/agent/auth.json),
 					// API key env vars, and PATH all flow through. The Pi
@@ -145,12 +152,12 @@ export class PiSubagentRunner implements SubagentRunner {
 			// child.stdout/stderr can be null only when the corresponding stdio
 			// slot is "ignore"/"inherit"/<fd>. We always pass "pipe" for both
 			// (above), so they're guaranteed Readable streams here. Still treat
-			// a missing stream as a hard protocol_error rather than crashing —
-			// this guards against future stdio-config changes that drop the pipe.
+			// a missing stream as a hard parse_failed rather than crashing — this
+			// guards against future stdio-config changes that drop the pipe.
 			if (!child.stdout) {
 				settle({
 					ok: false,
-					reason: "protocol_error",
+					reason: "parse_failed",
 					error: "pi child process did not expose stdout (stdio misconfigured)",
 					durationMs: Date.now() - startTime,
 				});
@@ -163,17 +170,15 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			rl.on("line", (line) => {
 				if (line.length === 0) return;
-				let event: unknown;
-				try {
-					event = JSON.parse(line);
-				} catch (error) {
+				const parsed = parsePiEventLine(line);
+				if (!parsed.ok) {
 					// Malformed event line — record but don't abort yet,
 					// so we can still consume `agent_end` if it arrives
-					// intact later. If we never see one, this becomes the
-					// protocol_error reason.
-					parseError = `failed to parse event: ${error instanceof Error ? error.message : String(error)} | line=${line.slice(0, 200)}`;
+					// intact later. If we never see one, this becomes parse_failed.
+					parseError = parsed.error;
 					return;
 				}
+				const event = parsed.event;
 
 				if (typeof event !== "object" || event === null) return;
 				const e = event as { type?: string; messages?: unknown };
@@ -193,10 +198,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
 				timeoutHandle = setTimeout(() => {
 					if (settled) return;
-					child.kill("SIGTERM");
-					setTimeout(() => {
-						if (!child.killed) child.kill("SIGKILL");
-					}, 2000);
+					terminateChild(child);
 					settle({
 						ok: false,
 						reason: "timeout",
@@ -209,13 +211,10 @@ export class PiSubagentRunner implements SubagentRunner {
 			// Caller-driven abort (e.g. dreamer lease loss).
 			const onAbort = () => {
 				if (settled) return;
-				child.kill("SIGTERM");
-				setTimeout(() => {
-					if (!child.killed) child.kill("SIGKILL");
-				}, 2000);
+				terminateChild(child);
 				settle({
 					ok: false,
-					reason: "aborted",
+					reason: "abort",
 					error: "pi subagent aborted by caller",
 					durationMs: Date.now() - startTime,
 				});
@@ -241,6 +240,16 @@ export class PiSubagentRunner implements SubagentRunner {
 				// Common case: agent_end was observed. Decide between
 				// success and model_failed based on the embedded stopReason.
 				if (sawAgentEnd) {
+					if (finalAssistantText === null) {
+						settle({
+							ok: false,
+							reason: "no_assistant",
+							error: "pi agent_end did not include an assistant message",
+							durationMs: Date.now() - startTime,
+							meta: { stderr: stderr.length > 0 ? stderr : undefined },
+						});
+						return;
+					}
 					if (finalStopReason === "error" || finalStopReason === "aborted") {
 						settle({
 							ok: false,
@@ -268,8 +277,23 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (parseError !== null) {
 					settle({
 						ok: false,
-						reason: "protocol_error",
+						reason: "parse_failed",
 						error: parseError,
+						durationMs: Date.now() - startTime,
+						meta: {
+							stderr: stderr.length > 0 ? stderr : undefined,
+							exitCode: code,
+							signal,
+						},
+					});
+					return;
+				}
+
+				if (code !== 0 || signal !== null) {
+					settle({
+						ok: false,
+						reason: "non_zero_exit",
+						error: `pi exited (code=${code}, signal=${signal}) without emitting agent_end. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
 						durationMs: Date.now() - startTime,
 						meta: {
 							stderr: stderr.length > 0 ? stderr : undefined,
@@ -282,8 +306,8 @@ export class PiSubagentRunner implements SubagentRunner {
 
 				settle({
 					ok: false,
-					reason: "unknown",
-					error: `pi exited (code=${code}, signal=${signal}) without emitting agent_end. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
+					reason: "no_assistant",
+					error: `pi exited successfully without emitting agent_end. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
 					durationMs: Date.now() - startTime,
 					meta: {
 						stderr: stderr.length > 0 ? stderr : undefined,
@@ -294,58 +318,63 @@ export class PiSubagentRunner implements SubagentRunner {
 			});
 		});
 	}
+}
 
-	/**
-	 * Build the argv for one `pi --print --mode json` invocation.
-	 *
-	 * Argument ordering matters: print mode treats positional args as
-	 * messages, so the user prompt must come last.
-	 */
-	private buildArgs(options: SubagentRunOptions): string[] {
-		const args: string[] = [
-			"--print",
-			"--mode",
-			"json",
-			// Disable extension/skill/template discovery in the spawned child
-			// for two reasons:
-			//   (1) Recursion: without this, every historian/sidekick/dreamer
-			//       subagent process loads the magic-context plugin again,
-			//       which itself can register its own historian trigger that
-			//       fires on the child's brief turn — leading to nested spawn
-			//       cycles that just waste API calls and tokens.
-			//   (2) Performance: skill/template discovery scans the filesystem
-			//       at startup. Subagents don't need any of that — they have
-			//       a focused system prompt and one user message.
-			"--no-extensions",
-			"--no-skills",
-			"--no-prompt-templates",
-			// --no-tools is intentionally NOT set: historian and dreamer use
-			// Pi's built-in tools (Edit, Write, etc.) for some maintenance
-			// tasks. Sidekick uses ctx_search, but that's exposed via a
-			// different mechanism. If we ever need to harden subagent tool
-			// surfaces this is the right toggle.
-		];
+/**
+ * Build the argv for one `pi --print --mode json` invocation.
+ *
+ * Argument ordering matters: print mode treats positional args as
+ * messages, so the user prompt must come last.
+ */
+export function buildArgs(options: SubagentRunOptions): string[] {
+	const args: string[] = [
+		"--print",
+		"--mode",
+		"json",
+		// Disable extension/skill/template discovery in the spawned child
+		// for two reasons:
+		//   (1) Recursion: without this, every historian/sidekick/dreamer
+		//       subagent process loads the magic-context plugin again,
+		//       which itself can register its own historian trigger that
+		//       fires on the child's brief turn — leading to nested spawn
+		//       cycles that just waste API calls and tokens.
+		//   (2) Performance: skill/template discovery scans the filesystem
+		//       at startup. Subagents don't need any of that — they have
+		//       a focused system prompt and one user message.
+		"--no-extensions",
+		"--no-skills",
+		"--no-prompt-templates",
+		// --no-tools is intentionally NOT set: historian and dreamer use
+		// Pi's built-in tools (Edit, Write, etc.) for some maintenance
+		// tasks. Sidekick uses ctx_search, but that's exposed via a
+		// different mechanism. If we ever need to harden subagent tool
+		// surfaces this is the right toggle.
+	];
 
-		if (options.systemPrompt && options.systemPrompt.length > 0) {
-			// We intentionally use --system-prompt (replace) rather than
-			// --append-system-prompt (chain) because subagents are one-shot
-			// and have their own focused system prompt. Mixing in Pi's
-			// default coding-assistant prompt would dilute the historian
-			// / dreamer / sidekick role guidance.
-			args.push("--system-prompt", options.systemPrompt);
-		}
-
-		if (options.model && options.model.length > 0) {
-			// Pi accepts `provider/model` directly via --model. No need
-			// to split into separate --provider / --model flags.
-			args.push("--model", options.model);
-		}
-
-		// Positional message argument MUST come last in print-mode argv.
-		args.push(options.userMessage);
-
-		return args;
+	if (options.systemPrompt && options.systemPrompt.length > 0) {
+		// We intentionally use --system-prompt (replace) rather than
+		// --append-system-prompt (chain) because subagents are one-shot
+		// and have their own focused system prompt. Mixing in Pi's
+		// default coding-assistant prompt would dilute the historian
+		// / dreamer / sidekick role guidance.
+		args.push("--system-prompt", options.systemPrompt);
 	}
+
+	const models = [options.model, ...(options.fallbackModels ?? [])].filter(
+		(model): model is string => typeof model === "string" && model.length > 0,
+	);
+	if (models.length > 1) {
+		args.push("--models", models.join(","));
+	} else if (models.length === 1) {
+		// Pi accepts `provider/model` directly via --model. No need
+		// to split into separate --provider / --model flags.
+		args.push("--model", models[0]);
+	}
+
+	// Positional message argument MUST come last in print-mode argv.
+	args.push(options.userMessage);
+
+	return args;
 }
 
 /**
@@ -365,8 +394,8 @@ export class PiSubagentRunner implements SubagentRunner {
  * role === "assistant". Its text content is the concatenation of every
  * `{ type: "text", text }` block in `content`.
  */
-function extractFinalAssistant(messages: unknown[]): {
-	text: string;
+export function extractFinalAssistant(messages: unknown[]): {
+	text: string | null;
 	stopReason: string | null;
 	errorMessage: string | null;
 } {
@@ -398,5 +427,34 @@ function extractFinalAssistant(messages: unknown[]): {
 			errorMessage: typeof m.errorMessage === "string" ? m.errorMessage : null,
 		};
 	}
-	return { text: "", stopReason: null, errorMessage: null };
+	return { text: null, stopReason: null, errorMessage: null };
 }
+
+export function parsePiEventLine(
+	line: string,
+): { ok: true; event: unknown } | { ok: false; error: string } {
+	try {
+		return { ok: true, event: JSON.parse(line) };
+	} catch (error) {
+		return {
+			ok: false,
+			error: `failed to parse event: ${error instanceof Error ? error.message : String(error)} | line=${line.slice(0, 200)}`,
+		};
+	}
+}
+
+function terminateChild(child: ReturnType<typeof childProcess.spawn>) {
+	child.kill("SIGTERM");
+	const killHandle = setTimeout(() => {
+		if (!child.killed) child.kill("SIGKILL");
+	}, 2000);
+	if (typeof killHandle.unref === "function") {
+		killHandle.unref();
+	}
+}
+
+export const __test = {
+	buildArgs,
+	extractFinalAssistant,
+	parsePiEventLine,
+};
