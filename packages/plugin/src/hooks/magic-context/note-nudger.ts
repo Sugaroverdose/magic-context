@@ -62,12 +62,22 @@ export function onNoteTrigger(db: Database, sessionId: string, trigger: NoteNudg
  *   If it matches the trigger-time message, delivery is deferred to avoid busting
  *   the Anthropic prompt-cache prefix (the trigger fired during the agent's turn,
  *   so injecting into the current user message would mutate cached content).
+ * @param projectIdentity - Project identity for resolving ready smart notes.
+ * @param noteReadStillVisible - True if the agent currently has a non-stripped
+ *   `ctx_note(action="read")` tool call in their visible message context. When
+ *   the agent has read the latest note state AND that read is still visible,
+ *   the nudge is suppressed (no value re-surfacing what's already on screen).
+ *   When the read has been dropped (compactified, ctx_reduce'd, age-cleaned),
+ *   the nudge fires again at the next work boundary so the agent regains
+ *   visibility into deferred intentions. Caller computes this via
+ *   `hasVisibleNoteReadCall(messages)` AFTER drops are materialized.
  */
 export function peekNoteNudgeText(
     db: Database,
     sessionId: string,
     currentUserMessageId?: string | null,
     projectIdentity?: string,
+    noteReadStillVisible?: boolean,
 ): string | null {
     const state = getPersistedNoteNudge(db, sessionId);
 
@@ -120,14 +130,27 @@ export function peekNoteNudgeText(
         return null;
     }
 
-    // Suppress if the agent already ran ctx_note(read) AFTER the most recent
-    // note activity. In that case the agent has seen the current note state in
-    // recent context (the tool result is in message history) and there's no
-    // new information to surface. This is the main "stop bugging the agent"
-    // heuristic — nudging them to re-read something they already read provides
-    // no benefit.
+    // Suppress only when BOTH conditions hold:
+    //   1. The agent already ran ctx_note(read) AFTER the most recent note
+    //      activity — they've seen the current note state.
+    //   2. That ctx_note(read) tool call is STILL VISIBLE in their message
+    //      context (caller passes `noteReadStillVisible` after computing it
+    //      against the post-drop messages array).
+    //
+    // Both must hold because either alone produces wrong behavior:
+    //   - Timestamp-only suppression (#1 alone) keeps suppressing forever
+    //     once the read result has been compactified, ctx_reduce'd, or
+    //     age-cleaned out of context. The agent loses visibility into
+    //     deferred intentions and we never re-surface them.
+    //   - Visibility-only suppression (#2 alone) re-nudges immediately even
+    //     when the agent just read the latest state — pestering them with
+    //     content they already see.
+    //
+    // The combined check is what your original design intended: re-surface
+    // notes at work boundaries when the prior read is no longer in front
+    // of the agent.
     const lastReadAt = getNoteLastReadAt(db, sessionId);
-    if (lastReadAt > 0) {
+    if (lastReadAt > 0 && noteReadStillVisible) {
         const mostRecentNoteActivity = maxNoteActivityTime([...notes, ...readySmartNotes]);
         // Strict > so same-millisecond races favor the newer note. If a note
         // write and a ctx_note(read) land in the same ms, we can't tell which
@@ -136,9 +159,9 @@ export function peekNoteNudgeText(
         if (mostRecentNoteActivity > 0 && lastReadAt > mostRecentNoteActivity) {
             sessionLog(
                 sessionId,
-                `note-nudge: suppressing — agent already ran ctx_note(read) at ${new Date(
+                `note-nudge: suppressing — agent ran ctx_note(read) at ${new Date(
                     lastReadAt,
-                ).toISOString()}, no new notes since ${new Date(
+                ).toISOString()} and the read is still visible; no new notes since ${new Date(
                     mostRecentNoteActivity,
                 ).toISOString()}`,
             );

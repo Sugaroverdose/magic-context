@@ -28,6 +28,7 @@ import {
     markNoteNudgeDelivered,
     peekNoteNudgeText,
 } from "./note-nudger";
+import { hasVisibleNoteReadCall } from "./note-visibility";
 import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
@@ -637,8 +638,22 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         }
     }
 
+    // Visibility check: scan the post-drop messages array for a non-stripped
+    // ctx_note(action="read") tool call. This decides whether the suppression
+    // path inside `peekNoteNudgeText` should fire — see the comment block
+    // there for the full rationale. Only computed when nudges can actually
+    // fire (fullFeatureMode), so we skip the scan in subagent sessions.
+    const noteReadStillVisible = args.fullFeatureMode
+        ? hasVisibleNoteReadCall(args.messages)
+        : false;
     const deferredNoteText = args.fullFeatureMode
-        ? peekNoteNudgeText(args.db, args.sessionId, args.currentTurnId, args.projectPath)
+        ? peekNoteNudgeText(
+              args.db,
+              args.sessionId,
+              args.currentTurnId,
+              args.projectPath,
+              noteReadStillVisible,
+          )
         : null;
     if (deferredNoteText) {
         const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
