@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 
+import { doctor } from "./doctor";
 import { runSetup } from "./setup";
 
 function getVersion(): string {
@@ -14,33 +15,31 @@ function getVersion(): string {
 	}
 }
 
-export function doctor(): number {
-	console.log(
-		"Magic Context for Pi doctor is not yet implemented in v1; coming in 5b.2.",
-	);
-	return 0;
-}
-
 function printUsage(): void {
 	console.log("");
 	console.log("  Magic Context for Pi CLI");
 	console.log("  ────────────────────────");
 	console.log("");
 	console.log("  Commands:");
-	console.log("    setup       Interactive setup wizard");
-	console.log("    doctor      Health check stub (coming in 5b.2)");
-	console.log("    --version   Print version");
+	console.log("    setup            Interactive setup wizard");
+	console.log("    doctor           Run health checks");
+	console.log("    doctor --force   Repair safe issues and re-check");
+	console.log("    doctor --issue   Create a sanitized GitHub bug report");
+	console.log("    doctor --help    Show doctor help");
+	console.log("    --version        Print version");
 	console.log("");
 	console.log("  Usage:");
 	console.log("    magic-context-pi setup");
 	console.log("    magic-context-pi doctor");
+	console.log("    magic-context-pi doctor --force");
+	console.log("    magic-context-pi doctor --issue");
 	console.log("");
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
 	const command = argv[0];
 	if (command === "setup") return runSetup();
-	if (command === "doctor") return doctor();
+	if (command === "doctor") return doctor(argv.slice(1));
 	if (command === "--version" || command === "-v") {
 		console.log(getVersion());
 		return 0;

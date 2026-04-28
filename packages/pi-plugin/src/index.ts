@@ -31,6 +31,11 @@ import { initializeEmbedding } from "@magic-context/core/features/magic-context/
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import {
+	deriveHistorianChunkTokens,
+	deriveTriggerBudget,
+	resolveHistorianContextLimit,
+} from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
@@ -40,6 +45,10 @@ import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
+import { registerCtxDreamCommand } from "./commands/ctx-dream";
+import { registerCtxFlushCommand } from "./commands/ctx-flush";
+import { registerCtxRecompCommand } from "./commands/ctx-recomp";
+import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { loadPiConfig } from "./config";
 import {
 	awaitInFlightHistorians,
@@ -116,35 +125,57 @@ function resolveSidekickFromConfig(
 function resolveHistorianFromConfig(
 	config: MagicContextConfig,
 ): PiHistorianOptions | undefined {
-	const historian = config.historian as HistorianConfig;
-	const model = historian.model?.trim();
+	// Defensive: schema declares `historian` required with default {}, but the
+	// runtime config can come from a malformed JSONC merge that drops the
+	// field. Fall back to undefined-safe access so plugin load never crashes.
+	const historian = config.historian as HistorianConfig | undefined;
+	const model = historian?.model?.trim();
 	if (!model || model.length === 0) return undefined;
-
-	// Trigger budget is derived from the OpenCode-style execute_threshold
-	// math but Pi sessions don't have provider-reported context limits at
-	// load time. Use a conservative default of 8000 tokens, matching the
-	// previous env-var stop-gap.
-	const triggerBudget = 8_000;
 
 	const executeThreshold =
 		typeof config.execute_threshold_percentage === "number"
 			? config.execute_threshold_percentage
 			: (config.execute_threshold_percentage as { default: number }).default;
 
+	// Step 5c: replace the previous hardcoded 8K trigger budget with the
+	// OpenCode-style derivation. The trigger budget anchors size-based
+	// historian triggers (tail_size, commit_clusters); the chunk budget
+	// scales with the HISTORIAN model's own context window so a single
+	// historian call doesn't overflow.
+	//
+	// We don't know the main session's model at boot (Pi reports it via
+	// `ctx.getContextUsage()` per turn), so we approximate `mainContextLimit`
+	// using the historian model's resolved limit. For most users the
+	// session model has equal-or-larger context than the historian model
+	// (Sonnet/Opus session, Haiku historian), so this is safe — the
+	// trigger budget will scale to the smaller of the two contexts and
+	// fire historian sooner rather than later. The OpenCode plugin uses
+	// the live session model here because it has direct access; that's a
+	// minor parity gap, not a correctness issue.
+	const historianContextLimit = resolveHistorianContextLimit(model);
+	const triggerBudget = deriveTriggerBudget(
+		historianContextLimit,
+		executeThreshold,
+	);
+	const historianChunkTokens = deriveHistorianChunkTokens(
+		historianContextLimit,
+	);
+
 	// Schema's `fallback_models` is `string | string[] | undefined`; Pi
 	// expects readonly `string[] | undefined`. Normalize a single-string
 	// fallback into a one-element array. (OpenCode does the same in its
 	// agent-override resolver — single-string is shorthand for one fallback.)
+	// `historian` is guaranteed defined here because we returned early on
+	// `!model` above (model is derived from `historian?.model`).
+	const fbRaw = historian?.fallback_models;
 	const fallbackModels: readonly string[] | undefined =
-		typeof historian.fallback_models === "string"
-			? [historian.fallback_models]
-			: historian.fallback_models;
+		typeof fbRaw === "string" ? [fbRaw] : fbRaw;
 
 	return {
 		runner: new PiSubagentRunner(),
 		model,
 		fallbackModels,
-		historianChunkTokens: triggerBudget,
+		historianChunkTokens,
 		timeoutMs: config.historian_timeout_ms,
 		executeThresholdPercentage: executeThreshold,
 		triggerBudget,
@@ -328,6 +359,49 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			? `registered /ctx-aug (sidekick model=${sidekickConfig.model})`
 			: "registered /ctx-aug (sidekick disabled — set sidekick.enabled=true and sidekick.model in config)",
 	);
+
+	// Step 5c: register the four diagnostic/admin slash commands so Pi
+	// reaches command-surface parity with the OpenCode plugin. All four
+	// commands emit `pi.sendMessage(..., { triggerTurn: false })` — they
+	// are never visible to the LLM and never trigger a turn. They mirror
+	// the behavior of OpenCode's command-handler.ts but use Pi-native
+	// surfaces (registerCommand + sendMessage) instead of OpenCode's
+	// command.execute.before hook.
+	registerCtxStatusCommand(pi, {
+		db,
+		projectIdentity,
+		protectedTags: config.protected_tags,
+		nudgeIntervalTokens: config.nudge_interval_tokens,
+		executeThresholdPercentage: config.execute_threshold_percentage,
+		historyBudgetPercentage: config.history_budget_percentage,
+		commitClusterTrigger: config.commit_cluster_trigger,
+		executeThresholdTokens: config.execute_threshold_tokens,
+	});
+	info("registered /ctx-status");
+
+	registerCtxFlushCommand(pi, { db });
+	info("registered /ctx-flush");
+
+	// /ctx-recomp uses its own PiSubagentRunner instance — recomp can run
+	// concurrently with normal historian, and giving each its own runner
+	// avoids cross-cancellation. Same model + fallback chain as historian.
+	registerCtxRecompCommand(pi, {
+		db,
+		runner: new PiSubagentRunner(),
+		historianModel: historianConfig?.model,
+		historianFallbacks: historianConfig?.fallbackModels,
+		historianTimeoutMs: config.historian_timeout_ms,
+		memoryEnabled: config.memory.enabled,
+		autoPromote: config.memory.auto_promote,
+	});
+	info("registered /ctx-recomp");
+
+	registerCtxDreamCommand(pi, {
+		db,
+		projectDir,
+		projectIdentity,
+	});
+	info("registered /ctx-dream");
 
 	// Register Pi project with the singleton dreamer timer. When dreamer is
 	// disabled in config (default) this is a no-op. When enabled, the timer
