@@ -26,7 +26,12 @@
  * in `./sqlite-helpers.ts`.
  */
 
-const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+// Detect Bun via process.versions.bun. Both globalThis.Bun and
+// process.versions.bun are set by the Bun runtime, but process.versions
+// is a lower-level surface less likely to be sandboxed by host runtimes
+// (e.g. Electron in OpenCode desktop apps that re-expose a Bun-flavored
+// environment). Real Node and Electron never set this field.
+const isBun = typeof process !== "undefined" && typeof process.versions?.bun === "string";
 
 // Function() defeats bundler static analysis. Both Bun (1.x) and Node (≥14.8)
 // support top-level await in ESM, which is the build target.

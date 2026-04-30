@@ -39,3 +39,4 @@ packages/plugin/README.md
 # Keep only the final animation; iteration folders stay local
 packages/plugin/docs/animation[0-9]*/
 
+.pi/
