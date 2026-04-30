@@ -4,26 +4,12 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { log, sessionLog } from "../../../shared/logger";
+import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
-export const SIDEKICK_SYSTEM_PROMPT = `You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.
-
-Your job is to search project memories, session facts, and conversation history and return a concise augmentation for the user's prompt.
-
-Rules:
-- Use ctx_search(query="...") to look up relevant memories, facts, and history before answering.
-- Run targeted searches only; prefer 1-3 precise queries.
-- Return only findings that materially help with the user's prompt.
-- If nothing useful is found, respond with exactly: No relevant memories found.
-- Keep the response focused and concise.
-- Do not invent facts or speculate beyond what memories support.`;
-
-/**
- * Strip <think>...</think> blocks emitted by reasoning models (DeepSeek, Qwen, etc.).
- * These contain chain-of-thought traces that shouldn't appear in the augmentation output.
- */
-function stripThinkingBlocks(text: string): string {
-    return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-}
+// Re-export the system prompt so existing call sites that import from this
+// module keep working. The canonical location is now `./core` so the
+// pi-plugin can pull it without depending on OpenCode-specific imports.
+export { SIDEKICK_SYSTEM_PROMPT };
 
 export async function runSidekick(deps: {
     client: PluginContext["client"];

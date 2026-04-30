@@ -363,6 +363,35 @@ export class MockProvider {
                                     type: "content_block_stop",
                                     index,
                                 });
+                            } else if (blockType === "tool_use") {
+                                const toolBlock = block as {
+                                    type: "tool_use";
+                                    id?: string;
+                                    name?: string;
+                                    input?: Record<string, unknown>;
+                                };
+                                send("content_block_start", {
+                                    type: "content_block_start",
+                                    index,
+                                    content_block: {
+                                        type: "tool_use",
+                                        id: toolBlock.id ?? `toolu_${index}`,
+                                        name: toolBlock.name ?? "mock_tool",
+                                        input: {},
+                                    },
+                                });
+                                send("content_block_delta", {
+                                    type: "content_block_delta",
+                                    index,
+                                    delta: {
+                                        type: "input_json_delta",
+                                        partial_json: JSON.stringify(toolBlock.input ?? {}),
+                                    },
+                                });
+                                send("content_block_stop", {
+                                    type: "content_block_stop",
+                                    index,
+                                });
                             } else {
                                 // Pass through other non-text blocks as-is (tool_use, etc.)
                                 send("content_block_start", {

@@ -1,6 +1,5 @@
-import type { Database } from "bun:sqlite";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
+import { getHarness } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertFactStatements = new WeakMap<Database, PreparedStatement>();
@@ -9,7 +8,7 @@ function getInsertCompartmentStatement(db: Database): PreparedStatement {
     let stmt = insertCompartmentStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertCompartmentStatements.set(db, stmt);
     }
@@ -20,7 +19,7 @@ function getInsertFactStatement(db: Database): PreparedStatement {
     let stmt = insertFactStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO session_facts (session_id, category, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO session_facts (session_id, category, content, created_at, updated_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
         );
         insertFactStatements.set(db, stmt);
     }
@@ -129,6 +128,7 @@ function insertCompartmentRows(
             compartment.title,
             compartment.content,
             now,
+            getHarness(),
         );
     }
 }
@@ -141,7 +141,7 @@ function insertFactRows(
 ): void {
     const stmt = getInsertFactStatement(db);
     for (const fact of facts) {
-        stmt.run(sessionId, fact.category, fact.content, now, now);
+        stmt.run(sessionId, fact.category, fact.content, now, now, getHarness());
     }
 }
 
@@ -342,7 +342,7 @@ export function saveRecompStagingPass(
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
         const compartmentStmt = db.prepare(
-            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, pass_number, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO recomp_compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         for (const c of compartments) {
             compartmentStmt.run(
@@ -356,14 +356,15 @@ export function saveRecompStagingPass(
                 c.content,
                 passNumber,
                 now,
+                getHarness(),
             );
         }
 
         const factStmt = db.prepare(
-            "INSERT INTO recomp_facts (session_id, category, content, pass_number, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO recomp_facts (session_id, category, content, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
         );
         for (const f of facts) {
-            factStmt.run(sessionId, f.category, f.content, passNumber, now);
+            factStmt.run(sessionId, f.category, f.content, passNumber, now, getHarness());
         }
     })();
 }

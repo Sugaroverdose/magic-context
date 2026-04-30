@@ -1,19 +1,21 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getSourceContents, replaceSourceContent, saveSourceContent } from "./storage-source";
 
 let db: Database;
 
 function createDb(): Database {
     const database = new Database(":memory:");
-    database.run(`
+    database.exec(`
     CREATE TABLE source_contents (
       tag_id INTEGER NOT NULL,
       session_id TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY (session_id, tag_id)
     );
   `);
@@ -21,7 +23,7 @@ function createDb(): Database {
 }
 
 afterEach(() => {
-    if (db) db.close(false);
+    if (db) closeQuietly(db);
 });
 
 describe("storage-source", () => {

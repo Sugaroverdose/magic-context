@@ -1,9 +1,13 @@
-import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { getOpenCodeStorageDir } from "../../shared/data-path";
+import {
+    getLegacyOpenCodeMagicContextStorageDir,
+    getMagicContextStorageDir,
+} from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 
 const databases = new Map<string, Database>();
@@ -12,15 +16,69 @@ const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
 function resolveDatabasePath(): { dbDir: string; dbPath: string } {
-    const dbDir = join(getOpenCodeStorageDir(), "plugin", "magic-context");
+    const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
 }
 
+/**
+ * One-time migration of pre-cortexkit OpenCode plugin data into the shared
+ * cortexkit/magic-context location. Runs lazily on first openDatabase() call.
+ *
+ * Safety guarantees:
+ *   - Only runs when target DB does not yet exist (idempotent on subsequent
+ *     boots; never overwrites newer state).
+ *   - Only runs when legacy DB exists (no-op for fresh installs and Pi).
+ *   - Copies WAL/SHM sidecars too — WAL mode means uncheckpointed writes live
+ *     there, so omitting them would lose recent data.
+ *   - Copies the embedding model cache subdirectory if present, avoiding
+ *     re-download on first post-migration boot.
+ *   - Leaves legacy files in place as a manual rollback path. Manual cleanup
+ *     is safe after one stable release.
+ */
+function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string): void {
+    if (existsSync(targetDbPath)) return;
+
+    const legacyDir = getLegacyOpenCodeMagicContextStorageDir();
+    const legacyDbPath = join(legacyDir, "context.db");
+    if (!existsSync(legacyDbPath)) return;
+
+    log(
+        `[magic-context] migrating legacy plugin storage: ${legacyDir} -> ${targetDbDir} (legacy left in place as backup)`,
+    );
+    mkdirSync(targetDbDir, { recursive: true });
+
+    // Copy main DB + WAL/SHM sidecars. WAL mode keeps uncheckpointed writes in
+    // -wal; if the OpenCode plugin was running when the user upgraded, real
+    // data could be in -wal only. Same for -shm shared memory metadata.
+    for (const suffix of ["", "-wal", "-shm"]) {
+        const src = `${legacyDbPath}${suffix}`;
+        const dst = join(targetDbDir, `context.db${suffix}`);
+        if (existsSync(src)) {
+            try {
+                copyFileSync(src, dst);
+            } catch (error) {
+                log(`[magic-context] failed to copy ${src}:`, getErrorMessage(error));
+            }
+        }
+    }
+
+    // Copy the embedding model cache subdir to avoid re-downloading on first boot.
+    const legacyModelsDir = join(legacyDir, "models");
+    const targetModelsDir = join(targetDbDir, "models");
+    if (existsSync(legacyModelsDir) && !existsSync(targetModelsDir)) {
+        try {
+            cpSync(legacyModelsDir, targetModelsDir, { recursive: true });
+        } catch (error) {
+            log("[magic-context] failed to copy embedding model cache:", getErrorMessage(error));
+        }
+    }
+}
+
 export function initializeDatabase(db: Database): void {
-    db.run("PRAGMA journal_mode=WAL");
-    db.run("PRAGMA busy_timeout=5000");
-    db.run("PRAGMA foreign_keys=ON");
-    db.run(`
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec("PRAGMA busy_timeout=5000");
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,
@@ -29,6 +87,7 @@ export function initializeDatabase(db: Database): void {
       status TEXT DEFAULT 'active',
       byte_size INTEGER,
       tag_number INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, tag_number)
     );
 
@@ -37,7 +96,8 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT,
       tag_id INTEGER,
       operation TEXT,
-      queued_at INTEGER
+      queued_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE TABLE IF NOT EXISTS source_contents (
@@ -45,6 +105,7 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT,
       content TEXT,
       created_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY(session_id, tag_id)
     );
 
@@ -59,6 +120,7 @@ export function initializeDatabase(db: Database): void {
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
     CREATE INDEX IF NOT EXISTS idx_compartments_session ON compartments(session_id);
@@ -67,6 +129,7 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT NOT NULL,
       message_ordinal INTEGER NOT NULL,
       depth INTEGER NOT NULL DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY(session_id, message_ordinal)
     );
     CREATE INDEX IF NOT EXISTS idx_compression_depth_session ON compression_depth(session_id);
@@ -77,7 +140,8 @@ export function initializeDatabase(db: Database): void {
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     -- session_notes and smart_notes were merged into the unified notes table
@@ -169,7 +233,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TABLE IF NOT EXISTS message_history_index (
       session_id TEXT PRIMARY KEY,
       last_indexed_ordinal INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
@@ -187,6 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
 
     CREATE TABLE IF NOT EXISTS session_meta (
       session_id TEXT PRIMARY KEY,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       last_response_time INTEGER,
       cache_ttl TEXT,
       counter INTEGER DEFAULT 0,
@@ -233,6 +299,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       content TEXT NOT NULL,
       pass_number INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
 
@@ -242,7 +309,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE INDEX IF NOT EXISTS idx_session_facts_session ON session_facts(session_id);
@@ -335,6 +403,34 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // the heal into the versioned migration system means it runs exactly
     // once on affected DBs (v4 → v5 upgrade) and never again.
     // See features/magic-context/migrations.ts.
+
+    // Plugin v0.16+ — `harness` column on every session-scoped table.
+    // SQLite ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT physically backfills
+    // existing rows with the default, so OpenCode users transparently get
+    // harness='opencode' on all pre-existing data. Pi will be added later
+    // by its own plugin entry, also writing to the same shared DB.
+    //
+    // We don't (yet) include harness in WHERE clauses — OpenCode session IDs
+    // never collide with Pi session IDs in practice (different ID formats).
+    // The column captures origin for the dashboard and unblocks future
+    // cross-harness session migration. Defensive query scoping by harness
+    // ships in a later commit once Pi can write to the same DB concurrently
+    // and we can validate the safety property end-to-end.
+    ensureColumn(db, "tags", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "pending_ops", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "source_contents", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "compartments", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "compression_depth", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "session_facts", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "session_meta", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "recomp_compartments", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "recomp_facts", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "message_history_index", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    // notes table is created by migration v1 (not initializeDatabase). It
+    // exists by the time runMigrations() returns, but ensureColumn's PRAGMA
+    // table_info check needs the table to exist. Order: initializeDatabase()
+    // runs before runMigrations(), so notes won't exist yet on a fresh DB
+    // here. Migration v6 handles `notes` separately (see migrations.ts).
 }
 
 /**
@@ -462,7 +558,7 @@ function ensureColumn(db: Database, table: string, column: string, definition: s
     if (rows.some((row) => row.name === column)) {
         return;
     }
-    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function createFallbackDatabase(): Database {
@@ -489,6 +585,7 @@ export function openDatabase(): Database {
             return existing;
         }
 
+        migrateLegacyStorageIfNeeded(dbPath, dbDir);
         mkdirSync(dbDir, { recursive: true });
 
         const db = new Database(dbPath);
@@ -529,7 +626,7 @@ export function getDatabasePersistenceError(db: Database): string | null {
 export function closeDatabase(): void {
     for (const [key, db] of databases) {
         try {
-            db.close(false);
+            closeQuietly(db);
         } catch (error) {
             log("[magic-context] storage error:", error);
         } finally {

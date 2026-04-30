@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { setNoteLastReadAt } from "../../features/magic-context/storage-meta-persisted";
 import { addNote } from "../../features/magic-context/storage-notes";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearNoteNudgeState,
     getNoteNudgeText,
@@ -17,14 +18,14 @@ const dbs: Database[] = [];
 
 afterEach(() => {
     for (const db of dbs) {
-        db.close(false);
+        closeQuietly(db);
     }
     dbs.length = 0;
 });
 
 function makeDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
         CREATE TABLE session_meta (
             session_id TEXT PRIMARY KEY,
             last_response_time INTEGER DEFAULT 0,
@@ -50,8 +51,9 @@ function makeDb(): Database {
             note_nudge_sticky_text TEXT DEFAULT '',
             note_nudge_sticky_message_id TEXT DEFAULT '',
             note_last_read_at INTEGER DEFAULT 0,
-            cleared_reasoning_through_tag INTEGER DEFAULT 0
-        );
+            cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
 
         CREATE TABLE notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,8 +67,9 @@ function makeDb(): Database {
             updated_at INTEGER NOT NULL,
             last_checked_at INTEGER,
             ready_at INTEGER,
-            ready_reason TEXT
-        );
+            ready_reason TEXT,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
     `);
     dbs.push(db);
     return db;

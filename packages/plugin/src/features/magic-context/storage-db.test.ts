@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeDatabase, isDatabasePersisted, openDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
@@ -23,7 +24,8 @@ function useTempDataHome(prefix: string): string {
 }
 
 function resolveDbPath(dataHome: string): string {
-    return join(dataHome, "opencode", "storage", "plugin", "magic-context", "context.db");
+    // Plugin v0.16+ — shared cortexkit/magic-context path. See data-path.ts.
+    return join(dataHome, "cortexkit", "magic-context", "context.db");
 }
 
 afterEach(() => {
@@ -106,7 +108,9 @@ describe("storage-db", () => {
 
         it("#when file path setup fails #then falls back to in-memory DB", () => {
             const dataHome = useTempDataHome("storage-db-fallback-");
-            writeFileSync(join(dataHome, "opencode"), "not-a-directory", "utf-8");
+            // Block mkdirSync by planting a file at the cortexkit segment of
+            // the new shared path. See storage.test.ts for the same pattern.
+            writeFileSync(join(dataHome, "cortexkit"), "not-a-directory", "utf-8");
 
             const db = openDatabase();
 
@@ -123,7 +127,7 @@ describe("storage-db", () => {
         it("#when an existing session_meta table lacks compartment_in_progress #then openDatabase adds the missing column", () => {
             const dataHome = useTempDataHome("storage-db-migrate-compartment-flag-");
             const dbPath = resolveDbPath(dataHome);
-            mkdirSync(join(dataHome, "opencode", "storage", "plugin", "magic-context"), {
+            mkdirSync(join(dataHome, "cortexkit", "magic-context"), {
                 recursive: true,
             });
             const legacyDb = new Database(dbPath);
@@ -147,10 +151,11 @@ describe("storage-db", () => {
           historian_failure_count INTEGER DEFAULT 0,
           historian_last_error TEXT DEFAULT NULL,
           historian_last_failure_at INTEGER DEFAULT NULL,
-          cleared_reasoning_through_tag INTEGER DEFAULT 0
-        );
+          cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
       `);
-            legacyDb.close(false);
+            closeQuietly(legacyDb);
 
             const db = openDatabase();
             const columns = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
@@ -170,7 +175,7 @@ describe("storage-db", () => {
         it("#when an existing memory_embeddings table lacks model_id #then openDatabase adds the missing column", () => {
             const dataHome = useTempDataHome("storage-db-migrate-embedding-model-");
             const dbPath = resolveDbPath(dataHome);
-            mkdirSync(join(dataHome, "opencode", "storage", "plugin", "magic-context"), {
+            mkdirSync(join(dataHome, "cortexkit", "magic-context"), {
                 recursive: true,
             });
             const legacyDb = new Database(dbPath);
@@ -205,7 +210,7 @@ describe("storage-db", () => {
           embedding BLOB NOT NULL
         );
       `);
-            legacyDb.close(false);
+            closeQuietly(legacyDb);
 
             const db = openDatabase();
             const columns = db.prepare("PRAGMA table_info(memory_embeddings)").all() as Array<{

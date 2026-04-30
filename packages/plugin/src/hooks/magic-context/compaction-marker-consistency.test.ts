@@ -1,12 +1,13 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { setPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { checkCompactionMarkerConsistency } from "./compaction-marker-manager";
 
 const tempDirs: string[] = [];
@@ -17,10 +18,11 @@ function useTempDataHome(prefix: string): string {
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     // Match the getDataDir() layout the plugin expects. opencode.db lives
-    // alongside the storage/ tree, not inside it.
-    mkdirSync(join(dir, "opencode", "storage", "plugin", "magic-context"), {
-        recursive: true,
-    });
+    // under opencode/, while magic-context's own DB now lives at the shared
+    // cortexkit path. Create both parent directories so the OpenCode-side DB
+    // file write succeeds and openDatabase() finds a clean target.
+    mkdirSync(join(dir, "opencode"), { recursive: true });
+    mkdirSync(join(dir, "cortexkit", "magic-context"), { recursive: true });
     return dir;
 }
 
@@ -67,7 +69,7 @@ describe("checkCompactionMarkerConsistency", () => {
     it("is a no-op when there is no persisted state", () => {
         const dataHome = useTempDataHome("consistency-empty-");
         const opencodeDb = createOpenCodeDb(dataHome);
-        opencodeDb.close(false);
+        closeQuietly(opencodeDb);
 
         const db = openDatabase();
         // Should not throw on the happy path even when there are no markers.
@@ -82,7 +84,7 @@ describe("checkCompactionMarkerConsistency", () => {
         insertMessage(opencodeDb, "msg-boundary");
         insertPart(opencodeDb, "prt-compaction");
         // msg-summary and prt-summary-text are intentionally MISSING
-        opencodeDb.close(false);
+        closeQuietly(opencodeDb);
 
         const db = openDatabase();
         setPersistedCompactionMarkerState(db, "ses-1", {
@@ -111,7 +113,7 @@ describe("checkCompactionMarkerConsistency", () => {
         insertMessage(opencodeDb, "msg-summary");
         insertPart(opencodeDb, "prt-compaction");
         insertPart(opencodeDb, "prt-summary-text");
-        opencodeDb.close(false);
+        closeQuietly(opencodeDb);
 
         const db = openDatabase();
         setPersistedCompactionMarkerState(db, "ses-1", {
@@ -144,7 +146,7 @@ describe("checkCompactionMarkerConsistency", () => {
         insertPart(opencodeDb, "prt-summary-text-1");
         // Session 2: orphaned, clear
         // (no rows inserted for ses-2)
-        opencodeDb.close(false);
+        closeQuietly(opencodeDb);
 
         const db = openDatabase();
         setPersistedCompactionMarkerState(db, "ses-1", {
@@ -183,7 +185,7 @@ describe("checkCompactionMarkerConsistency", () => {
         const opencodeDb = createOpenCodeDb(dataHome);
         insertMessage(opencodeDb, "msg-boundary");
         // Missing rows → marker is orphaned
-        opencodeDb.close(false);
+        closeQuietly(opencodeDb);
 
         const db = openDatabase();
         setPersistedCompactionMarkerState(db, "ses-1", {

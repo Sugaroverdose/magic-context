@@ -1,7 +1,6 @@
-import type { Database } from "bun:sqlite";
+import { getHarness } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { TagEntry } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const insertTagStatements = new WeakMap<Database, PreparedStatement>();
 const updateTagStatusStatements = new WeakMap<Database, PreparedStatement>();
@@ -16,7 +15,7 @@ function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertTagStatements.set(db, stmt);
     }
@@ -192,6 +191,7 @@ export function insertTag(
         tagNumber,
         toolName,
         inputByteSize,
+        getHarness(),
     );
 
     return tagNumber;

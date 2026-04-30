@@ -21,6 +21,67 @@ export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
 
 let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
 
+/**
+ * Per-session source override for raw message reading.
+ *
+ * The default implementation of `readRawSessionMessages(sessionId)` reads
+ * from OpenCode's session DB via `withReadOnlySessionDb`. Other harnesses
+ * (e.g. Pi) provide their session data through a different surface
+ * (`pi.sessionManager.getBranch()`), so they register a per-session
+ * provider here BEFORE invoking any code path that calls the shared
+ * `readRawSessionMessages` / `getRawSessionMessageCount` /
+ * `getProtectedTailStartOrdinal` / `readSessionChunk` helpers.
+ *
+ * The registry is lookup-by-sessionId: a registered provider takes
+ * precedence over the OpenCode-DB default. Sessions never registered
+ * here continue to read from OpenCode's DB (existing behavior).
+ *
+ * Lifecycle: providers should be registered for the duration of one
+ * historian/trigger evaluation and unregistered afterward to avoid
+ * leaking session state across unrelated plugin instances. The
+ * `withSessionMessageProvider` helper enforces this by wrapping a
+ * scope.
+ */
+export interface RawMessageProvider {
+    readMessages(): RawMessage[];
+    /** Optional fast count path; falls back to readMessages().length. */
+    getMessageCount?: () => number;
+}
+
+const sessionProviders = new Map<string, RawMessageProvider>();
+
+/**
+ * Register a per-session source for raw message reading. Returns an
+ * unregister function. Pass-through harnesses (OpenCode) never call
+ * this; only Pi/future harnesses install themselves before triggering
+ * historian.
+ */
+export function setRawMessageProvider(sessionId: string, provider: RawMessageProvider): () => void {
+    sessionProviders.set(sessionId, provider);
+    return () => {
+        const current = sessionProviders.get(sessionId);
+        if (current === provider) sessionProviders.delete(sessionId);
+    };
+}
+
+/**
+ * Run `fn` with a temporary per-session provider override. Cleans up
+ * on return regardless of throw — preferred over manual
+ * `setRawMessageProvider` / `cleanup()` pairs.
+ */
+export function withRawMessageProvider<T>(
+    sessionId: string,
+    provider: RawMessageProvider,
+    fn: () => T,
+): T {
+    const cleanup = setRawMessageProvider(sessionId, provider);
+    try {
+        return fn();
+    } finally {
+        cleanup();
+    }
+}
+
 /** Strip system-reminder blocks and OMO markers from user text for chunk compaction. */
 export function cleanUserText(text: string): string {
     return removeSystemReminders(text).replace(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
@@ -70,15 +131,26 @@ export function readRawSessionMessages(sessionId: string): RawMessage[] {
             return cached;
         }
 
-        const messages = withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
+        const messages = readRawSessionMessagesFromSource(sessionId);
         activeRawMessageCache.set(sessionId, messages);
         return messages;
     }
 
+    return readRawSessionMessagesFromSource(sessionId);
+}
+
+function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
+    const provider = sessionProviders.get(sessionId);
+    if (provider) return provider.readMessages();
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 
 export function getRawSessionMessageCount(sessionId: string): number {
+    const provider = sessionProviders.get(sessionId);
+    if (provider) {
+        if (provider.getMessageCount) return provider.getMessageCount();
+        return provider.readMessages().length;
+    }
     return withReadOnlySessionDb((db) => getRawSessionMessageCountFromDb(db, sessionId));
 }
 

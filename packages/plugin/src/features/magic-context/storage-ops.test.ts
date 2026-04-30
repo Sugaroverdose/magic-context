@@ -1,27 +1,29 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { clearPendingOps, getPendingOps, queuePendingOp, removePendingOp } from "./storage-ops";
 
 let db: Database;
 
 function makeMemoryDatabase(): Database {
     const d = new Database(":memory:");
-    d.run(`
+    d.exec(`
     CREATE TABLE IF NOT EXISTS pending_ops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,
       tag_id INTEGER,
       operation TEXT,
-      queued_at INTEGER
+      queued_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
     return d;
 }
 
 afterEach(() => {
-    if (db) db.close(false);
+    if (db) closeQuietly(db);
 });
 
 describe("storage-ops", () => {

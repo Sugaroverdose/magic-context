@@ -1,13 +1,13 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { ensureDreamQueueTable } from "../../features/magic-context/dreamer/queue";
+import { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,
@@ -21,6 +21,7 @@ function createTestDb(): Database {
       tag_number INTEGER NOT NULL,
       reasoning_byte_size INTEGER NOT NULL DEFAULT 0,
       caveman_depth INTEGER NOT NULL DEFAULT 0,
+            harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, tag_number)
     );
 
@@ -29,7 +30,8 @@ function createTestDb(): Database {
       session_id TEXT,
       tag_id INTEGER,
       operation TEXT,
-      queued_at INTEGER
+      queued_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE TABLE IF NOT EXISTS compartments (
@@ -73,10 +75,11 @@ function createTestDb(): Database {
       system_prompt_tokens INTEGER DEFAULT 0,
       conversation_tokens INTEGER DEFAULT 0,
       tool_call_tokens INTEGER DEFAULT 0,
-      cleared_reasoning_through_tag INTEGER DEFAULT 0
+      cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
-    db.run(`
+    db.exec(`
     CREATE TABLE IF NOT EXISTS plugin_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       direction TEXT NOT NULL,

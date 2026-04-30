@@ -1,6 +1,8 @@
-import type { Database } from "bun:sqlite";
+import { getHarness } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { getMaxTagNumberBySession, getTagNumberByMessageId, insertTag } from "./storage-tags";
 import type { TagEntry } from "./types";
+
 export interface Tagger {
     assignTag(
         sessionId: string,
@@ -45,14 +47,16 @@ function isAssignmentRow(row: unknown): row is AssignmentRow {
  * roll the counter backwards. Combined with the DB-authoritative allocation
  * in assignTag(), this prevents a stale in-memory counter from re-issuing
  * tag numbers that another writer already claimed.
+ *
+ * `harness` is written on first INSERT only. On conflict we don't update it —
+ * a session is created by exactly one harness (OpenCode or Pi) and that origin
+ * doesn't change for the lifetime of the row.
  */
 const UPSERT_COUNTER_SQL = `
-  INSERT INTO session_meta (session_id, counter)
-  VALUES (?, ?)
+  INSERT INTO session_meta (session_id, counter, harness)
+  VALUES (?, ?, ?)
   ON CONFLICT(session_id) DO UPDATE SET counter = MAX(session_meta.counter, excluded.counter)
 `;
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const upsertCounterStatements = new WeakMap<Database, PreparedStatement>();
 
@@ -65,9 +69,15 @@ function getUpsertCounterStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+/**
+ * Force-reset to 0. Distinct from the monotonic upsert above because callers
+ * like /ctx-recomp need to roll the counter back to rebuild a session from
+ * scratch. Includes harness on first INSERT for the same reason as the
+ * monotonic upsert.
+ */
 const RESET_COUNTER_SQL = `
-  INSERT INTO session_meta (session_id, counter)
-  VALUES (?, 0)
+  INSERT INTO session_meta (session_id, counter, harness)
+  VALUES (?, 0, ?)
   ON CONFLICT(session_id) DO UPDATE SET counter = 0
 `;
 
@@ -123,7 +133,7 @@ export function createTagger(): Tagger {
         if (value <= 0) return;
         const next = Math.max(counters.get(sessionId) ?? 0, value);
         counters.set(sessionId, next);
-        getUpsertCounterStatement(db).run(sessionId, next);
+        getUpsertCounterStatement(db).run(sessionId, next, getHarness());
     }
 
     function assignTag(
@@ -184,7 +194,7 @@ export function createTagger(): Tagger {
                         toolName,
                         inputByteSize,
                     );
-                    getUpsertCounterStatement(db).run(sessionId, next);
+                    getUpsertCounterStatement(db).run(sessionId, next, getHarness());
                 })();
             } catch (error: unknown) {
                 if (!isUniqueConstraintError(error)) {
@@ -243,7 +253,7 @@ export function createTagger(): Tagger {
         // monotonic upsert by using a dedicated statement.
         counters.set(sessionId, 0);
         assignments.delete(sessionId);
-        getResetCounterStatement(db).run(sessionId);
+        getResetCounterStatement(db).run(sessionId, getHarness());
     }
 
     function getCounter(sessionId: string): number {

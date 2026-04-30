@@ -1,14 +1,13 @@
-import type { Database } from "bun:sqlite";
 import {
     cleanUserText,
     extractTexts,
     hasMeaningfulUserText,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import { getHarness } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { removeSystemReminders } from "../../shared/system-directive";
 import { clearCompressionDepth } from "./compression-depth-storage";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 interface MessageHistoryIndexRow {
     last_indexed_ordinal?: number;
@@ -51,7 +50,7 @@ function getUpsertIndexStatement(db: Database): PreparedStatement {
     let stmt = upsertIndexStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO message_history_index (session_id, last_indexed_ordinal, updated_at) VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET last_indexed_ordinal = excluded.last_indexed_ordinal, updated_at = excluded.updated_at",
+            "INSERT INTO message_history_index (session_id, last_indexed_ordinal, updated_at, harness) VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET last_indexed_ordinal = excluded.last_indexed_ordinal, updated_at = excluded.updated_at",
         );
         upsertIndexStatements.set(db, stmt);
     }
@@ -186,6 +185,6 @@ export function ensureMessagesIndexed(
             );
         }
 
-        getUpsertIndexStatement(db).run(sessionId, messages.length, now);
+        getUpsertIndexStatement(db).run(sessionId, messages.length, now, getHarness());
     })();
 }

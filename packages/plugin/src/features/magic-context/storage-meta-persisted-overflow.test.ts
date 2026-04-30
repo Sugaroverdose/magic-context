@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
 import {
     clearEmergencyRecovery,
     getOverflowState,
@@ -36,7 +36,8 @@ function createTestDb(): Database {
             tool_call_tokens INTEGER NOT NULL DEFAULT 0,
             cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
             detected_context_limit INTEGER NOT NULL DEFAULT 0,
-            needs_emergency_recovery INTEGER NOT NULL DEFAULT 0
+            needs_emergency_recovery INTEGER NOT NULL DEFAULT 0,
+            harness TEXT NOT NULL DEFAULT 'opencode'
         )
     `);
     return db;

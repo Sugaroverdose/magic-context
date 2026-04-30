@@ -1,8 +1,7 @@
-import type { Database } from "bun:sqlite";
+import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { PendingOp } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const queuePendingOpStatements = new WeakMap<Database, PreparedStatement>();
 const getPendingOpsStatements = new WeakMap<Database, PreparedStatement>();
@@ -13,7 +12,7 @@ function getQueuePendingOpStatement(db: Database): PreparedStatement {
     let stmt = queuePendingOpStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, ?, ?, ?)",
         );
         queuePendingOpStatements.set(db, stmt);
     }
@@ -91,7 +90,7 @@ export function queuePendingOp(
     operation: PendingOp["operation"],
     queuedAt: number = Date.now(),
 ): void {
-    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt);
+    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt, getHarness());
 }
 
 export function getPendingOps(db: Database, sessionId: string): PendingOp[] {
