@@ -523,6 +523,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				dropToolStructure: config.drop_tool_structure,
 				temporalAwarenessEnabled:
 					config.experimental?.temporal_awareness ?? false,
+				cavemanTextCompressionEnabled:
+					config.ctx_reduce_enabled === false &&
+					config.experimental?.caveman_text_compression?.enabled === true,
 			});
 			if (!block) return;
 			return { systemPrompt: `${event.systemPrompt}\n\n${block}` };

@@ -147,6 +147,9 @@ export interface BuildMagicContextBlockOptions {
 	dropToolStructure?: boolean;
 	/** When true, include temporal-awareness guidance. */
 	temporalAwarenessEnabled?: boolean;
+	/** When true (and ctx_reduce_enabled is false), inject "BEWARE: history compression is on"
+	 *  warning so the agent doesn't mimic its own caveman-compressed past output. */
+	cavemanTextCompressionEnabled?: boolean;
 }
 
 /**
@@ -230,6 +233,7 @@ export function buildMagicContextBlock(
 		opts.dreamerEnabled ?? false,
 		opts.dropToolStructure ?? true,
 		opts.temporalAwarenessEnabled ?? false,
+		opts.cavemanTextCompressionEnabled ?? false,
 	);
 
 	if (dataBlock) {

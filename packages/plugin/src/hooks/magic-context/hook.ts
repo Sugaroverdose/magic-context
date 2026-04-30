@@ -543,6 +543,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
         experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
+        // Caveman text compression only runs when ctx_reduce_enabled === false
+        // (gated in transform.ts and in hook.ts cavemanTextCompression wiring above).
+        // Mirror that gate here so the prompt warning never appears in modes where
+        // caveman won't actually compress anything.
+        experimentalCavemanTextCompression:
+            ctxReduceEnabled === false &&
+            deps.config.experimental?.caveman_text_compression?.enabled === true,
     });
     const systemPromptHashHandler = systemPromptHash.handler;
 

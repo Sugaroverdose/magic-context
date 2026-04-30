@@ -230,6 +230,8 @@ export function detectAgentFromSystemPrompt(systemPrompt: string): AgentType | n
 
 const TEMPORAL_AWARENESS_GUIDANCE = `\n**Temporal awareness**: User messages may be preceded by HTML comments like \`<!-- +12m -->\`, \`<!-- +2h 15m -->\`, or \`<!-- +3d 4h -->\` indicating time elapsed since the previous message's completion. Compartments in \`<session-history>\` carry \`start-date\` and \`end-date\` attributes (YYYY-MM-DD) showing real-time boundaries. Use these when reasoning about workflow pacing, log durations, build times, or how long ago something happened.`;
 
+const CAVEMAN_COMPRESSION_WARNING = `\n**BEWARE**: History compression is on; older user AND assistant text — including your own earlier responses — has been deterministically rewritten in a terse caveman style (dropped articles, missing auxiliaries, \`//\` instead of connectives like \`because\`). This is automatic context compression that runs after the fact, not your actual prior wording or the user's. **DO NOT mimic this style in new turns.** Write fresh responses in normal prose. If you notice your output drifting into caveman cadence, that drift is in-context-learning bleeding from the compressed history — consciously revert to full sentences.`;
+
 export function buildMagicContextSection(
     agent: AgentType | null,
     protectedTags: number,
@@ -237,14 +239,22 @@ export function buildMagicContextSection(
     dreamerEnabled = false,
     dropToolStructure = true,
     temporalAwarenessEnabled = false,
+    cavemanTextCompressionEnabled = false,
 ): string {
     const smartNoteGuidance = dreamerEnabled
         ? `\nWhen \`surface_condition\` is provided with \`write\`, the note becomes a project-scoped smart note.\nThe dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met.\nExample: \`ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")\``
         : "";
     const temporalGuidance = temporalAwarenessEnabled ? TEMPORAL_AWARENESS_GUIDANCE : "";
+    // Caveman compression only runs when ctx_reduce_enabled === false (verified
+    // in transform.ts gate). The flag is also gated upstream in hook.ts so it
+    // never reaches the prompt builder when ctx_reduce is on. Belt-and-braces:
+    // we still only emit the warning when ctxReduceEnabled === false even if
+    // somehow the flag flipped on with ctx_reduce enabled.
+    const cavemanWarning =
+        cavemanTextCompressionEnabled && !ctxReduceEnabled ? CAVEMAN_COMPRESSION_WARNING : "";
 
     if (!ctxReduceEnabled) {
-        return `## Magic Context\n\n${BASE_INTRO_NO_REDUCE(dropToolStructure)}${smartNoteGuidance}${temporalGuidance}`;
+        return `## Magic Context\n\n${BASE_INTRO_NO_REDUCE(dropToolStructure)}${smartNoteGuidance}${temporalGuidance}${cavemanWarning}`;
     }
     const section = agent ? AGENT_SECTIONS[agent] : GENERIC_SECTION;
     return `## Magic Context\n\n${BASE_INTRO(protectedTags, dropToolStructure)}${smartNoteGuidance}${temporalGuidance}\n${section}\n\nPrefer many small targeted operations over one large blanket operation. Compress early and often — don't wait for warnings.`;

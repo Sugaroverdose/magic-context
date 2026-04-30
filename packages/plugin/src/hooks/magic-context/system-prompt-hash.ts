@@ -124,6 +124,9 @@ export function createSystemPromptHashHandler(deps: {
     experimentalPinKeyFilesTokenBudget?: number;
     /** When true, add a temporal-awareness guidance paragraph + surface compartment dates */
     experimentalTemporalAwareness?: boolean;
+    /** When true (and ctx_reduce_enabled is false), inject a "BEWARE: history compression is on"
+     *  warning so the agent doesn't mimic its own caveman-compressed past output. */
+    experimentalCavemanTextCompression?: boolean;
 }): {
     handler: (input: { sessionID?: string }, output: { system: string[] }) => Promise<void>;
     clearSession: (sessionId: string) => void;
@@ -170,6 +173,7 @@ export function createSystemPromptHashHandler(deps: {
                 deps.dreamerEnabled,
                 deps.dropToolStructure,
                 deps.experimentalTemporalAwareness,
+                deps.experimentalCavemanTextCompression,
             );
             output.system.push(guidance);
             sessionLog(
