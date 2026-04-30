@@ -511,6 +511,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// when memory.enabled=false. Same for project docs.
 				memoryEnabled: config.memory.enabled,
 				injectDocs: config.dreamer?.inject_docs ?? true,
+				// Inject the ## Magic Context guidance section so the agent knows
+				// (a) §N§ prefixes are system-internal and shouldn't be mimicked,
+				// (b) how to use ctx_search / ctx_memory / ctx_note proactively,
+				// (c) compressed history caveats around tool-call hallucination.
+				// Mirrors OpenCode's experimental.chat.system.transform path.
+				includeGuidance: true,
+				protectedTags: config.protected_tags,
+				ctxReduceEnabled: config.ctx_reduce_enabled,
+				dreamerEnabled: config.dreamer?.enabled ?? false,
+				dropToolStructure: config.drop_tool_structure,
+				temporalAwarenessEnabled:
+					config.experimental?.temporal_awareness ?? false,
 			});
 			if (!block) return;
 			return { systemPrompt: `${event.systemPrompt}\n\n${block}` };

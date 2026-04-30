@@ -32,6 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
 import {
 	buildCompartmentBlock,
 	getCompartments,
@@ -120,6 +121,32 @@ export interface BuildMagicContextBlockOptions {
 	injectDocs: boolean;
 	/** Char budget for the rendered `<project-memory>` block. */
 	memoryBudgetChars?: number;
+	/**
+	 * When true (default), prepend the `## Magic Context` guidance section
+	 * that explains `§N§` tags, `ctx_*` tools, history caveats, etc. This
+	 * mirrors OpenCode's `experimental.chat.system.transform` injection.
+	 *
+	 * The guidance is what tells the agent NOT to mimic `§N§` prefixes in
+	 * its own output, NOT to fabricate tool calls based on compressed
+	 * history, and how to use `ctx_search`/`ctx_memory`/`ctx_note`.
+	 * Without it, weaker models will pattern-match on stored memory
+	 * content and emit `§4§ ...` at the start of responses.
+	 */
+	includeGuidance?: boolean;
+	/**
+	 * `protected_tags` from config — passed through to guidance for the
+	 * "last N tags are protected" line. Only used when `ctxReduceEnabled`
+	 * AND `includeGuidance` are both true.
+	 */
+	protectedTags?: number;
+	/** When true, include `ctx_reduce` guidance; when false, the no-reduce variant. */
+	ctxReduceEnabled?: boolean;
+	/** When true, include smart-note guidance (Dreamer evaluates surface_condition). */
+	dreamerEnabled?: boolean;
+	/** When true, omit older tool-call structure caveat from guidance. */
+	dropToolStructure?: boolean;
+	/** When true, include temporal-awareness guidance. */
+	temporalAwarenessEnabled?: boolean;
 }
 
 /**
@@ -175,7 +202,38 @@ export function buildMagicContextBlock(
 		if (docsBlock) sections.push(docsBlock);
 	}
 
-	if (sections.length === 0) return null;
+	// Build the data block (compartments + memory + docs) and the guidance
+	// section separately, then concatenate. We always emit guidance when
+	// requested (default true) — even if the data block is empty — because
+	// the guidance is what teaches the agent how to use ctx_search /
+	// ctx_memory / ctx_note even when those tools have no project data
+	// to operate on yet. This mirrors OpenCode's behavior, where the
+	// guidance is always injected via experimental.chat.system.transform.
+	const dataBlock =
+		sections.length > 0
+			? `<magic-context>\n${sections.join("\n\n")}\n</magic-context>`
+			: null;
 
-	return `<magic-context>\n${sections.join("\n\n")}\n</magic-context>`;
+	const includeGuidance = opts.includeGuidance ?? true;
+	if (!includeGuidance) {
+		return dataBlock;
+	}
+
+	// `agent` argument is null because Pi doesn't have OpenCode's named
+	// agent system (sisyphus, atlas, hephaestus, oracle, athena, ...). The
+	// generic guidance section applies — same fallback OpenCode uses for
+	// unrecognized agents.
+	const guidance = buildMagicContextSection(
+		null,
+		opts.protectedTags ?? 20,
+		opts.ctxReduceEnabled ?? true,
+		opts.dreamerEnabled ?? false,
+		opts.dropToolStructure ?? true,
+		opts.temporalAwarenessEnabled ?? false,
+	);
+
+	if (dataBlock) {
+		return `${guidance}\n\n${dataBlock}`;
+	}
+	return guidance;
 }
