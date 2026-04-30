@@ -61,6 +61,7 @@ import {
 	registerPiDreamerProject,
 	unregisterPiDreamerProject,
 } from "./dreamer";
+import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { PiSubagentRunner } from "./subagent-runner";
 import { buildMagicContextBlock } from "./system-prompt";
 import { registerMagicContextTools } from "./tools";
@@ -547,6 +548,37 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			await awaitInFlightDreamers();
 		} catch (err) {
 			warn("agent_end: awaitInFlightDreamers threw:", err);
+		}
+	});
+
+	// Strip injected `§N§` tag prefix from assistant text BEFORE Pi
+	// persists the message to disk and renders it to the UI. Mirrors
+	// OpenCode's `experimental.text.complete` handler which scrubs the
+	// prefix from `output.text` before the assistant message lands in
+	// `opencode.db`.
+	//
+	// Pi's `agent-session.ts` emits `message_end` to extensions BEFORE
+	// calling `sessionManager.appendMessage(event.message)`. Mutating
+	// the message reference in this handler is therefore visible to
+	// the persistence call — same effect as OpenCode's hook on a
+	// different harness.
+	//
+	// Why this matters: LLMs frequently mimic the `§N§` prefix they
+	// see on prior assistant messages and emit `§4§ Yes...` at the
+	// start of a fresh response. The mimicry is harmless for cache
+	// (we re-strip and re-inject on the next transform pass), but the
+	// stored text is what Pi's UI renders — without this scrub, users
+	// see internal tag IDs at the start of every assistant turn.
+	pi.on("message_end", async (event) => {
+		try {
+			const msg = event.message as unknown;
+			if (msg !== null && typeof msg === "object") {
+				stripTagPrefixFromAssistantMessage(
+					msg as { role: string; content: unknown },
+				);
+			}
+		} catch (err) {
+			warn("message_end: stripTagPrefixFromAssistantMessage threw:", err);
 		}
 	});
 
