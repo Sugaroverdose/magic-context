@@ -201,22 +201,46 @@ function normalizeOpenCodeTool(part: OpenCodePartData): {
     return { callId, name, input, output };
 }
 
+/**
+ * Pi's interactive footer reads `entry.message.usage.input` on every assistant
+ * message during render — without `usage`, it crashes the TUI. Real Pi sessions
+ * always include this field (populated from provider response). For migrated
+ * sessions we don't have real token counts, so emit a zero-filled stub. Pi's
+ * footer aggregator is additive ( `totalInput += usage.input` ), so zeros are
+ * benign — they just show "0 tokens" for migrated turns until new turns add
+ * real provider usage.
+ */
+function zeroUsage(): Record<string, unknown> {
+    return {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+}
+
 function makeMessageEntry(
     role: "user" | "assistant",
     text: string,
     timestamp: string,
     parentId: string | null,
 ): PiJson {
+    const message: Record<string, unknown> = {
+        role,
+        content: [{ type: "text", text }],
+        timestamp: Date.parse(timestamp),
+    };
+    if (role === "assistant") {
+        message.usage = zeroUsage();
+    }
     return {
         type: "message",
         id: shortId(),
         parentId,
         timestamp,
-        message: {
-            role,
-            content: [{ type: "text", text }],
-            timestamp: Date.parse(timestamp),
-        },
+        message,
     };
 }
 
@@ -230,6 +254,7 @@ function makeThinkingEntry(text: string, timestamp: string, parentId: string | n
             role: "assistant",
             content: [{ type: "thinking", thinking: text, thinkingSignature: null }],
             timestamp: Date.parse(timestamp),
+            usage: zeroUsage(),
         },
     };
 }
@@ -250,6 +275,7 @@ function makeToolCallEntry(
                 { type: "toolCall", id: tool.callId, name: tool.name, arguments: tool.input ?? {} },
             ],
             timestamp: Date.parse(timestamp),
+            usage: zeroUsage(),
         },
     };
 }

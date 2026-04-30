@@ -80,7 +80,7 @@ describe("MagicContextConfigSchema", () => {
                     },
                     auto_search: {
                         enabled: false,
-                        score_threshold: 0.55,
+                        score_threshold: 0.6,
                         min_prompt_chars: 20,
                     },
                     caveman_text_compression: {

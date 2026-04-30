@@ -102,7 +102,8 @@ export function buildAutoSearchHint(
         lines.length === 1
             ? "Your memory may contain 1 related fragment:"
             : `Your memory may contain ${lines.length} related fragments:`;
-    const footer = "Run ctx_search to retrieve full context if relevant.";
+    const footer =
+        "If the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.";
     const body = [header, ...lines, footer].join("\n");
     const wrapped = `<ctx-search-hint>\n${body}\n</ctx-search-hint>`;
 
