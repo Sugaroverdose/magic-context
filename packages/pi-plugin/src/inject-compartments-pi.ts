@@ -150,6 +150,47 @@ function trimPiMessagesToBoundary(
 		}
 	}
 	if (cutoffIndex < 0) return 0;
+
+	// Collect all toolCall IDs from messages being trimmed. Any
+	// immediately-following toolResult messages that reference those IDs
+	// would become orphaned (their paired toolCall is gone), causing
+	// providers to reject the request. Advance the cutoff past them.
+	const removedCallIds = new Set<string>();
+	for (let i = 0; i <= cutoffIndex; i++) {
+		const msg = piMessages[i];
+		if (!msg || msg.role !== "assistant") continue;
+		const assistantMsg = msg as { role: "assistant"; content: unknown[] };
+		if (!Array.isArray(assistantMsg.content)) continue;
+		for (const part of assistantMsg.content) {
+			if (
+				part &&
+				typeof part === "object" &&
+				(part as Record<string, unknown>).type === "toolCall" &&
+				typeof (part as Record<string, unknown>).id === "string"
+			) {
+				removedCallIds.add((part as Record<string, unknown>).id as string);
+			}
+		}
+	}
+	// Advance past any orphaned toolResult messages.
+	if (removedCallIds.size > 0) {
+		let i = cutoffIndex + 1;
+		while (i < piMessages.length) {
+			const msg = piMessages[i];
+			if (
+				msg &&
+				msg.role === "toolResult" &&
+				typeof (msg as Record<string, unknown>).toolCallId === "string" &&
+				removedCallIds.has((msg as Record<string, unknown>).toolCallId as string)
+			) {
+				cutoffIndex = i;
+				i++;
+			} else {
+				break;
+			}
+		}
+	}
+
 	const removed = cutoffIndex + 1;
 	piMessages.splice(0, removed);
 	return removed;
