@@ -457,6 +457,14 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		args.push("--model", models[0]);
 	}
 
+	// Explicitly disable thinking/reasoning for subagents unless the model
+	// requires it. Without this, providers like GitHub Copilot may apply
+	// their own default reasoning_effort (e.g. "minimal") which can be
+	// unsupported by the target model, causing a 400 error.
+	// `--thinking off` sets reasoningEffort="off" explicitly, overriding
+	// any provider default.
+	args.push("--thinking", "off");
+
 	// Positional message argument MUST come last in print-mode argv.
 	args.push(options.userMessage);
 

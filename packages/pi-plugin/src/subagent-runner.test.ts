@@ -125,6 +125,11 @@ describe("subagent-runner pure helpers", () => {
 			"system guidance",
 			"--model",
 			"anthropic/claude-sonnet",
+			// Explicit --thinking off prevents providers like GitHub Copilot
+			// from applying their own default reasoning_effort which may be
+			// unsupported by the target model (e.g. gpt-5.4 rejects "minimal").
+			"--thinking",
+			"off",
 			"summarize this session",
 		]);
 	});
@@ -462,6 +467,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				"system guidance",
 				"--models",
 				"anthropic/primary,openai/fallback",
+				"--thinking",
+				"off",
 				"summarize this session",
 			],
 			expect.objectContaining({ cwd: "/workspace/project" }),
