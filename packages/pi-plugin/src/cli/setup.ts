@@ -283,7 +283,10 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 				},
 				{ label: "low — faster, less thorough", value: "low" },
 				{ label: "high — best quality, slowest", value: "high" },
-				{ label: "off — no thinking, fastest (not recommended for historian)", value: "off" },
+				{
+					label: "off — no thinking, fastest (not recommended for historian)",
+					value: "off",
+				},
 			],
 		);
 	}

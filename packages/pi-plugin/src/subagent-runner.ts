@@ -222,6 +222,13 @@ export class PiSubagentRunner implements SubagentRunner {
 				crlfDelay: Number.POSITIVE_INFINITY,
 			});
 
+			// Track event progress so a timeout can report whether the
+			// subagent was actively producing output (model hung on a
+			// long generation) vs silent (auth/network/spawn problem).
+			let eventCount = 0;
+			let lastEventType: string | null = null;
+			let lastEventTimestamp = 0;
+
 			rl.on("line", (line) => {
 				if (line.length === 0) return;
 				const parsed = parsePiEventLine(line);
@@ -236,6 +243,10 @@ export class PiSubagentRunner implements SubagentRunner {
 
 				if (typeof event !== "object" || event === null) return;
 				const e = event as { type?: string; messages?: unknown };
+
+				eventCount += 1;
+				lastEventTimestamp = Date.now();
+				if (typeof e.type === "string") lastEventType = e.type;
 
 				if (e.type === "agent_end" && Array.isArray(e.messages)) {
 					sawAgentEnd = true;
@@ -253,11 +264,28 @@ export class PiSubagentRunner implements SubagentRunner {
 				timeoutHandle = setTimeout(() => {
 					if (settled) return;
 					terminateChild(child);
+					// Build a diagnostic suffix so callers can tell whether
+					// the subagent was hung silent (auth/network/no events)
+					// vs actively producing output but slow (model just
+					// taking too long). Without this, every timeout looks
+					// the same and operators can't distinguish them.
+					const sinceLastEvent =
+						lastEventTimestamp > 0 ? Date.now() - lastEventTimestamp : -1;
+					const progressSuffix =
+						eventCount === 0
+							? " — no events received from child (silent hang: spawn/auth/network or model never started streaming)"
+							: ` — saw ${eventCount} events; last event type=${lastEventType ?? "?"} ${sinceLastEvent}ms before timeout (model was producing output but didn't reach agent_end in time)`;
 					settle({
 						ok: false,
 						reason: "timeout",
-						error: `pi subagent timed out after ${options.timeoutMs}ms`,
+						error: `pi subagent timed out after ${options.timeoutMs}ms${progressSuffix}${stderr.length > 0 ? ` | stderr: ${stderr.slice(0, 500)}` : ""}`,
 						durationMs: Date.now() - startTime,
+						meta: {
+							stderr: stderr.length > 0 ? stderr : undefined,
+							eventCount,
+							lastEventType: lastEventType ?? undefined,
+							msSinceLastEvent: sinceLastEvent,
+						},
 					});
 				}, options.timeoutMs);
 			}

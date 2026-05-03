@@ -181,7 +181,9 @@ function trimPiMessagesToBoundary(
 				msg &&
 				msg.role === "toolResult" &&
 				typeof (msg as Record<string, unknown>).toolCallId === "string" &&
-				removedCallIds.has((msg as Record<string, unknown>).toolCallId as string)
+				removedCallIds.has(
+					(msg as Record<string, unknown>).toolCallId as string,
+				)
 			) {
 				cutoffIndex = i;
 				i++;

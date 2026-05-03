@@ -515,10 +515,7 @@ async function runHealthChecks(options: {
 	// injects "minimal" — which it then rejects with a 400 error.
 	const historianModel = loadedConfig.config.historian?.model?.trim() ?? "";
 	const historianThinkingLevel = loadedConfig.config.historian?.thinking_level;
-	if (
-		historianModel.startsWith("github-copilot/") &&
-		!historianThinkingLevel
-	) {
+	if (historianModel.startsWith("github-copilot/") && !historianThinkingLevel) {
 		add(
 			results,
 			"warn",
@@ -528,7 +525,10 @@ async function runHealthChecks(options: {
 				`Set historian.thinking_level to "medium" (or "off" to disable thinking) ` +
 				`in your magic-context.jsonc.`,
 		);
-	} else if (historianModel.startsWith("github-copilot/") && historianThinkingLevel) {
+	} else if (
+		historianModel.startsWith("github-copilot/") &&
+		historianThinkingLevel
+	) {
 		add(
 			results,
 			"pass",
