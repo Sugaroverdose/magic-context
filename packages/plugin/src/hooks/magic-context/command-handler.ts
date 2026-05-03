@@ -224,8 +224,10 @@ async function executeDreaming(
         throwSentinel("CTX-DREAM");
     }
 
-    // dream_queue table is created in initializeDatabase() — no ensureDreamQueueTable needed
-    const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual");
+    // dream_queue table is created in initializeDatabase() — no ensureDreamQueueTable needed.
+    // force=true uses the lease TTL (2 min) as the stale threshold so a crashed or restarted
+    // runner does not permanently block /ctx-dream from the user.
+    const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual", true);
     if (!entry) {
         await deps.sendNotification(sessionId, "Dream already queued for this project", {});
         throwSentinel("CTX-DREAM");
