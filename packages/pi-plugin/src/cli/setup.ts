@@ -110,6 +110,8 @@ export function writeMagicContextConfig(
 	configPath: string,
 	options: {
 		historianModel: string;
+		historianThinkingLevel?: string;
+		dreamerEnabled: boolean;
 		dreamerModel: string;
 		sidekickEnabled: boolean;
 		sidekickModel?: string;
@@ -126,13 +128,14 @@ export function writeMagicContextConfig(
 			"https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
 	}
 
-	config.historian = {
+	config.historian = compactObject({
 		...((config.historian as Record<string, unknown> | undefined) ?? {}),
 		model: options.historianModel,
-	};
+		thinking_level: options.historianThinkingLevel,
+	});
 	config.dreamer = {
 		...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-		enabled: true,
+		enabled: options.dreamerEnabled,
 		model: options.dreamerModel,
 	};
 
@@ -261,6 +264,34 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 		"historian",
 		"Select a model for historian (background context compressor)",
 	);
+
+	// GitHub Copilot reasoning models need an explicit thinking_level because
+	// the Copilot API injects "minimal" as a default and then rejects it (400).
+	let historianThinkingLevel: string | undefined;
+	if (historianModel.startsWith("github-copilot/")) {
+		prompts.log.warn(
+			`GitHub Copilot reasoning models require an explicit thinking level.\n` +
+				`Without it, Copilot injects "minimal" as a default — which it then rejects with a 400 error.`,
+		);
+		historianThinkingLevel = await prompts.selectOne(
+			"Select thinking level for historian",
+			[
+				{
+					label: "medium — good quality, moderate cost (Recommended)",
+					value: "medium",
+					recommended: true,
+				},
+				{ label: "low — faster, less thorough", value: "low" },
+				{ label: "high — best quality, slowest", value: "high" },
+				{ label: "off — no thinking, fastest (not recommended for historian)", value: "off" },
+			],
+		);
+	}
+
+	const dreamerEnabled = await prompts.confirm(
+		"Enable dreamer for overnight memory maintenance?",
+		true,
+	);
 	const dreamerModel = await chooseModel(
 		prompts,
 		allModels,
@@ -283,6 +314,8 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
 	writeMagicContextConfig(configPath, {
 		historianModel,
+		historianThinkingLevel,
+		dreamerEnabled,
 		dreamerModel,
 		sidekickEnabled,
 		sidekickModel,
@@ -290,11 +323,14 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 	});
 	prompts.log.success(`Config written to ${configPath}`);
 
+	const thinkingLevelSuffix = historianThinkingLevel
+		? ` (thinking: ${historianThinkingLevel})`
+		: "";
 	const summary = [
 		`Pi settings: ${configurePi ? settingsPath : "skipped"}`,
 		`Magic Context config: ${configPath}`,
-		`Historian: ${historianModel}`,
-		`Dreamer: ${dreamerModel}`,
+		`Historian: ${historianModel}${thinkingLevelSuffix}`,
+		`Dreamer: ${dreamerModel} (${dreamerEnabled ? "enabled" : "disabled"})`,
 		sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
 		`Embedding: ${embedding.provider}${"model" in embedding ? ` (${embedding.model})` : ""}`,
 	].join("\n");

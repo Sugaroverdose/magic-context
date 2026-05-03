@@ -509,6 +509,33 @@ async function runHealthChecks(options: {
 		add(results, "pass", "Pi Magic Context config loads successfully");
 	}
 
+	// Warn when a reasoning model is configured for historian on a provider
+	// known to apply bad default reasoning_effort values (currently GitHub Copilot).
+	// Without an explicit `thinking_level`, Pi leaves the level unset and Copilot
+	// injects "minimal" — which it then rejects with a 400 error.
+	const historianModel = loadedConfig.config.historian?.model?.trim() ?? "";
+	const historianThinkingLevel = loadedConfig.config.historian?.thinking_level;
+	if (
+		historianModel.startsWith("github-copilot/") &&
+		!historianThinkingLevel
+	) {
+		add(
+			results,
+			"warn",
+			`historian.model "${historianModel}" is a GitHub Copilot reasoning model but ` +
+				`historian.thinking_level is not set. GitHub Copilot may apply a bad ` +
+				`default reasoning_effort that it then rejects (400 error). ` +
+				`Set historian.thinking_level to "medium" (or "off" to disable thinking) ` +
+				`in your magic-context.jsonc.`,
+		);
+	} else if (historianModel.startsWith("github-copilot/") && historianThinkingLevel) {
+		add(
+			results,
+			"pass",
+			`historian.model "${historianModel}" has thinking_level "${historianThinkingLevel}" configured`,
+		);
+	}
+
 	const storageDir = getMagicContextStorageDir();
 	const dbPath = join(storageDir, "context.db");
 	const existedBeforeOpen = existsSync(dbPath);

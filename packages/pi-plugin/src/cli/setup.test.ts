@@ -100,7 +100,8 @@ describe("runSetup", () => {
 				getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
 			},
 		};
-		const prompts = new MockPrompts({ confirms: [true, false] });
+		// confirms: configurePi=true, dreamerEnabled=true, sidekickEnabled=false
+		const prompts = new MockPrompts({ confirms: [true, true, false] });
 
 		const code = await runSetup({ prompts, env });
 
@@ -116,12 +117,14 @@ describe("runSetup", () => {
 		expect(settings.packages).toContain("npm:@cortexkit/pi-magic-context");
 
 		const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
-			historian?: { model?: string };
+			historian?: { model?: string; thinking_level?: string };
 			dreamer?: { enabled?: boolean; model?: string };
 			sidekick?: { enabled?: boolean };
 			embedding?: { provider?: string; model?: string };
 		};
+		// anthropic model — no thinking_level needed
 		expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
+		expect(config.historian?.thinking_level).toBeUndefined();
 		expect(config.dreamer).toEqual({
 			enabled: true,
 			model: "anthropic/claude-sonnet-4-6",
@@ -131,6 +134,39 @@ describe("runSetup", () => {
 			provider: "local",
 			model: "Xenova/all-MiniLM-L6-v2",
 		});
+	});
+
+	it("prompts for thinking_level when historian model is github-copilot", async () => {
+		const root = makeTempRoot();
+		const agentDir = join(root, ".pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+
+		const env: SetupEnvironment = {
+			detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+			getPiVersion: () => "0.69.0",
+			// Only github-copilot model so buildModelSelection always picks it first
+			getAvailableModels: () => ["github-copilot/gpt-5.4"],
+			paths: {
+				getPiAgentConfigDir: () => agentDir,
+				getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+				getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+			},
+		};
+		// selectOne picks the recommended option ("medium" for thinking_level)
+		// confirms: configurePi=true, dreamerEnabled=true, sidekickEnabled=false
+		const prompts = new MockPrompts({ confirms: [true, true, false] });
+
+		const code = await runSetup({ prompts, env });
+		expect(code).toBe(0);
+
+		const config = parseJsonc(
+			readFileSync(join(agentDir, "magic-context.jsonc"), "utf-8"),
+		) as {
+			historian?: { model?: string; thinking_level?: string };
+		};
+		// github-copilot model — thinking_level must be set by setup wizard
+		expect(config.historian?.model).toBe("github-copilot/gpt-5.4");
+		expect(config.historian?.thinking_level).toBe("medium");
 	});
 
 	it("exits gracefully without writing files when Pi is missing", async () => {
