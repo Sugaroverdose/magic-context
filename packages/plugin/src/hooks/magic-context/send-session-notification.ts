@@ -75,20 +75,19 @@ export async function sendIgnoredMessage(
                 // Intentional: call via property access to preserve `this` binding on the SDK client.
                 // The tui object is an SDK-generated client where methods live on the prototype.
                 const tuiClient = tui as Record<string, (...args: unknown[]) => Promise<unknown>>;
-                await tuiClient
-                    .showToast({
-                        body: {
-                            title: extractToastTitle(text),
-                            message: text.length > 200 ? `${text.slice(0, 200)}…` : text,
-                            variant: inferToastVariant(text),
-                            duration: 5000,
-                        },
-                    })
-                    .catch(() => {});
+                await tuiClient.showToast({
+                    body: {
+                        title: extractToastTitle(text),
+                        message: text.length > 200 ? `${text.slice(0, 200)}…` : text,
+                        variant: inferToastVariant(text),
+                        duration: 5000,
+                    },
+                });
                 return;
             }
         } catch {
-            // Fall through to ignored message
+            // showToast failed or tui client is unavailable — fall through to ignored message.
+            sessionLog(sessionId, "TUI showToast failed, falling back to ignored message");
         }
     }
     const agent = params.agent || undefined;

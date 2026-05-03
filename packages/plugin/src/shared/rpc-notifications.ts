@@ -14,7 +14,11 @@ export interface RpcNotification {
 }
 
 let queue: RpcNotification[] = [];
-let tuiConnected = false;
+// Timestamp of last drain — used to detect if TUI is actively polling.
+// The TUI polls every 500ms; we consider it connected if it polled within
+// the last 3 seconds (6× the poll interval, tolerates transient delays).
+let lastDrainAt = 0;
+const TUI_CONNECTED_WINDOW_MS = 3_000;
 
 /** Push a notification for TUI to pick up via polling. */
 export function pushNotification(
@@ -30,15 +34,17 @@ export function pushNotification(
 }
 
 /** Drain and return all pending notifications atomically.
- *  Also marks TUI as connected since only TUI polls this. */
+ *  Updates lastDrainAt so isTuiConnected() reflects recent activity. */
 export function drainNotifications(): RpcNotification[] {
-    tuiConnected = true;
+    lastDrainAt = Date.now();
     const result = queue;
     queue = [];
     return result;
 }
 
-/** Whether a TUI client has connected and is polling for notifications. */
+/** Whether a TUI client is actively polling for notifications.
+ *  Returns true only if the TUI has drained within the last 3 seconds.
+ *  This prevents stale-connected state after TUI closes or disconnects. */
 export function isTuiConnected(): boolean {
-    return tuiConnected;
+    return lastDrainAt > 0 && Date.now() - lastDrainAt < TUI_CONNECTED_WINDOW_MS;
 }
