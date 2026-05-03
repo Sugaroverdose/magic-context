@@ -80,6 +80,7 @@ import { describeError } from "@magic-context/core/shared/error-message";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 import type {
+	SubagentProgressEvent,
 	SubagentRunner,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
@@ -289,6 +290,67 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				`pi-historian: invoking subagent (model=${historianModel}, chunk=${chunk.startIndex}-${chunk.endIndex}, ${chunk.messageCount} msgs, ~${chunk.tokenEstimate} tokens)`,
 			);
 
+			// Verbose per-event tracing of the Pi child run. Every parsed
+			// event from the subagent's NDJSON stream lands in
+			// magic-context.log with phase=raw_event so we can reconstruct
+			// what actually happened during a hang or a timeout. Phase
+			// labels: spawned, first_event, raw_event, terminal, stderr,
+			// child_exit. The trace is per-pass-prefixed so first/repair/
+			// editor pass logs are unambiguous in the timeline.
+			const buildProgressLogger = (passLabel: string) => {
+				return (event: SubagentProgressEvent) => {
+					try {
+						if (event.type === "raw_event") {
+							// Stringify with safe size cap so a giant
+							// message body doesn't dominate the log.
+							let serialized: string;
+							try {
+								serialized = JSON.stringify(event.event);
+							} catch {
+								serialized = "[unserializable]";
+							}
+							if (serialized.length > 4000) {
+								serialized = `${serialized.slice(0, 4000)}…[truncated ${serialized.length - 4000} chars]`;
+							}
+							sessionLog(
+								sessionId,
+								`pi-historian[${passLabel}] raw_event @${event.ms}ms type=${event.eventType ?? "?"}: ${serialized}`,
+							);
+						} else if (event.type === "spawned") {
+							sessionLog(
+								sessionId,
+								`pi-historian[${passLabel}] spawned pid=${event.pid ?? "?"} argv=${event.argv.length} args`,
+							);
+						} else if (event.type === "first_event") {
+							sessionLog(
+								sessionId,
+								`pi-historian[${passLabel}] first_event @${event.ms}ms type=${event.eventType}`,
+							);
+						} else if (event.type === "terminal") {
+							sessionLog(
+								sessionId,
+								`pi-historian[${passLabel}] terminal @${event.ms}ms stopReason=${event.stopReason ?? "?"} textLen=${event.textLength} hasToolCall=${event.hasToolCall}`,
+							);
+						} else if (event.type === "stderr") {
+							const cleaned = event.chunk.replace(/\s+/g, " ").trim();
+							if (cleaned.length > 0) {
+								sessionLog(
+									sessionId,
+									`pi-historian[${passLabel}] stderr: ${cleaned.slice(0, 500)}`,
+								);
+							}
+						} else if (event.type === "child_exit") {
+							sessionLog(
+								sessionId,
+								`pi-historian[${passLabel}] child_exit @${event.ms}ms code=${event.code} signal=${event.signal}`,
+							);
+						}
+					} catch {
+						// Logging must never crash the runner.
+					}
+				};
+			};
+
 			// First pass.
 			const firstResult = await runner.run({
 				agent: HISTORIAN_AGENT_NAME,
@@ -299,6 +361,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				timeoutMs: historianTimeoutMs,
 				cwd: directory,
 				thinkingLevel,
+				onProgress: buildProgressLogger("first"),
 			});
 
 			let validatedPass = await validateHistorianResult(
@@ -340,6 +403,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					timeoutMs: historianTimeoutMs,
 					cwd: directory,
 					thinkingLevel,
+					onProgress: buildProgressLogger("repair"),
 				});
 				validatedPass = await validateHistorianResult(
 					repairResult,
@@ -400,6 +464,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						timeoutMs: historianTimeoutMs,
 						cwd: directory,
 						thinkingLevel,
+						onProgress: buildProgressLogger("editor"),
 					});
 					const editorPass = await validateHistorianResult(
 						editorResult,

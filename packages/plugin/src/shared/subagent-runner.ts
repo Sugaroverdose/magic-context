@@ -78,7 +78,56 @@ export interface SubagentRunOptions {
      * speed (local models), or "medium"/"high" for better quality.
      */
     thinkingLevel?: string | undefined;
+
+    /**
+     * Optional progress callback. The runner invokes it for milestone events
+     * during the run: spawn, first event received, terminal stop reason
+     * detected, child exit. Used by historian/dreamer/sidekick to write
+     * lifecycle entries to the magic-context.log without polluting the
+     * normal stdout stream.
+     *
+     * Implementations must be non-throwing and fast — they're called on the
+     * runner's hot path. Errors are swallowed.
+     */
+    onProgress?: (event: SubagentProgressEvent) => void;
 }
+
+/**
+ * Progress events emitted by a runner during a run. Distinct from the final
+ * `SubagentRunResult` — these are mid-run milestones plus (optionally) every
+ * raw event the underlying harness emits, so callers can write a complete
+ * trace to the log when diagnosing hangs.
+ *
+ * Categories:
+ * - `spawned` / `child_exit` / `stderr` — process lifecycle.
+ * - `first_event` — convenience: first event received from the child, useful
+ *   for measuring auth/network warmup time.
+ * - `terminal` — runner detected the final assistant turn (Pi: assistant
+ *   message_end with terminal stopReason and no toolCall; OpenCode: SDK
+ *   `agent_end` equivalent).
+ * - `raw_event` — every parsed event from the harness's structured output
+ *   stream (Pi NDJSON / OpenCode SDK events). Emitted unconditionally so
+ *   debug logs can capture the full timeline. The `event` payload is
+ *   harness-shaped — callers should treat it as `unknown` and log it raw.
+ */
+export type SubagentProgressEvent =
+    | { type: "spawned"; argv: readonly string[]; pid: number | undefined }
+    | { type: "first_event"; eventType: string; ms: number }
+    | {
+          type: "raw_event";
+          eventType: string | undefined;
+          event: unknown;
+          ms: number;
+      }
+    | {
+          type: "terminal";
+          stopReason: string | undefined;
+          textLength: number;
+          hasToolCall: boolean;
+          ms: number;
+      }
+    | { type: "stderr"; chunk: string }
+    | { type: "child_exit"; code: number | null; signal: string | null; ms: number };
 
 /**
  * Result of one subagent invocation.

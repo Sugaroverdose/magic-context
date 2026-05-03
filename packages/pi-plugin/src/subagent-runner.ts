@@ -4,6 +4,7 @@ import { dirname, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type {
+	SubagentProgressEvent,
 	SubagentRunner,
 	SubagentRunOptions,
 	SubagentRunResult,
@@ -154,6 +155,18 @@ export class PiSubagentRunner implements SubagentRunner {
 				resolve(result);
 			};
 
+			// Helper that wraps the optional caller-provided progress
+			// callback so we never throw on its mistakes — historian/dreamer
+			// log handlers must not be allowed to crash the runner.
+			const emitProgress = (event: SubagentProgressEvent) => {
+				if (!options.onProgress) return;
+				try {
+					options.onProgress(event);
+				} catch {
+					// progress callbacks are non-critical
+				}
+			};
+
 			let child: ReturnType<typeof childProcess.spawn>;
 			try {
 				child = this.spawnImpl(this.piBinary, args, {
@@ -167,7 +180,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					// as additional message content — we already pass the
 					// user message via argv. stderr captured for error
 					// diagnostics if spawn fails or the model bails out
-					// before producing an `agent_end` event.
+					// before producing the final assistant message.
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 			} catch (error) {
@@ -180,16 +193,23 @@ export class PiSubagentRunner implements SubagentRunner {
 				return;
 			}
 
+			emitProgress({ type: "spawned", argv: args, pid: child.pid });
+
 			// Capture stderr so we can attach it to error reasons. Pi prints
 			// unrecoverable errors (auth failures, network) here before the
-			// process exits.
+			// process exits. Also forward each chunk to the progress channel
+			// so historian failure logs see the message immediately rather
+			// than only at child exit (a hung child wouldn't surface this
+			// otherwise).
 			let stderr = "";
 			child.stderr?.on("data", (chunk: Buffer) => {
-				stderr += chunk.toString("utf8");
+				const text = chunk.toString("utf8");
+				stderr += text;
 				// Cap to prevent unbounded growth on chatty failures.
 				if (stderr.length > 16_000) {
 					stderr = `${stderr.slice(0, 16_000)}…[truncated]`;
 				}
+				emitProgress({ type: "stderr", chunk: text });
 			});
 
 			// Track the final assistant text from `agent_end`. We don't
@@ -267,9 +287,31 @@ export class PiSubagentRunner implements SubagentRunner {
 					message?: unknown;
 				};
 
+				const isFirstEvent = eventCount === 0;
 				eventCount += 1;
 				lastEventTimestamp = Date.now();
 				if (typeof e.type === "string") lastEventType = e.type;
+
+				const elapsedMs = Date.now() - startTime;
+
+				if (isFirstEvent && typeof e.type === "string") {
+					emitProgress({
+						type: "first_event",
+						eventType: e.type,
+						ms: elapsedMs,
+					});
+				}
+
+				// Forward the full parsed event so debug callers can write
+				// a complete trace to the log. Emitted unconditionally and
+				// before any branch-specific handling so even unexpected
+				// event types end up in the log.
+				emitProgress({
+					type: "raw_event",
+					eventType: typeof e.type === "string" ? e.type : undefined,
+					event,
+					ms: elapsedMs,
+				});
 
 				// Backwards-compat: if Pi (or any pi-compatible runner) ever
 				// does emit `agent_end` with the full messages array, treat
@@ -280,12 +322,24 @@ export class PiSubagentRunner implements SubagentRunner {
 					finalAssistantText = result.text;
 					finalStopReason = result.stopReason;
 					finalErrorMessage = result.errorMessage;
+					emitProgress({
+						type: "terminal",
+						stopReason: result.stopReason ?? undefined,
+						textLength: result.text?.length ?? 0,
+						hasToolCall: false,
+						ms: elapsedMs,
+					});
 					return;
 				}
 
 				// Live path: accumulate every assistant/tool message Pi
 				// emits via session.subscribe. The terminal assistant turn
-				// is detected by stopReason="stop" + no toolCall content.
+				// is detected by Pi's stopReason vocabulary
+				// ("stop" | "length" | "toolUse" | "error" | "aborted")
+				// being a non-toolUse value AND no toolCall content in the
+				// assistant message body. "length" means the model hit its
+				// max-tokens cap mid-response — still terminal, but we
+				// surface it as model_failed so callers can react.
 				if (e.type === "message_end" && e.message) {
 					accumulatedMessages.push(e.message);
 					const m = e.message as {
@@ -303,18 +357,25 @@ export class PiSubagentRunner implements SubagentRunner {
 									c !== null &&
 									(c as { type?: unknown }).type === "toolCall",
 							);
-						if (
+						const isTerminalStopReason =
 							typeof m.stopReason === "string" &&
 							(m.stopReason === "stop" ||
+								m.stopReason === "length" ||
 								m.stopReason === "error" ||
-								m.stopReason === "aborted") &&
-							!hasToolCall
-						) {
+								m.stopReason === "aborted");
+						if (isTerminalStopReason && !hasToolCall) {
 							sawAgentEnd = true;
 							const result = extractFinalAssistant(accumulatedMessages);
 							finalAssistantText = result.text;
 							finalStopReason = result.stopReason;
 							finalErrorMessage = result.errorMessage;
+							emitProgress({
+								type: "terminal",
+								stopReason: m.stopReason,
+								textLength: result.text?.length ?? 0,
+								hasToolCall: false,
+								ms: elapsedMs,
+							});
 						}
 					}
 				}
@@ -341,7 +402,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					const progressSuffix =
 						eventCount === 0
 							? " — no events received from child (silent hang: spawn/auth/network or model never started streaming)"
-							: ` — saw ${eventCount} events; last event type=${lastEventType ?? "?"} ${sinceLastEvent}ms before timeout (model was producing output but didn't reach agent_end in time)`;
+							: ` — saw ${eventCount} events; last event type=${lastEventType ?? "?"} ${sinceLastEvent}ms before timeout (model was emitting events but no terminal stopReason reached)`;
 					settle({
 						ok: false,
 						reason: "timeout",
@@ -384,10 +445,17 @@ export class PiSubagentRunner implements SubagentRunner {
 			child.on("close", (code, signal) => {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				options.signal?.removeEventListener("abort", onAbort);
+				emitProgress({
+					type: "child_exit",
+					code,
+					signal,
+					ms: Date.now() - startTime,
+				});
 				if (settled) return;
 
-				// Common case: agent_end was observed. Decide between
-				// success and model_failed based on the embedded stopReason.
+				// Common case: terminal assistant message_end was observed.
+				// Decide between success and model_failed based on the
+				// embedded stopReason.
 				if (sawAgentEnd) {
 					if (finalAssistantText === null) {
 						settle({
