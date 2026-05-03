@@ -60,6 +60,10 @@ import {
 import { queueDropsForCompartmentalizedMessages } from "@magic-context/core/hooks/magic-context/compartment-runner-drop-queue";
 import { buildExistingStateXml } from "@magic-context/core/hooks/magic-context/compartment-runner-state-xml";
 import {
+	cleanupHistorianStateFile,
+	maybeWriteHistorianStateFile,
+} from "@magic-context/core/hooks/magic-context/historian-state-file";
+import {
 	buildHistorianRepairPrompt,
 	validateChunkCoverage,
 	validateHistorianOutput,
@@ -189,6 +193,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 	updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 	let completedSuccessfully = false;
+	let stateFilePath: string | undefined;
 
 	try {
 		// All session-data reads in the historian path go through the shared
@@ -271,9 +276,27 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
 						: "This is your first run. No existing state.";
 
+			// Offload large existing-state XML to a temp file so the inline
+			// prompt body stays small. Long sessions accumulate hundreds of
+			// compartments + memory + facts; passing 100K+ chars inline can
+			// stall the model on certain provider/API combinations
+			// (notably github-copilot/gpt-5.4 via the openai-responses API,
+			// which buffers the full reasoning trace before emitting any
+			// output). The historian agent has access to Pi's built-in Read
+			// tool and the prompt instructs it to read the file before
+			// processing the new chunk. Cleaned up in finally{}.
+			stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+			if (stateFilePath) {
+				sessionLog(
+					sessionId,
+					`pi-historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
+				);
+			}
+
 			const prompt = buildCompartmentAgentPrompt(
 				existingState,
 				`Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+				{ stateFilePath },
 			);
 
 			// Defensive: use MAX(sequence) + 1 over .length to survive any old
@@ -569,6 +592,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		} else {
 			updateSessionMeta(db, sessionId, { compartmentInProgress: false });
 		}
+		// Best-effort cleanup of the temp state file written when existing
+		// state exceeded the inline threshold. Safe with undefined.
+		cleanupHistorianStateFile(stateFilePath);
 	}
 }
 

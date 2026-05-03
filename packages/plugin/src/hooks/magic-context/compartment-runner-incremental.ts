@@ -1,47 +1,21 @@
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     appendCompartments,
     getCompartments,
     getSessionFacts,
     replaceSessionFacts,
 } from "../../features/magic-context/compartment-storage";
+// Re-export the historian-state-file helpers so existing callers
+// (compartment-runner-recomp.ts, compartment-runner.ts, tests) keep working
+// unchanged. The implementation moved to ./historian-state-file.ts so Pi
+// can import it without pulling in the full incremental runner.
+import { cleanupHistorianStateFile, maybeWriteHistorianStateFile } from "./historian-state-file";
 
-/** Inline existing-state threshold (chars). Above this, write to a temp file. */
-const HISTORIAN_STATE_INLINE_THRESHOLD = 30_000;
-const HISTORIAN_STATE_DIR = join(tmpdir(), "magic-context-historian");
-
-/**
- * When existingState is large, write it to a temp file and return the path.
- * The caller must delete the file in finally{} via cleanupHistorianStateFile().
- * Returns undefined when existingState is small enough to inline.
- */
-export function maybeWriteHistorianStateFile(
-    sessionId: string,
-    existingState: string,
-): string | undefined {
-    if (existingState.length <= HISTORIAN_STATE_INLINE_THRESHOLD) return undefined;
-    try {
-        mkdirSync(HISTORIAN_STATE_DIR, { recursive: true });
-        const path = join(HISTORIAN_STATE_DIR, `state-${sessionId}-${Date.now()}.xml`);
-        writeFileSync(path, existingState, "utf8");
-        return path;
-    } catch {
-        // Fall back to inline if we can't write the file
-        return undefined;
-    }
-}
-
-/** Delete a previously written state file. Safe to call with undefined. */
-export function cleanupHistorianStateFile(path: string | undefined): void {
-    if (!path) return;
-    try {
-        unlinkSync(path);
-    } catch {
-        // best-effort cleanup
-    }
-}
+export {
+    cleanupHistorianStateFile,
+    HISTORIAN_STATE_DIR,
+    HISTORIAN_STATE_INLINE_THRESHOLD,
+    maybeWriteHistorianStateFile,
+} from "./historian-state-file";
 
 import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
