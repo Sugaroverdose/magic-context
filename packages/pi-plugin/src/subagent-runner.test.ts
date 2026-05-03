@@ -181,25 +181,26 @@ describe("subagent-runner pure helpers", () => {
 	// runner's argv contract for loading Magic Context's lean subagent
 	// extension (./subagent-entry.js) inside spawned Pi child processes.
 	// The bundle is only present after `bun run build`; in unit tests
-	// running source via Bun directly, the dev fallback (no `-x`) kicks
-	// in. Both shapes are valid and locked in.
+	// running source via Bun directly, the dev fallback (no --extension)
+	// kicks in. Both shapes are valid and locked in.
 
-	it("dev mode (no bundle): does NOT pass -x flag, so subagents run without Magic Context tools", () => {
+	it("dev mode (no bundle): does NOT pass --extension flag, so subagents run without Magic Context tools", () => {
 		// In dev mode (running .ts source), there's no dist/subagent-entry.js
 		// next to subagent-runner.ts, so resolveSubagentEntryPath() returns
-		// undefined and we skip the -x flag. This matches the original
-		// pre-tools behavior where subagents ran with `--no-extensions`
-		// and no Magic Context tools at all.
+		// undefined and we skip the --extension flag. This matches the
+		// original pre-tools behavior where subagents ran with
+		// `--no-extensions` and no Magic Context tools at all.
 		const args = __test.buildArgs({
 			...baseOptions,
 			agent: "historian",
 			model: "anthropic/claude-sonnet",
 		});
-		// The `-x` flag should NOT appear when the bundle isn't built
-		// (this test runs the source, not the dist build). Pinning this
-		// is what lets us run unit tests without a build step.
-		const xIdx = args.indexOf("-x");
-		expect(xIdx).toBe(-1);
+		// Neither --extension nor the legacy -x alias should appear when
+		// the bundle isn't built (this test runs the source, not the
+		// dist build). Pinning this is what lets us run unit tests
+		// without a build step. -x was removed in Pi 0.71+ and now hard-fails.
+		expect(args).not.toContain("--extension");
+		expect(args).not.toContain("-x");
 		expect(args).not.toContain("--magic-context-dreamer-actions");
 	});
 

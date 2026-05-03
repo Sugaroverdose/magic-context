@@ -31,9 +31,9 @@ function resolveSubagentEntryPath(): string | undefined {
 		if (existsSync(candidate)) return candidate;
 
 		// Dev fallback: when running source from packages/pi-plugin/src/
-		// the .js bundle doesn't exist yet; skip the -x flag so tests
-		// running pre-build don't fail. Production builds always have
-		// the bundle.
+		// the .js bundle doesn't exist yet; skip the --extension flag so
+		// tests running pre-build don't fail. Production builds always
+		// have the bundle.
 		return undefined;
 	} catch {
 		return undefined;
@@ -417,16 +417,21 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 	// Load Magic Context's lean subagent extension entry alongside
 	// `--no-extensions`. Verified at pi-coding-agent
 	// resource-loader.js:272-274: `--no-extensions` skips Pi's
-	// discovered-extensions scan but still loads explicit `-x` paths,
-	// so we get tools (ctx_search, ctx_memory, ctx_note, ctx_expand)
-	// without recursion risk (the lean entry never registers historian,
-	// dreamer, transform, or any other event handler that could spawn
-	// further subagents). When the bundle isn't present (e.g. running
-	// source from src/ without a build), skip the flag — the subagent
-	// will run without Magic Context tools, matching the original
-	// `--no-extensions` behavior.
+	// discovered-extensions scan but still loads explicit `--extension`
+	// paths, so we get tools (ctx_search, ctx_memory, ctx_note,
+	// ctx_expand) without recursion risk (the lean entry never registers
+	// historian, dreamer, transform, or any other event handler that
+	// could spawn further subagents). When the bundle isn't present
+	// (e.g. running source from src/ without a build), skip the flag —
+	// the subagent will run without Magic Context tools, matching the
+	// original `--no-extensions` behavior.
+	//
+	// We use the long form `--extension` (not the `-e` short form) to
+	// avoid clashes with extension-registered flags. Older Pi versions
+	// also exposed `-x`, but that alias was removed in 0.71+ — newer
+	// versions hard-fail with "Unknown option: -x".
 	if (SUBAGENT_ENTRY_PATH) {
-		args.push("-x", SUBAGENT_ENTRY_PATH);
+		args.push("--extension", SUBAGENT_ENTRY_PATH);
 
 		// Only the dreamer subagent gets the elevated ctx_memory action
 		// surface (update/merge/archive). Mirrors OpenCode's
