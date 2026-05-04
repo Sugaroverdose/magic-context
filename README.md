@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  Available for <a href="https://github.com/anomalyco/opencode">OpenCode</a> and the <a href="https://github.com/mariozechner/pi-mono">Pi coding agent</a>. Memories, embeddings, dreamer state, and project knowledge are <strong>shared across both</strong> — write a memory in OpenCode, retrieve it in Pi (and vice versa).
+  Available for <a href="https://opencode.ai/">OpenCode</a> and the <a href="https://pi.dev">Pi coding agent</a>. Memories, embeddings, dreamer state, and project knowledge are <strong>shared across both</strong> — write a memory in OpenCode, retrieve it in Pi (and vice versa).
 </p>
 
 <p align="center">
@@ -26,7 +26,7 @@
   <a href="#what-is-magic-context">What is Magic Context?</a> ·
   <a href="#what-your-agent-gets">What Your Agent Gets</a> ·
   <a href="#how-it-works">How It Works</a> ·
-  <a href="#magic-context-app">🖥️ Desktop App <sup>(NEW)</sup></a> ·
+  <a href="#magic-context-app">🖥️ Desktop App</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#configuration">Configuration</a>
 </p>
