@@ -61,7 +61,10 @@ RUN git config --global user.email "test@cortexkit.local" && \
 # already produced packages/plugin/dist/.
 COPY packages/plugin/dist/ /test/mc-opencode/dist/
 COPY packages/plugin/package.json /test/mc-opencode/package.json
-COPY packages/plugin/README.md /test/mc-opencode/README.md
+# README is intentionally NOT copied — it's gitignored locally (regenerated
+# by scripts/release.sh from root README at publish time) and unused inside
+# the image. Pinning a COPY here would break CI on master where the file
+# doesn't exist on disk.
 
 # Test scripts and aimock fixtures.
 COPY tests/docker/test-opencode-e2e.sh /test/test-opencode-e2e.sh
