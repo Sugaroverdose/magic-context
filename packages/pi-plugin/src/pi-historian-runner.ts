@@ -60,15 +60,15 @@ import {
 import { queueDropsForCompartmentalizedMessages } from "@magic-context/core/hooks/magic-context/compartment-runner-drop-queue";
 import { buildExistingStateXml } from "@magic-context/core/hooks/magic-context/compartment-runner-state-xml";
 import {
-	cleanupHistorianStateFile,
-	maybeWriteHistorianStateFile,
-} from "@magic-context/core/hooks/magic-context/historian-state-file";
-import {
 	buildHistorianRepairPrompt,
 	validateChunkCoverage,
 	validateHistorianOutput,
 	validateStoredCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
+import {
+	cleanupHistorianStateFile,
+	maybeWriteHistorianStateFile,
+} from "@magic-context/core/hooks/magic-context/historian-state-file";
 import {
 	clearInjectionCache,
 	renderMemoryBlock,
