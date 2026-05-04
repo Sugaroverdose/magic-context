@@ -951,11 +951,25 @@ export async function processDreamQueue(args: {
     maxRuntimeMinutes: number;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
     experimentalPinKeyFiles?: ExperimentalPinKeyFilesConfig;
+    /**
+     * Optional project identity filter — when provided, only entries belonging
+     * to this project are dequeued. Each running OpenCode/Pi process registers
+     * exactly one project, and the host's dreamer client (and `pi` runner, in
+     * Pi's case) is project-specific. Without this filter, a Pi process running
+     * for project A would dequeue queue entries for project B and try to
+     * `posix_spawn 'pi'` in B's `git:<sha>` identity string as a directory,
+     * failing with ENOENT every cycle.
+     *
+     * Callers should pass this whenever they own a single project — both the
+     * scheduled timer tick (`sweepProject`) and the `/ctx-dream` command
+     * handler. Tests pass `undefined` to keep the legacy "dequeue any" semantics.
+     */
+    projectIdentity?: string;
 }): Promise<DreamRunResult | null> {
     // Use configured max runtime + 30min buffer for stale threshold instead of hardcoded 2h
     const maxRuntimeMs = args.maxRuntimeMinutes * 60 * 1000;
     clearStaleEntries(args.db, maxRuntimeMs + 30 * 60 * 1000);
-    const entry = dequeueNext(args.db);
+    const entry = dequeueNext(args.db, args.projectIdentity);
     if (!entry) {
         return null;
     }

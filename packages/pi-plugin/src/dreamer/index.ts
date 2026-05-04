@@ -145,6 +145,11 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			maxRuntimeMinutes: opts.config.max_runtime_minutes,
 			experimentalUserMemories,
 			experimentalPinKeyFiles,
+			// Pi /ctx-dream is project-scoped: only drain THIS project's
+			// queue entry, not whatever happens to be at the queue head
+			// (which could belong to an OpenCode-only project Pi can't
+			// possibly dream).
+			projectIdentity: opts.projectIdentity,
 		});
 
 	registeredProjects.set(opts.projectIdentity, { cleanup, runOnce });

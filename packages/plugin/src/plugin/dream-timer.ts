@@ -190,7 +190,14 @@ async function sweepProject(
         log(
             `[dreamer] timer tick (${origin}) ${reg.directory} — checking schedule window "${reg.dreamerConfig.schedule}"`,
         );
-        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule);
+        // Resolve THIS registration's project identity. The shared `dream_queue`
+        // is process-global (any OpenCode/Pi instance can write to it), but
+        // each running host only owns its own registered project. We pass this
+        // identity to both `checkScheduleAndEnqueue` (so we don't enqueue work
+        // for projects this host doesn't own) and `processDreamQueue` (so we
+        // only drain entries that belong to us).
+        const registrationIdentity = resolveProjectIdentity(reg.directory);
+        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule, registrationIdentity);
 
         await processDreamQueue({
             db,
@@ -200,6 +207,7 @@ async function sweepProject(
             maxRuntimeMinutes: reg.dreamerConfig.max_runtime_minutes,
             experimentalUserMemories: reg.experimentalUserMemories,
             experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
+            projectIdentity: registrationIdentity,
         });
     } catch (error) {
         log(`[dreamer] timer-triggered queue processing failed for ${reg.directory}:`, error);

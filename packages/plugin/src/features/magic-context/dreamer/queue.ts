@@ -73,13 +73,35 @@ export function enqueueDream(
     })();
 }
 
-/** Peek at the next unstarted entry without claiming it. */
-export function peekQueue(db: Database): DreamQueueEntry | null {
-    const row = db
-        .prepare<[], { id: number; project_path: string; reason: string; enqueued_at: number }>(
-            "SELECT id, project_path, reason, enqueued_at FROM dream_queue WHERE started_at IS NULL ORDER BY enqueued_at ASC LIMIT 1",
-        )
-        .get();
+/** Peek at the next unstarted entry without claiming it.
+ *
+ * @param projectIdentity - When provided, only matches entries for this project.
+ *   This is critical for cross-process coexistence: each running OpenCode/Pi
+ *   process registers exactly one project, so it must only drain entries that
+ *   belong to it. Without this filter, Pi (running in project A) would dequeue
+ *   queue entries for project B and try to dream B with Pi's runner — which
+ *   either spawns `pi` in a directory that doesn't exist (the `git:<sha>`
+ *   identity string) or, even if it succeeded, runs the wrong harness for that
+ *   project.
+ */
+export function peekQueue(db: Database, projectIdentity?: string): DreamQueueEntry | null {
+    const row = projectIdentity
+        ? db
+              .prepare<
+                  [string],
+                  { id: number; project_path: string; reason: string; enqueued_at: number }
+              >(
+                  "SELECT id, project_path, reason, enqueued_at FROM dream_queue WHERE started_at IS NULL AND project_path = ? ORDER BY enqueued_at ASC LIMIT 1",
+              )
+              .get(projectIdentity)
+        : db
+              .prepare<
+                  [],
+                  { id: number; project_path: string; reason: string; enqueued_at: number }
+              >(
+                  "SELECT id, project_path, reason, enqueued_at FROM dream_queue WHERE started_at IS NULL ORDER BY enqueued_at ASC LIMIT 1",
+              )
+              .get();
 
     if (!row) return null;
 
@@ -92,11 +114,15 @@ export function peekQueue(db: Database): DreamQueueEntry | null {
     };
 }
 
-/** Claim the next unstarted entry atomically by marking started_at. Returns null if queue is empty. */
-export function dequeueNext(db: Database): DreamQueueEntry | null {
+/** Claim the next unstarted entry atomically by marking started_at. Returns null if queue is empty.
+ *
+ * @param projectIdentity - When provided, only dequeues entries for this project.
+ *   See `peekQueue` for the cross-process coexistence rationale.
+ */
+export function dequeueNext(db: Database, projectIdentity?: string): DreamQueueEntry | null {
     const now = Date.now();
     return db.transaction(() => {
-        const entry = peekQueue(db);
+        const entry = peekQueue(db, projectIdentity);
         if (!entry) return null;
 
         const result = db

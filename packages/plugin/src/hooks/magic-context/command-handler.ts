@@ -245,6 +245,10 @@ async function executeDreaming(
               maxRuntimeMinutes: deps.dreamer.config.max_runtime_minutes,
               experimentalUserMemories: deps.dreamer.experimentalUserMemories,
               experimentalPinKeyFiles: deps.dreamer.experimentalPinKeyFiles,
+              // /ctx-dream is project-scoped: it should only ever drain THIS
+              // project's queue entry, never accidentally pick up another
+              // host's enqueued work that is sitting at the queue head.
+              projectIdentity: deps.dreamer.projectPath,
           });
 
     await deps.sendNotification(

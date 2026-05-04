@@ -114,8 +114,24 @@ export function findProjectsNeedingDream(db: Database): string[] {
  * Check schedule and enqueue eligible projects.
  * Called periodically from the hook layer (debounced to once per hour).
  * Returns the number of projects enqueued.
+ *
+ * @param ownProjectIdentity - When provided, restricts enqueue to this project.
+ *   Each running OpenCode/Pi process registers exactly one project, so it
+ *   must only enqueue work for THAT project — otherwise a process running for
+ *   project A would enqueue dream entries for projects B, C, D... that this
+ *   host can't actually drain (it has the wrong client + the wrong
+ *   subagent-runner directory). Without the filter, a Pi process running for
+ *   `opencode-anthropic-auth` ends up trying to spawn `pi --print` for
+ *   `opencode-xtra` (a project Pi was never opened in), failing every cycle.
+ *
+ *   When undefined, the legacy "enqueue everything that needs a dream"
+ *   behavior is preserved for tests and any future single-host caller.
  */
-export function checkScheduleAndEnqueue(db: Database, schedule: string): number {
+export function checkScheduleAndEnqueue(
+    db: Database,
+    schedule: string,
+    ownProjectIdentity?: string,
+): number {
     if (!isInScheduleWindow(schedule)) {
         return 0;
     }
@@ -129,8 +145,16 @@ export function checkScheduleAndEnqueue(db: Database, schedule: string): number 
         return 0;
     }
 
+    // Filter to just THIS host's project when an identity was passed in.
+    // findProjectsNeedingDream returns every project with active memories or
+    // pending smart notes across the whole shared DB; without the filter, a
+    // single host would try to enqueue work for projects it doesn't own.
+    const eligible = ownProjectIdentity
+        ? projects.filter((id) => id === ownProjectIdentity)
+        : projects;
+
     let enqueued = 0;
-    for (const projectIdentity of projects) {
+    for (const projectIdentity of eligible) {
         const entry = enqueueDream(db, projectIdentity, "scheduled");
         if (entry) {
             log(`[dreamer] enqueued project for scheduled dream: ${projectIdentity}`);

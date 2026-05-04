@@ -187,5 +187,108 @@ describe("dreamer", () => {
                 .get();
             expect(row?.count).toBe(0);
         });
+
+        /**
+         * Cross-project queue isolation regression. The dream_queue is shared
+         * across processes (OpenCode + Pi can both write/read). Without this
+         * filter, a Pi process running in project A would dequeue a queue
+         * entry for project B and try to dream B with Pi's client — failing
+         * because Pi has no idea where B is on disk.
+         *
+         * The user-visible report that triggered this fix: Pi running in
+         * `opencode-anthropic-auth` was dreaming `opencode-xtra` every 15
+         * minutes and failing every cycle with `posix_spawn 'pi'` ENOENT
+         * because `dreamProjectDirectories` for opencode-xtra wasn't
+         * registered in Pi's process, so the spawn cwd fell back to the
+         * `git:<sha>` identity string itself.
+         */
+        it("dequeues only entries matching projectIdentity when filter is provided", async () => {
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+            registerDreamProjectDirectory("git:my-repo", "/repo/my-repo");
+            registerDreamProjectDirectory("git:other-repo", "/repo/other-repo");
+            const client = createDreamClient();
+
+            // Two projects enqueued. We're filtering to my-repo, so the
+            // other-repo entry must STAY in the queue untouched.
+            expect(enqueueDream(db, "git:other-repo", "scheduled")).not.toBeNull();
+            expect(enqueueDream(db, "git:my-repo", "scheduled")).not.toBeNull();
+
+            const result = await processDreamQueue({
+                db,
+                client,
+                tasks: ["consolidate"],
+                taskTimeoutMinutes: 5,
+                maxRuntimeMinutes: 10,
+                projectIdentity: "git:my-repo",
+            });
+
+            // We dreamed my-repo (filtered).
+            expect(result).not.toBeNull();
+
+            // other-repo's queue entry survives — another host (or a future
+            // tick from a process that owns other-repo) must drain it.
+            const remaining = db
+                .prepare<[], { project_path: string }>(
+                    "SELECT project_path FROM dream_queue ORDER BY id",
+                )
+                .all();
+            expect(remaining.map((r) => r.project_path)).toEqual(["git:other-repo"]);
+        });
+
+        it("returns null when projectIdentity filter has no matching entries", async () => {
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+            const client = createDreamClient();
+
+            // Queue has entries, but NONE for our project.
+            expect(enqueueDream(db, "git:not-mine", "scheduled")).not.toBeNull();
+            expect(enqueueDream(db, "git:also-not-mine", "scheduled")).not.toBeNull();
+
+            const result = await processDreamQueue({
+                db,
+                client,
+                tasks: ["consolidate"],
+                taskTimeoutMinutes: 5,
+                maxRuntimeMinutes: 10,
+                projectIdentity: "git:my-repo",
+            });
+
+            expect(result).toBeNull();
+
+            // Both other-project entries must still be queued.
+            const remaining = db
+                .prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM dream_queue")
+                .get();
+            expect(remaining?.count).toBe(2);
+        });
+
+        it("legacy behavior preserved when projectIdentity filter is omitted", async () => {
+            // Tests that pass `undefined` (or just don't pass the field)
+            // continue to drain the queue head — preserves backward compat
+            // for any test or future single-host caller that wants the old
+            // "dequeue any" behavior.
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+            registerDreamProjectDirectory("git:repo-1", "/repo/project");
+            const client = createDreamClient();
+
+            expect(enqueueDream(db, "git:repo-1", "manual")).not.toBeNull();
+
+            const result = await processDreamQueue({
+                db,
+                client,
+                tasks: ["consolidate"],
+                taskTimeoutMinutes: 5,
+                maxRuntimeMinutes: 10,
+                // projectIdentity intentionally omitted
+            });
+
+            expect(result?.tasks.map((task) => task.name)).toEqual(["consolidate"]);
+            const row = db
+                .prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM dream_queue")
+                .get();
+            expect(row?.count).toBe(0);
+        });
     });
 });
