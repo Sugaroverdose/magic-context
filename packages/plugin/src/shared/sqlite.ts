@@ -33,11 +33,26 @@
 // environment). Real Node and Electron never set this field.
 const isBun = typeof process !== "undefined" && typeof process.versions?.bun === "string";
 
-// Function() defeats bundler static analysis. Both Bun (1.x) and Node (≥14.8)
-// support top-level await in ESM, which is the build target.
+// IMPORTANT: bundler-evading dynamic imports.
+//
+// We can't write `await import("better-sqlite3")` directly because esbuild/bun
+// would try to resolve both modules at build time, and one of them won't exist
+// in the build runtime (bun:sqlite is missing in Node, better-sqlite3 isn't
+// shipped in Bun-only environments). Earlier versions used
+// `new Function("p", "return import(p)")("modname")` to defeat static
+// analysis, but that breaks Pi's vm-based extension loader: a Function
+// constructed at runtime has no module record, so `import()` inside it has
+// no referrer module and Node throws "A dynamic import callback was not
+// specified".
+//
+// The /* @vite-ignore */ + variable indirection pattern hides the specifier
+// from static analyzers while keeping a real referrer module for the
+// dynamic import — Pi's loader, esbuild, and bun build all accept it.
+const bunSpec = "bun:" + "sqlite";
+const betterSpec = "better-" + "sqlite3";
 const sqliteModule = isBun
-    ? await new Function("p", "return import(p)")("bun:sqlite")
-    : await new Function("p", "return import(p)")("better-sqlite3");
+    ? await import(/* @vite-ignore */ bunSpec)
+    : await import(/* @vite-ignore */ betterSpec);
 
 // Different export shapes between the two libraries:
 //   - bun:sqlite     → named export `Database`
