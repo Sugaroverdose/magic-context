@@ -72,18 +72,28 @@ COPY packages/pi-plugin/dist/ /test/mc-pi/dist/
 COPY packages/pi-plugin/package.json /test/mc-pi/package.json
 COPY packages/pi-plugin/README.md /test/mc-pi/README.md
 
-# Install runtime deps with flat npm layout for the magic-context-pi
-# CLI binary itself. The CLI is invoked directly (not via Pi), so it
-# needs its own dependency tree. better-sqlite3 builds from source
-# here for the linux/amd64 runtime.
+# Install runtime deps with flat npm layout for the Pi extension itself.
+# Even though Pi loads the extension via `pi install`, we keep deps
+# resolvable in /test/mc-pi/node_modules so the extension's runtime
+# requires (better-sqlite3, comment-json, etc.) work. better-sqlite3
+# builds from source here for the linux/amd64 runtime.
 RUN cd /test/mc-pi && \
     npm install --omit=dev --no-audit --no-fund --workspaces=false \
         --no-package-lock --legacy-peer-deps 2>&1 | tail -5
 
-# Symlink magic-context-pi onto PATH so `magic-context-pi doctor` works.
-# Mirrors what `npm install -g @cortexkit/pi-magic-context` would do.
-RUN chmod +x /test/mc-pi/dist/cli.js && \
-    ln -s /test/mc-pi/dist/cli.js /usr/local/bin/magic-context-pi
+# Magic Context CLI — install the unified CLI from the local copy of
+# packages/cli/. Since v0.16.1 the CLI lives in a separate package
+# (@cortexkit/magic-context) and dispatches to the right harness via
+# `--harness pi`. The Pi plugin no longer ships its own bin entry.
+COPY packages/cli/dist/ /test/mc-cli/dist/
+COPY packages/cli/package.json /test/mc-cli/package.json
+RUN cd /test/mc-cli && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps 2>&1 | tail -5
+# Symlink `magic-context` onto PATH so `magic-context doctor --harness pi`
+# resolves the way it does after `npm install -g @cortexkit/magic-context`.
+RUN chmod +x /test/mc-cli/dist/index.js && \
+    ln -s /test/mc-cli/dist/index.js /usr/local/bin/magic-context
 
 # Pre-install the Pi extension via Pi's own `pi install ./local/path`
 # flow. This mirrors how end users install from npm — Pi resolves the

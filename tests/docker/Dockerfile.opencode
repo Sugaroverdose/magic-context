@@ -66,6 +66,24 @@ COPY packages/plugin/package.json /test/mc-opencode/package.json
 # the image. Pinning a COPY here would break CI on master where the file
 # doesn't exist on disk.
 
+# Magic Context CLI — install the unified CLI (since v0.16.1 the CLI
+# lives in @cortexkit/magic-context, separate from the plugin). The
+# E2E test script invokes `bunx --bun @cortexkit/magic-context doctor
+# --harness opencode --force` which needs build tools (python3, make,
+# g++) for better-sqlite3 to build from source on Linux x64 + Node 24
+# when no prebuilt binary matches.
+COPY packages/cli/dist/ /test/mc-cli/dist/
+COPY packages/cli/package.json /test/mc-cli/package.json
+RUN apt-get update && apt-get install -y python3 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN cd /test/mc-cli && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps 2>&1 | tail -5
+# Symlink `magic-context` onto PATH so `magic-context doctor --harness
+# opencode` resolves the way it does after a global install.
+RUN chmod +x /test/mc-cli/dist/index.js && \
+    ln -s /test/mc-cli/dist/index.js /usr/local/bin/magic-context
+
 # Test scripts and aimock fixtures.
 COPY tests/docker/test-opencode-e2e.sh /test/test-opencode-e2e.sh
 COPY tests/docker/fixtures/aimock-opencode.cjs /test/aimock-server.cjs

@@ -69,9 +69,12 @@ rm -rf "$HOME/.config/opencode" "$HOME/.local/share/cortexkit" "$PLUGIN_LOG"
 mkdir -p "$HOME/.config/opencode"
 echo '{}' > "$HOME/.config/opencode/opencode.json"
 
-# Use bunx --bun to match the path users actually run. The local linked
-# package wins over npm latest because npm link symlinks the global path.
-DOCTOR_OUT=$(bunx --bun @cortexkit/opencode-magic-context doctor --force 2>&1 || true)
+# Since v0.16.1 the CLI lives in the unified @cortexkit/magic-context
+# package — opencode-magic-context is now the runtime plugin only. The
+# `magic-context` binary was symlinked into /usr/local/bin during the
+# Dockerfile build, so it resolves the same way `npm install -g
+# @cortexkit/magic-context` would on a real machine.
+DOCTOR_OUT=$(magic-context doctor --harness opencode --force 2>&1 || true)
 echo "$DOCTOR_OUT" | tail -30
 
 # Doctor's actual outro is one of:

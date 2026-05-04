@@ -53,18 +53,20 @@ check "pi --version returns a value" "test -n \"$PI_VERSION\""
 
 # ----------------------------------------------------------------------
 # Phase 1: SETUP_SMOKE — non-interactive doctor --force.
-# magic-context-pi binary was symlinked into /usr/local/bin in the
+# Since v0.16.1 the CLI is unified into @cortexkit/magic-context with
+# `--harness pi` selecting the Pi-specific doctor pipeline. The
+# `magic-context` binary was symlinked into /usr/local/bin in the
 # Dockerfile.
 # ----------------------------------------------------------------------
-section "Phase 1: SETUP_SMOKE — magic-context-pi doctor --force on a clean machine"
+section "Phase 1: SETUP_SMOKE — magic-context doctor --harness pi --force on a clean machine"
 
 # Pre-condition: no Magic Context state exists.
 rm -rf "$HOME/.local/share/cortexkit" "$PLUGIN_LOG"
 
-DOCTOR_OUT=$(magic-context-pi doctor --force 2>&1 || true)
+DOCTOR_OUT=$(magic-context doctor --harness pi --force 2>&1 || true)
 echo "$DOCTOR_OUT" | tail -40
 
-check "magic-context-pi doctor --force exits with a Doctor summary" \
+check "magic-context doctor --harness pi --force exits with a Doctor summary" \
     "echo \"\$DOCTOR_OUT\" | grep -qE 'Doctor (complete|repair complete|found failures)'"
 
 check "Pi user config created at ~/.pi/agent/magic-context.jsonc" \
