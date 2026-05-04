@@ -31,7 +31,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts --outfile dist/index.js --target node --format esm",
+		"build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external better-sqlite3",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",
@@ -41,10 +41,12 @@
 	},
 	"dependencies": {
 		"@clack/prompts": "^1.1.0",
+		"better-sqlite3": "^12.9.0",
 		"comment-json": "^4.6.2"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
+		"@types/better-sqlite3": "^7.6.13",
 		"@types/node": "^22.0.0",
 		"typescript": "^5.8.0"
 	},

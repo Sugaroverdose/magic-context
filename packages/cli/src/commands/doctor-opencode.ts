@@ -573,11 +573,19 @@ export async function runDoctor(
             const pluginList = (plugins as unknown[]).filter(
                 (p): p is string => typeof p === "string",
             );
+            // Detect any plugin entry that resolves to magic-context, including
+            // local dev paths (file://..., /abs/path, ./relative). Dev paths
+            // are recognized so we don't double-add an @latest entry on top,
+            // but they are NOT replaced — replacing a developer worktree
+            // path with `@latest` would make the dev plugin instance vanish
+            // from OpenCode.
+            const isDevPathEntry = (p: string): boolean =>
+                p.startsWith("file://") || p.startsWith("/") || p.startsWith("./");
             const existingIdx = pluginList.findIndex(
                 (p) =>
                     p === PLUGIN_NAME ||
                     p.startsWith(`${PLUGIN_NAME}@`) ||
-                    p.includes("opencode-magic-context"),
+                    (isDevPathEntry(p) && p.includes("opencode-magic-context")),
             );
             const configName =
                 paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
@@ -585,25 +593,35 @@ export async function runDoctor(
                 log.success(`Plugin registered in ${configName}`);
             } else if (existingIdx >= 0) {
                 const oldEntry = pluginList[existingIdx];
-                const isPinned =
-                    oldEntry !== PLUGIN_NAME &&
-                    oldEntry !== PLUGIN_ENTRY_WITH_VERSION &&
-                    /^@cortexkit\/opencode-magic-context@\d/.test(oldEntry);
 
-                if (isPinned && !options.force) {
-                    // Warn but don't change — user intentionally pinned
-                    log.warn(
-                        `Plugin pinned to ${oldEntry} in ${configName} — use 'doctor --force' to upgrade`,
-                    );
+                // Dev-path entries (file://, absolute, relative) are detected
+                // so we don't double-add @latest, but we MUST NOT replace them
+                // — that would silently disable the developer's local plugin
+                // checkout. Always log as-is and leave the entry alone, even
+                // under --force.
+                if (isDevPathEntry(oldEntry)) {
+                    log.success(`Plugin registered in ${configName} (dev path: ${oldEntry})`);
                 } else {
-                    // Upgrade versionless entry to @latest, or --force upgrades pinned
-                    pluginList[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                    config.plugin = pluginList;
-                    writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
-                    log.success(
-                        `Upgraded plugin entry in ${configName}: ${oldEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`,
-                    );
-                    fixed++;
+                    const isPinned =
+                        oldEntry !== PLUGIN_NAME &&
+                        oldEntry !== PLUGIN_ENTRY_WITH_VERSION &&
+                        /^@cortexkit\/opencode-magic-context@\d/.test(oldEntry);
+
+                    if (isPinned && !options.force) {
+                        // Warn but don't change — user intentionally pinned
+                        log.warn(
+                            `Plugin pinned to ${oldEntry} in ${configName} — use 'doctor --force' to upgrade`,
+                        );
+                    } else {
+                        // Upgrade versionless entry to @latest, or --force upgrades pinned
+                        pluginList[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
+                        config.plugin = pluginList;
+                        writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
+                        log.success(
+                            `Upgraded plugin entry in ${configName}: ${oldEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`,
+                        );
+                        fixed++;
+                    }
                 }
             } else {
                 // Auto-add plugin entry — preserves comments

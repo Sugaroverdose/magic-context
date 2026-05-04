@@ -92,8 +92,14 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
             const plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
             const existingIdx = plugin.findIndex((e) => matchesPluginEntry(e, PLUGIN_NAME));
+            const existingDevIdx = plugin.findIndex((e) => isDevPathPluginEntry(e));
 
-            if (existingIdx === -1) {
+            // Local dev-path entries are recognized so we don't double-add
+            // an @latest entry on top, but they are NEVER replaced by setup.
+            // Replacing a developer worktree path with the npm package would
+            // silently swap their local plugin instance for the published
+            // one — a surprising behavior change setup must avoid.
+            if (existingIdx === -1 && existingDevIdx === -1) {
                 plugin.push(PLUGIN_ENTRY);
                 cfg.plugin = plugin;
                 writeFileSync(target, `${stringifyJsonc(cfg, null, 4)}\n`);
@@ -105,7 +111,17 @@ export class OpenCodeAdapter implements HarnessAdapter {
                 };
             }
 
-            // Already present — check whether it's pinned to an old version.
+            if (existingDevIdx !== -1) {
+                const devEntry = String(plugin[existingDevIdx]);
+                return {
+                    ok: true,
+                    action: "already_present",
+                    message: `Plugin already present (dev path: ${devEntry}) in ${target}.`,
+                    configPath: target,
+                };
+            }
+
+            // Already present as an npm entry — check whether it's pinned to an old version.
             const current = plugin[existingIdx];
             if (typeof current === "string" && current !== PLUGIN_ENTRY) {
                 plugin[existingIdx] = PLUGIN_ENTRY;
@@ -232,6 +248,29 @@ export class OpenCodeAdapter implements HarnessAdapter {
  * For matching purposes we strip everything after `@` (after the first `@org/pkg`
  * segment) so versioned and unversioned entries are equivalent.
  */
+/**
+ * Match a plugin entry that resolves to a local dev checkout of magic-context:
+ *   - "file:///abs/path/.../opencode-magic-context"
+ *   - "/abs/path/.../opencode-magic-context/packages/plugin"
+ *   - "./relative/path/.../opencode-magic-context"
+ *
+ * Tuple entries `["file://...", { options }]` are also recognized.
+ *
+ * Setup and doctor must detect these so they don't double-add @latest, but
+ * must NEVER replace them — that would silently disable the developer's
+ * local plugin instance.
+ */
+function isDevPathPluginEntry(entry: unknown): boolean {
+    let candidate: string | null = null;
+    if (typeof entry === "string") candidate = entry;
+    else if (Array.isArray(entry) && typeof entry[0] === "string") candidate = entry[0];
+    if (!candidate) return false;
+    const isPath =
+        candidate.startsWith("file://") || candidate.startsWith("/") || candidate.startsWith("./");
+    if (!isPath) return false;
+    return candidate.includes("opencode-magic-context") || candidate.includes("magic-context");
+}
+
 function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
     let candidate: string | null = null;
     if (typeof entry === "string") candidate = entry;
