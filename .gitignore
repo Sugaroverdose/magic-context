@@ -40,3 +40,6 @@ packages/plugin/README.md
 packages/plugin/docs/animation[0-9]*/
 
 .pi/
+
+# Local agent task outputs / scratch state
+.alfonso/
