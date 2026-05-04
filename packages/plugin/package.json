@@ -5,9 +5,6 @@
   "description": "OpenCode plugin for Magic Context — cross-session memory and context management",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "bin": {
-    "opencode-magic-context": "dist/cli.js"
-  },
   "author": "ualtinok",
   "license": "MIT",
   "keywords": [
@@ -32,7 +29,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "bun test",
     "lint": "biome check .",
@@ -43,13 +40,11 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
-    "@clack/prompts": "^1.1.0",
     "@huggingface/transformers": "^4.1.0",
     "@opencode-ai/plugin": "^1.2.26",
     "@opencode-ai/sdk": "^1.2.26",
     "ai-tokenizer": "^1.0.6",
     "better-sqlite3": "^12.9.0",
-    "comment-json": "^4.6.2",
     "zod": "^4.1.8"
   },
   "devDependencies": {

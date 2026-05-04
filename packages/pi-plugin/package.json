@@ -4,9 +4,6 @@
 	"type": "module",
 	"description": "Pi coding agent extension for Magic Context — cross-session memory and context management",
 	"main": "dist/index.js",
-	"bin": {
-		"magic-context-pi": "dist/cli.js"
-	},
 	"license": "MIT",
 	"author": "ualtinok",
 	"keywords": [
@@ -29,7 +26,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-tui --external @huggingface/transformers --external better-sqlite3 && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external @clack/prompts",
+		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-tui --external @huggingface/transformers --external better-sqlite3",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",
@@ -40,11 +37,9 @@
 		"prepublishOnly": "bun run build"
 	},
 	"dependencies": {
-		"@clack/prompts": "^1.1.0",
 		"@huggingface/transformers": "^4.1.0",
 		"ai-tokenizer": "^1.0.6",
 		"better-sqlite3": "^12.9.0",
-		"comment-json": "^4.6.2",
 		"typebox": "^1.1.24",
 		"zod": "^4.1.8"
 	},
