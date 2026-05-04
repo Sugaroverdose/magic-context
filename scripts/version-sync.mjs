@@ -80,15 +80,29 @@ for (const pkgDir of PACKAGES) {
     const pkg = JSON.parse(content);
     const label = pkgDir.replace(repoRoot + "/", "");
 
+    // Detect existing indent style so version bumps don't reformat the
+    // entire file. Tabs vs 2-space differ across our packages and we
+    // want to preserve whatever each owner picked.
+    const indent = detectIndent(content);
+
     if (pkg.version === version) {
         console.log(`${label}/package.json: (already at target version)`);
     } else {
         console.log(`${label}/package.json: ${pkg.version} → ${version}`);
         pkg.version = version;
         if (!dryRun) {
-            writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf-8");
+            writeFileSync(pkgPath, `${JSON.stringify(pkg, null, indent)}\n`, "utf-8");
         }
     }
+}
+
+/** Detect whether the JSON file is indented with tabs or N-space indent. */
+function detectIndent(text) {
+    const m = text.match(/^\{\r?\n([ \t]+)"/);
+    if (!m) return 2;
+    const lead = m[1];
+    if (lead.startsWith("\t")) return "\t";
+    return lead.length || 2;
 }
 
 console.log(`\n${dryRun ? "[DRY RUN] " : ""}Done.`);
