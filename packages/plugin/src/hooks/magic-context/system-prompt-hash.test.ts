@@ -49,6 +49,8 @@ function buildHandler(opts?: {
     historyRefreshSessions?: Set<string>;
     systemPromptRefreshSessions?: Set<string>;
     pendingMaterializationSessions?: Set<string>;
+    injectionEnabled?: boolean;
+    injectionSkipSignatures?: string[];
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
@@ -62,6 +64,8 @@ function buildHandler(opts?: {
         systemPromptRefreshSessions: opts?.systemPromptRefreshSessions ?? new Set<string>(),
         pendingMaterializationSessions: opts?.pendingMaterializationSessions ?? new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
+        injectionEnabled: opts?.injectionEnabled,
+        injectionSkipSignatures: opts?.injectionSkipSignatures,
     });
 }
 
@@ -178,5 +182,197 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
         // with isCacheBusting=true → drain.
         await handler({ sessionID: sessionId }, { system: ["New prompt content"] });
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
+    });
+});
+
+/**
+ * Issue #52 regression: Magic Context guidance was being injected into the
+ * system prompt for OpenCode's three native hidden agents (title, summary,
+ * compaction). These agents run on small/cheap models with a fixed single-
+ * shot job — they don't benefit from any of our injection (no tools, no
+ * `ctx_reduce`, no nudges) and pay for the extra prompt content in cost.
+ */
+describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)", () => {
+    const TITLE_PROMPT_HEAD =
+        "You are a title generator. You output ONLY a thread title. Nothing else.";
+    const SUMMARY_PROMPT_HEAD =
+        "Summarize what was done in this conversation. Write like a pull request description.";
+    const COMPACTION_PROMPT_HEAD =
+        "You are an anchored context summarization assistant for coding sessions.";
+
+    it("skips ALL injection for the title agent (signature from title.txt)", async () => {
+        useTempDataHome("sph-skip-title-");
+        const sessionId = "ses-title";
+        const { handler } = buildHandler();
+
+        const system = [TITLE_PROMPT_HEAD];
+        await handler({ sessionID: sessionId }, { system });
+
+        // Nothing appended: no `## Magic Context`, no `<project-docs>`,
+        // no `<user-profile>`, no `<key-files>`. The system array stays
+        // exactly as OpenCode passed it in.
+        expect(system).toHaveLength(1);
+        expect(system[0]).toBe(TITLE_PROMPT_HEAD);
+        expect(system.join("\n")).not.toContain("## Magic Context");
+    });
+
+    it("skips ALL injection for the summary agent", async () => {
+        useTempDataHome("sph-skip-summary-");
+        const sessionId = "ses-summary";
+        const { handler } = buildHandler();
+
+        const system = [SUMMARY_PROMPT_HEAD];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toHaveLength(1);
+        expect(system[0]).toBe(SUMMARY_PROMPT_HEAD);
+    });
+
+    it("skips ALL injection for the compaction agent", async () => {
+        useTempDataHome("sph-skip-compaction-");
+        const sessionId = "ses-compaction";
+        const { handler } = buildHandler();
+
+        const system = [COMPACTION_PROMPT_HEAD];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toHaveLength(1);
+        expect(system[0]).toBe(COMPACTION_PROMPT_HEAD);
+    });
+
+    it("does NOT update systemPromptHash for internal-agent calls", async () => {
+        // Title-gen runs once on the first user turn with a totally
+        // different system prompt than the main agent. If we updated the
+        // hash here, every subsequent main-agent turn would see a
+        // "hash changed" flush and burn cache for nothing.
+        useTempDataHome("sph-skip-no-hash-update-");
+        const sessionId = "ses-no-hash-update";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash-abc123" });
+
+        const { handler } = buildHandler();
+        await handler({ sessionID: sessionId }, { system: [TITLE_PROMPT_HEAD] });
+
+        const meta = getOrCreateSessionMeta(db, sessionId);
+        expect(meta.systemPromptHash).toBe("main-agent-hash-abc123");
+    });
+
+    it("still injects guidance for normal agents whose prompts don't match signatures", async () => {
+        useTempDataHome("sph-still-injects-");
+        const sessionId = "ses-normal";
+        const { handler } = buildHandler();
+
+        const system = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system });
+
+        // The normal-agent path still appends the magic-context guidance.
+        expect(system.length).toBeGreaterThan(1);
+        expect(system.join("\n")).toContain("## Magic Context");
+    });
+});
+
+/**
+ * Issue #53 regression: users can opt specific agents out of system-prompt
+ * injection so Magic Context's `## Magic Context` guidance doesn't tell the
+ * LLM to use tools that the user has denied for that agent.
+ */
+describe("system-prompt-hash honors per-agent opt-out (issue #53)", () => {
+    it("skips ALL injection when injectionEnabled=false (global escape hatch)", async () => {
+        useTempDataHome("sph-issue53-disabled-");
+        const sessionId = "ses-disabled";
+        const { handler } = buildHandler({ injectionEnabled: false });
+
+        const system = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toHaveLength(1);
+        expect(system[0]).toBe("You are a helpful coding assistant.");
+        expect(system.join("\n")).not.toContain("## Magic Context");
+    });
+
+    it("skips injection when an agent prompt contains a custom skip signature", async () => {
+        useTempDataHome("sph-issue53-skip-sig-");
+        const sessionId = "ses-skipsig";
+        const { handler } = buildHandler({
+            injectionSkipSignatures: ["<!-- magic-context: skip -->"],
+        });
+
+        const system = [
+            "You are a read-only QA agent.\n<!-- magic-context: skip -->\nDeny all writes.",
+        ];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toHaveLength(1);
+        expect(system.join("\n")).not.toContain("## Magic Context");
+    });
+
+    it("matches multiple skip signatures (any one match opts the agent out)", async () => {
+        useTempDataHome("sph-issue53-multi-sig-");
+        const sessionId = "ses-multisig";
+        const { handler } = buildHandler({
+            injectionSkipSignatures: [
+                "<!-- magic-context: skip -->",
+                "I AM A TINY SPECIALIZED AGENT",
+            ],
+        });
+
+        const system = ["I AM A TINY SPECIALIZED AGENT — do nothing else."];
+        await handler({ sessionID: sessionId }, { system });
+
+        expect(system).toHaveLength(1);
+        expect(system.join("\n")).not.toContain("## Magic Context");
+    });
+
+    it("does NOT skip when skip signatures don't match the prompt", async () => {
+        useTempDataHome("sph-issue53-no-match-");
+        const sessionId = "ses-nomatch";
+        const { handler } = buildHandler({
+            injectionSkipSignatures: ["<!-- magic-context: skip -->"],
+        });
+
+        const system = ["You are a normal agent without any skip marker."];
+        await handler({ sessionID: sessionId }, { system });
+
+        // Injection still happened — guidance was appended.
+        expect(system.length).toBeGreaterThan(1);
+        expect(system.join("\n")).toContain("## Magic Context");
+    });
+
+    it("ignores empty skip-signature strings (would otherwise match everything)", async () => {
+        // Defensive: an empty string in skip_signatures would make
+        // `prompt.includes("")` true for every prompt, silently disabling
+        // injection globally. The handler explicitly filters out empty
+        // signatures so a misconfiguration can't break injection silently.
+        useTempDataHome("sph-issue53-empty-sig-");
+        const sessionId = "ses-emptysig";
+        const { handler } = buildHandler({
+            injectionSkipSignatures: ["", "<!-- magic-context: skip -->"],
+        });
+
+        const system = ["You are a normal agent — no skip marker here."];
+        await handler({ sessionID: sessionId }, { system });
+
+        // Empty signature ignored, real signature didn't match → guidance injected.
+        expect(system.length).toBeGreaterThan(1);
+        expect(system.join("\n")).toContain("## Magic Context");
+    });
+
+    it("does NOT update systemPromptHash for opted-out calls", async () => {
+        // Same reasoning as the issue #52 hash-update test: an opted-out
+        // agent's system prompt is structurally different from the main
+        // agent's, so updating the hash here would cause every later
+        // main-agent turn to see a hash-change flush.
+        useTempDataHome("sph-issue53-no-hash-update-");
+        const sessionId = "ses-issue53-no-hash";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash" });
+
+        const { handler } = buildHandler({ injectionEnabled: false });
+        await handler({ sessionID: sessionId }, { system: ["Custom agent prompt"] });
+
+        const meta = getOrCreateSessionMeta(db, sessionId);
+        expect(meta.systemPromptHash).toBe("main-agent-hash");
     });
 });

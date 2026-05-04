@@ -210,6 +210,27 @@ export interface MagicContextConfig {
         min_clusters: number;
     };
     compaction_markers: boolean;
+    /**
+     * Controls whether and where Magic Context augments the system prompt
+     * (`## Magic Context` guidance, `<project-docs>`, `<user-profile>`,
+     * `<key-files>`, sticky date) inside `experimental.chat.system.transform`.
+     *
+     * Internal OpenCode hidden agents (title, summary, compaction) are
+     * always skipped automatically — that's a separate code path.
+     */
+    system_prompt_injection: {
+        /** When false, NO injection happens for ANY agent — global escape hatch. */
+        enabled: boolean;
+        /**
+         * If the agent's system prompt contains any of these substrings,
+         * skip ALL Magic Context injection for that call. Lets users opt
+         * specific agents out (e.g. read-only QA agents that deny our
+         * `ctx_*` tools and don't need the guidance). The default marker
+         * `<!-- magic-context: skip -->` is meant to be added inside the
+         * user's custom agent prompt.
+         */
+        skip_signatures: string[];
+    };
     compressor: {
         enabled: boolean;
         min_compartment_ratio: number;
@@ -342,6 +363,26 @@ export const MagicContextConfigSchema = z
          *  After historian publishes compartments, a compaction boundary is written into
          *  OpenCode's message/part tables so older messages are skipped at load time. Default: true. */
         compaction_markers: z.boolean().default(true),
+        /** Controls whether and where Magic Context augments the system prompt.
+         *  Lets users opt specific agents out of `## Magic Context` guidance and
+         *  the surrounding `<project-docs>` / `<user-profile>` / `<key-files>`
+         *  blocks (issue #53). OpenCode's internal hidden agents — title,
+         *  summary, and compaction — are always skipped automatically. */
+        system_prompt_injection: z
+            .object({
+                /** When false, NO injection happens for ANY agent — global escape hatch. (default: true) */
+                enabled: z.boolean().default(true),
+                /** Substring opt-out list. If the agent's system prompt contains
+                 *  any of these strings, skip ALL Magic Context injection for that
+                 *  call. Default `<!-- magic-context: skip -->` is meant to be
+                 *  added inside a user's custom agent prompt to opt that agent
+                 *  out. (default: ["<!-- magic-context: skip -->"]) */
+                skip_signatures: z.array(z.string()).default(["<!-- magic-context: skip -->"]),
+            })
+            .default({
+                enabled: true,
+                skip_signatures: ["<!-- magic-context: skip -->"],
+            }),
         /** Compressor configuration — controls second-pass compression of older
          *  compartments when the rendered history block exceeds its budget.
          *  The compressor merges adjacent compartments and applies progressively

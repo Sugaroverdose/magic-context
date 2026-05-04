@@ -63,6 +63,10 @@ describe("MagicContextConfigSchema", () => {
                     min_clusters: 3,
                 },
                 compaction_markers: true,
+                system_prompt_injection: {
+                    enabled: true,
+                    skip_signatures: ["<!-- magic-context: skip -->"],
+                },
                 compressor: {
                     enabled: true,
                     min_compartment_ratio: 1000,

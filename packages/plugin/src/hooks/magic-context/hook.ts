@@ -89,6 +89,10 @@ export interface MagicContextDeps {
         dreamer?: DreamerConfig;
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
         compaction_markers?: boolean;
+        /** Issue #53: per-agent system-prompt injection opt-out. Optional in
+         *  the inline type so legacy tests/callers don't have to construct it;
+         *  Zod's .default() guarantees it's present in real loaded configs. */
+        system_prompt_injection?: { enabled: boolean; skip_signatures: string[] };
         compressor?: {
             enabled: boolean;
             min_compartment_ratio: number;
@@ -539,6 +543,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         systemPromptRefreshSessions,
         pendingMaterializationSessions,
         lastHeuristicsTurnId,
+        // Issue #53: per-agent injection opt-out via config.
+        // Defensive defaults for tests/legacy callers that pre-date the
+        // schema field; Zod's .default() handles real loaded configs.
+        injectionEnabled: deps.config.system_prompt_injection?.enabled ?? true,
+        injectionSkipSignatures: deps.config.system_prompt_injection?.skip_signatures ?? [
+            "<!-- magic-context: skip -->",
+        ],
         experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
         experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,

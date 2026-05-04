@@ -44,6 +44,46 @@ export function clearSystemPromptHashSession(
     handleMaps.cachedDocsBySession.delete(sessionId);
 }
 
+/**
+ * Detect OpenCode's three native hidden agents by stable signature lines from
+ * their built-in prompts (see `~/Work/OSS/opencode/packages/opencode/src/agent/
+ * prompt/{title,summary,compaction}.txt`).
+ *
+ * These agents:
+ *   - "title": runs once on the first user turn against `small_model` to
+ *              generate a short session title.
+ *   - "summary": pull-request-style description of work done in a session.
+ *   - "compaction": OpenCode's own auto-compaction summarizer (orthogonal to
+ *                   our historian — fires when users haven't disabled
+ *                   `compaction.auto`).
+ *
+ * Magic Context skips ALL injection (guidance, project docs, user profile,
+ * key files, sticky date, hash flush) when these agents fire — they don't
+ * benefit from any of it and the extra prompt content is wasted spend on
+ * what's typically a small/cheap model running a fixed single-shot job.
+ *
+ * Detection uses literal substrings rather than fuzzy matching so a small
+ * upstream prompt edit doesn't silently disable the skip. If OpenCode ever
+ * rewrites these prompts, our injection will resume — that's the correct
+ * fail-open behavior (worse than ideal, but not broken).
+ */
+function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
+    return (
+        // title.txt opens with this exact line
+        systemPromptContent.includes(
+            "You are a title generator. You output ONLY a thread title.",
+        ) ||
+        // summary.txt opens with this exact line
+        systemPromptContent.includes(
+            "Summarize what was done in this conversation. Write like a pull request description.",
+        ) ||
+        // compaction.txt opens with this exact line
+        systemPromptContent.includes(
+            "You are an anchored context summarization assistant for coding sessions.",
+        )
+    );
+}
+
 const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 
 /**
@@ -111,6 +151,21 @@ export function createSystemPromptHashHandler(deps: {
     historyRefreshSessions: Set<string>;
     pendingMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
+    /**
+     * Issue #53: when false, Magic Context skips ALL system-prompt injection
+     * for ALL agents. Global escape hatch for users who don't want any
+     * Magic Context guidance / docs / user-profile / key-files / sticky date
+     * touching the system prompt. (default: true)
+     */
+    injectionEnabled?: boolean;
+    /**
+     * Issue #53: per-agent opt-out. If the agent's system prompt contains
+     * any of these substrings, skip ALL injection for this call. Lets users
+     * mark specific custom agents (e.g. read-only QA agents that deny our
+     * `ctx_*` tools) as no-injection without having to disable injection
+     * globally.
+     */
+    injectionSkipSignatures?: string[];
     /** When true, inject stable user memories as <user-profile> into system prompt */
     experimentalUserMemories?: boolean;
     /** When true, inject pinned key files as <key-files> into system prompt */
@@ -144,6 +199,71 @@ export function createSystemPromptHashHandler(deps: {
     ): Promise<void> => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
+
+        // ── Skip OpenCode's internal hidden agents ──
+        //
+        // OpenCode invokes `experimental.chat.system.transform` for ALL llm
+        // calls inside a session, including its three native hidden agents:
+        //   - "title": runs once on the first user turn against `small_model`
+        //              (or the small variant of the active model) to generate
+        //              a session title from the first message.
+        //   - "summary": session export / pull-request-style description.
+        //   - "compaction": OpenCode's own auto-compaction summarizer.
+        //
+        // These agents:
+        //   1. Don't benefit from magic-context guidance (they have a fixed
+        //      single-shot job — no tools, no `ctx_reduce`, no nudges).
+        //   2. Get hit with our `<project-docs>`, `<user-profile>`,
+        //      `<key-files>`, and the multi-paragraph guidance block, which
+        //      can multiply their input by 10× for a tiny single-line output.
+        //   3. Often run on a smaller/cheaper model where the extra prompt
+        //      content is wasted spend.
+        //
+        // The hook contract gives us only `{ sessionID, model }`, so we can't
+        // dispatch on agent name. We detect them by signature lines from
+        // their prompts in OpenCode source (`packages/opencode/src/agent/prompt/`).
+        // These signatures are stable across OpenCode releases — they're the
+        // first instruction lines of each internal prompt.
+        const fullPromptForDetection = output.system.join("\n");
+        if (isInternalOpenCodeAgent(fullPromptForDetection)) {
+            sessionLog(
+                sessionId,
+                "system-prompt-hash skipped (OpenCode internal agent: title/summary/compaction)",
+            );
+            return;
+        }
+
+        // ── Issue #53: user-controlled per-agent opt-out ──
+        //
+        // Two layers, both honored here:
+        //   1. Global: `system_prompt_injection.enabled: false` → skip
+        //      injection for every agent. Useful when a user wants Magic
+        //      Context to manage history but never touch the system prompt.
+        //   2. Per-agent: `system_prompt_injection.skip_signatures` →
+        //      substring opt-out. The user adds the signature (default
+        //      `<!-- magic-context: skip -->`) inside their custom agent's
+        //      prompt; whenever that agent fires, we skip injection for
+        //      that call only.
+        //
+        // Both paths skip ALL injection (guidance, project docs, user
+        // profile, key files, sticky date) AND skip hash tracking — like
+        // the internal-agent skip above. Hash tracking is intentionally
+        // skipped so a deny-listed agent's system prompt doesn't compete
+        // with the main agent's hash, which would cause cross-agent
+        // hash-change flushes.
+        const injectionEnabled = deps.injectionEnabled !== false;
+        const skipSignatures = deps.injectionSkipSignatures ?? [];
+        if (!injectionEnabled) {
+            sessionLog(sessionId, "system-prompt-hash skipped (injection globally disabled)");
+            return;
+        }
+        if (skipSignatures.some((sig) => sig.length > 0 && fullPromptForDetection.includes(sig))) {
+            sessionLog(
+                sessionId,
+                "system-prompt-hash skipped (matched system_prompt_injection.skip_signatures)",
+            );
+            return;
+        }
 
         // ── Step 1: Inject magic-context guidance ──
         // Subagents get the no-reduce guidance variant: they run heuristic
