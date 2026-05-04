@@ -183,7 +183,7 @@ export default function CacheDiagnostics() {
     <>
       <div class="section-header">
         <h1 class="section-title">Cache Diagnostics</h1>
-        <div class="section-actions">
+        <div class="section-actions" style={{ "align-items": "center" }}>
           <FilterSelect
             value={harnessFilter()}
             onChange={(value) => {
@@ -197,11 +197,6 @@ export default function CacheDiagnostics() {
               { value: "pi", label: "Pi" },
             ]}
           />
-          <Show when={!paused()}>
-            <span style={{ color: "var(--green)", "font-size": "12px", "margin-right": "8px" }}>
-              ● Live
-            </span>
-          </Show>
           <button
             type="button"
             class={`btn sm ${!hideSubagents() ? "primary" : ""}`}
@@ -216,6 +211,19 @@ export default function CacheDiagnostics() {
           >
             {paused() ? "▶ Resume" : "⏸ Pause"}
           </button>
+          <Show when={!paused()}>
+            <span
+              style={{
+                color: "var(--green)",
+                "font-size": "12px",
+                display: "inline-flex",
+                "align-items": "center",
+                "margin-left": "4px",
+              }}
+            >
+              ● Live
+            </span>
+          </Show>
         </div>
       </div>
 
@@ -358,18 +366,26 @@ export default function CacheDiagnostics() {
                           "align-items": "center",
                           gap: "8px",
                           "margin-bottom": "4px",
+                          "min-width": "0",
                         }}
                       >
-                        <span>{severityIcon(event.severity)}</span>
-                        <HarnessBadge harness={event.harness} />
+                        <span style={{ "flex-shrink": "0" }}>{severityIcon(event.severity)}</span>
+                        <span style={{ "flex-shrink": "0", display: "inline-flex" }}>
+                          <HarnessBadge harness={event.harness} />
+                        </span>
                         <span
                           class="mono"
-                          style={{ "font-size": "11px", color: "var(--text-secondary)" }}
+                          style={{
+                            "font-size": "11px",
+                            color: "var(--text-secondary)",
+                            "flex-shrink": "0",
+                          }}
                         >
                           {formatDateTime(event.timestamp)}
                         </span>
                         <span
                           class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}
+                          style={{ "flex-shrink": "0" }}
                         >
                           {event.severity === "full_bust"
                             ? "FULL BUST"
@@ -379,7 +395,16 @@ export default function CacheDiagnostics() {
                         </span>
                         <span
                           class="mono"
-                          style={{ "font-size": "10px", color: "var(--text-muted)" }}
+                          style={{
+                            "font-size": "10px",
+                            color: "var(--text-muted)",
+                            "min-width": "0",
+                            overflow: "hidden",
+                            "text-overflow": "ellipsis",
+                            "white-space": "nowrap",
+                            flex: "1 1 auto",
+                          }}
+                          title={resolveTitle(event.harness, event.session_id)}
                         >
                           {resolveTitle(event.harness, event.session_id)}
                         </span>
