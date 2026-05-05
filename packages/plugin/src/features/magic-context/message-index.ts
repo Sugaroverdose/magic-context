@@ -19,6 +19,7 @@ const upsertIndexStatements = new WeakMap<Database, PreparedStatement>();
 const deleteFtsStatements = new WeakMap<Database, PreparedStatement>();
 const deleteIndexStatements = new WeakMap<Database, PreparedStatement>();
 const countIndexedMessageStatements = new WeakMap<Database, PreparedStatement>();
+const indexedMessageIdStatements = new WeakMap<Database, PreparedStatement>();
 
 function normalizeIndexText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
@@ -86,13 +87,43 @@ function getCountIndexedMessageStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+function getIndexedMessageIdStatement(db: Database): PreparedStatement {
+    let stmt = indexedMessageIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT message_id AS messageId FROM message_history_fts WHERE session_id = ?",
+        );
+        indexedMessageIdStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
 interface CountRow {
     count: number;
 }
 
-function getLastIndexedOrdinal(db: Database, sessionId: string): number {
+interface IndexedMessageIdRow {
+    messageId?: string;
+}
+
+export function getLastIndexedOrdinal(db: Database, sessionId: string): number {
     const row = getLastIndexedStatement(db).get(sessionId) as MessageHistoryIndexRow | null;
     return typeof row?.last_indexed_ordinal === "number" ? row.last_indexed_ordinal : 0;
+}
+
+function isMessageAlreadyIndexed(db: Database, sessionId: string, messageId: string): boolean {
+    const row = getCountIndexedMessageStatement(db).get(sessionId, messageId) as CountRow | null;
+    return (typeof row?.count === "number" ? row.count : 0) > 0;
+}
+
+function advanceIndexWatermark(
+    db: Database,
+    sessionId: string,
+    ordinal: number,
+    now: number,
+): void {
+    const current = getLastIndexedOrdinal(db, sessionId);
+    getUpsertIndexStatement(db).run(sessionId, Math.max(current, ordinal), now, getHarness());
 }
 
 export function deleteIndexedMessage(db: Database, sessionId: string, messageId: string): number {
@@ -115,7 +146,7 @@ export function clearIndexedMessages(db: Database, sessionId: string): void {
     })();
 }
 
-function getIndexableContent(role: string, parts: unknown[]): string {
+export function getIndexableContent(role: string, parts: unknown[]): string {
     if (role === "user") {
         if (!hasMeaningfulUserText(parts)) {
             return "";
@@ -137,6 +168,81 @@ function getIndexableContent(role: string, parts: unknown[]): string {
     }
 
     return "";
+}
+
+function indexSingleMessageInTransaction(
+    db: Database,
+    sessionId: string,
+    message: RawMessage,
+    now: number,
+): boolean {
+    if (message.role !== "user" && message.role !== "assistant") {
+        advanceIndexWatermark(db, sessionId, message.ordinal, now);
+        return false;
+    }
+
+    const content = getIndexableContent(message.role, message.parts);
+    if (content.length === 0) {
+        advanceIndexWatermark(db, sessionId, message.ordinal, now);
+        return false;
+    }
+
+    if (isMessageAlreadyIndexed(db, sessionId, message.id)) {
+        advanceIndexWatermark(db, sessionId, message.ordinal, now);
+        return false;
+    }
+
+    getInsertMessageStatement(db).run(
+        sessionId,
+        message.ordinal,
+        message.id,
+        message.role,
+        content,
+    );
+    advanceIndexWatermark(db, sessionId, message.ordinal, now);
+    return true;
+}
+
+export function indexSingleMessage(db: Database, sessionId: string, message: RawMessage): boolean {
+    return db.transaction(() =>
+        indexSingleMessageInTransaction(db, sessionId, message, Date.now()),
+    )();
+}
+
+export function indexMessagesAfterOrdinal(
+    db: Database,
+    sessionId: string,
+    messages: RawMessage[],
+    lastIndexedOrdinal: number,
+    finalWatermark: number = messages.length,
+): number {
+    const now = Date.now();
+    let inserted = 0;
+    db.transaction(() => {
+        const existingMessageIds = new Set(
+            (getIndexedMessageIdStatement(db).all(sessionId) as IndexedMessageIdRow[])
+                .map((row) => row.messageId)
+                .filter((messageId): messageId is string => typeof messageId === "string"),
+        );
+        const insertMessage = getInsertMessageStatement(db);
+        for (const message of messages) {
+            if (message.ordinal <= lastIndexedOrdinal) {
+                continue;
+            }
+            if (message.role !== "user" && message.role !== "assistant") {
+                continue;
+            }
+            const content = getIndexableContent(message.role, message.parts);
+            if (content.length === 0 || existingMessageIds.has(message.id)) {
+                continue;
+            }
+            insertMessage.run(sessionId, message.ordinal, message.id, message.role, content);
+            existingMessageIds.add(message.id);
+            inserted++;
+        }
+        getUpsertIndexStatement(db).run(sessionId, finalWatermark, now, getHarness());
+    })();
+    return inserted;
 }
 
 export function ensureMessagesIndexed(
@@ -161,30 +267,5 @@ export function ensureMessagesIndexed(
         return;
     }
 
-    const messagesToInsert = messages
-        .filter((message) => message.ordinal > lastIndexedOrdinal)
-        .filter((message) => message.role === "user" || message.role === "assistant")
-        .map((message) => ({
-            ordinal: message.ordinal,
-            id: message.id,
-            role: message.role,
-            content: getIndexableContent(message.role, message.parts),
-        }))
-        .filter((message) => message.content.length > 0);
-
-    const now = Date.now();
-    db.transaction(() => {
-        const insertMessage = getInsertMessageStatement(db);
-        for (const message of messagesToInsert) {
-            insertMessage.run(
-                sessionId,
-                message.ordinal,
-                message.id,
-                message.role,
-                message.content,
-            );
-        }
-
-        getUpsertIndexStatement(db).run(sessionId, messages.length, now, getHarness());
-    })();
+    indexMessagesAfterOrdinal(db, sessionId, messages, lastIndexedOrdinal, messages.length);
 }
