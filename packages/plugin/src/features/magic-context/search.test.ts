@@ -13,6 +13,7 @@ const rawMessagesBySession = new Map<
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { replaceSessionFacts } from "./compartment-storage";
 import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
+import { ensureMessagesIndexed } from "./message-index";
 import { runMigrations } from "./migrations";
 import { unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
@@ -91,6 +92,7 @@ describe("unifiedSearch", () => {
                 ],
             },
         ]);
+        ensureMessagesIndexed(db, "ses-1", readMessages);
 
         const results = await unifiedSearch(db, "ses-1", "/repo/project", "ranked search", {
             limit: 5,
@@ -130,6 +132,7 @@ describe("unifiedSearch", () => {
                 parts: [{ type: "text", text: "What prompt does the historian agent use?" }],
             },
         ]);
+        ensureMessagesIndexed(db, "ses-sources", readMessages);
 
         // Memory-only filter — message hit must be excluded.
         const memoryOnly = await unifiedSearch(
@@ -223,6 +226,7 @@ describe("unifiedSearch", () => {
                 parts: [{ type: "text", text: "regression three" }],
             },
         ]);
+        ensureMessagesIndexed(db, "ses-decay", readMessages);
 
         const results = await unifiedSearch(db, "ses-decay", "/repo/decay", "regression", {
             memoryEnabled: false,
@@ -249,7 +253,7 @@ describe("unifiedSearch", () => {
         expect(messages[2].score).toBeGreaterThan(0.2);
     });
 
-    it("indexes only meaningful text messages and updates incrementally", async () => {
+    it("returns empty message results until async indexing populates FTS", async () => {
         rawMessagesBySession.set("ses-2", [
             {
                 ordinal: 1,
@@ -284,6 +288,18 @@ describe("unifiedSearch", () => {
             isEmbeddingRuntimeEnabled,
         });
 
+        expect(results.filter((result) => result.source === "message")).toHaveLength(0);
+
+        ensureMessagesIndexed(db, "ses-2", readMessages);
+
+        results = await unifiedSearch(db, "ses-2", "/repo/project", "ticket", {
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+        });
+
         expect(results.filter((result) => result.source === "message")).toHaveLength(2);
 
         rawMessagesBySession.set("ses-2", [
@@ -295,6 +311,7 @@ describe("unifiedSearch", () => {
                 parts: [{ type: "text", text: "The indexed ticket search now supports history." }],
             },
         ]);
+        ensureMessagesIndexed(db, "ses-2", readMessages);
 
         results = await unifiedSearch(db, "ses-2", "/repo/project", "supports history", {
             memoryEnabled: false,

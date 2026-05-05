@@ -1,5 +1,3 @@
-import { readRawSessionMessages } from "../../hooks/magic-context/read-session-chunk";
-import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { type GitCommitSearchHit, searchGitCommitsSync } from "./git-commits";
@@ -15,7 +13,6 @@ import {
 import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
-import { ensureMessagesIndexed } from "./message-index";
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
 const FTS_SEMANTIC_CANDIDATE_LIMIT = 50;
@@ -50,7 +47,8 @@ export interface UnifiedSearchOptions {
     limit?: number;
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
-    readMessages?: (sessionId: string) => RawMessage[];
+    /** Deprecated: message search no longer reads raw messages on the hot path. */
+    readMessages?: (sessionId: string) => unknown[];
     embedQuery?: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled?: () => boolean;
     /** Only return message-history hits with ordinal ≤ this value (e.g. last compartment end). -1 or omit to search all. */
@@ -374,12 +372,9 @@ function searchMessages(args: {
     sessionId: string;
     query: string;
     limit: number;
-    readMessages: (sessionId: string) => RawMessage[];
     /** Only return messages with ordinal ≤ this value. Omit or -1 to search all indexed messages. */
     maxOrdinal?: number;
 }): MessageSearchResult[] {
-    ensureMessagesIndexed(args.db, args.sessionId, args.readMessages);
-
     const sanitizedQuery = sanitizeFtsQuery(args.query.trim());
     if (sanitizedQuery.length === 0) {
         return [];
@@ -586,15 +581,16 @@ export async function unifiedSearch(
     // doesn't actually leave the process until we await later.
     await Promise.resolve();
 
-    // Run the synchronous message-FTS path now that the embed fetch is
-    // in flight. The message-search path doesn't depend on embeddings.
+    // Run the synchronous message-FTS SELECT now that the embed fetch is
+    // in flight. Message indexing is event-driven and never runs here;
+    // unreconciled sessions simply return no message hits until the async
+    // first-touch reconciliation finishes.
     const messageResults: MessageSearchResult[] = runMessages
         ? searchMessages({
               db,
               sessionId,
               query: trimmedQuery,
               limit: tierLimit,
-              readMessages: options.readMessages ?? readRawSessionMessages,
               maxOrdinal: options.maxMessageOrdinal,
           })
         : [];

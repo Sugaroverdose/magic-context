@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
+import { indexMessagesAfterOrdinal } from "../../features/magic-context/message-index";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -87,6 +88,26 @@ describe("createCtxSearchTools", () => {
                 },
             ],
         });
+        indexMessagesAfterOrdinal(
+            db,
+            "ses-message",
+            [
+                {
+                    ordinal: 5,
+                    id: "m5",
+                    role: "assistant",
+                    parts: [{ type: "text", text: "Alpha migration details are here." }],
+                },
+                {
+                    ordinal: 6,
+                    id: "m6",
+                    role: "user",
+                    parts: [{ type: "text", text: "More alpha migration context." }],
+                },
+            ],
+            0,
+            6,
+        );
 
         const result = await tools.ctx_search.execute(
             { query: "alpha migration", sources: ["message"] },
