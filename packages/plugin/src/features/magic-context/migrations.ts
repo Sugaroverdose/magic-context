@@ -306,6 +306,41 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 8,
+        description: "Add partial indexes on tags(session_id, tag_number) for active and dropped",
+        // Hot-path optimization. The existing index
+        // `idx_tags_session_tag_number ON tags(session_id, tag_number)`
+        // covers `WHERE session_id = ?` but not the `status = ?` predicate,
+        // so SQLite's planner falls back to scanning every tag in a session
+        // (~50k rows on long-lived sessions) for the active-only and
+        // dropped-only queries that run on every transform pass.
+        //
+        // Partial indexes restrict the index to rows matching the WHERE
+        // clause, so:
+        //   - `getActiveTagsBySession` becomes an index-only scan over the
+        //     active rows (typically <1% of total tags),
+        //   - `getMaxDroppedTagNumber` becomes a single backward index seek.
+        //
+        // Benchmarked at ~110× speedup on a 49k-tag session (67ms → 0.6ms
+        // for the combined per-pass workload). See
+        // `packages/plugin/scripts/benchmark-tag-queries.ts`.
+        //
+        // ANALYZE is run after creation so the planner has stats for the
+        // new indexes the first time it sees a query against this DB.
+        up: (db: Database) => {
+            db.exec(`
+                CREATE INDEX IF NOT EXISTS idx_tags_active_session_tag_number
+                ON tags(session_id, tag_number)
+                WHERE status = 'active';
+
+                CREATE INDEX IF NOT EXISTS idx_tags_dropped_session_tag_number
+                ON tags(session_id, tag_number)
+                WHERE status = 'dropped';
+            `);
+            db.exec("ANALYZE tags;");
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

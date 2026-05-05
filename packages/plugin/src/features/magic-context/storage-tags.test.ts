@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    getActiveTagsBySession,
+    getMaxDroppedTagNumber,
     getTagById,
+    getTagsByNumbers,
     getTagsBySession,
     getTopNBySize,
     insertTag,
@@ -293,6 +296,221 @@ describe("storage-tags", () => {
             expect(tag?.dropMode).toBe("truncated");
             expect(tag?.toolName).toBe("read");
             expect(tag?.inputByteSize).toBe(321);
+        });
+    });
+
+    // P0 perf: targeted helpers for the hot transform path.
+    // Each test asserts a) the new helper returns an equivalent slice
+    // of getTagsBySession, b) it filters correctly when dropped/compacted
+    // tags exist alongside active ones, and c) it never silently
+    // mis-translates fields (status, type, dropMode, etc).
+
+    describe("#given getActiveTagsBySession", () => {
+        it("#when session has mixed statuses #then returns only active rows", () => {
+            db = makeMemoryDatabase();
+            const a1 = insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            const a2 = insertTag(db, "ses-1", "msg-2", "tool", 200, 2);
+            const d = insertTag(db, "ses-1", "msg-3", "message", 300, 3);
+            const c = insertTag(db, "ses-1", "msg-4", "tool", 400, 4);
+            updateTagStatus(db, "ses-1", d, "dropped");
+            updateTagStatus(db, "ses-1", c, "compacted");
+
+            const active = getActiveTagsBySession(db, "ses-1");
+
+            expect(active).toHaveLength(2);
+            expect(active.map((t) => t.tagNumber).sort((a, b) => a - b)).toEqual([a1, a2]);
+            expect(active.every((t) => t.status === "active")).toBe(true);
+        });
+
+        it("#when session has no active tags #then returns empty array", () => {
+            db = makeMemoryDatabase();
+            const id = insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            updateTagStatus(db, "ses-1", id, "dropped");
+
+            expect(getActiveTagsBySession(db, "ses-1")).toEqual([]);
+        });
+
+        it("#when session is unknown #then returns empty array", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+
+            expect(getActiveTagsBySession(db, "unknown")).toEqual([]);
+        });
+
+        it("#when ordering by tag_number #then result is ascending", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-c", "message", 300, 7);
+            insertTag(db, "ses-1", "msg-a", "message", 100, 3);
+            insertTag(db, "ses-1", "msg-b", "tool", 200, 5);
+
+            const active = getActiveTagsBySession(db, "ses-1");
+
+            expect(active.map((t) => t.tagNumber)).toEqual([3, 5, 7]);
+        });
+
+        it("#when result must match getTagsBySession-active-filter exactly #then equivalent", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            insertTag(db, "ses-1", "msg-2", "tool", 200, 2);
+            const d = insertTag(db, "ses-1", "msg-3", "tool", 300, 3, 0, "read", 50);
+            updateTagStatus(db, "ses-1", d, "dropped");
+
+            const fromHelper = getActiveTagsBySession(db, "ses-1");
+            const fromFull = getTagsBySession(db, "ses-1").filter((t) => t.status === "active");
+
+            expect(fromHelper).toEqual(fromFull);
+        });
+    });
+
+    describe("#given getTagsByNumbers", () => {
+        it("#when tagNumbers is empty #then returns empty array without hitting SQL", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+
+            expect(getTagsByNumbers(db, "ses-1", [])).toEqual([]);
+        });
+
+        it("#when tagNumbers match #then returns those rows regardless of status", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            const d = insertTag(db, "ses-1", "msg-2", "tool", 200, 2);
+            insertTag(db, "ses-1", "msg-3", "message", 300, 3);
+            updateTagStatus(db, "ses-1", d, "dropped");
+
+            const slice = getTagsByNumbers(db, "ses-1", [1, 2]);
+
+            expect(slice).toHaveLength(2);
+            expect(slice.find((t) => t.tagNumber === 1)?.status).toBe("active");
+            expect(slice.find((t) => t.tagNumber === 2)?.status).toBe("dropped");
+        });
+
+        it("#when tagNumbers contain unknown ids #then silently skips them", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+
+            const slice = getTagsByNumbers(db, "ses-1", [1, 999, 1000]);
+
+            expect(slice).toHaveLength(1);
+            expect(slice[0].tagNumber).toBe(1);
+        });
+
+        it("#when tagNumbers exist in another session #then never returned", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            insertTag(db, "ses-2", "msg-2", "message", 200, 1);
+
+            const slice = getTagsByNumbers(db, "ses-1", [1]);
+
+            expect(slice).toHaveLength(1);
+            expect(slice[0].sessionId).toBe("ses-1");
+        });
+
+        it("#when list exceeds 900 entries #then chunks transparently", () => {
+            db = makeMemoryDatabase();
+            // SQLite parameter limit is 999. Helper chunks at 900.
+            // Insert 1500 tags and request all 1500 numbers in one call.
+            for (let i = 1; i <= 1500; i++) {
+                insertTag(db, "ses-1", `msg-${i}`, "message", 10, i);
+            }
+            const tagNumbers = Array.from({ length: 1500 }, (_, i) => i + 1);
+
+            const slice = getTagsByNumbers(db, "ses-1", tagNumbers);
+
+            expect(slice).toHaveLength(1500);
+            // Sanity: returned tag numbers exactly match the requested set.
+            expect(new Set(slice.map((t) => t.tagNumber))).toEqual(new Set(tagNumbers));
+        });
+
+        it("#when result must match the targets-filtered slice #then equivalent to getTagsBySession", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            const d = insertTag(db, "ses-1", "msg-2", "tool", 200, 2, 0, "read", 50);
+            insertTag(db, "ses-1", "msg-3", "message", 300, 3);
+            updateTagStatus(db, "ses-1", d, "dropped");
+            updateTagDropMode(db, "ses-1", d, "truncated");
+
+            const targetNumbers = [1, 2];
+            const fromHelper = getTagsByNumbers(db, "ses-1", targetNumbers);
+            const fromFull = getTagsBySession(db, "ses-1").filter((t) =>
+                targetNumbers.includes(t.tagNumber),
+            );
+
+            // Order matches by ORDER BY tag_number ASC, id ASC in both.
+            expect(fromHelper).toEqual(fromFull);
+        });
+    });
+
+    describe("#given getMaxDroppedTagNumber", () => {
+        it("#when no dropped tags exist #then returns 0", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "msg-1", "message", 100, 1);
+            insertTag(db, "ses-1", "msg-2", "tool", 200, 2);
+
+            expect(getMaxDroppedTagNumber(db, "ses-1")).toBe(0);
+        });
+
+        it("#when one dropped tag exists #then returns its tag_number", () => {
+            db = makeMemoryDatabase();
+            const id = insertTag(db, "ses-1", "msg-1", "message", 100, 5);
+            updateTagStatus(db, "ses-1", id, "dropped");
+
+            expect(getMaxDroppedTagNumber(db, "ses-1")).toBe(5);
+        });
+
+        it("#when multiple dropped tags exist #then returns the maximum tag_number", () => {
+            db = makeMemoryDatabase();
+            const a = insertTag(db, "ses-1", "msg-a", "tool", 100, 3);
+            const b = insertTag(db, "ses-1", "msg-b", "tool", 100, 7);
+            const c = insertTag(db, "ses-1", "msg-c", "tool", 100, 5);
+            updateTagStatus(db, "ses-1", a, "dropped");
+            updateTagStatus(db, "ses-1", b, "dropped");
+            updateTagStatus(db, "ses-1", c, "dropped");
+
+            expect(getMaxDroppedTagNumber(db, "ses-1")).toBe(7);
+        });
+
+        it("#when active and compacted tags have higher numbers #then they're ignored", () => {
+            db = makeMemoryDatabase();
+            // tag_number 3 dropped, tag_number 5 active, tag_number 7 compacted
+            const a = insertTag(db, "ses-1", "msg-a", "tool", 100, 3);
+            insertTag(db, "ses-1", "msg-b", "message", 200, 5);
+            const c = insertTag(db, "ses-1", "msg-c", "tool", 100, 7);
+            updateTagStatus(db, "ses-1", a, "dropped");
+            updateTagStatus(db, "ses-1", c, "compacted");
+
+            // The MAX over status='dropped' is 3, not 5 or 7.
+            expect(getMaxDroppedTagNumber(db, "ses-1")).toBe(3);
+        });
+
+        it("#when dropped tags belong to other sessions #then they're ignored", () => {
+            db = makeMemoryDatabase();
+            const a = insertTag(db, "ses-1", "msg-a", "tool", 100, 3);
+            const b = insertTag(db, "ses-2", "msg-b", "tool", 100, 99);
+            updateTagStatus(db, "ses-1", a, "dropped");
+            updateTagStatus(db, "ses-2", b, "dropped");
+
+            expect(getMaxDroppedTagNumber(db, "ses-1")).toBe(3);
+            expect(getMaxDroppedTagNumber(db, "ses-2")).toBe(99);
+        });
+
+        it("#when result must match the for-loop watermark #then equivalent", () => {
+            db = makeMemoryDatabase();
+            const a = insertTag(db, "ses-1", "msg-a", "tool", 100, 3);
+            const b = insertTag(db, "ses-1", "msg-b", "tool", 100, 7);
+            insertTag(db, "ses-1", "msg-c", "message", 200, 12);
+            updateTagStatus(db, "ses-1", a, "dropped");
+            updateTagStatus(db, "ses-1", b, "dropped");
+
+            const fromHelper = getMaxDroppedTagNumber(db, "ses-1");
+            // Reproduce the exact watermark loop the new helper replaces.
+            let watermark = 0;
+            for (const tag of getTagsBySession(db, "ses-1")) {
+                if (tag.status === "dropped" && tag.tagNumber > watermark) {
+                    watermark = tag.tagNumber;
+                }
+            }
+
+            expect(fromHelper).toBe(watermark);
         });
     });
 });

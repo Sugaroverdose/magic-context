@@ -85,8 +85,11 @@ export {
 } from "./storage-source";
 export {
     deleteTagsByMessageId,
+    getActiveTagsBySession,
+    getMaxDroppedTagNumber,
     getMaxTagNumberBySession,
     getTagById,
+    getTagsByNumbers,
     getTagsBySession,
     getTopNBySize,
     insertTag,
