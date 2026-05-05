@@ -27,9 +27,62 @@ const GET_COUNTER_SQL = `SELECT counter FROM session_meta WHERE session_id = ?`;
 const GET_ASSIGNMENTS_SQL =
     "SELECT message_id, tag_number FROM tags WHERE session_id = ? ORDER BY tag_number ASC";
 
+/**
+ * Two SQLite primitives form the change-detection signal for the
+ * `initFromDb` cache:
+ *
+ *   - `PRAGMA main.data_version` — bumps when ANOTHER connection commits
+ *     to this DB. Does NOT bump for writes on the current connection.
+ *   - `SELECT total_changes()` — bumps when THIS connection commits any
+ *     INSERT/UPDATE/DELETE (including inside transactions). Does NOT
+ *     reflect writes made by other connections.
+ *
+ * Together they cover every write path that could invalidate our in-memory
+ * tagger state. Read-only queries bump neither, so a defer pass that only
+ * reads sees a clean cache hit.
+ *
+ * Both probes are <0.005ms vs ~15ms for the full assignments scan on a
+ * 49k-tag session, so cache hits are effectively free.
+ */
+const PROBE_DATA_VERSION_SQL = "PRAGMA main.data_version";
+const PROBE_TOTAL_CHANGES_SQL = "SELECT total_changes() AS tc";
+
+const probeDataVersionStatements = new WeakMap<Database, PreparedStatement>();
+const probeTotalChangesStatements = new WeakMap<Database, PreparedStatement>();
+
+function getProbeDataVersionStatement(db: Database): PreparedStatement {
+    let stmt = probeDataVersionStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(PROBE_DATA_VERSION_SQL);
+        probeDataVersionStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getProbeTotalChangesStatement(db: Database): PreparedStatement {
+    let stmt = probeTotalChangesStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(PROBE_TOTAL_CHANGES_SQL);
+        probeTotalChangesStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
 interface AssignmentRow {
     message_id: string;
     tag_number: number;
+}
+
+/**
+ * Per-session signature recorded at the last successful `initFromDb` reload.
+ * Keyed by sessionId; tied to a specific `Database` object so we never
+ * cache-hit across different connections (e.g. test fixtures, dashboard
+ * hot reload, harness swap).
+ */
+interface LoadSignature {
+    db: Database;
+    dataVersion: number;
+    totalChanges: number;
 }
 
 function isAssignmentRow(row: unknown): row is AssignmentRow {
@@ -105,6 +158,18 @@ export function createTagger(): Tagger {
     const counters = new Map<string, number>();
     // per-session tag assignments: messageId → tag number
     const assignments = new Map<string, Map<string, number>>();
+    // per-session load signatures: tracks the DB state at the last
+    // successful initFromDb() reload. A subsequent initFromDb() call can
+    // skip the full DB scan when (a) the signature exists for this session,
+    // (b) the recorded `db` object is identical to the current one, and
+    // (c) both `data_version` and `total_changes` still match. Any
+    // mismatch — including a different Database object, an external
+    // commit (data_version bump), or any commit on this connection
+    // (total_changes bump) — falls through to the full reload.
+    //
+    // Absence of a signature entry means "first load" (or post-cleanup /
+    // post-resetCounter) so the next initFromDb is always a full reload.
+    const loadSignatures = new Map<string, LoadSignature>();
 
     function getSessionAssignments(sessionId: string): Map<string, number> {
         let map = assignments.get(sessionId);
@@ -253,6 +318,9 @@ export function createTagger(): Tagger {
         // monotonic upsert by using a dedicated statement.
         counters.set(sessionId, 0);
         assignments.delete(sessionId);
+        // Drop the load signature so the next initFromDb forces a full
+        // reload rather than cache-hitting against pre-reset state.
+        loadSignatures.delete(sessionId);
         getResetCounterStatement(db).run(sessionId, getHarness());
     }
 
@@ -261,22 +329,70 @@ export function createTagger(): Tagger {
     }
 
     /**
+     * Read the current SQLite change-detection signature for `db`. The two
+     * cheap probes together detect any commit that could have invalidated
+     * our in-memory tagger state.
+     */
+    function probeSignature(db: Database): { dataVersion: number; totalChanges: number } {
+        const dvRow = getProbeDataVersionStatement(db).get() as
+            | { data_version: number }
+            | null
+            | undefined;
+        const tcRow = getProbeTotalChangesStatement(db).get() as { tc: number } | null | undefined;
+        return {
+            dataVersion: dvRow?.data_version ?? 0,
+            totalChanges: tcRow?.tc ?? 0,
+        };
+    }
+
+    /**
      * Load (or refresh) per-session tagger state from the DB.
      *
-     * Always re-reads the assignments and counter from disk so we pick up
-     * any inserts another writer may have made since this process last
-     * looked. The previous `if (counters.has(sessionId)) return` short-
-     * circuit was a long-lived bug: once the in-memory counter drifted
-     * behind the DB max (stale process, prior outer-transaction rollback,
-     * concurrent writer), it could never self-heal — every assignTag would
-     * keep proposing already-claimed tag numbers and either go through the
-     * collision-recovery slow path or fail outright.
+     * Fast path: if the recorded load signature for this session still
+     * matches the current `data_version` and `total_changes`, the in-memory
+     * Map is already consistent with the DB and we skip the full reload.
+     * On a 49k-tag session this drops a ~15 ms scan to ~0.005 ms, which
+     * matters because this function is called once per transform pass and
+     * most defer passes touch the DB only for reads.
      *
-     * This refresh is cheap: one indexed SELECT for the counter, one
-     * indexed SELECT for the per-session assignments. Called once per
-     * transform pass.
+     * Slow path: full reload. Re-reads the assignments and counter from
+     * disk so we pick up any inserts another writer may have made since
+     * this process last looked. The previous `if (counters.has(sessionId))
+     * return` short-circuit was a long-lived bug: once the in-memory
+     * counter drifted behind the DB max (stale process, prior outer-
+     * transaction rollback, concurrent writer), it could never self-heal —
+     * every assignTag would keep proposing already-claimed tag numbers and
+     * either go through the collision-recovery slow path or fail outright.
+     * The signature-based cache preserves correct refresh-on-change while
+     * eliminating the unnecessary refresh-on-no-change cost.
+     *
+     * Note: `total_changes()` is connection-wide, so a write to ANY table
+     * on this connection (e.g. session_meta, compartments, source_contents)
+     * will force a tag-state reload here even if the tags table didn't
+     * change. That's intentional — the alternative would require per-table
+     * change detection, which adds complexity for a small additional win.
+     * The cache still avoids the worst case where pure-read defer passes
+     * pay the full reload cost.
+     *
+     * Important: do NOT update the cached signature from anywhere except
+     * a successful full reload. In particular, do not bump it inside
+     * `assignTag` — its writes happen inside SAVEPOINTs that a caller-
+     * managed outer transaction can later roll back, and marking the cache
+     * clean from `assignTag` would freeze in-memory state that is no longer
+     * consistent with the rolled-back DB.
      */
     function initFromDb(sessionId: string, db: Database): void {
+        const probe = probeSignature(db);
+        const cached = loadSignatures.get(sessionId);
+        if (
+            cached !== undefined &&
+            cached.db === db &&
+            cached.dataVersion === probe.dataVersion &&
+            cached.totalChanges === probe.totalChanges
+        ) {
+            return;
+        }
+
         const row = db.prepare(GET_COUNTER_SQL).get(sessionId) as
             | { counter: number }
             | null
@@ -303,11 +419,23 @@ export function createTagger(): Tagger {
         // hand out a number some other writer has already taken.
         const counter = Math.max(row?.counter ?? 0, maxTagNumber, counters.get(sessionId) ?? 0);
         counters.set(sessionId, counter);
+
+        // Record the signature AFTER the full reload completes successfully
+        // so a thrown query never leaves us with a fresh signature pointing
+        // at stale in-memory state.
+        loadSignatures.set(sessionId, {
+            db,
+            dataVersion: probe.dataVersion,
+            totalChanges: probe.totalChanges,
+        });
     }
 
     function cleanup(sessionId: string): void {
         counters.delete(sessionId);
         assignments.delete(sessionId);
+        // Drop the load signature so the next initFromDb forces a full
+        // reload rather than cache-hitting against pre-cleanup state.
+        loadSignatures.delete(sessionId);
     }
 
     return {
