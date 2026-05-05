@@ -259,21 +259,40 @@ export default function SessionViewer() {
   return (
     <>
       <div class="section-header">
-        <h1 class="section-title">
+        <h1
+          class="section-title"
+          style={{
+            display: "flex",
+            "align-items": "flex-start",
+            gap: "8px",
+            "min-width": 0,
+            "flex-wrap": "wrap",
+          }}
+        >
           <Show when={selectedSession()} fallback="Sessions">
             <button
               type="button"
               class="btn sm"
-              style={{ "margin-right": "8px" }}
+              style={{ "margin-right": "8px", "flex-shrink": 0 }}
               onClick={() => setSelectedSession(null)}
             >
               ←
             </button>
-            <span style={{ display: "inline-flex", "align-items": "center", gap: "8px" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                "align-items": "flex-start",
+                gap: "8px",
+                "min-width": 0,
+                "flex": "1 1 0",
+                "overflow-wrap": "anywhere",
+                "word-break": "break-word",
+              }}
+            >
               <Show when={sessionDetail() ?? selectedRow()}>
                 {(session) => <HarnessBadge harness={session().harness} />}
               </Show>
-              {displayTitle()}
+              <span style={{ "min-width": 0, "overflow-wrap": "anywhere" }}>{displayTitle()}</span>
             </span>
           </Show>
         </h1>

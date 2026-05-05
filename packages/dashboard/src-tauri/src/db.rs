@@ -1953,7 +1953,7 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
             SessionRow {
                 harness: Harness::Pi,
                 session_id: meta.session_id,
-                title: meta.session_name.unwrap_or(meta.first_message),
+                title: clean_pi_title(meta.session_name, &meta.first_message),
                 project_identity,
                 project_display: basename(&meta.cwd),
                 message_count: meta.message_count,
@@ -2127,6 +2127,39 @@ fn load_opencode_messages(
     rows.collect()
 }
 
+/// Resolve a clean Pi session title.
+///
+/// Pi sessions migrated from OpenCode have a synthetic first user message that begins
+/// with `<!-- migrated from OpenCode session ... -->`. When no explicit `session.name`
+/// is present, that banner leaks through as the displayed title. Strip the comment +
+/// boilerplate and use whatever real text follows it (often empty in practice). If
+/// nothing useful remains, fall back to a short, readable placeholder.
+fn clean_pi_title(session_name: Option<String>, first_message: &str) -> String {
+    if let Some(name) = session_name.filter(|n| !n.trim().is_empty()) {
+        return name;
+    }
+    let trimmed = first_message.trim_start();
+    if !trimmed.starts_with("<!--") {
+        return first_message.to_string();
+    }
+    // Strip a single `<!-- ... -->` HTML comment, then the migration boilerplate sentence
+    // that the migrate command always appends after the comment.
+    let after_comment = trimmed
+        .find("-->")
+        .map(|idx| trimmed[idx + 3..].trim_start().to_string())
+        .unwrap_or_default();
+    const MIGRATION_BOILERPLATE: &str = "The following conversation was migrated from a different harness. Reasoning context from prior turns may be incomplete; tool calls reference tools that may not exist in this environment.";
+    let stripped = after_comment
+        .strip_prefix(MIGRATION_BOILERPLATE)
+        .map(|rest| rest.trim_start().to_string())
+        .unwrap_or(after_comment);
+    if stripped.trim().is_empty() {
+        "Migrated session".to_string()
+    } else {
+        stripped
+    }
+}
+
 /// Normalize and truncate text for preview: collapse whitespace, drop control characters,
 /// and cap at 500 chars. Mirrors `preview_from_json` final pass for consistency.
 fn normalize_preview(text: &str) -> String {
@@ -2147,11 +2180,7 @@ pub fn get_pi_session_detail(
 ) -> Option<SessionDetail> {
     let path = pi_sessions::find_pi_session_path(session_id)?;
     let detail = pi_sessions::read_pi_session_detail(&path)?;
-    let title = detail
-        .meta
-        .session_name
-        .clone()
-        .unwrap_or_else(|| detail.meta.first_message.clone());
+    let title = clean_pi_title(detail.meta.session_name.clone(), &detail.meta.first_message);
     let compartments = conn
         .and_then(|c| get_compartments(c, session_id).ok())
         .unwrap_or_default();
@@ -2802,6 +2831,53 @@ pub fn get_db_health(db_path: &PathBuf) -> DbHealth {
     }
 }
 
+
+#[cfg(test)]
+mod clean_pi_title_tests {
+    use super::clean_pi_title;
+
+    #[test]
+    fn explicit_session_name_wins() {
+        assert_eq!(
+            clean_pi_title(Some("My Session".into()), "anything"),
+            "My Session"
+        );
+    }
+
+    #[test]
+    fn empty_session_name_is_ignored() {
+        assert_eq!(clean_pi_title(Some("   ".into()), "fallback"), "fallback");
+    }
+
+    #[test]
+    fn first_message_is_returned_when_no_banner() {
+        assert_eq!(
+            clean_pi_title(None, "implementing the new feature"),
+            "implementing the new feature"
+        );
+    }
+
+    #[test]
+    fn migration_banner_is_stripped() {
+        let banner = "<!-- migrated from OpenCode session ses_abc at 2026-05-01T16:48:44.508Z --> The following conversation was migrated from a different harness. Reasoning context from prior turns may be incomplete; tool calls reference tools that may not exist in this environment.";
+        assert_eq!(clean_pi_title(None, banner), "Migrated session");
+    }
+
+    #[test]
+    fn migration_banner_with_trailing_text_uses_trailing_text() {
+        let banner = "<!-- migrated from OpenCode session ses_abc at 2026-05-01T16:48:44.508Z --> The following conversation was migrated from a different harness. Reasoning context from prior turns may be incomplete; tool calls reference tools that may not exist in this environment. Plan compaction-marker rollout";
+        assert_eq!(
+            clean_pi_title(None, banner),
+            "Plan compaction-marker rollout"
+        );
+    }
+
+    #[test]
+    fn unknown_html_comment_is_passed_through_after_strip() {
+        let text = "<!-- some other note --> real intent";
+        assert_eq!(clean_pi_title(None, text), "real intent");
+    }
+}
 
 #[cfg(test)]
 mod load_messages_tests {
