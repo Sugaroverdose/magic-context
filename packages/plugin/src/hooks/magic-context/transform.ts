@@ -1,5 +1,6 @@
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 
 import {
@@ -30,7 +31,11 @@ import {
 import { onNoteTrigger } from "./note-nudger";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
-import { getProtectedTailStartOrdinal, getRawSessionMessageCount } from "./read-session-chunk";
+import {
+    getProtectedTailStartOrdinal,
+    getRawSessionMessageCount,
+    readRawSessionMessages,
+} from "./read-session-chunk";
 import { estimateTokens } from "./read-session-formatting";
 import { modelRequiresInterleavedReasoning } from "./reasoning-capability";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -272,6 +277,10 @@ export function createTransform(deps: TransformDeps) {
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
 
         const db = deps.db;
+        if (deps.client !== undefined) {
+            scheduleReconciliation(db, sessionId, readRawSessionMessages);
+        }
+
         const tUserMsg = performance.now();
         const currentTurnId = findLastUserMessageId(messages);
         logTransformTiming(sessionId, "findLastUserMessageId", tUserMsg);

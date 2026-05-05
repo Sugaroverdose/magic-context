@@ -10,6 +10,10 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import {
+    __resetMessageIndexAsyncForTests,
+    isSessionReconciled,
+} from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     clearPendingOps,
@@ -64,6 +68,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 afterEach(() => {
+    __resetMessageIndexAsyncForTests();
     closeDatabase();
     clearModelsDevCache();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -107,6 +112,48 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("schedules first-touch message index reconciliation once per session", async () => {
+        useTempDataHome("context-transform-index-reconcile-");
+        createOpenCodeDbForTransform("ses-reconcile", [
+            { id: "m-user", role: "user", text: "hello" },
+        ]);
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>(),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            client: {} as PluginContext["client"],
+        });
+
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-reconcile" },
+                parts: [{ type: "text", text: "hello" }],
+            },
+        ];
+
+        await transform({}, { messages });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(isSessionReconciled("ses-reconcile")).toBe(true);
+
+        await transform({}, { messages });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(isSessionReconciled("ses-reconcile")).toBe(true);
+    });
+
     it("tags text/tool content and appends nudge to the latest non-tool assistant message", async () => {
         //#given
         useTempDataHome("context-transform-tag-");
@@ -2218,6 +2265,7 @@ describe("createTransform historian failure handling", () => {
         await transform({}, { messages: secondPass });
         incrementHistorianFailure(db, "ses-emergency", "503 overloaded");
         await transform({}, { messages: thirdPass });
+        await new Promise((resolve) => setTimeout(resolve, 0));
 
         const emergencyNotifications = (
             prompt.mock.calls as unknown as Array<
