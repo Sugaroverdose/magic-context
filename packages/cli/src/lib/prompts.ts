@@ -5,18 +5,9 @@
  * plugin CLI (`selectOne(message, [{label, value, recommended}])`) and Pi
  * plugin CLI (`PromptIO`/`SelectOption` interfaces with `recommended` flag).
  *
- * Runtime note on interactive prompts under `curl | bash`:
- *
- * `install.sh` does `bunx ... setup </dev/tty` to reconnect the setup
- * process's stdin to the terminal after the install script was piped through
- * bash. For that path to work with Clack's `select()` prompt (which relies on
- * raw-mode keypress events), the setup process needs to run under a Node
- * runtime — Bun's TTY stream handling does not currently deliver `data`/
- * `keypress` events through a fresh `/dev/tty` open and `select()` freezes.
- *
- * `install.sh` is structured to prefer `bunx` *without* `--bun`, so the CLI's
- * `#!/usr/bin/env node` shebang is honored and setup runs on Node, which
- * handles `</dev/tty` redirects correctly.
+ * The CLI ships with `#!/usr/bin/env node` and is invoked via `npx`, which
+ * runs it on Node. `install.sh` redirects stdin from `/dev/tty` so Clack's
+ * raw-mode `select()` prompt still works under `curl | bash`.
  */
 import {
     cancel as clackCancel,

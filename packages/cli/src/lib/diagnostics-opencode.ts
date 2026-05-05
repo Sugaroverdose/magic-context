@@ -1,11 +1,12 @@
 // NOTE: bun:sqlite is loaded lazily inside collectHistorianFailures() via a
-// runtime-gated dynamic import. A static `import { Database } from "bun:sqlite"`
-// here would crash the CLI under Node — `bunx <pkg> setup` (no --bun) routes
-// to the system Node, and Node's ESM loader throws ERR_UNSUPPORTED_ESM_URL_SCHEME
-// on `bun:` specifiers before any try/catch can intervene. The historian-failure
-// section is best-effort diagnostics; if the DB can't be read (no Bun runtime,
-// missing module, missing context.db, etc.) the report still produces all
-// other useful information.
+// runtime-gated dynamic import. The CLI runs under Node (npx invocation), so
+// `bun:sqlite` is normally unavailable; we only attempt the import when running
+// under Bun (e.g. someone runs `bun x @cortexkit/magic-context doctor`). A
+// static `import { Database } from "bun:sqlite"` would crash the CLI under
+// Node before any try/catch could intervene because Node's ESM loader rejects
+// `bun:` specifiers during resolution. Historian-failure diagnostics are
+// best-effort: if the DB can't be read, the report still produces all other
+// information.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir, userInfo } from "node:os";
@@ -299,10 +300,10 @@ function collectHistorianDumps(): DiagnosticReport["historianDumps"] {
  *
  *   - Under Bun (typeof Bun !== "undefined"): import("bun:sqlite") succeeds
  *     and we read the failures.
- *   - Under Node (system `node` from `bunx <pkg> setup`, `npx <pkg> setup`,
- *     or any `--target node` build path): we never attempt the import, so
- *     Node's ESM loader doesn't see a `bun:` specifier. The function returns
- *     `[]` and the rest of the diagnostics report builds normally.
+ *   - Under Node (the default for `npx @cortexkit/magic-context doctor`):
+ *     we never attempt the import, so Node's ESM loader doesn't see a `bun:`
+ *     specifier. The function returns `[]` and the rest of the diagnostics
+ *     report builds normally.
  *
  * A static `import { Database } from "bun:sqlite"` at module top would crash
  * the CLI before any try/catch could catch it: Node throws

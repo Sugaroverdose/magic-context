@@ -40,24 +40,53 @@ describe("e2e smoke", () => {
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "hi there");
 
-        // Mock captured at least one request.
+        // The plugin intentionally SKIPS prompt injection for OpenCode's
+        // internal small-model agents (title generator, summary, compaction)
+        // as of v0.16.2 — they don't have our tools and were just paying the
+        // token cost. The first captured request is typically the title
+        // generator firing in parallel with the user's first turn, so we
+        // need to wait for the MAIN agent's request and assert on that one.
+        //
+        // Identify the main-agent request: it's the one whose system prompt
+        // does NOT match an OpenCode internal agent signature. We use the
+        // negation of "title generator" / "Generate a summary" / etc. to
+        // distinguish.
+        await h.waitFor(
+            () => {
+                const hits = h.mock.requests().filter((r) => {
+                    const body = JSON.stringify(r.body);
+                    if (!body.includes("hi there")) return false;
+                    // Skip OpenCode's internal small-model agents.
+                    if (body.includes("You are a title generator")) return false;
+                    if (body.includes("Generate a summary of the conversation")) return false;
+                    if (body.includes("Compress the conversation history")) return false;
+                    return true;
+                });
+                return hits.length > 0;
+            },
+            { timeoutMs: 10_000, label: "main-agent request captured" },
+        );
+
         const requests = h.mock.requests();
         expect(requests.length).toBeGreaterThanOrEqual(1);
 
         // The assertion that matters is that the PLUGIN touched the outgoing
-        // request, not that the harness transported our text. Previously this
-        // check only looked for "hi there" in the body, which would pass even
-        // if the plugin was disabled. The magic-context system prompt is the
-        // one unambiguous plugin-produced artifact that should appear on every
-        // transform pass, so anchor the smoke here.
-        const first = requests[0]!;
-        const fullBody = JSON.stringify(first.body);
-        expect(fullBody).toContain("hi there");
-        // Magic-context injects a system-prompt block describing its tools and
-        // guidance. This exact phrase comes from
+        // request, not that the harness transported our text. Magic-context
+        // injects a system-prompt block describing its tools and guidance —
+        // this exact phrase comes from
         // packages/plugin/src/agents/magic-context-prompt.ts and is stable
         // across the default agent-prompt variants.
-        expect(fullBody).toContain("Magic Context");
+        const mainAgentBody = requests
+            .map((r) => JSON.stringify(r.body))
+            .find(
+                (b) =>
+                    b.includes("hi there") &&
+                    !b.includes("You are a title generator") &&
+                    !b.includes("Generate a summary of the conversation") &&
+                    !b.includes("Compress the conversation history"),
+            );
+        expect(mainAgentBody, "main-agent request not captured").toBeDefined();
+        expect(mainAgentBody).toContain("Magic Context");
 
         // Plugin created its DB and ran the transform (at least one tag persisted).
         await h.waitFor(() => h.hasContextDb(), { timeoutMs: 5000, label: "context.db created" });

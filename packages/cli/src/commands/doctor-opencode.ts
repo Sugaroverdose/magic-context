@@ -116,7 +116,7 @@ async function clearPluginCache(force = false): Promise<{
         // Can't read cached version — proceed with clearing
     }
 
-    // Compare against our own version — when running via `bunx --bun @cortexkit/opencode-magic-context@latest doctor`,
+    // Compare against our own version — when running via `npx @cortexkit/opencode-magic-context@latest doctor`,
     // our package.json IS the latest published version. No network call needed.
     // Try multiple relative paths to handle both src/ and dist/ build output locations.
     const require = createRequire(import.meta.url);
@@ -967,14 +967,13 @@ export async function runDoctor(
         pass("Plugin cache clean (no cached version found)");
     }
 
-    // 9. Check for min-release-age / minimumReleaseAge restrictions
-    // OpenCode uses @npmcli/arborist (npm core) to install plugins, so .npmrc
-    // restrictions apply. Bun's bunfig.toml is checked too for users who install
-    // via bunx manually.
+    // 9. Check for min-release-age / before restrictions in ~/.npmrc.
+    // OpenCode installs plugins with npm under the hood, so npm's age guards
+    // apply. We don't check Bun's bunfig.toml anymore — the unified CLI uses
+    // npx and the auto-update checker uses npm install, neither of which read
+    // bunfig.
     {
         const ageWarnings: string[] = [];
-
-        // Check ~/.npmrc for min-release-age or before
         const npmrcPath = join(homedir(), ".npmrc");
         if (existsSync(npmrcPath)) {
             try {
@@ -992,26 +991,9 @@ export async function runDoctor(
             }
         }
 
-        // Check ~/.bunfig.toml for minimumReleaseAge
-        const bunfigPath = join(homedir(), ".bunfig.toml");
-        if (existsSync(bunfigPath)) {
-            try {
-                const bunfig = readFileSync(bunfigPath, "utf-8");
-                for (const line of bunfig.split("\n")) {
-                    const trimmed = line.trim();
-                    if (trimmed.startsWith("#")) continue;
-                    if (/minimumReleaseAge\s*=/.test(trimmed)) {
-                        ageWarnings.push(`~/.bunfig.toml has '${trimmed}'`);
-                    }
-                }
-            } catch {
-                // Can't read bunfig — skip
-            }
-        }
-
         if (ageWarnings.length > 0) {
             log.warn(
-                "Package manager min-release-age restriction detected — this can prevent OpenCode from installing the latest plugin version",
+                "npm min-release-age restriction detected — this can prevent OpenCode from installing the latest plugin version",
             );
             for (const w of ageWarnings) {
                 log.info(`  ${w}`);

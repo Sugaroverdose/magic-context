@@ -66,7 +66,7 @@ function printNextSteps(adapter: HarnessAdapter): void {
         note(
             [
                 "Restart OpenCode (or reload your session) so the plugin loads.",
-                "Verify with: bunx --bun @cortexkit/magic-context@latest doctor",
+                "Verify with: npx @cortexkit/magic-context@latest doctor",
             ].join("\n"),
             "Next steps",
         );
@@ -76,7 +76,7 @@ function printNextSteps(adapter: HarnessAdapter): void {
         note(
             [
                 "Restart your Pi session so the extension registers.",
-                "Verify with: bunx --bun @cortexkit/magic-context@latest doctor --harness pi",
+                "Verify with: npx @cortexkit/magic-context@latest doctor --harness pi",
             ].join("\n"),
             "Next steps",
         );

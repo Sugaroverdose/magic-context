@@ -54,10 +54,10 @@ function printUsage(): void {
     console.log("    (default: auto-detect, prompt if multiple installed)");
     console.log("");
     console.log("  Usage:");
-    console.log("    bunx --bun @cortexkit/magic-context@latest setup");
-    console.log("    bunx --bun @cortexkit/magic-context@latest doctor");
-    console.log("    bunx --bun @cortexkit/magic-context@latest doctor --issue");
-    console.log("    bunx --bun @cortexkit/magic-context@latest doctor migrate \\");
+    console.log("    npx @cortexkit/magic-context@latest setup");
+    console.log("    npx @cortexkit/magic-context@latest doctor");
+    console.log("    npx @cortexkit/magic-context@latest doctor --issue");
+    console.log("    npx @cortexkit/magic-context@latest doctor migrate \\");
     console.log("        --from opencode --to pi --session ses_xxx --dry-run");
     console.log("");
 }

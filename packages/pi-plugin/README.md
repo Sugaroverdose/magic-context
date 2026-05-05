@@ -31,7 +31,7 @@ Magic Context is a context engine that keeps long Pi sessions productive by:
 The fastest path is the unified Magic Context CLI — `--harness pi` selects the Pi-specific setup pipeline (registers the extension with Pi, writes a sensible `magic-context.jsonc`, and verifies your model picks):
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest setup --harness pi
+npx @cortexkit/magic-context@latest setup --harness pi
 ```
 
 This handles everything for you:
@@ -51,7 +51,7 @@ This adds the extension to `~/.pi/agent/settings.json` but won't write `magic-co
 To check installation health later:
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest doctor --harness pi
+npx @cortexkit/magic-context@latest doctor --harness pi
 ```
 
 ---

@@ -981,7 +981,7 @@ export function printMigrateHelp(): void {
     --from opencode --to pi
 
   Usage:
-    bunx --bun @cortexkit/opencode-magic-context@latest doctor migrate \\
+    npx @cortexkit/opencode-magic-context@latest doctor migrate \\
       --from opencode --to pi --session ses_xxx [--max-messages N] [--dry-run]
 
   Fidelity:

@@ -365,7 +365,7 @@ export function formatConflictShort(result: ConflictResult): string {
         "",
         ...result.reasons.map((r) => `• ${r}`),
         "",
-        "Fix: run `bunx --bun @cortexkit/opencode-magic-context@latest doctor`",
+        "Fix: run `npx @cortexkit/opencode-magic-context@latest doctor`",
     ];
     return lines.join("\n");
 }

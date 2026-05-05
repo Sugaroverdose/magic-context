@@ -66,7 +66,7 @@ Keep using the **same session** for **weeks**, **months**, or even **years**. **
 
 **Key File Pinning (v0.14)** — under `dreamer.pin_key_files`, still opt-in. Dreamer analyzes which files your agent reads most frequently across the session. Core orientation files (architecture, config, types) that get re-read after every context drop are pinned into the system prompt as `<key-files>`, so the agent always has them without needing to re-read from disk. Files are read fresh on each cache-busting pass. Enable with `dreamer.pin_key_files.enabled: true`.
 
-> Migrating from an earlier version? Running `bunx --bun @cortexkit/magic-context@latest doctor` rewrites old `experimental.user_memories.*` and `experimental.pin_key_files.*` keys into their new `dreamer.*` homes, preserving any `enabled` state you had.
+> Migrating from an earlier version? Running `npx @cortexkit/magic-context@latest doctor` rewrites old `experimental.user_memories.*` and `experimental.pin_key_files.*` keys into their new `dreamer.*` homes, preserving any `enabled` state you had.
 
 ### 🧪 New Experimental Features
 
@@ -98,7 +98,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 
 **Or run directly (any OS):**
 ```bash
-bunx --bun @cortexkit/magic-context@latest setup
+npx @cortexkit/magic-context@latest setup
 ```
 
 The unified setup wizard auto-detects which harnesses you have installed (OpenCode, Pi, or both) and configures each one. Use `--harness opencode` or `--harness pi` to target a specific harness.
@@ -166,7 +166,7 @@ The setup wizard handles this automatically if it detects an oh-my-openagent or 
 Already installed but something isn't working? Run the doctor to check and auto-fix configuration issues:
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest doctor
+npx @cortexkit/magic-context@latest doctor
 ```
 
 Doctor auto-detects installed harnesses and runs the right checks for each. Pass `--harness opencode` or `--harness pi` to target a specific harness when you have both installed.
@@ -176,13 +176,13 @@ Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sideba
 Use `--force` to force-clear the plugin cache even when versions match (fixes broken transitive dependencies):
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest doctor --force
+npx @cortexkit/magic-context@latest doctor --force
 ```
 
 Hit a real bug? Use `--issue` to collect environment, sanitized config, and the last 400 log lines into a ready-to-submit report. It can also open the issue directly via `gh` if you have it installed:
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest doctor --issue
+npx @cortexkit/magic-context@latest doctor --issue
 ```
 
 ---
@@ -195,7 +195,7 @@ Magic Context is also available as a [Pi](https://github.com/mariozechner/pi-mon
 
 ```bash
 # Setup wizard for Pi (uses the same unified CLI as OpenCode)
-bunx --bun @cortexkit/magic-context@latest setup --harness pi
+npx @cortexkit/magic-context@latest setup --harness pi
 ```
 
 Requires Pi `>= 0.71.0`. The wizard handles registration with Pi (`packages` array in `~/.pi/agent/settings.json`), writes `~/.pi/agent/magic-context.jsonc`, and prompts for historian/dreamer/sidekick model picks. Pi-specific docs and config notes live in [`packages/pi-plugin/README.md`](https://github.com/cortexkit/magic-context/blob/master/packages/pi-plugin/README.md).
@@ -203,7 +203,7 @@ Requires Pi `>= 0.71.0`. The wizard handles registration with Pi (`packages` arr
 For health checks:
 
 ```bash
-bunx --bun @cortexkit/magic-context@latest doctor --harness pi
+npx @cortexkit/magic-context@latest doctor --harness pi
 ```
 
 ---
@@ -365,7 +365,7 @@ The TUI plugin is configured automatically by the setup wizard and the `doctor` 
 
 ### Startup conflict detection
 
-On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `bunx --bun @cortexkit/magic-context@latest doctor`.
+On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `npx @cortexkit/magic-context@latest doctor`.
 
 ---
 

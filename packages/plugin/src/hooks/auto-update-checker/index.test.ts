@@ -12,7 +12,7 @@ const checkerMocks = {
 const cacheMocks = {
     preparePackageUpdate: mock(() => "/tmp/opencode"),
     resolveInstallContext: mock(() => ({ installDir: "/tmp/opencode" })),
-    runBunInstallSafe: mock(async () => true),
+    runNpmInstallSafe: mock(async () => true),
 };
 
 mock.module("./checker", () => checkerMocks);
@@ -65,8 +65,8 @@ describe("auto-update-checker/index", () => {
         cacheMocks.resolveInstallContext.mockImplementation(() => ({
             installDir: "/tmp/opencode",
         }));
-        cacheMocks.runBunInstallSafe.mockReset();
-        cacheMocks.runBunInstallSafe.mockImplementation(async () => true);
+        cacheMocks.runNpmInstallSafe.mockReset();
+        cacheMocks.runNpmInstallSafe.mockImplementation(async () => true);
     });
 
     afterEach(() => {
@@ -148,7 +148,7 @@ describe("auto-update-checker/index", () => {
             "0.15.6",
             "@cortexkit/opencode-magic-context",
         );
-        expect(cacheMocks.runBunInstallSafe).toHaveBeenCalledWith(
+        expect(cacheMocks.runNpmInstallSafe).toHaveBeenCalledWith(
             "/tmp/opencode",
             expect.objectContaining({ signal: expect.any(AbortSignal) }),
         );
@@ -193,7 +193,7 @@ describe("auto-update-checker/index", () => {
             },
         });
         expect(cacheMocks.preparePackageUpdate).not.toHaveBeenCalled();
-        expect(cacheMocks.runBunInstallSafe).not.toHaveBeenCalled();
+        expect(cacheMocks.runNpmInstallSafe).not.toHaveBeenCalled();
     });
 
     test("shows pinned-version notification without installing", async () => {
@@ -270,7 +270,7 @@ describe("auto-update-checker/index", () => {
         }));
         checkerMocks.getCachedVersion.mockImplementation(() => "0.15.5");
         checkerMocks.getLatestVersion.mockImplementation(async () => "0.15.6");
-        cacheMocks.runBunInstallSafe.mockImplementation(async () => false);
+        cacheMocks.runNpmInstallSafe.mockImplementation(async () => false);
         const { createAutoUpdateCheckerHook } = await freshIndexImport();
         const { ctx, showToast } = createCtx();
 

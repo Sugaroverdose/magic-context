@@ -7,40 +7,36 @@ Write-Host "  ──────────────────────
 Write-Host ""
 
 $package = "@cortexkit/magic-context"
-# Always pin "@latest": without an explicit version, bun x / npx resolve from
-# their local on-disk cache rather than re-resolving the npm dist-tag, so a
-# user who already installed an older version would keep getting the cached
-# bundle even after a patch ships. "@latest" forces a registry round-trip.
+# Always pin "@latest": without an explicit version, npx resolves from its
+# on-disk cache rather than re-resolving the npm dist-tag, so a user who
+# already installed an older version would keep getting the cached bundle
+# even after a patch ships. "@latest" forces a registry round-trip.
 $packageLatest = "$package@latest"
 
-if (Get-Command bun -ErrorAction SilentlyContinue) {
-    Write-Host "  → Using bun" -ForegroundColor Gray
+if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
+    Write-Host "  ✗ npx not found." -ForegroundColor Red
     Write-Host ""
-    & bun x --bun $packageLatest setup
-} elseif (Get-Command npx -ErrorAction SilentlyContinue) {
-    # Check Node version — @clack/prompts requires styleText from node:util (Node >= 20.12)
-    $nodeVer = (node -v 2>$null) -replace '^v',''
-    $parts = $nodeVer.Split('.')
-    $major = [int]$parts[0]
-    $minor = [int]$parts[1]
-    if ($major -lt 20 -or ($major -eq 20 -and $minor -lt 12)) {
-        Write-Host "  ✗ Node.js $nodeVer is too old (requires >= 20.12)" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "  Options:" -ForegroundColor Yellow
-        Write-Host "    • Install bun (recommended): irm bun.sh/install.ps1 | iex"
-        Write-Host "    • Upgrade Node.js: https://nodejs.org"
-        Write-Host ""
-        exit 1
-    }
-    Write-Host "  → Using npx (Node $nodeVer)" -ForegroundColor Gray
-    Write-Host ""
-    & npx -y $packageLatest setup
-} else {
-    Write-Host "  ✗ Neither bun nor npx found." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "  Install one of:" -ForegroundColor Yellow
-    Write-Host "    • bun:  irm bun.sh/install.ps1 | iex"
-    Write-Host "    • node: https://nodejs.org (>= 20.12)"
+    Write-Host "  Install Node.js (>= 20.12) from https://nodejs.org, then re-run." -ForegroundColor Yellow
     Write-Host ""
     exit 1
 }
+
+# @clack/prompts requires styleText from node:util, which landed in Node 20.12.
+$nodeVer = (node -v 2>$null) -replace '^v',''
+if (-not $nodeVer) {
+    Write-Host "  ✗ Node.js not found on PATH." -ForegroundColor Red
+    Write-Host "  Install Node.js (>= 20.12) from https://nodejs.org, then re-run." -ForegroundColor Yellow
+    exit 1
+}
+$parts = $nodeVer.Split('.')
+$major = [int]$parts[0]
+$minor = [int]$parts[1]
+if ($major -lt 20 -or ($major -eq 20 -and $minor -lt 12)) {
+    Write-Host "  ✗ Node.js $nodeVer is too old (requires >= 20.12)" -ForegroundColor Red
+    Write-Host "  Upgrade Node.js: https://nodejs.org" -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "  → Using npx (Node $nodeVer)" -ForegroundColor Gray
+Write-Host ""
+& npx -y $packageLatest setup

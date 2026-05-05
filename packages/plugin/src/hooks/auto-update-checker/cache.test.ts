@@ -150,20 +150,21 @@ describe("auto-update-checker/cache", () => {
         });
     });
 
-    describe("runBunInstallSafe", () => {
-        test("returns true for successful bun install", async () => {
+    describe("runNpmInstallSafe", () => {
+        test("returns true for successful npm install", async () => {
             const proc = new EventEmitter();
             const spawnMock = spyOn(childProcess, "spawn").mockImplementation(() => {
                 setTimeout(() => proc.emit("exit", 0), 0);
                 return proc as childProcess.ChildProcess;
             });
-            const { runBunInstallSafe } = await freshCacheImport();
+            const { runNpmInstallSafe } = await freshCacheImport();
 
-            expect(await runBunInstallSafe("/tmp/opencode", { timeoutMs: 1000 })).toBe(true);
-            expect(spawnMock).toHaveBeenCalledWith("bun", ["install"], {
-                cwd: "/tmp/opencode",
-                stdio: "pipe",
-            });
+            expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1000 })).toBe(true);
+            expect(spawnMock).toHaveBeenCalledWith(
+                "npm",
+                ["install", "--no-audit", "--no-fund", "--no-progress"],
+                { cwd: "/tmp/opencode", stdio: "pipe" },
+            );
 
             spawnMock.mockRestore();
         });
@@ -173,9 +174,9 @@ describe("auto-update-checker/cache", () => {
             const killMock = mock(() => true);
             proc.kill = killMock;
             const spawnMock = spyOn(childProcess, "spawn").mockReturnValue(proc);
-            const { runBunInstallSafe } = await freshCacheImport();
+            const { runNpmInstallSafe } = await freshCacheImport();
 
-            expect(await runBunInstallSafe("/tmp/opencode", { timeoutMs: 1 })).toBe(false);
+            expect(await runNpmInstallSafe("/tmp/opencode", { timeoutMs: 1 })).toBe(false);
             expect(killMock).toHaveBeenCalled();
 
             spawnMock.mockRestore();

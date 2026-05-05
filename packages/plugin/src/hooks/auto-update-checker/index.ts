@@ -1,7 +1,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 
 import { log } from "../../shared/logger";
-import { preparePackageUpdate, resolveInstallContext, runBunInstallSafe } from "./cache";
+import { preparePackageUpdate, resolveInstallContext, runNpmInstallSafe } from "./cache";
 import {
     extractChannel,
     findPluginEntry,
@@ -188,7 +188,7 @@ async function runBackgroundUpdateCheck(
         return;
     }
 
-    const installSuccess = await runBunInstallSafe(installDir, { signal: options.signal });
+    const installSuccess = await runNpmInstallSafe(installDir, { signal: options.signal });
     if (installSuccess) {
         showToast(
             ctx,
@@ -208,7 +208,7 @@ async function runBackgroundUpdateCheck(
         "error",
         8000,
     );
-    warn("[auto-update-checker] bun install failed; update not installed");
+    warn("[auto-update-checker] npm install failed; update not installed");
 }
 
 export function getAutoUpdateInstallDir(): string {

@@ -2119,7 +2119,7 @@ export default function ConfigEditor(props: { models: string[] }) {
                     when={configTarget() === "pi"}
                     fallback={
                       <span style={{ "font-size": "11px" }}>
-                        Run <code>bunx --bun @cortexkit/opencode-magic-context setup</code> to
+                        Run <code>npx @cortexkit/opencode-magic-context setup</code> to
                         create one
                       </span>
                     }
