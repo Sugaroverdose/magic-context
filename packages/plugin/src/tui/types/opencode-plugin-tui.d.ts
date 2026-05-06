@@ -4,11 +4,11 @@
 declare module "@opencode-ai/plugin/tui" {
     import type {
         createOpencodeClient as createOpencodeClientV2,
-        Event as TuiEvent,
         Message,
         Part,
         Provider,
         Config as SdkConfig,
+        Event as TuiEvent,
     } from "@opencode-ai/sdk/v2";
 
     import type { CliRenderer, RGBA } from "@opentui/core";
