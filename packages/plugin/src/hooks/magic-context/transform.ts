@@ -921,10 +921,18 @@ export function createTransform(deps: TransformDeps) {
             `strippedParts=${strippedClearedReasoning}`,
         );
 
-        // Strip reasoning from non-first assistants in consecutive runs to
-        // avoid @ai-sdk/anthropic's groupIntoBlocks producing interleaved
-        // thinking blocks that Opus 4.7 rejects. See strip-content.ts for
-        // full explanation.
+        // Opus 4.7 merged-assistants workaround. Required for Anthropic's
+        // AI-SDK `groupIntoBlocks` behavior, which expects thinking blocks at
+        // index 0 of an assistant message. When Magic Context drops a tool
+        // call and `pruneEmptyMessages` removes the now-empty message, two
+        // assistant messages can become adjacent — and the second one's
+        // `thinking` part triggers Anthropic's index-0 invariant rejection.
+        //
+        // Briefly disabled while diagnosing the Kimi 2.6 "must not be empty"
+        // failure (suspected reasoning-strip cause), but the real Kimi bug
+        // turned out to be empty assistant `content` after whole-message
+        // sentinel — fixed separately via `[dropped]` placeholder. This
+        // workaround is back to its proper role: Anthropic groupIntoBlocks.
         const tMergeStrip = performance.now();
         const strippedMergedReasoning = stripReasoningFromMergedAssistants(messages);
         if (strippedMergedReasoning > 0) {
@@ -1064,6 +1072,12 @@ export function createTransform(deps: TransformDeps) {
                 deps.ctxReduceEnabled === false && !reducedMode
                     ? deps.cavemanTextCompression
                     : undefined,
+            // Live provider for whole-message sentinel selection. Anthropic
+            // gets `""` (their normalizeMessages filters it out of the wire);
+            // every other provider gets `[dropped]` so empty assistant
+            // messages don't reach providers that reject them (Kimi/Moonshot
+            // returns 400 "must not be empty"). See sentinel.ts for details.
+            liveProviderID: deps.liveModelBySession?.get(sessionId)?.providerID,
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 

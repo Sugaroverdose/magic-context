@@ -166,9 +166,10 @@ describe("createTransform nudge cache handling", () => {
         await transform({}, { messages: secondPass });
 
         //#then — sentinel replacement preserves array length; assistant (tag 2) is
-        // neutralized to an empty-text sentinel instead of spliced out.
+        // neutralized to a sentinel instead of spliced out. No providerID set
+        // → `[dropped]` (non-anthropic safe default).
         expect(secondPass).toHaveLength(2);
-        expect(secondPass[1]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(secondPass[1]?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
         expect(getPersistedNudgePlacement(db, "ses-1")).toBeNull();
     });
 

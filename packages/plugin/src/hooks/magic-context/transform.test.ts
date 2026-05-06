@@ -460,8 +460,10 @@ describe("createTransform", () => {
         expect(messages[0]?.info.id).toBeUndefined();
         expect(messages).toHaveLength(3);
         // m-4 was dropped; its assistant text now carries the sentinel shape.
+        // Default (no providerID set) → `[dropped]` sentinel for non-anthropic
+        // safety. Anthropic-only optimization (text="") is covered separately.
         expect(messages[1]?.info.id).toBe("m-4");
-        expect(messages[1]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(messages[1]?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
         expect(text(messages[2]!, 0)).toContain("new 5");
     });
 
@@ -873,11 +875,12 @@ describe("createTransform", () => {
         await transform({}, { messages: secondPass });
 
         //#then — sentinel replacement preserves array length;
-        // the user message stays, assistant message neutralized to an empty sentinel.
+        // the user message stays, assistant message neutralized to a sentinel.
         expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toStartWith("\u00a71\u00a7 ");
-        // Assistant message (previously dropped) now carries a single sentinel part.
-        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
+        // Assistant message (previously dropped) now carries a single sentinel
+        // part. Test doesn't set providerID → `[dropped]` (safe non-anthropic).
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
     });
 
     it("keeps reduced magic-context support for subagent sessions", async () => {
@@ -1096,9 +1099,10 @@ describe("createTransform", () => {
 
         // Sentinel replacement preserves array length. Subagent sessions
         // skip §N§ prefix injection, so user text appears verbatim.
+        // Test doesn't set providerID → `[dropped]` sentinel.
         expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toBe("keep this");
-        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });
 
@@ -1486,9 +1490,10 @@ describe("createTransform", () => {
 
         //#then — thinking part becomes sentinel; text becomes [dropped §2§];
         // assistant message neutralized to a lone sentinel (array length preserved).
+        // Default providerID → `[dropped]` sentinel.
         expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toContain("user prompt");
-        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
     });
 
     it("fails open when session meta lookup throws", async () => {

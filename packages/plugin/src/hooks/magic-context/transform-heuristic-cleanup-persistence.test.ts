@@ -229,10 +229,11 @@ describe("createTransform heuristic cleanup persistence", () => {
         await transform({}, { messages: executePass });
 
         // Sentinel-based stripping preserves array length; the injection-only
-        // message is kept in the array but neutralized to a single empty-text
-        // sentinel so OpenCode's upstream filter drops it from the wire.
+        // message is kept in the array but neutralized to a single sentinel.
+        // Test doesn't set providerID → `[dropped]` text (non-anthropic safe).
+        // Anthropic-only optimization (text="") is covered in dedicated tests.
         const executeInjection = getMessage(executePass, "m-injection-only");
-        expect(executeInjection?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(executeInjection?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
 
         schedulerDecision.mockImplementation(() => "defer");
         const deferPass = buildInjectionOnlyMessages();
@@ -240,6 +241,6 @@ describe("createTransform heuristic cleanup persistence", () => {
 
         // Replay on defer: same neutralization persists without re-mutating array.
         const deferredInjection = getMessage(deferPass, "m-injection-only");
-        expect(deferredInjection?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(deferredInjection?.parts).toEqual([{ type: "text", text: "[dropped]" }]);
     });
 });

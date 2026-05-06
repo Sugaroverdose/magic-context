@@ -119,6 +119,13 @@ interface RunPostTransformPhaseArgs {
         enabled: boolean;
         minChars: number;
     };
+    /**
+     * Live provider/model for this session. Used by the whole-message
+     * sentinel path to pick `""` (Anthropic-only optimization) vs
+     * `[dropped]` (everything else, ensures non-empty wire content for
+     * providers that don't filter empties — Kimi/Moonshot, etc.).
+     */
+    liveProviderID?: string;
 }
 
 export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Promise<void> {
@@ -482,6 +489,7 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
             const { replayed, missingIds } = replaySentinelByMessageIds(
                 args.messages,
                 persistedIds,
+                args.liveProviderID,
             );
             if (replayed > 0) {
                 sessionLog(
@@ -501,11 +509,15 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         // Step 2: Detect — only on cache-busting passes, find NEW eligible messages
         // and persist their IDs so future defer passes can replay.
         if (isCacheBustingPass) {
-            const droppedResult = stripDroppedPlaceholderMessages(args.messages);
+            const droppedResult = stripDroppedPlaceholderMessages(
+                args.messages,
+                args.liveProviderID,
+            );
             const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
             const systemInjectedResult = stripSystemInjectedMessages(
                 args.messages,
                 protectedTailStart,
+                args.liveProviderID,
             );
 
             const newlyNeutralized =

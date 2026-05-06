@@ -1,5 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
-import { isSentinel, makeSentinel } from "./sentinel";
+import { isSentinel, makeSentinel, makeWholeMessageSentinel } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 const DROPPED_PLACEHOLDER_PATTERN = /^\[dropped §\d+§\]$/;
@@ -46,6 +46,7 @@ function isSystemInjectedText(text: string): boolean {
 export function stripSystemInjectedMessages(
     messages: MessageLike[],
     protectedTailStart: number,
+    providerID?: string,
 ): { stripped: number; sentineledIds: string[] } {
     let stripped = 0;
     const sentineledIds: string[] = [];
@@ -95,7 +96,7 @@ export function stripSystemInjectedMessages(
 
         if (hasContentPart && allContentIsSystemInjection) {
             msg.parts.length = 0;
-            msg.parts.push(makeSentinel(undefined));
+            msg.parts.push(makeWholeMessageSentinel(providerID));
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
@@ -152,7 +153,10 @@ const METADATA_PART_TYPES = new Set([
  *
  * Returns both count and sentineled IDs so callers can persist-and-replay.
  */
-export function stripDroppedPlaceholderMessages(messages: MessageLike[]): {
+export function stripDroppedPlaceholderMessages(
+    messages: MessageLike[],
+    providerID?: string,
+): {
     stripped: number;
     sentineledIds: string[];
 } {
@@ -224,7 +228,7 @@ export function stripDroppedPlaceholderMessages(messages: MessageLike[]): {
 
         if (hasContentPart && !hasNonDroppedContent) {
             msg.parts.length = 0;
-            msg.parts.push(makeSentinel(undefined));
+            msg.parts.push(makeWholeMessageSentinel(providerID));
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }

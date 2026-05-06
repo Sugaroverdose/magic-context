@@ -20,6 +20,10 @@ function message(id: string, role: string, parts: unknown[]): MessageLike {
 }
 
 const SENTINEL = { type: "text", text: "" };
+// Whole-message sentinel: defaults to "[dropped]" because `providerID` is
+// not passed in these tests. Anthropic-only optimization (text="") is
+// covered by dedicated provider-aware tests below.
+const WHOLE_MESSAGE_SENTINEL = { type: "text", text: "[dropped]" };
 
 describe("strip-content", () => {
     let buildDataUrl: ReturnType<typeof mock<(payloadSize: number) => string>>;
@@ -515,7 +519,36 @@ describe("strip-content", () => {
 
                 expect(result.stripped).toBe(1);
                 expect(result.sentineledIds).toEqual(["m-a"]);
+                // Default (no providerID): non-empty `[dropped]` placeholder
+                // so providers that don't filter empties (Kimi, openai-compat)
+                // don't get a 400 "must not be empty" rejection.
+                expect(assistant.parts).toEqual([WHOLE_MESSAGE_SENTINEL]);
+            });
+        });
+
+        describe("#given an assistant message with dropped text AND providerID=anthropic", () => {
+            it("#then it neutralizes with empty-text sentinel (Anthropic-only optimization)", () => {
+                const assistant = message("m-a", "assistant", [
+                    { type: "text", text: "[dropped §8§]" },
+                ]);
+
+                const result = stripDroppedPlaceholderMessages([assistant], "anthropic");
+
+                expect(result.stripped).toBe(1);
                 expect(assistant.parts).toEqual([SENTINEL]);
+            });
+        });
+
+        describe("#given an assistant message with dropped text AND providerID=opencode-go", () => {
+            it("#then it neutralizes with [dropped] sentinel (non-Anthropic safe default)", () => {
+                const assistant = message("m-a", "assistant", [
+                    { type: "text", text: "[dropped §8§]" },
+                ]);
+
+                const result = stripDroppedPlaceholderMessages([assistant], "opencode-go");
+
+                expect(result.stripped).toBe(1);
+                expect(assistant.parts).toEqual([WHOLE_MESSAGE_SENTINEL]);
             });
         });
 
