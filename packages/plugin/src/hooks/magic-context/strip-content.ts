@@ -514,7 +514,18 @@ const REASONING_PART_TYPES = new Set(["reasoning", "thinking", "redacted_thinkin
  * convert-to-anthropic-messages-prompt.ts (case 'assistant'). Same class
  * fixed for Bedrock in vercel/ai#13583/#13972.
  */
-export function stripReasoningFromMergedAssistants(messages: MessageLike[]): number {
+export function stripReasoningFromMergedAssistants(
+    messages: MessageLike[],
+    providerID?: string,
+): number {
+    // Anthropic-only workaround for @ai-sdk/anthropic's groupIntoBlocks
+    // index-0-thinking rule. openai-compatible providers like Kimi/
+    // Moonshot enforce the opposite invariant (every tool-call assistant
+    // must have non-empty `reasoning_content`), so the strip would
+    // trigger 400 "reasoning_content is missing" there. See call site
+    // in transform.ts for the full rationale.
+    if (providerID !== "anthropic") return 0;
+
     let stripped = 0;
     let prevRole: string | undefined;
     let keptReasoningInRun = false;

@@ -51,12 +51,21 @@ function useTempDataHome(prefix: string): void {
 function createTestTransform(sessionId: string) {
     const shouldExecute = mock<Scheduler["shouldExecute"]>(() => "defer");
     const scheduler: Scheduler = { shouldExecute };
+    // Force providerID="anthropic" so the merged-assistants strip workaround
+    // runs in this test fixture (the workaround is gated on canonical
+    // Anthropic to prevent Kimi/Moonshot rejections; this test specifically
+    // validates Opus 4.7's position-0 thinking invariant interaction with
+    // pruning, so it needs the gate to be open).
+    const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
+        [sessionId, { providerID: "anthropic", modelID: "claude-opus-4-7" }],
+    ]);
     const transform = createTransform({
         tagger: createTagger(),
         scheduler,
         contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
             [sessionId, { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() }],
         ]),
+        liveModelBySession,
         nudger: () => null,
         db: openDatabase(),
         nudgePlacements: createNudgePlacementStore(),

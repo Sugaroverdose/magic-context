@@ -629,7 +629,7 @@ describe("strip-content", () => {
                     { type: "text", text: "response" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1], "anthropic");
 
                 expect(stripped).toBe(0);
                 expect(a1.parts).toEqual([
@@ -651,7 +651,7 @@ describe("strip-content", () => {
                     { type: "text", text: "second response" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
 
                 expect(stripped).toBe(1);
                 expect(a1.parts).toEqual([
@@ -680,7 +680,7 @@ describe("strip-content", () => {
                     { type: "text", text: "finished" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2, a3]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2, a3], "anthropic");
 
                 expect(stripped).toBe(2);
                 expect(a1.parts[0]).toEqual({ type: "reasoning", text: "plan" });
@@ -702,7 +702,7 @@ describe("strip-content", () => {
                     { type: "text", text: "reply 2" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u1, a1, u2, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u1, a1, u2, a2], "anthropic");
 
                 expect(stripped).toBe(0);
                 expect(a1.parts[0]).toEqual({ type: "reasoning", text: "r1" });
@@ -723,7 +723,7 @@ describe("strip-content", () => {
                     { type: "text", text: "done" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, t, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, t, a2], "anthropic");
 
                 expect(stripped).toBe(0);
                 expect(a1.parts[0]).toEqual({ type: "reasoning", text: "r1" });
@@ -738,7 +738,7 @@ describe("strip-content", () => {
                     { type: "text", text: "just text, no reasoning" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1], "anthropic");
 
                 expect(stripped).toBe(0);
                 expect(a1.parts).toHaveLength(1);
@@ -754,7 +754,7 @@ describe("strip-content", () => {
                     { type: "text", text: "final" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1], "anthropic");
 
                 expect(stripped).toBe(1);
                 expect(a1.parts[0]).toEqual({ type: "text", text: "preamble" });
@@ -772,7 +772,7 @@ describe("strip-content", () => {
                     { type: "text", text: "output" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1], "anthropic");
 
                 expect(stripped).toBe(0);
                 expect(a1.parts[1]).toEqual({ type: "reasoning", text: "reasoning here" });
@@ -790,7 +790,7 @@ describe("strip-content", () => {
                     { type: "reasoning", text: "r3" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1], "anthropic");
 
                 expect(stripped).toBe(2);
                 expect(a1.parts).toHaveLength(5);
@@ -814,7 +814,7 @@ describe("strip-content", () => {
                     { type: "text", text: "t2" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
 
                 expect(stripped).toBe(2);
                 expect(a1.parts[0]).toEqual({ type: "text", text: "preamble" });
@@ -836,7 +836,7 @@ describe("strip-content", () => {
                     { type: "text", text: "reply 2" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
 
                 expect(stripped).toBe(1);
                 expect(a1.parts[0]).toEqual({ type: "thinking", thinking: "thought 1" });
@@ -856,7 +856,7 @@ describe("strip-content", () => {
                     { type: "redacted_thinking", data: "opaque" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
 
                 expect(stripped).toBe(2);
                 expect(a1.parts[0]).toEqual({ type: "reasoning", text: "r" });
@@ -877,7 +877,7 @@ describe("strip-content", () => {
                     { type: "text", text: "final" },
                 ]);
 
-                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
 
                 expect(stripped).toBe(2);
                 expect(a1.parts.map((p) => (p as { type: string }).type)).toEqual(["text", "text"]);
@@ -885,6 +885,80 @@ describe("strip-content", () => {
                 expect(a1.parts[1]).toEqual(SENTINEL);
                 expect(a2.parts[0]).toEqual(SENTINEL);
                 expect(a2.parts[1]).toEqual({ type: "text", text: "final" });
+            });
+        });
+
+        describe("#given providerID gate (anthropic-only workaround)", () => {
+            // Verifies the Kimi/Moonshot fix: stripReasoningFromMergedAssistants
+            // is an Anthropic-AI-SDK-specific workaround for groupIntoBlocks.
+            // For openai-compatible providers like Kimi, stripping reasoning
+            // from non-first merged assistants triggers
+            // "thinking is enabled but reasoning_content is missing in
+            // assistant tool call message at index N". The function MUST be a
+            // no-op for non-anthropic providers.
+
+            it("#then is a no-op when providerID is undefined", () => {
+                const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                const a1 = message("m-a1", "assistant", [
+                    { type: "reasoning", text: "first reasoning" },
+                    { type: "tool", tool: "edit", id: "edit:1" },
+                ]);
+                const a2 = message("m-a2", "assistant", [
+                    { type: "reasoning", text: "second reasoning" },
+                    { type: "tool", tool: "bash", id: "bash:2" },
+                ]);
+
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2]);
+
+                expect(stripped).toBe(0);
+                // Both reasoning parts preserved
+                expect(a1.parts[0]).toEqual({ type: "reasoning", text: "first reasoning" });
+                expect(a2.parts[0]).toEqual({ type: "reasoning", text: "second reasoning" });
+            });
+
+            it("#then is a no-op for opencode-go (Kimi/Moonshot)", () => {
+                const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                const a1 = message("m-a1", "assistant", [
+                    { type: "reasoning", text: "first reasoning" },
+                    { type: "tool", tool: "edit", id: "edit:1" },
+                ]);
+                const a2 = message("m-a2", "assistant", [
+                    { type: "reasoning", text: "second reasoning" },
+                    { type: "tool", tool: "bash", id: "bash:2" },
+                ]);
+
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "opencode-go");
+
+                expect(stripped).toBe(0);
+                expect(a1.parts[0]).toEqual({ type: "reasoning", text: "first reasoning" });
+                expect(a2.parts[0]).toEqual({ type: "reasoning", text: "second reasoning" });
+            });
+
+            it("#then is a no-op for github-copilot", () => {
+                const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                const a1 = message("m-a1", "assistant", [{ type: "reasoning", text: "first" }]);
+                const a2 = message("m-a2", "assistant", [{ type: "reasoning", text: "second" }]);
+
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "github-copilot");
+
+                expect(stripped).toBe(0);
+            });
+
+            it("#then runs normally for providerID === 'anthropic'", () => {
+                const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                const a1 = message("m-a1", "assistant", [
+                    { type: "reasoning", text: "first reasoning" },
+                ]);
+                const a2 = message("m-a2", "assistant", [
+                    { type: "reasoning", text: "second reasoning" },
+                ]);
+
+                const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "anthropic");
+
+                expect(stripped).toBe(1);
+                // First kept, second sentineled
+                expect(a1.parts[0]).toEqual({ type: "reasoning", text: "first reasoning" });
+                expect(a2.parts[0]).toEqual(SENTINEL);
             });
         });
     });

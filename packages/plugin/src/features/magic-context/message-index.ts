@@ -20,7 +20,6 @@ const deleteFtsStatements = new WeakMap<Database, PreparedStatement>();
 const deleteIndexStatements = new WeakMap<Database, PreparedStatement>();
 const countIndexedMessageStatements = new WeakMap<Database, PreparedStatement>();
 
-
 function normalizeIndexText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
 }

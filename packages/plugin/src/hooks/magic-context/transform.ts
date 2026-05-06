@@ -921,20 +921,25 @@ export function createTransform(deps: TransformDeps) {
             `strippedParts=${strippedClearedReasoning}`,
         );
 
-        // Opus 4.7 merged-assistants workaround. Required for Anthropic's
-        // AI-SDK `groupIntoBlocks` behavior, which expects thinking blocks at
-        // index 0 of an assistant message. When Magic Context drops a tool
-        // call and `pruneEmptyMessages` removes the now-empty message, two
-        // assistant messages can become adjacent — and the second one's
-        // `thinking` part triggers Anthropic's index-0 invariant rejection.
+        // Anthropic groupIntoBlocks workaround. @ai-sdk/anthropic requires
+        // thinking blocks at index 0 of an assistant message; when Magic
+        // Context drops a tool call and `pruneEmptyMessages` removes the
+        // now-empty message, two assistant messages can become adjacent and
+        // the second one's `thinking` part triggers an index-0 rejection.
         //
-        // Briefly disabled while diagnosing the Kimi 2.6 "must not be empty"
-        // failure (suspected reasoning-strip cause), but the real Kimi bug
-        // turned out to be empty assistant `content` after whole-message
-        // sentinel — fixed separately via `[dropped]` placeholder. This
-        // workaround is back to its proper role: Anthropic groupIntoBlocks.
+        // Gated to canonical Anthropic only. openai-compatible providers
+        // like Kimi/Moonshot enforce the OPPOSITE rule (every assistant
+        // tool-call message must have non-empty `reasoning_content`), so
+        // stripping there triggers "thinking is enabled but reasoning_content
+        // is missing in assistant tool call message". Bedrock-Claude and
+        // Google-Vertex-Anthropic may need the workaround if they hit
+        // merged-assistant scenarios; broaden the gate then.
         const tMergeStrip = performance.now();
-        const strippedMergedReasoning = stripReasoningFromMergedAssistants(messages);
+        const liveProviderID = deps.liveModelBySession?.get(sessionId)?.providerID;
+        const strippedMergedReasoning = stripReasoningFromMergedAssistants(
+            messages,
+            liveProviderID,
+        );
         if (strippedMergedReasoning > 0) {
             sessionLog(
                 sessionId,
@@ -1077,7 +1082,7 @@ export function createTransform(deps: TransformDeps) {
             // every other provider gets `[dropped]` so empty assistant
             // messages don't reach providers that reject them (Kimi/Moonshot
             // returns 400 "must not be empty"). See sentinel.ts for details.
-            liveProviderID: deps.liveModelBySession?.get(sessionId)?.providerID,
+            liveProviderID,
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 
