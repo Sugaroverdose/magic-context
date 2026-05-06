@@ -19,7 +19,8 @@ import {
     readRawSessionMessageByIdFromDb,
     readRawSessionMessagesFromDb,
 } from "./read-session-raw";
-import { isFilePart, isTextPart, isToolPartWithOutput } from "./tag-part-guards";
+import { isFilePart, isTextPart } from "./tag-part-guards";
+import { extractToolCallObservation } from "./tool-drop-target";
 
 export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
 
@@ -170,27 +171,90 @@ export function getRawSessionMessageCount(sessionId: string): number {
     return withReadOnlySessionDb((db) => getRawSessionMessageCountFromDb(db, sessionId));
 }
 
-export function getRawSessionTagKeysThrough(sessionId: string, upToMessageIndex: number): string[] {
+/**
+ * Set of raw-session keys observed in the visible window. Pre-v3.3.1
+ * this collapsed everything (text, file, tool) into one bare-string Set.
+ * That was the bug Finding D in the plan: tool tags share `messageId =
+ * callId`, so a callId reused outside the compartment would match a
+ * tag inside the compartment by string equality alone, queuing drops
+ * for tags that should have stayed live.
+ *
+ * Layer C splits the shape into:
+ *   - `messageFileKeys`: bare contentIds (`<msgId>:p<n>` / `<msgId>:fileN`).
+ *     These are globally unique within a session, so bare-string match
+ *     is correct.
+ *   - `toolObservations`: per-callId set of `ownerMsgId` values derived
+ *     by FIFO pairing, mirroring `tag-messages.ts`. A tool tag is "in
+ *     the visible window" iff its callId AND `tool_owner_message_id`
+ *     both appear here.
+ */
+export interface RawSessionTagKeys {
+    messageFileKeys: Set<string>;
+    toolObservations: Map<string, Set<string>>;
+}
+
+export function getRawSessionTagKeysThrough(
+    sessionId: string,
+    upToMessageIndex: number,
+): RawSessionTagKeys {
     const messages = readRawSessionMessages(sessionId);
-    const keys: string[] = [];
+    const messageFileKeys = new Set<string>();
+    const toolObservations = new Map<string, Set<string>>();
+    // FIFO queue per callId of unpaired invocations — same logic as
+    // tag-messages.ts so the composite keys we produce here match what
+    // the tagger persisted.
+    const unpairedInvocations = new Map<string, string[]>();
 
     for (const message of messages) {
         if (message.ordinal > upToMessageIndex) break;
 
         for (const [partIndex, part] of message.parts.entries()) {
             if (isTextPart(part)) {
-                keys.push(`${message.id}:p${partIndex}`);
+                messageFileKeys.add(`${message.id}:p${partIndex}`);
+                continue;
             }
             if (isFilePart(part)) {
-                keys.push(`${message.id}:file${partIndex}`);
+                messageFileKeys.add(`${message.id}:file${partIndex}`);
+                continue;
             }
-            if (isToolPartWithOutput(part)) {
-                keys.push(part.callID);
+
+            const obs = extractToolCallObservation(part);
+            if (!obs) continue;
+
+            // FIFO pairing: invocation parts push their owner; result
+            // parts pop. The owner identifies which assistant message
+            // hosts the invocation, which is what `tag-messages.ts`
+            // uses for `tool_owner_message_id`.
+            let ownerMsgId: string;
+            if (obs.kind === "invocation") {
+                ownerMsgId = message.id;
+                const queue = unpairedInvocations.get(obs.callId) ?? [];
+                queue.push(message.id);
+                unpairedInvocations.set(obs.callId, queue);
+            } else {
+                const queue = unpairedInvocations.get(obs.callId);
+                if (queue && queue.length > 0) {
+                    const popped = queue.shift();
+                    if (queue.length === 0) unpairedInvocations.delete(obs.callId);
+                    ownerMsgId = popped ?? message.id;
+                } else {
+                    // Result-only window inside this scan: invocation
+                    // wasn't observed in the visible range. Use the
+                    // result's own message id as a best-effort owner.
+                    // The drop queue compares against persisted
+                    // `tool_owner_message_id` and falls back to bare-
+                    // callId match for legacy NULL-owner rows; this
+                    // best-effort ownerMsgId is mainly informational.
+                    ownerMsgId = message.id;
+                }
             }
+            const owners = toolObservations.get(obs.callId) ?? new Set();
+            owners.add(ownerMsgId);
+            toolObservations.set(obs.callId, owners);
         }
     }
 
-    return keys;
+    return { messageFileKeys, toolObservations };
 }
 
 const PROTECTED_TAIL_USER_TURNS = 5;

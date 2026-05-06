@@ -414,4 +414,116 @@ describe("applyHeuristicCleanup", () => {
             });
         });
     });
+
+    /**
+     * v3.3.1 Layer C — plan §5 / Finding 1: composite-key dedup tests.
+     *
+     * Pre-fix the dedup pass keyed both sides (tag map + fingerprint
+     * map) by bare callId and used an owner-blind fingerprint string.
+     * Two assistant turns with same `(toolName, args)` and same callId
+     * from different owners would share a fingerprint bucket and be
+     * silently merged — even though they're semantically distinct
+     * invocations. Post-fix both sides include `ownerMsgId` so cross-
+     * owner pairs produce different fingerprints and are NOT merged.
+     */
+    describe("#given composite-key dedup (v3.3.1 Layer C)", () => {
+        function buildMessageWithId(
+            id: string,
+            parts: unknown[],
+        ): MessageLike & { info: { id: string; role: string } } {
+            return { info: { id, role: "assistant" }, parts };
+        }
+
+        it("does NOT merge cross-owner pairs with same (toolName, args, callId)", () => {
+            //#given — two assistant messages with same dedup-safe tool
+            // call (mcp_grep, same args) AND same callId, but different
+            // owners. With composite identity each turn gets its own
+            // tag (Layer A row uniqueness) and the dedup pass must NOT
+            // merge them.
+            insertTag(db, SESSION, "read:32", "tool", 1000, 50, 0, "mcp_grep", 0, "m-asst-1");
+            insertTag(db, SESSION, "read:32", "tool", 2000, 60, 0, "mcp_grep", 0, "m-asst-2");
+
+            const msgA = buildMessageWithId("m-asst-1", [
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "read:32",
+                    state: { input: { pattern: "x" }, output: "result-1", status: "completed" },
+                },
+            ]);
+            const msgB = buildMessageWithId("m-asst-2", [
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "read:32",
+                    state: { input: { pattern: "x" }, output: "result-2", status: "completed" },
+                },
+            ]);
+
+            const targets = new Map<number, TagTarget>([
+                [50, makeTarget(msgA)],
+                [60, makeTarget(msgB)],
+            ]);
+            const messageTagNumbers = new Map<MessageLike, number>();
+            messageTagNumbers.set(msgA, 50);
+            messageTagNumbers.set(msgB, 60);
+
+            const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
+                autoDropToolAge: 1000, // age cutoff doesn't fire (very large)
+                dropToolStructure: true,
+                protectedTags: 0,
+            });
+
+            //#then — neither tag is deduplicated (cross-owner pair).
+            expect(result.deduplicatedTools).toBe(0);
+            const tags = getTagsBySession(db, SESSION);
+            expect(tags.find((t) => t.tagNumber === 50)?.status).toBe("active");
+            expect(tags.find((t) => t.tagNumber === 60)?.status).toBe("active");
+        });
+
+        it("DOES merge same-owner duplicates with different callIds (Pi parallel-tool-calls shape)", () => {
+            //#given — two tool calls within the SAME assistant message
+            // (Pi parallel tool calls): same toolName, same args,
+            // different callIds. The composite keys differ (different
+            // callIds) but the fingerprint matches (same owner +
+            // toolName + args). Dedup pass must merge — older dropped,
+            // newer kept.
+            insertTag(db, SESSION, "call-A", "tool", 1000, 70, 0, "mcp_grep", 0, "m-asst");
+            insertTag(db, SESSION, "call-B", "tool", 2000, 80, 0, "mcp_grep", 0, "m-asst");
+
+            const msg = buildMessageWithId("m-asst", [
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "call-A",
+                    state: { input: { pattern: "y" }, output: "r1", status: "completed" },
+                },
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "call-B",
+                    state: { input: { pattern: "y" }, output: "r2", status: "completed" },
+                },
+            ]);
+
+            const targets = new Map<number, TagTarget>([
+                [70, makeTarget(msg)],
+                [80, makeTarget(msg)],
+            ]);
+            const messageTagNumbers = new Map<MessageLike, number>();
+            messageTagNumbers.set(msg, 80); // newest
+
+            const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
+                autoDropToolAge: 1000,
+                dropToolStructure: true,
+                protectedTags: 0,
+            });
+
+            //#then — older tag dropped, newer kept.
+            expect(result.deduplicatedTools).toBe(1);
+            const tags = getTagsBySession(db, SESSION);
+            expect(tags.find((t) => t.tagNumber === 70)?.status).toBe("dropped");
+            expect(tags.find((t) => t.tagNumber === 80)?.status).toBe("active");
+        });
+    });
 });

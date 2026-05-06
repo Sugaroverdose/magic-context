@@ -137,20 +137,34 @@ export function applyHeuristicCleanup(
     })();
 
     // Deduplication: auto-drop older identical tool calls (same tool + same params)
+    //
+    // v3.3.1 Layer C — plan §5 + Finding 1:
+    //   - Both the tag-side index AND the fingerprint-side map key on
+    //     composite key `<ownerMsgId>\x00<callId>` so cross-owner pairs
+    //     don't collapse into one bucket on lookup.
+    //   - The fingerprint VALUE includes ownerMsgId too. Without it, two
+    //     assistant turns with same `(toolName, args)` from different
+    //     owners would share a fingerprint bucket and be merged. With
+    //     it, cross-owner pairs are correctly NOT merged (semantically
+    //     distinct invocations). Within-same-owner duplicates still
+    //     dedup as expected.
     const allMessages = Array.from(messageTagNumbers.keys());
     const toolFingerprints = buildToolFingerprints(allMessages);
     if (toolFingerprints.size > 0) {
-        const tagsByMessageId = new Map<string, TagEntry>();
+        const tagsByCompositeKey = new Map<string, TagEntry>();
         for (const tag of tags) {
             if (tag.type === "tool" && tag.status === "active" && tag.messageId) {
-                tagsByMessageId.set(tag.messageId, tag);
+                const key = tag.toolOwnerMessageId
+                    ? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
+                    : tag.messageId; // legacy fallback for unbackfilled NULL-owner rows
+                tagsByCompositeKey.set(key, tag);
             }
         }
 
         // Group tags by fingerprint
         const fingerprintGroups = new Map<string, TagEntry[]>();
-        for (const [messageId, fingerprint] of toolFingerprints) {
-            const tag = tagsByMessageId.get(messageId);
+        for (const [compositeKey, fingerprint] of toolFingerprints) {
+            const tag = tagsByCompositeKey.get(compositeKey);
             if (!tag || tag.tagNumber > protectedCutoff) continue;
             const group = fingerprintGroups.get(fingerprint) ?? [];
             group.push(tag);
@@ -240,20 +254,32 @@ function extractToolInfo(
     return null;
 }
 
+/**
+ * v3.3.1 Layer C — plan §5: build a per-(owner, callId) fingerprint
+ * map. Both key (composite `<ownerMsgId>\x00<callId>`) and value
+ * (`<ownerMsgId>:<toolName>:<args>`) include the owner so cross-owner
+ * pairs with same `(toolName, args)` produce DISTINCT fingerprints
+ * and are NOT merged by the dedup pass. Within-same-owner duplicates
+ * still group correctly because their owner is identical and the
+ * callId differs (Pi parallel-tool-calls).
+ */
 function buildToolFingerprints(messages: MessageLike[]): Map<string, string> {
     const fingerprints = new Map<string, string>();
     for (const message of messages) {
         if (message.info.role !== "assistant") continue;
+        const ownerMsgId = typeof message.info.id === "string" ? message.info.id : null;
+        if (!ownerMsgId) continue;
         for (const part of message.parts) {
             const record = part as Record<string, unknown>;
             const info = extractToolInfo(record);
             if (!info) continue;
-            // Use callId (matches tool tag messageId in DB), not message.info.id
             const callId = extractCallId(record);
             if (!callId) continue;
             try {
-                const fingerprint = `${info.toolName}:${JSON.stringify(info.args)}`;
-                fingerprints.set(callId, fingerprint);
+                // Owner in BOTH key AND value (Finding 1 in plan v3.3.1).
+                const fingerprint = `${ownerMsgId}:${info.toolName}:${JSON.stringify(info.args)}`;
+                const compositeKey = `${ownerMsgId}\x00${callId}`;
+                fingerprints.set(compositeKey, fingerprint);
             } catch {
                 // Skip if args can't be stringified
             }
