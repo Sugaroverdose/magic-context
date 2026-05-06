@@ -4,10 +4,15 @@
  */
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import { getMemoriesByProject } from "../features/magic-context/memory/storage-memory";
 import { type ContextDatabase as Database, openDatabase } from "../features/magic-context/storage";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import { resolveExecuteThresholdDetail } from "../hooks/magic-context/event-resolvers";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
+import {
+    renderMemoryBlock,
+    trimMemoriesToBudget,
+} from "../hooks/magic-context/inject-compartments";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import {
@@ -66,11 +71,14 @@ function resolveConfigValue<T>(
     return defaultValue;
 }
 
-function buildSidebarSnapshot(
+// Exported for test access. Production code reaches this via the
+// "sidebar-snapshot" RPC handler registered below.
+export function buildSidebarSnapshot(
     db: Database,
     sessionId: string,
     directory: string,
     liveSessionState?: LiveSessionState,
+    injectionBudgetTokens?: number,
 ): SidebarSnapshot {
     const empty: SidebarSnapshot = {
         sessionId,
@@ -222,6 +230,30 @@ function buildSidebarSnapshot(
             const cached = meta.memory_block_cache;
             if (typeof cached === "string" && cached.length > 0) {
                 memoryTokens = estimateTokens(cached);
+            } else if (memoryBlockCount > 0 && projectIdentity) {
+                // Cache was cleared (e.g. by replaceAllCompartmentState /
+                // replaceSessionFacts / clearMemoryBlockCacheForSession) but
+                // memory_block_count is intentionally preserved so the
+                // dashboard still reports the count between cache busts.
+                // Render the memory block on-demand here using the same logic
+                // as inject-compartments.ts so the sidebar's token reading
+                // stays accurate. Read-only path — DO NOT write back to
+                // memory_block_cache; the empty cache state is a
+                // cache-stability signal that must be preserved.
+                try {
+                    let memories = getMemoriesByProject(db, projectIdentity, [
+                        "active",
+                        "permanent",
+                    ]);
+                    if (injectionBudgetTokens && memories.length > 0) {
+                        memories = trimMemoriesToBudget(sessionId, memories, injectionBudgetTokens);
+                    }
+                    const block = renderMemoryBlock(memories);
+                    memoryTokens = block ? estimateTokens(block) : 0;
+                } catch {
+                    // Defensive: memory tables may not exist yet on a brand-new DB.
+                    memoryTokens = 0;
+                }
             }
         }
 
@@ -334,8 +366,15 @@ function buildStatusDetail(
     modelKey?: string,
     config?: Record<string, unknown>,
     liveSessionState?: LiveSessionState,
+    injectionBudgetTokens?: number,
 ): StatusDetail {
-    const base = buildSidebarSnapshot(db, sessionId, directory, liveSessionState);
+    const base = buildSidebarSnapshot(
+        db,
+        sessionId,
+        directory,
+        liveSessionState,
+        injectionBudgetTokens,
+    );
     const detail: StatusDetail = {
         ...base,
         tagCounter: 0,
@@ -538,15 +577,20 @@ export function registerRpcHandlers(
             liveSessionState.agentBySession,
         );
 
+    const injectionBudgetTokens = config.memory?.injection_budget_tokens;
+
     rpcServer.handle("sidebar-snapshot", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         const dir = String(params.directory ?? directory);
         const db = getDb();
         if (!db || !sessionId) return { error: "unavailable" };
-        return buildSidebarSnapshot(db, sessionId, dir, liveSessionState) as unknown as Record<
-            string,
-            unknown
-        >;
+        return buildSidebarSnapshot(
+            db,
+            sessionId,
+            dir,
+            liveSessionState,
+            injectionBudgetTokens,
+        ) as unknown as Record<string, unknown>;
     });
 
     rpcServer.handle("status-detail", async (params) => {
@@ -562,6 +606,7 @@ export function registerRpcHandlers(
             modelKey,
             rawConfig,
             liveSessionState,
+            injectionBudgetTokens,
         ) as unknown as Record<string, unknown>;
     });
 

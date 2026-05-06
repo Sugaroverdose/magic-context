@@ -1,10 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
+import { runMigrations } from "./migrations";
+import { initializeDatabase } from "./storage-db";
 import {
     __resetToolDefinitionMeasurements,
     getMeasuredToolDefinitionTokens,
     getToolDefinitionSnapshot,
+    loadToolDefinitionMeasurements,
     recordToolDefinition,
+    setDatabase,
 } from "./tool-definition-tokens";
+
+function createTestDb(): Database {
+    const db = new Database(":memory:");
+    // initializeDatabase creates session_meta + tags etc., needed by older
+    // migrations (v5 heal, v6 counter heal). Then runMigrations applies the
+    // versioned migrations including v10 (tool_definition_measurements).
+    initializeDatabase(db);
+    runMigrations(db);
+    return db;
+}
 
 describe("tool-definition-tokens", () => {
     afterEach(() => {
@@ -113,5 +129,100 @@ describe("tool-definition-tokens", () => {
         expect(snapshot.length).toBe(2);
         expect(snapshot.every((s) => s.totalTokens > 0)).toBe(true);
         expect(snapshot.every((s) => s.toolCount === 1)).toBe(true);
+    });
+});
+
+describe("tool-definition-tokens persistence (bug #2)", () => {
+    afterEach(() => {
+        __resetToolDefinitionMeasurements();
+    });
+
+    test("loadToolDefinitionMeasurements restores in-memory map after reset", () => {
+        const db = createTestDb();
+        try {
+            setDatabase(db);
+            // Record a measurement: this writes to both in-memory map and SQLite.
+            recordToolDefinition(
+                "anthropic",
+                "claude-sonnet-4.7",
+                "sisyphus",
+                "bash",
+                "Run a shell command",
+                { type: "object", properties: { command: { type: "string" } } },
+            );
+            const beforeReset = getMeasuredToolDefinitionTokens(
+                "anthropic",
+                "claude-sonnet-4.7",
+                "sisyphus",
+            );
+            expect(beforeReset).toBeGreaterThan(0);
+
+            // Simulate a plugin restart: in-memory map cleared but SQLite
+            // retains the row. Reset also drops the persistenceDb reference,
+            // matching the cold-start state before openDatabase() rewires it.
+            __resetToolDefinitionMeasurements();
+            expect(
+                getMeasuredToolDefinitionTokens("anthropic", "claude-sonnet-4.7", "sisyphus"),
+            ).toBeUndefined();
+
+            // Rehydrate from SQLite. The measurement should be restored.
+            loadToolDefinitionMeasurements(db);
+            const afterLoad = getMeasuredToolDefinitionTokens(
+                "anthropic",
+                "claude-sonnet-4.7",
+                "sisyphus",
+            );
+            expect(afterLoad).toBe(beforeReset);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("INSERT OR REPLACE updates token_count when same key re-recorded", () => {
+        const db = createTestDb();
+        try {
+            setDatabase(db);
+            recordToolDefinition("p", "m", "a", "bash", "v1 description", { v: 1 });
+            // Read the persisted row directly. We rely on token_count, not the
+            // in-memory map — that's the whole point of this idempotency test.
+            const firstRow = db
+                .prepare(
+                    "SELECT token_count FROM tool_definition_measurements WHERE provider_id=? AND model_id=? AND agent_name=? AND tool_id=?",
+                )
+                .get("p", "m", "a", "bash") as { token_count: number } | undefined;
+            expect(firstRow).toBeDefined();
+            const firstCount = firstRow?.token_count ?? 0;
+            expect(firstCount).toBeGreaterThan(0);
+
+            // Re-record with a much longer description → larger token count.
+            // INSERT OR REPLACE should update the same row, not insert a new one.
+            recordToolDefinition("p", "m", "a", "bash", "v2 description ".repeat(50), { v: 2 });
+
+            const allRows = db
+                .prepare(
+                    "SELECT token_count FROM tool_definition_measurements WHERE provider_id=? AND model_id=? AND agent_name=? AND tool_id=?",
+                )
+                .all("p", "m", "a", "bash") as Array<{ token_count: number }>;
+            expect(allRows.length).toBe(1); // No duplicate row.
+            expect(allRows[0].token_count).toBeGreaterThan(firstCount);
+
+            // After reload, in-memory total reflects the new (larger) value.
+            __resetToolDefinitionMeasurements();
+            loadToolDefinitionMeasurements(db);
+            const reloaded = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+            expect(reloaded).toBe(allRows[0].token_count);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("recordToolDefinition without setDatabase still updates in-memory map", () => {
+        // Cold path: setDatabase has not been called yet (e.g. during plugin
+        // bootstrap before openDatabase has wired the DB). The call must not
+        // throw, and the in-memory map must still be updated so the live
+        // sidebar shows the correct value before the next restart.
+        recordToolDefinition("p", "m", "a", "bash", "desc", {});
+        const total = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+        expect(total).toBeGreaterThan(0);
     });
 });

@@ -341,6 +341,39 @@ const MIGRATIONS: Migration[] = [
             db.exec("ANALYZE tags;");
         },
     },
+    // NOTE: version 9 is intentionally reserved for the tag-owner-fix work
+    // documented in `.alfonso/plans/tag-owner-fix-plan.md`. New migrations
+    // should use v10+ to avoid colliding with that reserved slot.
+    {
+        version: 10,
+        description: "Persist tool_definition_measurements across plugin restarts",
+        // The `tool.definition` plugin hook fires once per tool per
+        // `ToolRegistry.tools()` call and produces our per-tool token
+        // measurements. Pre-v10 these measurements lived only in an
+        // in-process Map, so a plugin restart wiped them and the sidebar's
+        // "Tool Defs" segment showed 0 tokens until the next chat.message
+        // fired the hook chain again.
+        //
+        // Persisting to SQLite lets us repopulate the in-memory store at
+        // openDatabase() time, so the sidebar shows the correct value
+        // immediately after restart. Composite primary key matches the
+        // in-memory keying (provider/model/agent/tool) so re-recording the
+        // same key is a single INSERT OR REPLACE that updates the token
+        // count and recorded_at without growing the table.
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS tool_definition_measurements (
+                    provider_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    tool_id TEXT NOT NULL,
+                    token_count INTEGER NOT NULL,
+                    recorded_at INTEGER NOT NULL,
+                    PRIMARY KEY (provider_id, model_id, agent_name, tool_id)
+                );
+            `);
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

@@ -148,7 +148,7 @@ function utilityTier(m: Memory): number {
  * (chars/4 here vs real tokens elsewhere) caused either under- or
  * over-injection of memories, depending on memory content shape.
  */
-function trimMemoriesToBudget(
+export function trimMemoriesToBudget(
     sessionId: string,
     memories: Memory[],
     budgetTokens: number,

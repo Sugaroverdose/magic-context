@@ -9,6 +9,10 @@ import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
+import {
+    loadToolDefinitionMeasurements,
+    setDatabase as setToolDefinitionDatabase,
+} from "./tool-definition-tokens";
 
 const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
@@ -596,6 +600,14 @@ export function openDatabase(): Database {
         const db = new Database(dbPath);
         initializeDatabase(db);
         runMigrations(db);
+        // Wire the persistence-backed tool-definition measurement store and
+        // rehydrate the in-memory map from any prior writes. Doing this here
+        // (after migrations) means migration v10 has already created the
+        // `tool_definition_measurements` table, so loadToolDefinitionMeasurements
+        // never hits a missing-table failure path. See bug #2 in the v0.16+
+        // sidebar regression report.
+        setToolDefinitionDatabase(db);
+        loadToolDefinitionMeasurements(db);
         databases.set(dbPath, db);
         persistenceByDatabase.set(db, true);
         persistenceErrorByDatabase.delete(db);
