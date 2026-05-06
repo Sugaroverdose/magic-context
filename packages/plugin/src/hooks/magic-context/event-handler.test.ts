@@ -435,6 +435,7 @@ describe("createEventHandler", () => {
                 reasoningByteSize: 0,
                 sessionId: "ses-removed",
                 cavemanDepth: 0,
+                toolOwnerMessageId: null,
             },
         ]);
         // The removal path clears synchronously. Async reconciliation is scheduled

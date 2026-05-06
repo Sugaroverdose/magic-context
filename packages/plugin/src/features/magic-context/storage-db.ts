@@ -369,6 +369,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // always compresses from the original, never from an already-cavemaned
     // intermediate, so repeated tier shifts converge to the target depth.
     ensureColumn(db, "tags", "caveman_depth", "INTEGER DEFAULT 0");
+    // tool_owner_message_id is the third axis of tool-tag identity
+    // (plan v3.3.1 / migration v10). For pre-existing rows, NULL means
+    // "legacy orphan" — runtime lazy-adoption + the v10 backfill pass
+    // populate it post-upgrade. Migration v10 also creates the partial
+    // UNIQUE and lookup indexes; ensureColumn here covers the bare
+    // column-existence path for fresh DBs and tests that bypass
+    // runMigrations.
+    ensureColumn(db, "tags", "tool_owner_message_id", "TEXT DEFAULT NULL");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");

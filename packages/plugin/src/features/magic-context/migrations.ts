@@ -371,6 +371,50 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 10,
+        description: "Add tool_owner_message_id column to tags + composite identity indexes",
+        // Tag-owner identity fix (plan v3.3.1). Pre-v10 tool tags were
+        // keyed solely by (session_id, callID), but OpenCode generates
+        // callIDs per-turn rather than per-session. When two assistant
+        // turns produce a tool with the same internal counter (e.g.
+        // `read:32`), the tagger looked up the existing row by callID
+        // and bound the new occurrence to the original tag — replaying
+        // the original tag's drop status onto fresh content. Wire-level
+        // failures on Kimi/Moonshot followed because the resulting
+        // assistant message had reasoning_content stripped but no
+        // accompanying tool_use blocks.
+        //
+        // Persistent identity for tool tags becomes the triple
+        // (session_id, callID, tool_owner_message_id). Existing rows get
+        // NULL owner; the runtime lazy-adopts them on first observation
+        // (one-shot adoption per orphan, defense-in-depth) and a
+        // separate backfill pass populates owner from the OpenCode DB
+        // (primary correctness mechanism).
+        //
+        // The partial UNIQUE index prevents duplicate composite identity
+        // rows once owner is populated. The lookup index accelerates
+        // the lazy-adoption NULL fallback path.
+        //
+        // SQLite metadata-only ALTER (~5ms on 353MB DB).
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(tags)").all() as Array<{
+                name?: string;
+            }>;
+            if (!cols.some((c) => c.name === "tool_owner_message_id")) {
+                db.exec("ALTER TABLE tags ADD COLUMN tool_owner_message_id TEXT DEFAULT NULL");
+            }
+            db.exec(`
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_tool_composite
+                ON tags(session_id, message_id, tool_owner_message_id)
+                WHERE type = 'tool' AND tool_owner_message_id IS NOT NULL;
+
+                CREATE INDEX IF NOT EXISTS idx_tags_tool_null_owner
+                ON tags(session_id, message_id)
+                WHERE type = 'tool' AND tool_owner_message_id IS NULL;
+            `);
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

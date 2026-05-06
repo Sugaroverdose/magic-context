@@ -17,6 +17,23 @@ export interface TagEntry {
      * target depth for its age band.
      */
     cavemanDepth: number;
+    /**
+     * For `type: "tool"` tags: the assistant message id where the
+     * underlying tool call was invoked. Identity for a tool tag is the
+     * triple `(sessionId, messageId/callID, toolOwnerMessageId)` —
+     * including this field disambiguates collisions when OpenCode's
+     * per-turn callID counter produces the same id across turns.
+     *
+     * NULL on:
+     *   - all `type: "message"` and `type: "file"` tags (not applicable)
+     *   - legacy tool tags written before plugin v0.16.x (the
+     *     tag-owner-fix migration v10). The runtime lazily adopts these
+     *     orphan rows on first observation; backfill populates them at
+     *     plugin startup against the OpenCode DB.
+     *
+     * See plan v3.3.1 in `.alfonso/plans/tag-owner-fix-plan.md`.
+     */
+    toolOwnerMessageId: string | null;
 }
 
 export interface PendingOp {
