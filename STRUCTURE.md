@@ -23,10 +23,11 @@
 - Contains: TypeScript source files and co-located `*.test.ts` files.
 - Key files: `src/index.ts`, `src/plugin/tool-registry.ts`, `src/hooks/magic-context/hook.ts`
 
-**`src/cli/`:**
-- Purpose: Provide the interactive setup wizard exposed as the `opencode-magic-context` CLI binary.
-- Contains: Setup orchestration, config-path detection, OpenCode integration helpers, and prompt utilities.
-- Key files: `src/cli/index.ts`, `src/cli/setup.ts`, `src/cli/config-paths.ts`, `src/cli/opencode-helpers.ts`
+**CLI (lives in a sibling package):**
+- Purpose: Provide the unified, harness-aware setup/doctor wizard for OpenCode and Pi.
+- Location: `packages/cli/src/` — published as `@cortexkit/magic-context`. Invoked as `npx @cortexkit/magic-context@latest <subcommand>`.
+- Contains: Command implementations (`packages/cli/src/commands/`), per-harness adapters (`packages/cli/src/adapters/`), shared prompt/path utilities (`packages/cli/src/lib/`).
+- History: prior to v0.16.1 each plugin shipped its own `opencode-magic-context` / `pi-magic-context` bin. Those were collapsed into the unified `magic-context` bin; this `packages/plugin/` tree no longer contains a `src/cli/` directory.
 
 **`src/agents/`:**
 - Purpose: Define hidden agent identifiers and shared agent prompt helpers.
@@ -91,7 +92,7 @@
 
 ## Where to Add New Code
 
-**New CLI command:** add it in `src/cli/setup.ts` or a new module under `src/cli/`, then wire it from `src/cli/index.ts`.
+**New CLI command:** add it in `packages/cli/src/commands/` (the unified `@cortexkit/magic-context` package) and wire it from `packages/cli/src/index.ts`.
 
 **New OpenCode hook adapter:** add the adapter in `src/plugin/` and keep the runtime logic in `src/hooks/magic-context/`.
 

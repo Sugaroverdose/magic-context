@@ -1,8 +1,11 @@
 # @cortexkit/opencode-magic-context-e2e
 
-End-to-end test harness for the magic-context plugin. Spawns a real `opencode serve`
-subprocess pointed at a local mock Anthropic server and drives sessions through the
-OpenCode SDK client.
+End-to-end test harness for the Magic Context plugins (OpenCode and Pi). Spawns
+a real `opencode serve` subprocess (or a Pi child process) pointed at a local
+mock Anthropic server and drives sessions through the appropriate harness.
+
+> Note: the package name retains its original `-e2e` suffix from when this only
+> covered OpenCode; Pi e2e coverage was added alongside under `tests/pi-*.test.ts`.
 
 ## Running
 
@@ -28,13 +31,19 @@ cd packages/e2e-tests && bun test
   `file://` spec. No npm install required; the plugin is loaded directly from
   `packages/plugin/src/index.ts`.
 
-- **`tests/*.test.ts`** — Test suites. Each test creates a session, sends prompts
-  through the SDK, and asserts against SQLite state, log output, and captured mock
-  requests.
+- **`src/pi-runner/`** + **`src/pi-harness.ts`** — Pi-flavored counterpart to the
+  OpenCode runner. Spawns a real Pi child process pointed at the same mock
+  Anthropic server and loads the Pi plugin from local source.
+
+- **`tests/*.test.ts`** — Test suites. OpenCode-flavored suites use `harness.ts` /
+  `opencode-runner`; Pi-flavored suites (`tests/pi-*.test.ts`) use `pi-harness.ts` /
+  `pi-runner`. Each test creates a session, sends prompts, and asserts against
+  SQLite state, log output, and captured mock requests.
 
 ## Requirements
 
-- `opencode` CLI available on PATH (`which opencode` should succeed).
+- `opencode` CLI available on PATH for OpenCode suites (`which opencode`).
+- Pi CLI installed for Pi suites (see `packages/pi-plugin/README.md`).
 - Bun.
 - No `OPENCODE_SERVER_PASSWORD` required — the spawner explicitly strips it so the
   test server runs unsecured on a random localhost port.

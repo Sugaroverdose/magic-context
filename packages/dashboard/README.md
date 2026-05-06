@@ -15,7 +15,7 @@ A lightweight Tauri desktop app that provides visibility into Magic Context's in
 
 - [Rust](https://rustup.rs/) (1.77+)
 - [Bun](https://bun.sh/) or Node.js
-- The [Magic Context plugin](https://github.com/cortexkit/opencode-magic-context) must be installed and have been run at least once (to create the SQLite database)
+- The [Magic Context plugin](https://github.com/cortexkit/magic-context) must be installed and have been run at least once (to create the SQLite database)
 
 ## Development
 

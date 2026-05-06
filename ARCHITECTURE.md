@@ -56,12 +56,12 @@
 - Depends on: Node built-ins and Zod.
 - Used by: All other layers.
 
-**CLI:**
-- Purpose: Provide a standalone interactive setup wizard runnable via `bunx` or `npx` outside of OpenCode.
-- Location: `src/cli/`
-- Contains: Setup orchestration (`src/cli/setup.ts`), config-path detection (`src/cli/config-paths.ts`), OpenCode integration helpers (`src/cli/opencode-helpers.ts`), prompt wrappers (`src/cli/prompts.ts`).
+**CLI (separate package):**
+- Purpose: Provide a unified, harness-aware interactive setup/doctor wizard runnable via `npx` outside of OpenCode/Pi.
+- Location: `packages/cli/src/` (NOT in `packages/plugin/`; the per-plugin CLI bins were collapsed into one shared package in v0.16.1).
+- Contains: Setup/doctor commands (`packages/cli/src/commands/`), harness adapters for OpenCode and Pi (`packages/cli/src/adapters/`), shared prompt/path utilities (`packages/cli/src/lib/`).
 - Depends on: `@clack/prompts`, Node built-ins; no dependency on plugin runtime layers.
-- Used by: `dist/cli.js` built separately as a Node ESM target.
+- Used by: Published as `@cortexkit/magic-context` on npm; invoked as `npx @cortexkit/magic-context@latest <subcommand>`.
 
 ## Data Flow
 
@@ -157,9 +157,9 @@
 ## Entry Points
 
 **CLI entry:**
-- Location: `src/cli/index.ts`
-- Triggers: Executed as the `opencode-magic-context` bin target via `bunx` or `npx`.
-- Responsibilities: Dispatch the `setup` wizard sub-command; print usage on unknown commands.
+- Location: `packages/cli/src/index.ts` (separate `@cortexkit/magic-context` package).
+- Triggers: Executed as the unified `magic-context` bin target via `npx @cortexkit/magic-context@latest <subcommand>`.
+- Responsibilities: Detect installed harnesses (OpenCode, Pi) and dispatch `setup` / `doctor` flows; print usage on unknown commands.
 
 **Plugin entry:**
 - Location: `src/index.ts`
