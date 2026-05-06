@@ -8,7 +8,7 @@ body:
         Thanks for reporting! To make debugging faster, please run:
 
         ```
-        npx @cortexkit/opencode-magic-context@latest doctor --issue
+        npx @cortexkit/magic-context@latest doctor --issue
         ```
 
         That command collects environment info, your sanitized config, and the last 200 log lines into a local file. You can paste its contents into the Diagnostics field below, or let it submit the issue directly via `gh`.
