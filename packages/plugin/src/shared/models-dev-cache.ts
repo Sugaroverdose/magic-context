@@ -32,7 +32,11 @@ interface OpencodeClientLike {
     };
 }
 
-const RELOAD_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes, matches OpenCode's TTL
+// File-cache fallback only. The primary `models.json` API refresh is driven
+// by `setInterval(refreshModelLimitsFromApi, ...)` in `index.ts` at a 1-hour
+// cadence; this 5-minute interval governs the on-disk-cache fallback path
+// when the API loader hasn't run yet (e.g. during plugin warmup).
+const RELOAD_INTERVAL_MS = 5 * 60 * 1000;
 
 interface CachedModelMetadata {
     limit?: number;

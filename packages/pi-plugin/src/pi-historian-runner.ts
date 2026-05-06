@@ -313,41 +313,23 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				`pi-historian: invoking subagent (model=${historianModel}, chunk=${chunk.startIndex}-${chunk.endIndex}, ${chunk.messageCount} msgs, ~${chunk.tokenEstimate} tokens)`,
 			);
 
-			// Verbose per-event tracing of the Pi child run. Every parsed
-			// event from the subagent's NDJSON stream lands in
-			// magic-context.log with phase=raw_event so we can reconstruct
-			// what actually happened during a hang or a timeout. Phase
-			// labels: spawned, first_event, raw_event, terminal, stderr,
-			// child_exit. The trace is per-pass-prefixed so first/repair/
-			// editor pass logs are unambiguous in the timeline.
+			// Per-pass milestone tracing for the Pi child run. We log the
+			// high-signal lifecycle events (`spawned`, `terminal`, `stderr`,
+			// `child_exit`) so historian failure timelines stay readable in
+			// `magic-context.log`, but skip the full per-event NDJSON stream
+			// (`raw_event`, `first_event`) — those were added during the
+			// April timeout investigation, served their purpose, and would
+			// be excessive in production. If a future hang needs deeper
+			// inspection, set MC_PI_HISTORIAN_TRACE=1 to opt into raw-event
+			// logging without rebuilding.
+			const traceRawEvents = process.env.MC_PI_HISTORIAN_TRACE === "1";
 			const buildProgressLogger = (passLabel: string) => {
 				return (event: SubagentProgressEvent) => {
 					try {
-						if (event.type === "raw_event") {
-							// Stringify with safe size cap so a giant
-							// message body doesn't dominate the log.
-							let serialized: string;
-							try {
-								serialized = JSON.stringify(event.event);
-							} catch {
-								serialized = "[unserializable]";
-							}
-							if (serialized.length > 4000) {
-								serialized = `${serialized.slice(0, 4000)}…[truncated ${serialized.length - 4000} chars]`;
-							}
-							sessionLog(
-								sessionId,
-								`pi-historian[${passLabel}] raw_event @${event.ms}ms type=${event.eventType ?? "?"}: ${serialized}`,
-							);
-						} else if (event.type === "spawned") {
+						if (event.type === "spawned") {
 							sessionLog(
 								sessionId,
 								`pi-historian[${passLabel}] spawned pid=${event.pid ?? "?"} argv=${event.argv.length} args`,
-							);
-						} else if (event.type === "first_event") {
-							sessionLog(
-								sessionId,
-								`pi-historian[${passLabel}] first_event @${event.ms}ms type=${event.eventType}`,
 							);
 						} else if (event.type === "terminal") {
 							sessionLog(
@@ -367,6 +349,27 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 								sessionId,
 								`pi-historian[${passLabel}] child_exit @${event.ms}ms code=${event.code} signal=${event.signal}`,
 							);
+						} else if (traceRawEvents) {
+							if (event.type === "raw_event") {
+								let serialized: string;
+								try {
+									serialized = JSON.stringify(event.event);
+								} catch {
+									serialized = "[unserializable]";
+								}
+								if (serialized.length > 4000) {
+									serialized = `${serialized.slice(0, 4000)}…[truncated ${serialized.length - 4000} chars]`;
+								}
+								sessionLog(
+									sessionId,
+									`pi-historian[${passLabel}] raw_event @${event.ms}ms type=${event.eventType ?? "?"}: ${serialized}`,
+								);
+							} else if (event.type === "first_event") {
+								sessionLog(
+									sessionId,
+									`pi-historian[${passLabel}] first_event @${event.ms}ms type=${event.eventType}`,
+								);
+							}
 						}
 					} catch {
 						// Logging must never crash the runner.

@@ -580,31 +580,36 @@ export function createTagger(): Tagger {
     /**
      * Load (or refresh) per-session tagger state from the DB.
      *
-     * Fast path: if the recorded load signature for this session still
-     * matches the current `data_version` and `total_changes`, the in-memory
-     * Map is already consistent with the DB and we skip the full reload.
-     * On a 49k-tag session this drops a ~15 ms scan to ~0.005 ms, which
-     * matters because this function is called once per transform pass and
-     * most defer passes touch the DB only for reads.
+     * Cache-hit fast path: if the recorded load signature for this session
+     * still matches the current `data_version` and `total_changes` on this
+     * connection, the in-memory map is consistent with disk and we skip the
+     * full reload (~0.005 ms vs ~15 ms on a 49k-tag session).
      *
-     * Slow path: full reload. Re-reads the assignments and counter from
-     * disk so we pick up any inserts another writer may have made since
-     * this process last looked. The previous `if (counters.has(sessionId))
-     * return` short-circuit was a long-lived bug: once the in-memory
-     * counter drifted behind the DB max (stale process, prior outer-
-     * transaction rollback, concurrent writer), it could never self-heal —
-     * every assignTag would keep proposing already-claimed tag numbers and
-     * either go through the collision-recovery slow path or fail outright.
-     * The signature-based cache preserves correct refresh-on-change while
-     * eliminating the unnecessary refresh-on-no-change cost.
+     * Cache-miss slow path: re-read assignments + counter from disk to pick
+     * up writes made by either this connection or a sibling writer. The
+     * previous `if (counters.has(sessionId)) return` short-circuit had a
+     * subtle bug: once the in-memory counter drifted behind the DB max
+     * (stale process, prior outer-transaction rollback, concurrent writer),
+     * it could never self-heal — every `assignTag` would keep proposing
+     * already-claimed tag numbers and either bounce through the collision-
+     * recovery path or fail outright. The signature-based cache restores
+     * refresh-on-change correctness without paying the cost on every pass.
      *
-     * Note: `total_changes()` is connection-wide, so a write to ANY table
-     * on this connection (e.g. session_meta, compartments, source_contents)
-     * will force a tag-state reload here even if the tags table didn't
-     * change. That's intentional — the alternative would require per-table
-     * change detection, which adds complexity for a small additional win.
-     * The cache still avoids the worst case where pure-read defer passes
-     * pay the full reload cost.
+     * Realistic hit-rate caveat: `total_changes()` is connection-cumulative,
+     * so a write to ANY table on this connection (`session_meta`,
+     * `compartments`, `source_contents`, `pending_ops`, …) bumps the
+     * counter and invalidates the cache. In practice the postprocess phase
+     * persists nudge state, watermarks, sticky reminders, etc., so most
+     * defer passes are NOT pure-read — they still pay the full reload cost
+     * (still cheap; full reload is ~15 ms on the largest sessions). The
+     * cache-hit fast path fires only on truly read-only defer passes, which
+     * are infrequent. Don't read the 110× speedup figure as a per-pass
+     * average — it's the ceiling for the rarest case.
+     *
+     * Per-table change detection would lift the hit rate but adds complexity
+     * (manual versioning of every write site, brittle to refactors). The
+     * current behavior is the simplest correct design that still avoids the
+     * pathological "reload every pass even when nothing changed."
      *
      * Important: do NOT update the cached signature from anywhere except
      * a successful full reload. In particular, do not bump it inside
