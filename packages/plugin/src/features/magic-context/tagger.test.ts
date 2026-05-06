@@ -27,6 +27,8 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                     _tagNumber: number,
                     toolName?: string | null,
                     inputByteSize?: number,
+                    _harness?: string,
+                    toolOwnerMessageId?: string | null,
                 ) => {
                     const tag: StoredTag = {
                         rowId: nextId++,
@@ -40,6 +42,8 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                         reasoningByteSize: _reasoningByteSize ?? 0,
                         sessionId,
                         tagNumber: _tagNumber,
+                        cavemanDepth: 0,
+                        toolOwnerMessageId: toolOwnerMessageId ?? null,
                     };
                     tags.push(tag);
                     return { lastInsertRowid: tag.rowId };
@@ -53,12 +57,38 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                 run: () => {},
             };
         }
+        if (sql.includes("SELECT message_id, tag_number, type, tool_owner_message_id FROM tags")) {
+            return {
+                all: (sessionId: string) =>
+                    tags
+                        .filter((tag) => tag.sessionId === sessionId)
+                        .map((tag) => ({
+                            message_id: tag.messageId,
+                            tag_number: tag.tagNumber,
+                            type: tag.type,
+                            tool_owner_message_id: tag.toolOwnerMessageId,
+                        })),
+            };
+        }
         if (sql.includes("SELECT message_id, tag_number FROM tags")) {
             return {
                 all: (sessionId: string) =>
                     tags
                         .filter((tag) => tag.sessionId === sessionId)
                         .map((tag) => ({ message_id: tag.messageId, tag_number: tag.tagNumber })),
+            };
+        }
+        if (
+            sql.includes("SELECT id, tag_number FROM tags") &&
+            sql.includes("tool_owner_message_id IS NULL")
+        ) {
+            return {
+                get: (_sessionId: string, _callId: string) => undefined,
+            };
+        }
+        if (sql.includes("SELECT tag_number FROM tags") && sql.includes("tool_owner_message_id")) {
+            return {
+                get: (_sessionId: string, _callId: string, _ownerMsgId: string) => undefined,
             };
         }
         if (sql.includes("UPDATE session_meta") || sql.includes("INSERT INTO session_meta")) {
@@ -125,7 +155,7 @@ describe("createTagger", () => {
             //#when
             const tag1 = tagger.assignTag(sessionId, "msg-1", "message", 100, toDatabase(db));
             const tag2 = tagger.assignTag(sessionId, "msg-2", "message", 200, toDatabase(db));
-            const tag3 = tagger.assignTag(sessionId, "tool-1", "tool", 300, toDatabase(db));
+            const tag3 = tagger.assignToolTag(sessionId, "tool-1", "tool-1", 300, toDatabase(db));
 
             //#then
             expect(tag1).toBe(1);
@@ -167,7 +197,13 @@ describe("createTagger", () => {
 
             //#when
             const msgTag = tagger.assignTag(sessionId, "msg-1", "message", 100, toDatabase(db));
-            const toolTag = tagger.assignTag(sessionId, "tool-1", "tool", 200, toDatabase(db));
+            const toolTag = tagger.assignToolTag(
+                sessionId,
+                "tool-1",
+                "tool-1",
+                200,
+                toDatabase(db),
+            );
 
             //#then
             expect(msgTag).toBe(1);
@@ -179,7 +215,16 @@ describe("createTagger", () => {
             const sessionId = "session-1";
 
             //#when
-            tagger.assignTag(sessionId, "tool-1", "tool", 200, toDatabase(db), 0, "read", 321);
+            tagger.assignToolTag(
+                sessionId,
+                "tool-1",
+                "tool-1",
+                200,
+                toDatabase(db),
+                0,
+                "read",
+                321,
+            );
 
             //#then
             expect(db.tags[0]).toMatchObject({
@@ -224,7 +269,7 @@ describe("createTagger", () => {
             //#then
             expect(threw).toBe(true);
             expect(tagger.getCounter(sessionId)).toBe(0);
-            expect(tagger.getTag(sessionId, "msg-1")).toBeUndefined();
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
         });
 
         it("rolls back inserted tag when counter persistence fails after insert", () => {
@@ -241,7 +286,7 @@ describe("createTagger", () => {
             expect(failingDb.tags).toHaveLength(0);
             expect(failingDb.sessionMeta[sessionId]).toBeUndefined();
             expect(tagger.getCounter(sessionId)).toBe(0);
-            expect(tagger.getTag(sessionId, "msg-1")).toBeUndefined();
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
         });
     });
 
@@ -251,7 +296,7 @@ describe("createTagger", () => {
             const sessionId = "session-1";
 
             //#when
-            const result = tagger.getTag(sessionId, "unknown-msg");
+            const result = tagger.getTag(sessionId, "unknown-msg", "message");
 
             //#then
             expect(result).toBeUndefined();
@@ -263,7 +308,7 @@ describe("createTagger", () => {
             tagger.assignTag(sessionId, "msg-1", "message", 100, toDatabase(db));
 
             //#when
-            const result = tagger.getTag(sessionId, "msg-1");
+            const result = tagger.getTag(sessionId, "msg-1", "message");
 
             //#then
             expect(result).toBe(1);
@@ -305,8 +350,8 @@ describe("createTagger", () => {
 
             //#then
             expect(tagger.getCounter(sessionId)).toBe(0);
-            expect(tagger.getTag(sessionId, "msg-1")).toBeUndefined();
-            expect(tagger.getTag(sessionId, "msg-2")).toBeUndefined();
+            expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
+            expect(tagger.getTag(sessionId, "msg-2", "message")).toBeUndefined();
         });
 
         it("allows new sequential assignment after reset", () => {

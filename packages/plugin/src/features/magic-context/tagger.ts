@@ -1,21 +1,106 @@
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
-import { getMaxTagNumberBySession, getTagNumberByMessageId, insertTag } from "./storage-tags";
+import {
+    adoptNullOwnerToolTag,
+    getMaxTagNumberBySession,
+    getNullOwnerToolTag,
+    getTagNumberByMessageId,
+    getToolTagNumberByOwner,
+    insertTag,
+} from "./storage-tags";
 import type { TagEntry } from "./types";
 
+/**
+ * Composite key separator for tool tags in the in-memory assignments map.
+ * `\x00` (NUL) cannot appear in a callId or message id (both are
+ * UUID-shaped or finite character sets) so concatenation is unambiguous.
+ *
+ * v3.3.1 Layer C: tool tags carry a composite identity of
+ * `(sessionId, callId, ownerMsgId)`. The bare callId is no longer a
+ * unique key — two assistant turns reusing the same callId (collision
+ * pattern observed in real OC sessions) must produce distinct tags.
+ *
+ * Message and file tags continue to use bare `messageId` keys (no
+ * collision risk; `messageId` is `${msgId}:p${ord}` or `${msgId}:fileN`
+ * which is globally unique within a session).
+ */
+const TOOL_COMPOSITE_KEY_SEP = "\x00";
+
+export function makeToolCompositeKey(ownerMsgId: string, callId: string): string {
+    return `${ownerMsgId}${TOOL_COMPOSITE_KEY_SEP}${callId}`;
+}
+
+/**
+ * Narrowed type for non-tool tag operations. The compile-time exclusion
+ * of `"tool"` here is the v3.3.1 Layer C contract: every tool path MUST
+ * use `assignToolTag`/`getToolTag` so composite identity propagates.
+ *
+ * Any caller passing `"tool"` to `assignTag` or `getTag` triggers a TS
+ * compile error at the call site. Defense-in-depth: the runtime body
+ * also throws if it ever sees a "tool" type at runtime (caught by
+ * `as any` casts in legacy code).
+ */
+type NonToolTagType = Exclude<TagEntry["type"], "tool">;
+
 export interface Tagger {
+    /**
+     * Assign a tag for a non-tool entity (message text or file part).
+     *
+     * Tool tags MUST use {@link assignToolTag}; the `type` parameter
+     * here is narrowed at compile time to forbid `"tool"`.
+     */
     assignTag(
         sessionId: string,
         messageId: string,
-        type: TagEntry["type"],
+        type: NonToolTagType,
         byteSize: number,
         db: Database,
         reasoningByteSize?: number,
         toolName?: string | null,
         inputByteSize?: number,
     ): number;
-    getTag(sessionId: string, messageId: string): number | undefined;
+    /**
+     * Look up the tag number for a non-tool entity.
+     *
+     * The `type` parameter is required (and narrowed to non-tool) so a
+     * future tool-tag lookup can't accidentally fall through here. Use
+     * {@link getToolTag} for tool lookups.
+     */
+    getTag(sessionId: string, messageId: string, type: NonToolTagType): number | undefined;
+    /**
+     * Assign a tag for a tool invocation. Composite identity
+     * `(sessionId, callId, ownerMsgId)` is mandatory — pre-v3.3.1 the
+     * tagger keyed tool tags by bare callId, and two assistant turns
+     * reusing the same callId would silently bind to the same tag,
+     * inheriting the older tag's drop status.
+     *
+     * `ownerMsgId` is the assistant message id that hosts the tool
+     * invocation. For Pi parallel-tool-calls without `part.id`, callers
+     * pass a synthetic locator equal to the contentId (owner == callId)
+     * to satisfy the contract while preserving the legacy "each part
+     * gets its own tag" behavior.
+     */
+    assignToolTag(
+        sessionId: string,
+        callId: string,
+        ownerMsgId: string,
+        byteSize: number,
+        db: Database,
+        reasoningByteSize?: number,
+        toolName?: string | null,
+        inputByteSize?: number,
+    ): number;
+    /**
+     * Look up the tag number for a tool invocation by composite
+     * identity.
+     */
+    getToolTag(sessionId: string, callId: string, ownerMsgId: string): number | undefined;
     bindTag(sessionId: string, messageId: string, tagNumber: number): void;
+    /**
+     * Bind a tool tag by composite key. The in-memory map keys this as
+     * `${ownerMsgId}\x00${callId}`.
+     */
+    bindToolTag(sessionId: string, callId: string, ownerMsgId: string, tagNumber: number): void;
     getAssignments(sessionId: string): ReadonlyMap<string, number>;
     resetCounter(sessionId: string, db: Database): void;
     getCounter(sessionId: string): number;
@@ -24,8 +109,12 @@ export interface Tagger {
 }
 
 const GET_COUNTER_SQL = `SELECT counter FROM session_meta WHERE session_id = ?`;
+// Layer C: pull tool_owner_message_id and type so we can compose the
+// in-memory key correctly. NULL-owner tool rows are intentionally NOT
+// placed in the in-memory map; the lazy-adoption DB path discovers them
+// at the next lookup.
 const GET_ASSIGNMENTS_SQL =
-    "SELECT message_id, tag_number FROM tags WHERE session_id = ? ORDER BY tag_number ASC";
+    "SELECT message_id, tag_number, type, tool_owner_message_id FROM tags WHERE session_id = ? ORDER BY tag_number ASC";
 
 /**
  * Two SQLite primitives form the change-detection signal for the
@@ -71,6 +160,8 @@ function getProbeTotalChangesStatement(db: Database): PreparedStatement {
 interface AssignmentRow {
     message_id: string;
     tag_number: number;
+    type: TagEntry["type"];
+    tool_owner_message_id: string | null;
 }
 
 /**
@@ -91,7 +182,16 @@ function isAssignmentRow(row: unknown): row is AssignmentRow {
     }
 
     const candidate = row as Record<string, unknown>;
-    return typeof candidate.message_id === "string" && typeof candidate.tag_number === "number";
+    if (typeof candidate.message_id !== "string") return false;
+    if (typeof candidate.tag_number !== "number") return false;
+    if (candidate.type !== "message" && candidate.type !== "tool" && candidate.type !== "file")
+        return false;
+    if (
+        candidate.tool_owner_message_id !== null &&
+        typeof candidate.tool_owner_message_id !== "string"
+    )
+        return false;
+    return true;
 }
 
 /**
@@ -201,46 +301,49 @@ export function createTagger(): Tagger {
         getUpsertCounterStatement(db).run(sessionId, next, getHarness());
     }
 
-    function assignTag(
+    /**
+     * Core allocation loop shared by both non-tool and tool tag paths.
+     *
+     * `mapKey` is the in-memory assignments key (bare messageId for
+     * message/file, composite `<owner>\x00<callId>` for tool).
+     * `toolOwnerMessageId` is null for non-tool tags and required for
+     * tool tags. `dbExistingLookup` returns the persisted tag number
+     * for this entity if one already exists (different lookup paths
+     * for the bare-key vs composite-key cases).
+     */
+    function allocateTag(
         sessionId: string,
         messageId: string,
         type: TagEntry["type"],
         byteSize: number,
         db: Database,
-        reasoningByteSize: number = 0,
-        toolName: string | null = null,
-        inputByteSize: number = 0,
+        reasoningByteSize: number,
+        toolName: string | null,
+        inputByteSize: number,
+        toolOwnerMessageId: string | null,
+        mapKey: string,
+        dbExistingLookup: () => number | null,
     ): number {
         const sessionAssignments = getSessionAssignments(sessionId);
 
-        const existing = sessionAssignments.get(messageId);
+        const existing = sessionAssignments.get(mapKey);
         if (existing !== undefined) {
             return existing;
         }
 
-        // Fast path: this messageId already has a row in DB from a previous
+        // Fast path: this entity already has a row in DB from a previous
         // pass. Bind the existing tag back into memory and bump the counter
         // to at least that value. This handles the case where the in-memory
         // assignments map was lost (cleanup/restart) but the DB still has
         // the row.
-        const dbExisting = getTagNumberByMessageId(db, sessionId, messageId);
+        const dbExisting = dbExistingLookup();
         if (dbExisting !== null) {
-            sessionAssignments.set(messageId, dbExisting);
+            sessionAssignments.set(mapKey, dbExisting);
             syncCounterAtLeast(sessionId, db, dbExisting);
             return dbExisting;
         }
 
-        // Allocation loop. The counter we have in memory may be stale relative
-        // to what's in the DB (another process inserted, or an outer
-        // transaction in a previous pass rolled back the counter upsert but
-        // the inner SAVEPOINT had already committed the tag rows). Each
-        // attempt:
-        //   1. Re-read the live DB max
-        //   2. Allocate one slot beyond max(memory_counter, db_max)
-        //   3. Insert + upsert counter atomically inside a SAVEPOINT
-        //   4. On UNIQUE collision: re-bind if the row now belongs to this
-        //      messageId (race with another writer), else advance counter
-        //      past the conflict and retry
+        // Allocation loop (see assignTag pre-Layer-C comment for rationale).
         for (let attempt = 0; attempt < MAX_TAG_ALLOC_RETRIES; attempt += 1) {
             const memCounter = counters.get(sessionId) ?? 0;
             const dbMax = getMaxTagNumberBySession(db, sessionId);
@@ -258,6 +361,7 @@ export function createTagger(): Tagger {
                         reasoningByteSize,
                         toolName,
                         inputByteSize,
+                        toolOwnerMessageId,
                     );
                     getUpsertCounterStatement(db).run(sessionId, next, getHarness());
                 })();
@@ -268,44 +372,172 @@ export function createTagger(): Tagger {
 
                 // UNIQUE collision. Two possible causes:
                 //   (a) Another writer just claimed `next` for a DIFFERENT
-                //       messageId — recovery: advance our counter past the
-                //       new DB max and retry.
-                //   (b) This messageId was raced and now has its own row —
+                //       entity — recovery: advance counter and retry.
+                //   (b) This entity was raced and now has its own row —
                 //       recovery: bind the existing tag and return it.
-                const racedRow = getTagNumberByMessageId(db, sessionId, messageId);
+                const racedRow = dbExistingLookup();
                 if (racedRow !== null) {
-                    sessionAssignments.set(messageId, racedRow);
+                    sessionAssignments.set(mapKey, racedRow);
                     syncCounterAtLeast(sessionId, db, racedRow);
                     return racedRow;
                 }
 
-                // Case (a): advance counter and try again. Bumping past the
-                // current DB max prevents an immediate re-collision on the
-                // next attempt while still allocating the smallest available
-                // unused slot.
                 const advancedDbMax = getMaxTagNumberBySession(db, sessionId);
                 counters.set(sessionId, Math.max(memCounter, advancedDbMax));
                 continue;
             }
 
             counters.set(sessionId, next);
-            sessionAssignments.set(messageId, next);
+            sessionAssignments.set(mapKey, next);
             return next;
         }
 
         // Give up after retries — surface the failure so the transform
         // catch can log it and continue with reduced functionality.
         throw new Error(
-            `tagger.assignTag: failed to allocate tag for session=${sessionId} message=${messageId} after ${MAX_TAG_ALLOC_RETRIES} retries`,
+            `tagger.allocateTag: failed to allocate tag for session=${sessionId} key=${mapKey} after ${MAX_TAG_ALLOC_RETRIES} retries`,
         );
     }
 
-    function getTag(sessionId: string, messageId: string): number | undefined {
+    function assignTag(
+        sessionId: string,
+        messageId: string,
+        type: NonToolTagType,
+        byteSize: number,
+        db: Database,
+        reasoningByteSize: number = 0,
+        toolName: string | null = null,
+        inputByteSize: number = 0,
+    ): number {
+        // Defense-in-depth: TS narrowing already excludes "tool", but a
+        // caller routing through `as any` could still hit this body.
+        // Throw to surface the misuse loudly.
+        if ((type as string) === "tool") {
+            throw new Error(
+                "tagger.assignTag: type='tool' is forbidden — use assignToolTag(sessionId, callId, ownerMsgId, ...)",
+            );
+        }
+        return allocateTag(
+            sessionId,
+            messageId,
+            type,
+            byteSize,
+            db,
+            reasoningByteSize,
+            toolName,
+            inputByteSize,
+            null,
+            messageId,
+            () => getTagNumberByMessageId(db, sessionId, messageId),
+        );
+    }
+
+    function assignToolTag(
+        sessionId: string,
+        callId: string,
+        ownerMsgId: string,
+        byteSize: number,
+        db: Database,
+        reasoningByteSize: number = 0,
+        toolName: string | null = null,
+        inputByteSize: number = 0,
+    ): number {
+        const compositeKey = makeToolCompositeKey(ownerMsgId, callId);
+        const sessionAssignments = getSessionAssignments(sessionId);
+
+        // Composite-key fast path
+        const existing = sessionAssignments.get(compositeKey);
+        if (existing !== undefined) {
+            return existing;
+        }
+
+        // DB fast path: composite-keyed lookup. If the row already exists
+        // for this exact (callId, ownerMsgId), bind and return.
+        const dbHit = getToolTagNumberByOwner(db, sessionId, callId, ownerMsgId);
+        if (dbHit !== null) {
+            sessionAssignments.set(compositeKey, dbHit);
+            syncCounterAtLeast(sessionId, db, dbHit);
+            return dbHit;
+        }
+
+        // Lazy adoption: legacy NULL-owner row exists for this callId and
+        // is up for grabs. Try to atomically claim it.
+        //
+        // Loop: backfill (Layer B) may finish writing an owner between
+        // our SELECT and UPDATE. The NULL-guarded UPDATE catches that
+        // race; if the UPDATE matches zero rows we re-check the composite
+        // fast path (which may now hit) and on miss try the next NULL row.
+        // Bounded by MAX_TAG_ALLOC_RETRIES so we never loop unboundedly
+        // even under pathological concurrent-writer interleavings.
+        for (let attempt = 0; attempt < MAX_TAG_ALLOC_RETRIES; attempt += 1) {
+            const orphan = getNullOwnerToolTag(db, sessionId, callId);
+            if (orphan === null) break;
+
+            const claimed = adoptNullOwnerToolTag(db, orphan.id, ownerMsgId);
+            if (claimed) {
+                sessionAssignments.set(compositeKey, orphan.tagNumber);
+                syncCounterAtLeast(sessionId, db, orphan.tagNumber);
+                return orphan.tagNumber;
+            }
+
+            // Race lost: re-check composite fast path before allocating
+            // fresh — another writer may have just claimed the same row
+            // for the same owner.
+            const recheck = getToolTagNumberByOwner(db, sessionId, callId, ownerMsgId);
+            if (recheck !== null) {
+                sessionAssignments.set(compositeKey, recheck);
+                syncCounterAtLeast(sessionId, db, recheck);
+                return recheck;
+            }
+            // Otherwise loop: there may be more NULL-owner rows for this
+            // callId (collision deviation: when legacy data has multiple
+            // NULL-owner rows for the same callId, partial UNIQUE forced
+            // only the lowest tag_number row to be adopted by backfill;
+            // remaining rows stay NULL and we get to adopt one here).
+        }
+
+        // Fresh allocation
+        return allocateTag(
+            sessionId,
+            callId,
+            "tool",
+            byteSize,
+            db,
+            reasoningByteSize,
+            toolName,
+            inputByteSize,
+            ownerMsgId,
+            compositeKey,
+            () => getToolTagNumberByOwner(db, sessionId, callId, ownerMsgId),
+        );
+    }
+
+    function getTag(
+        sessionId: string,
+        messageId: string,
+        _type: NonToolTagType,
+    ): number | undefined {
+        // _type is unused at runtime — the parameter exists for compile-
+        // time enforcement of the non-tool contract. Any caller passing
+        // "tool" gets a TS error before this body runs.
         return assignments.get(sessionId)?.get(messageId);
+    }
+
+    function getToolTag(sessionId: string, callId: string, ownerMsgId: string): number | undefined {
+        return assignments.get(sessionId)?.get(makeToolCompositeKey(ownerMsgId, callId));
     }
 
     function bindTag(sessionId: string, messageId: string, tagNumber: number): void {
         getSessionAssignments(sessionId).set(messageId, tagNumber);
+    }
+
+    function bindToolTag(
+        sessionId: string,
+        callId: string,
+        ownerMsgId: string,
+        tagNumber: number,
+    ): void {
+        getSessionAssignments(sessionId).set(makeToolCompositeKey(ownerMsgId, callId), tagNumber);
     }
 
     function getAssignments(sessionId: string): ReadonlyMap<string, number> {
@@ -406,7 +638,29 @@ export function createTagger(): Tagger {
 
         let maxTagNumber = 0;
         for (const assignment of assignmentRows) {
-            sessionAssignments.set(assignment.message_id, assignment.tag_number);
+            // v3.3.1 Layer C: tool tags with non-NULL owner enter the
+            // map under their composite key so getToolTag/assignToolTag
+            // can hit. NULL-owner tool rows are intentionally NOT
+            // placed in the in-memory map — they're discoverable via
+            // the lazy-adoption DB query (getNullOwnerToolTag) the
+            // next time their callId is observed in a transform pass.
+            // This guarantees only "fully identified" rows live in
+            // memory; NULL-owner orphans get adopted on first touch
+            // rather than racing against fresh allocations.
+            if (assignment.type === "tool") {
+                if (assignment.tool_owner_message_id !== null) {
+                    sessionAssignments.set(
+                        makeToolCompositeKey(
+                            assignment.tool_owner_message_id,
+                            assignment.message_id,
+                        ),
+                        assignment.tag_number,
+                    );
+                }
+                // else: NULL-owner — skip the in-memory binding.
+            } else {
+                sessionAssignments.set(assignment.message_id, assignment.tag_number);
+            }
             if (assignment.tag_number > maxTagNumber) {
                 maxTagNumber = assignment.tag_number;
             }
@@ -440,8 +694,11 @@ export function createTagger(): Tagger {
 
     return {
         assignTag,
+        assignToolTag,
         getTag,
+        getToolTag,
         bindTag,
+        bindToolTag,
         getAssignments,
         resetCounter,
         getCounter,

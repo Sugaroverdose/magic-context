@@ -406,8 +406,12 @@ describe("createTransform nudge cache handling", () => {
         const baselinePass = makePartialReleaseMessages();
         await transform({}, { messages: baselinePass });
 
-        const completeToolTag = tagger.getTag("ses-1", "call-complete");
-        const incompleteToolTag = tagger.getTag("ses-1", "call-incomplete");
+        const completeToolTag = tagger.getToolTag("ses-1", "call-complete", "m-assistant-complete");
+        const incompleteToolTag = tagger.getToolTag(
+            "ses-1",
+            "call-incomplete",
+            "m-assistant-incomplete",
+        );
         expect(completeToolTag).toBeDefined();
         expect(incompleteToolTag).toBe(insertedIncompleteToolTag);
 

@@ -253,10 +253,15 @@ export function tagTranscript(
                         );
                     } else {
                         // First occurrence — reserve the tag number.
-                        const tagId = tagger.assignTag(
+                        // v3.3.1 Layer C: Pi main aggregation path. Owner
+                        // is the Pi message hosting the tool aggregate.
+                        // Owner stays stable across passes because Pi
+                        // re-emits the full transcript each time and
+                        // message ids are durable.
+                        const tagId = tagger.assignToolTag(
                             sessionId,
                             callId,
-                            "tool",
+                            messageId,
                             byteSize(text),
                             db,
                             0,
@@ -366,10 +371,16 @@ function tagToolPart(args: TagToolPartArgs): void {
     const contentId = stableId ?? `${args.messageId}:t${args.partIndex}`;
     const text = args.part.getText() ?? "";
     const meta = args.part.getToolMetadata();
-    const tagId = args.tagger.assignTag(
+    // v3.3.1 Layer C: synthetic ownership for the no-callId Pi
+    // fallback. Owner == callId == contentId. The composite key
+    // collapses to a unique synthetic identifier per part, preserving
+    // the legacy "each part gets its own tag" behavior while
+    // satisfying the composite-identity contract (TagEntry.tool_owner_message_id
+    // is non-null, lazy-adoption path is correctly bypassed).
+    const tagId = args.tagger.assignToolTag(
         args.sessionId,
         contentId,
-        "tool",
+        contentId,
         byteSize(text),
         args.db,
         0,

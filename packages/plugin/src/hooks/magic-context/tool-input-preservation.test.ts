@@ -53,7 +53,7 @@ describe("tool input preservation", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-1");
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
         expect(toolTagId).toBeDefined();
 
         const dropResult = targets.get(toolTagId!)?.drop?.();

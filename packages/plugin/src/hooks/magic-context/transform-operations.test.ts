@@ -82,7 +82,7 @@ describe("tagMessages", () => {
 
             tagMessages("ses-1", messages, tagger, db);
 
-            const toolTagId = tagger.getTag("ses-1", "call-1");
+            const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
             expect(toolTagId).toBeDefined();
             expect(getTagById(db, "ses-1", toolTagId!)?.reasoningByteSize).toBe(
                 byteSize(thinkingPart.thinking) + byteSize(reasoningPart.text),
@@ -119,7 +119,7 @@ describe("tagMessages", () => {
 
             tagMessages("ses-1", messages, tagger, db);
 
-            const toolTagId = tagger.getTag("ses-1", "call-2");
+            const toolTagId = tagger.getToolTag("ses-1", "call-2", "m-assistant");
             const toolTag = getTagById(db, "ses-1", toolTagId!);
             expect(toolTag?.toolName).toBe("read");
             expect(toolTag?.inputByteSize).toBe(JSON.stringify(toolInput).length);
@@ -153,7 +153,7 @@ describe("tagMessages", () => {
                 ];
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
-                const toolTagId = tagger.getTag("ses-1", "call-1")!;
+                const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant")!;
                 targets.get(toolTagId)!.setContent("[dropped]");
 
                 expect(thinkingPart.thinking).toBe("[cleared]");
@@ -194,7 +194,7 @@ describe("tagMessages", () => {
                 ];
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
-                const toolTagId = tagger.getTag("ses-1", "call-1")!;
+                const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant")!;
                 targets.get(toolTagId)!.setContent("[dropped]");
 
                 expect(thinkingPart.thinking).toBe("reasoning about response");
@@ -223,7 +223,7 @@ describe("tagMessages", () => {
                 ];
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
-                const textTagId = tagger.getTag("ses-1", "m-assistant:p1")!;
+                const textTagId = tagger.getTag("ses-1", "m-assistant:p1", "message")!;
                 targets.get(textTagId)!.setContent("[dropped]");
 
                 expect(thinkingPart.thinking).toBe("[cleared]");
@@ -267,11 +267,11 @@ describe("tagMessages", () => {
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
 
-                const toolTag1 = tagger.getTag("ses-1", "call-1")!;
+                const toolTag1 = tagger.getToolTag("ses-1", "call-1", "m-assistant")!;
                 targets.get(toolTag1)!.setContent("[dropped]");
                 expect(thinkingPart.thinking).toBe("[cleared]");
 
-                const toolTag2 = tagger.getTag("ses-1", "call-2")!;
+                const toolTag2 = tagger.getToolTag("ses-1", "call-2", "m-assistant")!;
                 targets.get(toolTag2)!.setContent("[dropped]");
                 expect(thinkingPart.thinking).toBe("[cleared]");
             });
@@ -311,7 +311,10 @@ describe("tagMessages", () => {
                 ];
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
-                const toolTagId = tagger.getTag("ses-1", "call-new")!;
+                // Result-only window: invocation absent → owner falls
+                // back to the result message's own id (m-tool) per
+                // deriveToolOwnerMessageId's last-resort branch.
+                const toolTagId = tagger.getToolTag("ses-1", "call-new", "m-tool")!;
                 targets.get(toolTagId)!.setContent("[dropped]");
 
                 expect(thinkingPart.thinking).toBe("old turn reasoning");
@@ -346,7 +349,7 @@ describe("tagMessages", () => {
                 ];
 
                 const { targets } = tagMessages("ses-1", messages, tagger, db);
-                const toolTagId = tagger.getTag("ses-1", "call-1")!;
+                const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant")!;
                 targets.get(toolTagId)!.setContent("[dropped]");
 
                 expect(reasoningPart.text).toBe("[cleared]");
@@ -378,9 +381,9 @@ describe("tagMessages", () => {
             const { targets } = tagMessages("ses-1", messages, tagger, db);
 
             expect(targets.size).toBe(2);
-            const textTagId = tagger.getTag("ses-1", "m-user:p0")!;
+            const textTagId = tagger.getTag("ses-1", "m-user:p0", "message")!;
             expect(textTagId).toBeDefined();
-            const fileTagId = tagger.getTag("ses-1", "m-user:file1")!;
+            const fileTagId = tagger.getTag("ses-1", "m-user:file1", "file")!;
             expect(fileTagId).toBeDefined();
         });
 
@@ -405,7 +408,7 @@ describe("tagMessages", () => {
             ];
 
             const { targets } = tagMessages("ses-1", messages, tagger, db);
-            const fileTagId = tagger.getTag("ses-1", "m-user:file1")!;
+            const fileTagId = tagger.getTag("ses-1", "m-user:file1", "file")!;
             targets.get(fileTagId)!.setContent(`[dropped §${fileTagId}§]`);
 
             const replacedPart = messages[0].parts[1] as { type: string; text: string };

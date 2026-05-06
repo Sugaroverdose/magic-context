@@ -80,7 +80,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-1");
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
         expect(toolTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
@@ -148,7 +148,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets } = tagMessages("ses-1", messages, tagger, db);
-        const messageTagId = tagger.getTag("ses-1", "m-5:p0");
+        const messageTagId = tagger.getTag("ses-1", "m-5:p0", "message");
         expect(messageTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", messageTagId!, "drop");
@@ -196,7 +196,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets } = tagMessages("ses-1", messages, tagger, db);
-        const messageTagId = tagger.getTag("ses-1", "m-3:p0");
+        const messageTagId = tagger.getTag("ses-1", "m-3:p0", "message");
         expect(messageTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", messageTagId!, "drop");
@@ -243,7 +243,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-2");
+        const toolTagId = tagger.getToolTag("ses-1", "call-2", "m-assistant");
         expect(toolTagId).toBeDefined();
 
         updateTagStatus(db, "ses-1", toolTagId!, "dropped");
@@ -290,7 +290,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-3");
+        const toolTagId = tagger.getToolTag("ses-1", "call-3", "m-tool");
         expect(toolTagId).toBeDefined();
 
         updateTagStatus(db, "ses-1", toolTagId!, "dropped");
@@ -323,7 +323,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-3");
+        const toolTagId = tagger.getToolTag("ses-1", "call-3", "m-assistant");
         expect(toolTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
@@ -360,7 +360,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const toolTagId = tagger.getTag("ses-1", "call-4");
+        const toolTagId = tagger.getToolTag("ses-1", "call-4", "m-assistant");
         expect(toolTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
@@ -389,7 +389,7 @@ describe("apply operations for tool drops", () => {
         ];
 
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
-        const messageTagId = tagger.getTag("ses-1", "m-assistant:p0");
+        const messageTagId = tagger.getTag("ses-1", "m-assistant:p0", "message");
         expect(messageTagId).toBeDefined();
 
         queuePendingOp(db, "ses-1", messageTagId!, "drop");
@@ -422,7 +422,7 @@ describe("apply operations for tool drops", () => {
             ];
 
             const { targets } = tagMessages("ses-1", messages, tagger, db);
-            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0");
+            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0", "message");
             expect(userMsgTagId).toBeDefined();
 
             queuePendingOp(db, "ses-1", userMsgTagId!, "drop");
@@ -465,7 +465,7 @@ describe("apply operations for tool drops", () => {
             ];
 
             const { targets } = tagMessages("ses-1", messages, tagger, db);
-            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0");
+            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0", "message");
             expect(userMsgTagId).toBeDefined();
 
             updateTagStatus(db, "ses-1", userMsgTagId!, "dropped");
@@ -494,7 +494,7 @@ describe("apply operations for tool drops", () => {
             ];
 
             const { targets } = tagMessages("ses-1", messages, tagger, db);
-            const asstMsgTagId = tagger.getTag("ses-1", "m-assistant:p0");
+            const asstMsgTagId = tagger.getTag("ses-1", "m-assistant:p0", "message");
             expect(asstMsgTagId).toBeDefined();
 
             queuePendingOp(db, "ses-1", asstMsgTagId!, "drop");
@@ -523,7 +523,7 @@ describe("apply operations for tool drops", () => {
             ];
 
             const { targets } = tagMessages("ses-1", messages, tagger, db);
-            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0");
+            const userMsgTagId = tagger.getTag("ses-1", "m-user:p0", "message");
             queuePendingOp(db, "ses-1", userMsgTagId!, "drop");
             applyPendingOperations("ses-1", db, targets);
 

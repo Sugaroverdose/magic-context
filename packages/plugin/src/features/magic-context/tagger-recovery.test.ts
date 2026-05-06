@@ -116,7 +116,7 @@ describe("tagger collision recovery", () => {
 
         //#then
         expect(racedTag).toBe(2);
-        expect(tagger.getTag(sessionId, "msg-raced")).toBe(2);
+        expect(tagger.getTag(sessionId, "msg-raced", "message")).toBe(2);
     });
 
     it("monotonic counter upsert never moves backward under concurrent writes", () => {
@@ -172,8 +172,8 @@ describe("tagger collision recovery", () => {
         //#then — counter is now at the live DB max, and assignments reflect
         // the new rows.
         expect(tagger.getCounter(sessionId)).toBe(5);
-        expect(tagger.getTag(sessionId, "msg-other-3")).toBe(3);
-        expect(tagger.getTag(sessionId, "msg-other-5")).toBe(5);
+        expect(tagger.getTag(sessionId, "msg-other-3", "message")).toBe(3);
+        expect(tagger.getTag(sessionId, "msg-other-5", "message")).toBe(5);
         // Next allocation goes to 6.
         const next = tagger.assignTag(sessionId, "msg-fresh", "message", 100, db);
         expect(next).toBe(6);
@@ -345,7 +345,7 @@ describe("initFromDb signature cache", () => {
         // skipped. (After ANY DB write, the cache would be invalidated
         // and a real reload would restore msg-1.)
         expect(tagger.getAssignments(sessionId).size).toBe(1);
-        expect(tagger.getTag(sessionId, "msg-1")).toBeUndefined();
+        expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
     });
 
     it("cache miss: same-connection direct INSERT bumps total_changes and forces reload", () => {
@@ -371,7 +371,7 @@ describe("initFromDb signature cache", () => {
 
         //#then — full reload picked up the new row.
         expect(tagger.getCounter(sessionId)).toBe(2);
-        expect(tagger.getTag(sessionId, "msg-direct-2")).toBe(2);
+        expect(tagger.getTag(sessionId, "msg-direct-2", "message")).toBe(2);
     });
 
     it("cache miss: a second Database connection bumps data_version and forces reload", () => {
@@ -408,7 +408,7 @@ describe("initFromDb signature cache", () => {
 
                 //#then — full reload picked up dbB's commit.
                 expect(tagger.getCounter(sessionId)).toBe(2);
-                expect(tagger.getTag(sessionId, "msg-from-dbB")).toBe(2);
+                expect(tagger.getTag(sessionId, "msg-from-dbB", "message")).toBe(2);
             } finally {
                 dbB.close();
                 dbA.close();
@@ -464,9 +464,9 @@ describe("initFromDb signature cache", () => {
 
         //#then — both sessions picked up their respective new rows.
         expect(tagger.getCounter(sessionA)).toBe(2);
-        expect(tagger.getTag(sessionA, "a-direct-2")).toBe(2);
+        expect(tagger.getTag(sessionA, "a-direct-2", "message")).toBe(2);
         expect(tagger.getCounter(sessionB)).toBe(2);
-        expect(tagger.getTag(sessionB, "b-direct-2")).toBe(2);
+        expect(tagger.getTag(sessionB, "b-direct-2", "message")).toBe(2);
     });
 
     it("outer-transaction rollback: cache MUST miss on next pass even though assignTag bumped total_changes inside the rolled-back outer txn", () => {
@@ -504,7 +504,7 @@ describe("initFromDb signature cache", () => {
         // The DB row for msg-rollback is gone. But assignTag updated
         // the in-memory map and counter before the rollback, so the
         // in-memory state is now stale.
-        const inMemoryAfterRollback = tagger.getTag(sessionId, "msg-rollback");
+        const inMemoryAfterRollback = tagger.getTag(sessionId, "msg-rollback", "message");
         expect(inMemoryAfterRollback).toBeDefined();
         // DB shows the row is gone.
         expect(getMaxTagNumberBySession(db, sessionId)).toBe(1);
@@ -526,7 +526,7 @@ describe("initFromDb signature cache", () => {
         // immediately re-colliding with whoever ends up at tag 2 next.
         // The cache correctness property is about the assignments map,
         // not the counter.
-        expect(tagger.getTag(sessionId, "msg-rollback")).toBeUndefined();
+        expect(tagger.getTag(sessionId, "msg-rollback", "message")).toBeUndefined();
     });
 
     it("resetCounter invalidates signature so next initFromDb forces full reload", () => {
@@ -565,11 +565,11 @@ describe("initFromDb signature cache", () => {
 
         //#then — full reload picked up the rebuilt rows.
         expect(tagger.getCounter(sessionId)).toBe(2);
-        expect(tagger.getTag(sessionId, "rebuilt-msg-1")).toBe(1);
-        expect(tagger.getTag(sessionId, "rebuilt-msg-2")).toBe(2);
+        expect(tagger.getTag(sessionId, "rebuilt-msg-1", "message")).toBe(1);
+        expect(tagger.getTag(sessionId, "rebuilt-msg-2", "message")).toBe(2);
         // Old assignments are gone.
-        expect(tagger.getTag(sessionId, "msg-1")).toBeUndefined();
-        expect(tagger.getTag(sessionId, "msg-2")).toBeUndefined();
+        expect(tagger.getTag(sessionId, "msg-1", "message")).toBeUndefined();
+        expect(tagger.getTag(sessionId, "msg-2", "message")).toBeUndefined();
     });
 
     it("cleanup invalidates signature so a re-loaded session does a full reload", () => {
@@ -591,6 +591,6 @@ describe("initFromDb signature cache", () => {
 
         //#then — counter and assignments restored from DB.
         expect(tagger.getCounter(sessionId)).toBe(1);
-        expect(tagger.getTag(sessionId, "msg-1")).toBe(1);
+        expect(tagger.getTag(sessionId, "msg-1", "message")).toBe(1);
     });
 });

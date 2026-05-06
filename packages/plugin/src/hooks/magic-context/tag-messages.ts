@@ -1,6 +1,11 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
-import type { Tagger } from "../../features/magic-context/tagger";
+import {
+    adoptNullOwnerToolTag,
+    getNullOwnerToolTag,
+    getPersistedToolOwnerNearestPrior,
+} from "../../features/magic-context/storage-tags";
+import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
@@ -19,6 +24,74 @@ import {
     type ToolDropResult,
     ToolMutationBatch,
 } from "./tool-drop-target";
+
+/**
+ * v3.3.1 Layer C: derive `tool_owner_message_id` for a tool observation.
+ *
+ * - invocation parts: owner = current message id (the assistant message
+ *   hosting the invocation)
+ * - result parts: pop the FIFO queue for this callId; if empty, attempt
+ *   the persisted-nearest-prior fallback (covers result-only windows
+ *   where the invocation has been compacted away); if that fails too,
+ *   fall back to the result's own message id (last-resort: ensures owner
+ *   is always non-null and tag identity stays stable).
+ *
+ * The FIFO queue is keyed by callId so two invocations of the same callId
+ * across two assistant messages produce two distinct owner ids — that's
+ * the whole point of composite identity.
+ */
+function deriveToolOwnerMessageId(
+    sessionId: string,
+    db: ContextDatabase,
+    message: MessageLike,
+    obs: { callId: string; kind: "invocation" | "result" },
+    unpaired: Map<string, string[]>,
+): string {
+    const messageId = typeof message.info.id === "string" ? message.info.id : "";
+
+    if (obs.kind === "invocation") {
+        if (messageId) {
+            const queue = unpaired.get(obs.callId) ?? [];
+            queue.push(messageId);
+            unpaired.set(obs.callId, queue);
+            return messageId;
+        }
+        // Synthetic message id missing — degrade gracefully. Use the
+        // callId itself as owner so the composite key is unique. This
+        // is rare (transcripts where assistant message has no id at
+        // all); the alternative is to drop the tool entirely, which
+        // would break aggregation.
+        return obs.callId;
+    }
+
+    // Result part — pop FIFO
+    const queue = unpaired.get(obs.callId);
+    if (queue && queue.length > 0) {
+        const popped = queue.shift();
+        if (queue.length === 0) unpaired.delete(obs.callId);
+        if (popped !== undefined) return popped;
+    }
+
+    // Result-only window: invocation was compacted away. Look up the
+    // persisted nearest-prior owner whose time_created precedes the
+    // current result's message.
+    if (messageId) {
+        try {
+            const persisted = getPersistedToolOwnerNearestPrior(
+                db,
+                sessionId,
+                obs.callId,
+                messageId,
+            );
+            if (persisted !== null) return persisted;
+        } catch {
+            // ATTACH alias `oc` may not be present in some test fixtures
+            // or in degraded states. Fall through to messageId fallback.
+        }
+        return messageId;
+    }
+    return obs.callId;
+}
 
 export type MessageInfo = { id?: string; role?: string; sessionID?: string };
 
@@ -137,9 +210,21 @@ export function tagMessages(
     const targets = new Map<number, TagTarget>();
     const reasoningByMessage = new Map<MessageLike, ThinkingLikePart[]>();
     const messageTagNumbers = new Map<MessageLike, number>();
+    // v3.3.1 Layer C: keys are composite `<ownerMsgId>\x00<callId>`,
+    // not bare callId. Two assistant turns reusing the same callId
+    // produce distinct keys → distinct tags → distinct drops.
     const toolTagByCallId = new Map<string, number>();
     const toolThinkingByCallId = new Map<string, ThinkingLikePart[]>();
     const toolCallIndex: ToolCallIndex = new Map();
+    // FIFO queue per callId of unpaired invocations. Result parts pop
+    // from this to find their invocation owner. Cleared at the end of
+    // each pass (function-scoped).
+    const unpairedInvocations = new Map<string, string[]>();
+    // Memo: for each part observed, what owner did we derive? Used by
+    // the second tool-block (isToolPartWithOutput) so it doesn't re-run
+    // FIFO logic and double-pop the queue. Parts are object references
+    // (the same `unknown` instance walked twice in the loop).
+    const ownerByPartKey = new Map<unknown, { ownerMsgId: string; callId: string }>();
     const batch = new ToolMutationBatch(messages);
     const assignments = tagger.getAssignments(sessionId);
     const resolver = createExistingTagResolver(sessionId, tagger, db);
@@ -195,17 +280,70 @@ export function tagMessages(
 
             const toolObservation = extractToolCallObservation(part);
             if (toolObservation) {
-                const entry = toolCallIndex.get(toolObservation.callId) ?? {
+                // v3.3.1 Layer C: derive composite owner via FIFO pairing.
+                // - invocation parts: ownerMsgId = message hosting the part.
+                // - result parts: pop the FIFO queue for this callId; if
+                //   empty, fall back to nearest-prior persisted owner;
+                //   ultimate fallback: result's own message id.
+                const ownerMsgId = deriveToolOwnerMessageId(
+                    sessionId,
+                    db,
+                    message,
+                    toolObservation,
+                    unpairedInvocations,
+                );
+                const compositeKey = makeToolCompositeKey(ownerMsgId, toolObservation.callId);
+                const entry = toolCallIndex.get(compositeKey) ?? {
                     occurrences: [],
                     hasResult: false,
                 };
                 entry.occurrences.push({ message, part, kind: toolObservation.kind });
                 if (toolObservation.kind === "result") entry.hasResult = true;
-                toolCallIndex.set(toolObservation.callId, entry);
+                toolCallIndex.set(compositeKey, entry);
 
-                const existingTagId = tagger.getTag(sessionId, toolObservation.callId);
+                let existingTagId = tagger.getToolTag(
+                    sessionId,
+                    toolObservation.callId,
+                    ownerMsgId,
+                );
+
+                // v3.3.1 Layer C: legacy NULL-owner adoption for the
+                // invocation-only path. The second tool block
+                // (isToolPartWithOutput) calls assignToolTag which
+                // adopts NULL-owner rows automatically — but invocation
+                // observations don't pass through that block. Without
+                // this lazy adoption, an invocation-only message with a
+                // pre-existing NULL-owner tag would never bind into
+                // `targets`, so a queued drop op against that tag could
+                // not be detected as "incomplete" (no result) and would
+                // fall through to the "absent" branch in
+                // applyPendingOperations, marking the tag dropped
+                // prematurely.
+                if (existingTagId === undefined) {
+                    const orphan = getNullOwnerToolTag(db, sessionId, toolObservation.callId);
+                    if (orphan !== null) {
+                        const claimed = adoptNullOwnerToolTag(db, orphan.id, ownerMsgId);
+                        if (claimed) {
+                            tagger.bindToolTag(
+                                sessionId,
+                                toolObservation.callId,
+                                ownerMsgId,
+                                orphan.tagNumber,
+                            );
+                            existingTagId = orphan.tagNumber;
+                        } else {
+                            // Race lost — re-check composite path.
+                            existingTagId = tagger.getToolTag(
+                                sessionId,
+                                toolObservation.callId,
+                                ownerMsgId,
+                            );
+                        }
+                    }
+                }
+
                 if (existingTagId !== undefined) {
-                    toolTagByCallId.set(toolObservation.callId, existingTagId);
+                    toolTagByCallId.set(compositeKey, existingTagId);
                     messageTagNumbers.set(
                         message,
                         Math.max(messageTagNumbers.get(message) ?? 0, existingTagId),
@@ -213,11 +351,12 @@ export function tagMessages(
                     if (
                         message.info.role === "tool" &&
                         precedingThinkingParts.length > 0 &&
-                        !toolThinkingByCallId.has(toolObservation.callId)
+                        !toolThinkingByCallId.has(compositeKey)
                     ) {
-                        toolThinkingByCallId.set(toolObservation.callId, precedingThinkingParts);
+                        toolThinkingByCallId.set(compositeKey, precedingThinkingParts);
                     }
                 }
+                ownerByPartKey.set(part, { ownerMsgId, callId: toolObservation.callId });
             }
 
             if (messageId && isTextPart(part)) {
@@ -283,10 +422,20 @@ export function tagMessages(
                 const reasoningBytes = getReasoningByteSize(thinkingParts);
                 const { toolName, inputByteSize } = extractToolTagMetadata(toolPart);
 
-                const tagId = tagger.assignTag(
+                // v3.3.1 Layer C: derive owner from the FIFO memo set
+                // earlier in this same loop iteration. The first tool
+                // block (extractToolCallObservation) already paired this
+                // part — reuse that owner so we don't double-pop the
+                // queue (which would shift result-pairing for later
+                // result parts of the same callId).
+                const memo = ownerByPartKey.get(part);
+                const ownerMsgId = memo?.ownerMsgId ?? messageId ?? toolPart.callID;
+                const compositeKey = makeToolCompositeKey(ownerMsgId, toolPart.callID);
+
+                const tagId = tagger.assignToolTag(
                     sessionId,
                     toolPart.callID,
-                    "tool",
+                    ownerMsgId,
                     byteSize(toolPart.state.output),
                     db,
                     reasoningBytes,
@@ -300,9 +449,9 @@ export function tagMessages(
                 if (!skipPrefixInjection) {
                     toolPart.state.output = prependTag(tagId, toolPart.state.output);
                 }
-                toolTagByCallId.set(toolPart.callID, tagId);
-                if (thinkingParts.length > 0 && !toolThinkingByCallId.has(toolPart.callID)) {
-                    toolThinkingByCallId.set(toolPart.callID, thinkingParts);
+                toolTagByCallId.set(compositeKey, tagId);
+                if (thinkingParts.length > 0 && !toolThinkingByCallId.has(compositeKey)) {
+                    toolThinkingByCallId.set(compositeKey, thinkingParts);
                 }
             }
 
@@ -373,9 +522,9 @@ export function tagMessages(
         }
     }
 
-    for (const [callId, tagId] of toolTagByCallId) {
-        const thinkingParts = toolThinkingByCallId.get(callId) ?? [];
-        targets.set(tagId, createToolDropTarget(callId, thinkingParts, toolCallIndex, batch));
+    for (const [compositeKey, tagId] of toolTagByCallId) {
+        const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
+        targets.set(tagId, createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch));
     }
 
     const hasRecentReduceCall =
