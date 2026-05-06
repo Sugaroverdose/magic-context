@@ -11,7 +11,9 @@ body:
         npx @cortexkit/magic-context@latest doctor --issue
         ```
 
-        That command collects environment info, your sanitized config, and the last 200 log lines into a local file. You can paste its contents into the Diagnostics field below, or let it submit the issue directly via `gh`.
+        That command collects environment info, your sanitized config, recent historian failure dumps, and the last 400 log lines into a local file. You can paste its contents into the Diagnostics field below, or let it submit the issue directly via `gh`.
+
+        For Pi users, add `--harness pi`. For OpenCode users, the harness is auto-detected.
 
   - type: input
     id: title
@@ -33,7 +35,7 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: Paste the output of `npx @cortexkit/opencode-magic-context@latest doctor --issue` here, or fill in the sections below manually.
+      description: Paste the output of `npx @cortexkit/magic-context@latest doctor --issue` here, or fill in the sections below manually.
       render: markdown
 
   - type: input
