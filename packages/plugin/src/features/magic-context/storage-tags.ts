@@ -308,6 +308,26 @@ export function updateTagMessageId(
     getUpdateTagMessageIdStatement(db).run(messageId, sessionId, tagId);
 }
 
+/**
+ * Delete every tag whose source content lives on `messageId`. This is
+ * the `message.removed` event handler's primary cleanup path.
+ *
+ * What gets deleted:
+ *   - Message tags: `messageId == <removed-msg-id>` (text parts).
+ *   - File tags: `messageId LIKE <removed-msg-id>:p%` /
+ *     `<removed-msg-id>:file%`.
+ *   - Tool tags owned by the removed message:
+ *     `tool_owner_message_id == <removed-msg-id>` (v3.3.1 Layer C).
+ *
+ * Pre-v10 semantics: tool tags used `messageId = callId`, so a removed
+ * assistant message would not match any tool tag's `messageId` field
+ * (the message id was never written there for tool tags). The fix:
+ * include tool tags by composite-owner identity so an assistant
+ * message removal correctly cascades to the tool tags it hosted.
+ *
+ * Returns the tag numbers that were deleted (used by the event handler
+ * to re-anchor reasoning watermarks and audit logs).
+ */
 export function deleteTagsByMessageId(
     db: Database,
     sessionId: string,
@@ -316,22 +336,55 @@ export function deleteTagsByMessageId(
     const escapedMessageId = escapeLikePattern(messageId);
     const textPartPattern = `${escapedMessageId}:p%`;
     const filePartPattern = `${escapedMessageId}:file%`;
-    const tagNumbers = getTagNumbersByMessageIdStatement(db)
+    const messageScopedTags = getTagNumbersByMessageIdStatement(db)
         .all(sessionId, messageId, textPartPattern, filePartPattern)
         .filter(isTagNumberRow)
         .map((row) => row.tag_number);
 
-    if (tagNumbers.length === 0) {
+    // Tool tags owned by the removed message — `tool_owner_message_id`
+    // can match independent of `messageId` (which is the callId). Pull
+    // these tag numbers BEFORE running the delete so the caller sees
+    // the union.
+    const ownerScopedTagNumbers = getOwnerScopedToolTagNumbers(db, sessionId, messageId);
+
+    if (messageScopedTags.length === 0 && ownerScopedTagNumbers.length === 0) {
         return [];
     }
 
-    getDeleteTagsByMessageIdStatement(db).run(
-        sessionId,
-        messageId,
-        textPartPattern,
-        filePartPattern,
-    );
-    return tagNumbers;
+    if (messageScopedTags.length > 0) {
+        getDeleteTagsByMessageIdStatement(db).run(
+            sessionId,
+            messageId,
+            textPartPattern,
+            filePartPattern,
+        );
+    }
+    if (ownerScopedTagNumbers.length > 0) {
+        deleteToolTagsByOwner(db, sessionId, messageId);
+    }
+
+    // De-duplicate — a tag could in theory match both predicates.
+    const merged = new Set<number>([...messageScopedTags, ...ownerScopedTagNumbers]);
+    return Array.from(merged).sort((a, b) => a - b);
+}
+
+const getOwnerScopedToolTagNumbersStatements = new WeakMap<Database, PreparedStatement>();
+function getOwnerScopedToolTagNumbers(
+    db: Database,
+    sessionId: string,
+    ownerMsgId: string,
+): number[] {
+    let stmt = getOwnerScopedToolTagNumbersStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT tag_number FROM tags WHERE session_id = ? AND type = 'tool' AND tool_owner_message_id = ? ORDER BY tag_number ASC",
+        );
+        getOwnerScopedToolTagNumbersStatements.set(db, stmt);
+    }
+    return stmt
+        .all(sessionId, ownerMsgId)
+        .filter(isTagNumberRow)
+        .map((row) => row.tag_number);
 }
 
 export function getMaxTagNumberBySession(db: Database, sessionId: string): number {

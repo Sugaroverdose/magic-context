@@ -308,4 +308,38 @@ describe("storage-tags v10 helpers", () => {
 
         closeQuietly(db);
     });
+
+    /**
+     * v3.3.1 Layer C — `message.removed` cleanup must cascade to tool
+     * tags owned by the removed message. Pre-fix `deleteTagsByMessageId`
+     * scanned only `messageId` / `messageId:p%` / `messageId:file%`,
+     * which never matched tool tags (their `messageId` is the callId,
+     * not the assistant message id). Post-fix the function also scopes
+     * by `tool_owner_message_id == messageId`.
+     */
+    test("deleteTagsByMessageId cascades to tool tags by tool_owner_message_id (Layer C)", async () => {
+        const { deleteTagsByMessageId } = await import("./storage-tags");
+        const db = freshDb();
+        // Text + file tags directly on m-asst-removed.
+        insertTag(db, "ses-1", "m-asst-removed:p0", "message", 32, 1);
+        insertTag(db, "ses-1", "m-asst-removed:file0", "file", 48, 2);
+        // Tool tags owned by m-asst-removed (composite identity).
+        insertTag(db, "ses-1", "read:32", "tool", 100, 3, 0, "read", 0, "m-asst-removed");
+        insertTag(db, "ses-1", "grep:1", "tool", 200, 4, 0, "grep", 0, "m-asst-removed");
+        // Tool tag owned by a DIFFERENT message — must survive.
+        insertTag(db, "ses-1", "read:99", "tool", 50, 5, 0, "read", 0, "m-asst-other");
+        // Legacy NULL-owner tool tag — survives (lazy adoption + Layer
+        // B backfill cover this case explicitly).
+        insertTag(db, "ses-1", "read:legacy", "tool", 25, 6);
+
+        const removed = deleteTagsByMessageId(db, "ses-1", "m-asst-removed");
+
+        // Tags 1, 2 (message + file on the removed msg) and 3, 4 (tool
+        // tags owned by it) all deleted; 5 + 6 survive.
+        expect(removed.sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+        const remaining = getTagsBySession(db, "ses-1");
+        expect(remaining.map((t) => t.tagNumber).sort((a, b) => a - b)).toEqual([5, 6]);
+
+        closeQuietly(db);
+    });
 });

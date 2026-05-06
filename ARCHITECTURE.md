@@ -215,3 +215,40 @@ Magic Context runs in three effective modes depending on `ctx_reduce_enabled` an
 **Caching:** Use deferred reductions, cached memory-block injection, per-session TTL tracking, and anchored nudge placement from `src/hooks/magic-context/`.
 
 **Storage:** Use the SQLite database created by `src/features/magic-context/storage-db.ts` under the OpenCode data directory resolved by `src/shared/data-path.ts`.
+
+## Tag Identity (v3.3.1+)
+
+**Tag types:** `message`, `file`, `tool`. Each row in the `tags` table represents one source-content unit that can be tagged with `§N§` and dropped/truncated/replayed by the runtime.
+
+**Identity composition by type:**
+
+- **`message` and `file` tags:** identified by `(session_id, message_id)`. The `message_id` for these is a synthetic content id (`<msgId>:p<partIndex>` for text, `<msgId>:fileN` for files). These ids are globally unique within a session.
+
+- **`tool` tags:** identified by `(session_id, message_id, tool_owner_message_id)` — a *composite* identity. For tool tags, `message_id` is the OpenCode-generated callID (e.g. `read:32`). Pre-v3.3.1 the runtime keyed tool tags by callID alone, but OpenCode reuses a callID counter per assistant turn — so two assistant turns that each invoke `read:32` produced the SAME callID for different invocations. The fix: include the *owning assistant message id* in the key so each invocation gets its own row.
+
+**Schema enforcement:** schema migration v10 (`src/features/magic-context/migrations.ts`) adds `tool_owner_message_id` (`TEXT NULL`), a partial UNIQUE index `idx_tags_tool_composite` on `(session_id, message_id, tool_owner_message_id) WHERE type='tool' AND tool_owner_message_id IS NOT NULL`, and a partial lookup index `idx_tags_tool_null_owner` on `(session_id, message_id) WHERE type='tool' AND tool_owner_message_id IS NULL` to back lazy adoption.
+
+**Helper API surface (`src/features/magic-context/storage-tags.ts`):**
+
+- `getToolTagNumberByOwner(db, sessionId, callId, ownerMsgId)`: composite-identity lookup.
+- `getNullOwnerToolTag(db, sessionId, callId)`: find a legacy NULL-owner orphan to lazily adopt.
+- `adoptNullOwnerToolTag(db, tagId, ownerMsgId)`: attempt to claim a NULL-owner row (NULL guard ensures first claim wins).
+- `getPersistedToolOwnerNearestPrior(db, sessionId, callId, beforeMessageId)`: derive the most recent prior owner for a tool result whose invocation isn't in the visible window.
+- `deleteToolTagsByOwner(db, sessionId, ownerMsgId)`: cascade delete on `message.removed`.
+
+**Owner derivation (`src/hooks/magic-context/tag-messages.ts`):**
+
+For each tool observation in a transform pass:
+
+1. **Invocation parts** (`tool-invocation` / `tool_use`): owner = the message hosting the part.
+2. **Result parts** (`tool` with output / `tool_result`): pop the FIFO queue of unpaired invocations for that callId; owner = the popped invocation's message id.
+3. **Result-only window** (invocation compacted away): fall back to `getPersistedToolOwnerNearestPrior` for the most recent prior persisted owner; if none found, last-resort owner = the result's own message id.
+
+The same logic mirrors in `src/hooks/magic-context/read-session-chunk.ts: getRawSessionTagKeysThrough` so the drop queue produces composite keys that match what the tagger persisted.
+
+**Cleanup paths:**
+
+- `deleteTagsByMessageId(db, sessionId, messageId)` (called from `event-handler.ts` on `message.removed`) deletes BOTH content-id-scoped tags (text/file on the removed message) AND owner-scoped tool tags (`tool_owner_message_id == messageId`).
+- `applyHeuristicCleanup` keys both the tag-side index and fingerprint-side map by composite `<ownerMsgId>\x00<callId>`. The fingerprint VALUE includes ownerMsgId too, so cross-owner pairs with same `(toolName, args)` produce DISTINCT fingerprints and are NOT merged.
+
+**Legacy NULL-owner handling:** rows written by pre-v3.3.1 plugin versions have `tool_owner_message_id = NULL`. The Layer B backfill (`src/features/magic-context/tool-owner-backfill.ts`) populates those rows from OpenCode's session DB on plugin upgrade (lease-based concurrency, batched commits). When backfill is skipped (no OpenCode DB attached) lazy adoption converts orphans to non-NULL on the next observation. Drop queue and heuristic cleanup gracefully fall back to bare-callId match for unbackfilled NULL-owner rows.
