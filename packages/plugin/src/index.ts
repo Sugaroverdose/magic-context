@@ -109,6 +109,13 @@ const plugin: Plugin = async (ctx) => {
         pluginConfig,
     });
 
+    // Resolve storage dir up front. Used by the RPC server below AND by
+    // the auto-update checker (for cross-process dedup of npm hits when
+    // multiple plugin instances boot concurrently). Resolving outside the
+    // `enabled` block lets the auto-update checker still coordinate even
+    // when the rest of the runtime is disabled by config or conflicts.
+    const storageDir = getMagicContextStorageDir();
+
     // Start independent dream schedule timer at plugin level (not inside hooks)
     // so overnight dreaming works even when the user isn't chatting.
     if (pluginConfig.enabled) {
@@ -140,8 +147,8 @@ const plugin: Plugin = async (ctx) => {
                 : undefined,
         });
 
-        // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus)
-        const storageDir = getMagicContextStorageDir();
+        // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus).
+        // `storageDir` is hoisted above so the auto-update checker can also use it.
         const rpcServer = new MagicContextRpcServer(storageDir, ctx.directory);
         registerRpcHandlers(rpcServer, {
             directory: ctx.directory,
@@ -235,6 +242,10 @@ const plugin: Plugin = async (ctx) => {
             autoUpdateChecker: createAutoUpdateCheckerHook(ctx, {
                 autoUpdate: pluginConfig.auto_update !== false,
                 signal: autoUpdateAbort.signal,
+                // Multi-project plugin reloads coordinate via this on-disk
+                // timestamp so npm gets hit at most once per check window
+                // across every concurrent plugin instance on the machine.
+                storageDir,
             }),
         }),
         "experimental.chat.messages.transform": createMessagesTransformHandler({
