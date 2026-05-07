@@ -16,6 +16,7 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,6 +183,33 @@ describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A
         // with isCacheBusting=true → drain.
         await handler({ sessionID: sessionId }, { system: ["New prompt content"] });
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
+    });
+});
+
+describe("system-prompt-hash token estimation (council audit bg_51106601 #2)", () => {
+    it("does not refresh systemPromptTokens when the system prompt hash is unchanged", async () => {
+        useTempDataHome("sph-unchanged-token-skip-");
+        const sessionId = "ses-unchanged-token-skip";
+        const { handler } = buildHandler();
+        const db = openDatabase();
+
+        const firstPassSystem = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system: firstPassSystem });
+
+        const initializedMeta = getOrCreateSessionMeta(db, sessionId);
+        expect(initializedMeta.systemPromptHash).toBe(
+            createHash("md5").update(firstPassSystem.join("\n")).digest("hex"),
+        );
+        expect(initializedMeta.systemPromptTokens).toBeGreaterThan(50);
+
+        updateSessionMeta(db, sessionId, { systemPromptTokens: 1 });
+
+        const secondPassSystem = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system: secondPassSystem });
+
+        const unchangedMeta = getOrCreateSessionMeta(db, sessionId);
+        expect(unchangedMeta.systemPromptHash).toBe(initializedMeta.systemPromptHash);
+        expect(unchangedMeta.systemPromptTokens).toBe(1);
     });
 });
 

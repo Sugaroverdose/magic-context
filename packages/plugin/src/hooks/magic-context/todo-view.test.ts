@@ -23,7 +23,11 @@ describe("todo-view", () => {
         expect(
             renderTodoBlock(
                 JSON.stringify([
-                    { content: "Implement v3.3.1 backfill", status: "in_progress", priority: "high" },
+                    {
+                        content: "Implement v3.3.1 backfill",
+                        status: "in_progress",
+                        priority: "high",
+                    },
                     { content: "Already done", status: "completed", priority: "medium" },
                     { content: "Review audit findings", status: "pending", priority: "medium" },
                     { content: "Cut release", status: "pending", priority: "low" },
@@ -71,6 +75,8 @@ describe("todo-view", () => {
     });
 
     test("normalization rejects malformed todo arrays", () => {
-        expect(normalizeTodoStateJson([{ content: "Missing priority", status: "pending" }])).toBeNull();
+        expect(
+            normalizeTodoStateJson([{ content: "Missing priority", status: "pending" }]),
+        ).toBeNull();
     });
 });

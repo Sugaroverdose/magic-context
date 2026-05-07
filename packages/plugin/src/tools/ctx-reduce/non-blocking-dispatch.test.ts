@@ -58,6 +58,7 @@ function createDb(): Database {
       conversation_tokens INTEGER DEFAULT 0,
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      last_todo_state TEXT DEFAULT '',
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);

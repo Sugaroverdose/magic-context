@@ -109,10 +109,7 @@ function isPersistedNoteNudgeRow(row: unknown): row is PersistedNoteNudgeRow {
 function isPersistedTodoBlockRow(row: unknown): row is PersistedTodoBlockRow {
     if (row === null || typeof row !== "object") return false;
     const r = row as Record<string, unknown>;
-    return (
-        typeof r.todo_sticky_text === "string" &&
-        typeof r.todo_sticky_message_id === "string"
-    );
+    return typeof r.todo_sticky_text === "string" && typeof r.todo_sticky_message_id === "string";
 }
 
 function isPersistedHistorianFailureRow(row: unknown): row is PersistedHistorianFailureRow {
@@ -358,10 +355,7 @@ export function clearPersistedNoteNudge(db: Database, sessionId: string): void {
     ).run(sessionId);
 }
 
-export function getPersistedTodoBlock(
-    db: Database,
-    sessionId: string,
-): PersistedTodoBlock | null {
+export function getPersistedTodoBlock(db: Database, sessionId: string): PersistedTodoBlock | null {
     const result = db
         .prepare(
             "SELECT todo_sticky_text, todo_sticky_message_id FROM session_meta WHERE session_id = ?",

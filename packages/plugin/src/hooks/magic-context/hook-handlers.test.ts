@@ -3,7 +3,10 @@
 import { describe, expect, test } from "bun:test";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { getOrCreateSessionMeta, updateSessionMeta } from "../../features/magic-context/storage-meta";
+import {
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createToolExecuteAfterHook } from "./hook-handlers";
@@ -34,7 +37,12 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
                 sessionID: "ses-todo",
                 args: {
                     todos: [
-                        { status: "pending", priority: "high", content: "Review audit", extra: true },
+                        {
+                            status: "pending",
+                            priority: "high",
+                            content: "Review audit",
+                            extra: true,
+                        },
                     ],
                 },
             });

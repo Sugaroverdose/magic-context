@@ -159,9 +159,10 @@ export function tagTranscript(
         const messageId = message.info.id;
 
         let textOrdinal = 0;
+        const parts = message.parts;
 
-        for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
-            const part = message.parts[partIndex];
+        for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+            const part = parts[partIndex];
             if (part === undefined) continue;
 
             if (part.kind === "text") {

@@ -429,7 +429,9 @@ const MIGRATIONS: Migration[] = [
                 db.exec("ALTER TABLE session_meta ADD COLUMN todo_sticky_text TEXT DEFAULT ''");
             }
             if (!cols.some((c) => c.name === "todo_sticky_message_id")) {
-                db.exec("ALTER TABLE session_meta ADD COLUMN todo_sticky_message_id TEXT DEFAULT ''");
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN todo_sticky_message_id TEXT DEFAULT ''",
+                );
             }
         },
     },

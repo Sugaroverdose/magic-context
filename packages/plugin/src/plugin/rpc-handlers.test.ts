@@ -1,13 +1,14 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { replaceAllCompartmentState } from "../features/magic-context/compartment-storage";
 import { insertMemory } from "../features/magic-context/memory";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
-import { buildSidebarSnapshot } from "./rpc-handlers";
+import { buildSidebarSnapshot, buildStatusDetail } from "./rpc-handlers";
 import { resetSidebarSnapshotCache } from "./sidebar-snapshot-cache";
 
 function createTestDb(): Database {
@@ -117,6 +118,59 @@ describe("buildSidebarSnapshot — memory tokens fallback (bug #1)", () => {
             expect(snapshot.memoryBlockCount).toBe(1);
             // Tokens come from estimating the cached block string directly.
             expect(snapshot.memoryTokens).toBeGreaterThan(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("buildStatusDetail — history token reuse (council audit bg_51106601 #1)", () => {
+    test("sets historyBlockTokens from sidebar compartmentTokens + factTokens", () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-status-history-tokens";
+            const directory = process.cwd();
+
+            db.prepare(
+                `INSERT INTO session_meta (
+                    session_id, last_input_tokens, last_context_percentage,
+                    system_prompt_tokens, conversation_tokens
+                ) VALUES (?, 50000, 25, 5000, 0)`,
+            ).run(sessionId);
+            replaceAllCompartmentState(
+                db,
+                sessionId,
+                [
+                    {
+                        sequence: 0,
+                        startMessage: 1,
+                        endMessage: 4,
+                        startMessageId: "msg-1",
+                        endMessageId: "msg-4",
+                        title: "Setup",
+                        content: "User configured the project and installed dependencies.",
+                    },
+                    {
+                        sequence: 1,
+                        startMessage: 5,
+                        endMessage: 8,
+                        startMessageId: "msg-5",
+                        endMessageId: "msg-8",
+                        title: "Implementation",
+                        content: "Assistant implemented the requested performance fix.",
+                    },
+                ],
+                [
+                    { category: "preference", content: "Use Bun for plugin commands." },
+                    { category: "environment", content: "The workspace is a git repository." },
+                ],
+            );
+
+            const detail = buildStatusDetail(db, sessionId, directory);
+
+            expect(detail.compartmentTokens).toBeGreaterThan(0);
+            expect(detail.factTokens).toBeGreaterThan(0);
+            expect(detail.historyBlockTokens).toBe(detail.compartmentTokens + detail.factTokens);
         } finally {
             closeQuietly(db);
         }

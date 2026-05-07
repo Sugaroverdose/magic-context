@@ -379,7 +379,7 @@ export function buildSidebarSnapshot(
     }
 }
 
-function buildStatusDetail(
+export function buildStatusDetail(
     db: Database,
     sessionId: string,
     directory: string,
@@ -529,29 +529,7 @@ function buildStatusDetail(
 
         // History compression
         try {
-            const compartments = db
-                .prepare<
-                    [string],
-                    { content: string; title: string; start_message: number; end_message: number }
-                >(
-                    "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
-                )
-                .all(sessionId);
-            const facts = db
-                .prepare<[string], { content: string }>(
-                    "SELECT content FROM session_facts WHERE session_id = ?",
-                )
-                .all(sessionId);
-
-            let histTokens = 0;
-            for (const c of compartments) {
-                histTokens += estimateTokens(
-                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
-                );
-            }
-            for (const f of facts) {
-                histTokens += estimateTokens(`* ${f.content}\n`);
-            }
+            const histTokens = base.compartmentTokens + base.factTokens;
             detail.historyBlockTokens = histTokens;
 
             if (detail.contextLimit > 0) {
@@ -564,7 +542,7 @@ function buildStatusDetail(
                 detail.compressionUsage = `${((histTokens / budget) * 100).toFixed(0)}%`;
             }
         } catch {
-            // compartments/facts read failure
+            // history-token derivation failure
         }
     } catch (err) {
         log("[rpc] status-detail error:", err);

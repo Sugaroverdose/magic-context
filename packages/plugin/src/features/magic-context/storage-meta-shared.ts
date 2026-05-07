@@ -151,8 +151,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
     const cacheTtlRaw =
         typeof row.cache_ttl === "string" && row.cache_ttl.length > 0 ? row.cache_ttl : "5m";
     const systemPromptHashRaw = row.system_prompt_hash == null ? "" : row.system_prompt_hash;
-    const lastTodoStateRaw =
-        typeof row.last_todo_state === "string" ? row.last_todo_state : "";
+    const lastTodoStateRaw = typeof row.last_todo_state === "string" ? row.last_todo_state : "";
     // Defensive numeric fallbacks: when isSessionMetaRow accepts NULL for
     // INTEGER columns added via ensureColumn, the raw row may have `null`
     // here. Coerce to 0 so callers see a usable SessionMeta without having

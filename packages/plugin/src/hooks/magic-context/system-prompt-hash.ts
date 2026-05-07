@@ -530,20 +530,14 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
-        // Estimate system prompt tokens for dashboard visibility.
-        // Always refresh when the count has drifted by > 50 tokens — this
-        // matters when the tokenizer algorithm itself changed (e.g. upgrade
-        // from /3.5 heuristic to real Claude tokenizer) and the stored value
-        // is stale even though the hash is unchanged.
-        const systemPromptTokens = estimateTokens(systemContent);
-
+        // Estimate system prompt tokens for dashboard visibility only when
+        // the prompt hash changed; unchanged prompts keep the stored count.
         if (currentHash !== previousHash) {
+            const systemPromptTokens = estimateTokens(systemContent);
             updateSessionMeta(deps.db, sessionId, {
                 systemPromptHash: currentHash,
                 systemPromptTokens,
             });
-        } else if (Math.abs(sessionMeta.systemPromptTokens - systemPromptTokens) > 50) {
-            updateSessionMeta(deps.db, sessionId, { systemPromptTokens });
         }
 
         // ── Step 4: Drain systemPromptRefreshSessions (one-shot semantics) ──
