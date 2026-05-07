@@ -43,6 +43,7 @@ import {
     stripInlineThinking,
     stripSystemInjectedMessages,
 } from "./strip-content";
+import { renderTodoBlock } from "./todo-view";
 import {
     appendReminderToLatestUserMessage,
     appendReminderToUserMessageById,
@@ -55,7 +56,6 @@ import {
     type TagTarget,
     truncateErroredTools,
 } from "./transform-operations";
-import { renderTodoBlock } from "./todo-view";
 import { logTransformTiming } from "./transform-stage-logger";
 
 interface RunPostTransformPhaseArgs {
@@ -732,13 +732,21 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                         todoBlock,
                     );
                     if (anchoredMessageId) {
-                        setPersistedTodoBlock(args.db, args.sessionId, todoBlock, anchoredMessageId);
+                        setPersistedTodoBlock(
+                            args.db,
+                            args.sessionId,
+                            todoBlock,
+                            anchoredMessageId,
+                        );
                     } else {
                         clearPersistedTodoBlock(args.db, args.sessionId);
                     }
                 }
             } else {
-                const anchoredMessageId = appendReminderToLatestUserMessage(args.messages, todoBlock);
+                const anchoredMessageId = appendReminderToLatestUserMessage(
+                    args.messages,
+                    todoBlock,
+                );
                 if (anchoredMessageId) {
                     setPersistedTodoBlock(args.db, args.sessionId, todoBlock, anchoredMessageId);
                 } else {

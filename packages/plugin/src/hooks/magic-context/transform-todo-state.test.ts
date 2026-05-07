@@ -111,7 +111,10 @@ describe("todo state synthesis transform", () => {
         await transform({}, { messages });
 
         expect(firstText(messages[0]!)).toBe(`user prompt${TODO_BLOCK}`);
-        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({ text: TODO_BLOCK, messageId: "m-user" });
+        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({
+            text: TODO_BLOCK,
+            messageId: "m-user",
+        });
     });
 
     it("replays persisted todo block byte-identically on defer pass", async () => {
@@ -123,7 +126,10 @@ describe("todo state synthesis transform", () => {
         await transform({}, { messages });
 
         expect(firstText(messages[0]!)).toBe(`user prompt${TODO_BLOCK}`);
-        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({ text: TODO_BLOCK, messageId: "m-user" });
+        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({
+            text: TODO_BLOCK,
+            messageId: "m-user",
+        });
     });
 
     it("re-renders and re-anchors when todo state changes on execute pass", async () => {
@@ -136,7 +142,9 @@ describe("todo state synthesis transform", () => {
             "m-user-1",
         );
         updateSessionMeta(db, "ses-1", {
-            lastTodoState: JSON.stringify([{ content: "New", status: "pending", priority: "high" }]),
+            lastTodoState: JSON.stringify([
+                { content: "New", status: "pending", priority: "high" },
+            ]),
         });
         const messages = makeTwoTurnMessages();
 
@@ -165,7 +173,10 @@ describe("todo state synthesis transform", () => {
 
         expect(firstText(messages[0]!)).toBe(`first user prompt${TODO_BLOCK}`);
         expect(firstText(messages[2]!)).toBe("second user prompt");
-        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({ text: TODO_BLOCK, messageId: "m-user-1" });
+        expect(getPersistedTodoBlock(db, "ses-1")).toEqual({
+            text: TODO_BLOCK,
+            messageId: "m-user-1",
+        });
     });
 
     it("clears sticky todo block when current state is empty", async () => {
@@ -173,7 +184,9 @@ describe("todo state synthesis transform", () => {
         const { db, transform } = createTodoTransform({ shouldExecute: mock(() => "execute") });
         setPersistedTodoBlock(db, "ses-1", TODO_BLOCK, "m-user");
         updateSessionMeta(db, "ses-1", {
-            lastTodoState: JSON.stringify([{ content: "Done", status: "completed", priority: "high" }]),
+            lastTodoState: JSON.stringify([
+                { content: "Done", status: "completed", priority: "high" },
+            ]),
         });
         const messages = makeMessages();
 
