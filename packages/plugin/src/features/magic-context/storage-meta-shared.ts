@@ -22,6 +22,7 @@ export interface SessionMetaRow {
     conversation_tokens: number;
     tool_call_tokens: number;
     cleared_reasoning_through_tag: number;
+    last_todo_state: string;
 }
 
 export const META_COLUMNS: Record<string, string> = {
@@ -41,6 +42,7 @@ export const META_COLUMNS: Record<string, string> = {
     conversationTokens: "conversation_tokens",
     toolCallTokens: "tool_call_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
+    lastTodoState: "last_todo_state",
 };
 
 export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress"]);
@@ -86,7 +88,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.system_prompt_tokens) &&
         isNumberOrNull(r.conversation_tokens) &&
         isNumberOrNull(r.tool_call_tokens) &&
-        isNumberOrNull(r.cleared_reasoning_through_tag)
+        isNumberOrNull(r.cleared_reasoning_through_tag) &&
+        isStringOrNull(r.last_todo_state)
     );
 }
 
@@ -109,6 +112,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         conversationTokens: 0,
         toolCallTokens: 0,
         clearedReasoningThroughTag: 0,
+        lastTodoState: "",
     };
 }
 
@@ -147,6 +151,8 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
     const cacheTtlRaw =
         typeof row.cache_ttl === "string" && row.cache_ttl.length > 0 ? row.cache_ttl : "5m";
     const systemPromptHashRaw = row.system_prompt_hash == null ? "" : row.system_prompt_hash;
+    const lastTodoStateRaw =
+        typeof row.last_todo_state === "string" ? row.last_todo_state : "";
     // Defensive numeric fallbacks: when isSessionMetaRow accepts NULL for
     // INTEGER columns added via ensureColumn, the raw row may have `null`
     // here. Coerce to 0 so callers see a usable SessionMeta without having
@@ -171,5 +177,6 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         conversationTokens: numOrZero(row.conversation_tokens),
         toolCallTokens: numOrZero(row.tool_call_tokens),
         clearedReasoningThroughTag: numOrZero(row.cleared_reasoning_through_tag),
+        lastTodoState: lastTodoStateRaw,
     };
 }

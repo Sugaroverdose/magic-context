@@ -30,6 +30,11 @@ interface PersistedNoteNudgeRow {
     note_nudge_sticky_message_id: string;
 }
 
+interface PersistedTodoBlockRow {
+    todo_sticky_text: string;
+    todo_sticky_message_id: string;
+}
+
 interface PersistedHistorianFailureRow {
     historian_failure_count: number;
     historian_last_error: string | null;
@@ -46,6 +51,11 @@ export interface PersistedNoteNudge {
     triggerMessageId: string | null;
     stickyText: string | null;
     stickyMessageId: string | null;
+}
+
+export interface PersistedTodoBlock {
+    text: string;
+    messageId: string;
 }
 
 export interface PersistedHistorianFailureState {
@@ -93,6 +103,15 @@ function isPersistedNoteNudgeRow(row: unknown): row is PersistedNoteNudgeRow {
         typeof r.note_nudge_trigger_message_id === "string" &&
         typeof r.note_nudge_sticky_text === "string" &&
         typeof r.note_nudge_sticky_message_id === "string"
+    );
+}
+
+function isPersistedTodoBlockRow(row: unknown): row is PersistedTodoBlockRow {
+    if (row === null || typeof row !== "object") return false;
+    const r = row as Record<string, unknown>;
+    return (
+        typeof r.todo_sticky_text === "string" &&
+        typeof r.todo_sticky_message_id === "string"
     );
 }
 
@@ -336,6 +355,50 @@ export function setPersistedDeliveredNoteNudge(
 export function clearPersistedNoteNudge(db: Database, sessionId: string): void {
     db.prepare(
         "UPDATE session_meta SET note_nudge_trigger_pending = 0, note_nudge_trigger_message_id = '', note_nudge_sticky_text = '', note_nudge_sticky_message_id = '' WHERE session_id = ?",
+    ).run(sessionId);
+}
+
+export function getPersistedTodoBlock(
+    db: Database,
+    sessionId: string,
+): PersistedTodoBlock | null {
+    const result = db
+        .prepare(
+            "SELECT todo_sticky_text, todo_sticky_message_id FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId);
+
+    if (!isPersistedTodoBlockRow(result)) {
+        return null;
+    }
+
+    if (result.todo_sticky_text.length === 0 || result.todo_sticky_message_id.length === 0) {
+        return null;
+    }
+
+    return {
+        text: result.todo_sticky_text,
+        messageId: result.todo_sticky_message_id,
+    };
+}
+
+export function setPersistedTodoBlock(
+    db: Database,
+    sessionId: string,
+    text: string,
+    messageId: string,
+): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET todo_sticky_text = ?, todo_sticky_message_id = ? WHERE session_id = ?",
+        ).run(text, messageId, sessionId);
+    })();
+}
+
+export function clearPersistedTodoBlock(db: Database, sessionId: string): void {
+    db.prepare(
+        "UPDATE session_meta SET todo_sticky_text = '', todo_sticky_message_id = '' WHERE session_id = ?",
     ).run(sessionId);
 }
 

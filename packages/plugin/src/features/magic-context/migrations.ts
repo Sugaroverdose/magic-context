@@ -415,6 +415,24 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 11,
+        description: "Add todo state synthesis columns to session_meta",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            if (!cols.some((c) => c.name === "last_todo_state")) {
+                db.exec("ALTER TABLE session_meta ADD COLUMN last_todo_state TEXT DEFAULT ''");
+            }
+            if (!cols.some((c) => c.name === "todo_sticky_text")) {
+                db.exec("ALTER TABLE session_meta ADD COLUMN todo_sticky_text TEXT DEFAULT ''");
+            }
+            if (!cols.some((c) => c.name === "todo_sticky_message_id")) {
+                db.exec("ALTER TABLE session_meta ADD COLUMN todo_sticky_message_id TEXT DEFAULT ''");
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {
