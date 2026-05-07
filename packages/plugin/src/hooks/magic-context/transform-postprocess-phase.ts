@@ -1,11 +1,14 @@
 import {
     type ContextDatabase,
     clearPersistedStickyTurnReminder,
+    clearPersistedTodoBlock,
     getPendingOps,
     getPersistedStickyTurnReminder,
+    getPersistedTodoBlock,
     getStrippedPlaceholderIds,
     getTopNBySize,
     setPersistedStickyTurnReminder,
+    setPersistedTodoBlock,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -52,6 +55,7 @@ import {
     type TagTarget,
     truncateErroredTools,
 } from "./transform-operations";
+import { renderTodoBlock } from "./todo-view";
 import { logTransformTiming } from "./transform-stage-logger";
 
 interface RunPostTransformPhaseArgs {
@@ -703,6 +707,51 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         // If no user message exists, the nudge is lost for this cycle, but
         // triggerPending must still clear to prevent firing on every subsequent pass.
         markNoteNudgeDelivered(args.db, args.sessionId, noteInstruction, anchoredMessageId);
+    }
+
+    // Todo state synthesis mirrors sticky replay above, but only re-renders
+    // from the raw snapshot on cache-busting passes. Defer passes replay the
+    // persisted text byte-for-byte at the same anchor to preserve cache stability.
+    if (args.fullFeatureMode) {
+        const stickyTodoBlock = getPersistedTodoBlock(args.db, args.sessionId);
+        if (isCacheBustingPass) {
+            const todoBlock = renderTodoBlock(args.sessionMeta.lastTodoState);
+            if (todoBlock === null) {
+                if (stickyTodoBlock) {
+                    clearPersistedTodoBlock(args.db, args.sessionId);
+                }
+            } else if (stickyTodoBlock?.text === todoBlock) {
+                const replayed = appendReminderToUserMessageById(
+                    args.messages,
+                    stickyTodoBlock.messageId,
+                    stickyTodoBlock.text,
+                );
+                if (!replayed) {
+                    const anchoredMessageId = appendReminderToLatestUserMessage(
+                        args.messages,
+                        todoBlock,
+                    );
+                    if (anchoredMessageId) {
+                        setPersistedTodoBlock(args.db, args.sessionId, todoBlock, anchoredMessageId);
+                    } else {
+                        clearPersistedTodoBlock(args.db, args.sessionId);
+                    }
+                }
+            } else {
+                const anchoredMessageId = appendReminderToLatestUserMessage(args.messages, todoBlock);
+                if (anchoredMessageId) {
+                    setPersistedTodoBlock(args.db, args.sessionId, todoBlock, anchoredMessageId);
+                } else {
+                    clearPersistedTodoBlock(args.db, args.sessionId);
+                }
+            }
+        } else if (stickyTodoBlock) {
+            appendReminderToUserMessageById(
+                args.messages,
+                stickyTodoBlock.messageId,
+                stickyTodoBlock.text,
+            );
+        }
     }
 
     // Auto-search hint — append a vague-recall fragment hint to the latest
