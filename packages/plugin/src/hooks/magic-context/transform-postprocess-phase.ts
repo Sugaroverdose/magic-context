@@ -746,6 +746,27 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                 // Snapshot unchanged AND persisted anchor message still
                 // present — idempotent re-inject leaves DB and messages
                 // byte-identical.
+                //
+                // Council Finding #1 v2 (Oracle final audit): if a legacy
+                // row was upgraded with `stateJson=""` (default after v11
+                // migration ran on a session that already had `callId` and
+                // `messageId` from the pre-stateJson build), backfill the
+                // snapshot now so subsequent defer passes have something
+                // to replay. Without this, defer at line 770 skips on
+                // `stateJson.length === 0` and the synthetic vanishes
+                // from T1 — exactly the regression Finding #1 was meant
+                // to prevent. callId equality (line 743) under sha256
+                // collision-resistance guarantees current snapshot ===
+                // what the old build hashed, so backfill is safe.
+                if (persistedAnchor.stateJson.length === 0) {
+                    setPersistedTodoSyntheticAnchor(
+                        args.db,
+                        args.sessionId,
+                        persistedAnchor.callId,
+                        persistedAnchor.messageId,
+                        args.sessionMeta.lastTodoState,
+                    );
+                }
             } else {
                 const anchoredMessageId = injectToolPartIntoLatestAssistant(args.messages, part);
                 if (anchoredMessageId) {

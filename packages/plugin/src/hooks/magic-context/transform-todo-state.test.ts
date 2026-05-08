@@ -107,6 +107,16 @@ function runTodoSynthesis(args: {
             persistedAnchor.callId === part.callID &&
             injectToolPartIntoAssistantById(messages, persistedAnchor.messageId, part)
         ) {
+            // Mirror production: backfill stateJson if it's empty (legacy upgrade row).
+            if (persistedAnchor.stateJson.length === 0) {
+                setPersistedTodoSyntheticAnchor(
+                    db,
+                    sessionId,
+                    persistedAnchor.callId,
+                    persistedAnchor.messageId,
+                    sessionMeta.lastTodoState,
+                );
+            }
             return;
         }
         const anchoredMessageId = injectToolPartIntoLatestAssistant(messages, part);
@@ -542,6 +552,63 @@ describe("todo state synthesis — defer branches and byte stability", () => {
         const t1Bytes = JSON.stringify(t1Messages);
 
         // T1 must equal T0 byte-for-byte even though last_todo_state changed.
+        expect(t1Bytes).toBe(t0Bytes);
+    });
+
+    it("CACHE STABILITY: legacy row with empty stateJson self-heals on cache-bust + replays on next defer (Oracle final audit)", () => {
+        // The exact upgrade scenario Oracle's final audit flagged:
+        // a user on the original v0.17 build had `(callId, messageId, stateJson='')`
+        // persisted because that build only stored callId+messageId. The v11
+        // migration's DEFAULT '' added the column, but existing rows have
+        // stateJson=''. Without self-heal, the next defer pass would skip
+        // replay (line 770 gate fails on length===0) and the synthetic would
+        // vanish from T1 — exactly the regression we're guarding against.
+        useTempDataHome("todo-legacy-stateJson-");
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-1", { lastTodoState: ACTIVE_TODOS_JSON });
+        // Seed a legacy row: callId matches current snapshot, but stateJson is empty.
+        const callId = computeSyntheticCallId(ACTIVE_TODOS_JSON);
+        setPersistedTodoSyntheticAnchor(db, "ses-1", callId, "msg-asst-2", "");
+
+        // Pre-seed a synthetic part on the anchor message (simulates state
+        // already injected on a previous pass before this build was loaded).
+        const part = buildSyntheticTodoPart(ACTIVE_TODOS_JSON);
+        if (!part) throw new Error("part null");
+        const asst2 = buildMessages().find((m) => m.info.id === "msg-asst-2");
+        if (!asst2) throw new Error("asst-2 missing");
+
+        // T0: cache-bust pass on a legacy row.
+        const t0Messages = buildMessages();
+        const t0Asst2 = t0Messages.find((m) => m.info.id === "msg-asst-2");
+        if (!t0Asst2) throw new Error("t0 asst-2 missing");
+        t0Asst2.parts.push(part);
+        runTodoSynthesis({
+            db,
+            sessionId: "ses-1",
+            messages: t0Messages,
+            isCacheBustingPass: true,
+            fullFeatureMode: true,
+        });
+        const t0Bytes = JSON.stringify(t0Messages);
+
+        // Backfill must have happened — anchor row now has stateJson.
+        const after = getPersistedTodoSyntheticAnchor(db, "ses-1");
+        expect(after?.callId).toBe(callId);
+        expect(after?.messageId).toBe("msg-asst-2");
+        expect(after?.stateJson).toBe(ACTIVE_TODOS_JSON);
+
+        // T1: defer pass from fresh messages (OpenCode rebuild). Without the
+        // backfill, this would skip injection and produce different bytes.
+        const t1Messages = buildMessages();
+        runTodoSynthesis({
+            db,
+            sessionId: "ses-1",
+            messages: t1Messages,
+            isCacheBustingPass: false,
+            fullFeatureMode: true,
+        });
+        const t1Bytes = JSON.stringify(t1Messages);
+
         expect(t1Bytes).toBe(t0Bytes);
     });
 });
