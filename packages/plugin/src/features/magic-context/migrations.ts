@@ -422,15 +422,39 @@ const MIGRATIONS: Migration[] = [
             const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
                 name?: string;
             }>;
+            // Snapshot of the most recent todowrite call's args.todos, written
+            // by hook-handlers.ts on tool.execute.after. Source of truth for
+            // synthetic injection on cache-busting passes.
             if (!cols.some((c) => c.name === "last_todo_state")) {
                 db.exec("ALTER TABLE session_meta ADD COLUMN last_todo_state TEXT DEFAULT ''");
             }
-            if (!cols.some((c) => c.name === "todo_sticky_text")) {
-                db.exec("ALTER TABLE session_meta ADD COLUMN todo_sticky_text TEXT DEFAULT ''");
-            }
-            if (!cols.some((c) => c.name === "todo_sticky_message_id")) {
+            // Synthetic call_id of the most recently injected todowrite tool
+            // part. Deterministic (sha256 of the snapshot JSON) — recorded so
+            // defer-pass replay can verify byte-shape stability.
+            if (!cols.some((c) => c.name === "todo_synthetic_call_id")) {
                 db.exec(
-                    "ALTER TABLE session_meta ADD COLUMN todo_sticky_message_id TEXT DEFAULT ''",
+                    "ALTER TABLE session_meta ADD COLUMN todo_synthetic_call_id TEXT DEFAULT ''",
+                );
+            }
+            // Assistant message ID where the synthetic todowrite tool part is
+            // anchored. Used by defer-pass replay to land at the exact same
+            // message; if the anchor message disappears from the visible
+            // window, the next cache-busting pass re-anchors.
+            if (!cols.some((c) => c.name === "todo_synthetic_anchor_message_id")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN todo_synthetic_anchor_message_id TEXT DEFAULT ''",
+                );
+            }
+            // Snapshot JSON of the todos as they existed at the moment we
+            // injected. Defer-pass replay rebuilds the synthetic part from
+            // THIS persisted state, not from `last_todo_state`. This keeps
+            // T0-cache-bust → T1-defer prefix bytes identical even when a
+            // real `todowrite` mutates `last_todo_state` between T0 and T1
+            // (defer passes never refresh content; the next cache-busting
+            // pass adopts the new state).
+            if (!cols.some((c) => c.name === "todo_synthetic_state_json")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN todo_synthetic_state_json TEXT DEFAULT ''",
                 );
             }
         },

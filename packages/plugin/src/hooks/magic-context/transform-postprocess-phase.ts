@@ -1,14 +1,14 @@
 import {
     type ContextDatabase,
     clearPersistedStickyTurnReminder,
-    clearPersistedTodoBlock,
+    clearPersistedTodoSyntheticAnchor,
     getPendingOps,
     getPersistedStickyTurnReminder,
-    getPersistedTodoBlock,
+    getPersistedTodoSyntheticAnchor,
     getStrippedPlaceholderIds,
     getTopNBySize,
     setPersistedStickyTurnReminder,
-    setPersistedTodoBlock,
+    setPersistedTodoSyntheticAnchor,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -43,11 +43,13 @@ import {
     stripInlineThinking,
     stripSystemInjectedMessages,
 } from "./strip-content";
-import { renderTodoBlock } from "./todo-view";
+import { buildSyntheticTodoPart } from "./todo-view";
 import {
     appendReminderToLatestUserMessage,
     appendReminderToUserMessageById,
     countMessagesSinceLastUser,
+    injectToolPartIntoAssistantById,
+    injectToolPartIntoLatestAssistant,
 } from "./transform-message-helpers";
 import {
     applyPendingOperations,
@@ -709,56 +711,81 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         markNoteNudgeDelivered(args.db, args.sessionId, noteInstruction, anchoredMessageId);
     }
 
-    // Todo state synthesis mirrors sticky replay above, but only re-renders
-    // from the raw snapshot on cache-busting passes. Defer passes replay the
-    // persisted text byte-for-byte at the same anchor to preserve cache stability.
+    // Todo state synthesis — inject a synthetic `todowrite` tool part into
+    // the latest assistant message so the agent reads current todos through
+    // their native todowrite-tracking mental model. The wire shape is
+    // identical to OpenCode's stored todowrite tool parts, so providers,
+    // serializers, and downstream code see something indistinguishable from
+    // a real call.
+    //
+    // Cache safety:
+    //   - Snapshot capture (in hook-handlers.ts on tool.execute.after) writes
+    //     DB only — no message mutation.
+    //   - Synthetic callID is deterministic from the snapshot JSON, so a
+    //     stable snapshot produces a stable wire shape across both cache-
+    //     busting and defer passes.
+    //   - This block runs AFTER tagging and applyPendingOperations, so the
+    //     synthetic part is never tagged and never targeted by ctx_reduce or
+    //     heuristic cleanup.
+    //   - Defer passes only replay an already-persisted (callID, anchor) pair
+    //     via `injectToolPartIntoAssistantById`, which is idempotent on
+    //     callID — repeated defer-pass calls produce byte-identical output.
     if (args.fullFeatureMode) {
-        const stickyTodoBlock = getPersistedTodoBlock(args.db, args.sessionId);
+        const persistedAnchor = getPersistedTodoSyntheticAnchor(args.db, args.sessionId);
         if (isCacheBustingPass) {
-            const todoBlock = renderTodoBlock(args.sessionMeta.lastTodoState);
-            if (todoBlock === null) {
-                if (stickyTodoBlock) {
-                    clearPersistedTodoBlock(args.db, args.sessionId);
+            const part = buildSyntheticTodoPart(args.sessionMeta.lastTodoState);
+            if (part === null) {
+                if (persistedAnchor) {
+                    clearPersistedTodoSyntheticAnchor(args.db, args.sessionId);
                 }
-            } else if (stickyTodoBlock?.text === todoBlock) {
-                const replayed = appendReminderToUserMessageById(
-                    args.messages,
-                    stickyTodoBlock.messageId,
-                    stickyTodoBlock.text,
-                );
-                if (!replayed) {
-                    const anchoredMessageId = appendReminderToLatestUserMessage(
-                        args.messages,
-                        todoBlock,
-                    );
-                    if (anchoredMessageId) {
-                        setPersistedTodoBlock(
-                            args.db,
-                            args.sessionId,
-                            todoBlock,
-                            anchoredMessageId,
-                        );
-                    } else {
-                        clearPersistedTodoBlock(args.db, args.sessionId);
-                    }
-                }
+            } else if (
+                persistedAnchor &&
+                persistedAnchor.callId === part.callID &&
+                injectToolPartIntoAssistantById(args.messages, persistedAnchor.messageId, part)
+            ) {
+                // Snapshot unchanged AND persisted anchor message still
+                // present — idempotent re-inject leaves DB and messages
+                // byte-identical.
             } else {
-                const anchoredMessageId = appendReminderToLatestUserMessage(
-                    args.messages,
-                    todoBlock,
-                );
+                const anchoredMessageId = injectToolPartIntoLatestAssistant(args.messages, part);
                 if (anchoredMessageId) {
-                    setPersistedTodoBlock(args.db, args.sessionId, todoBlock, anchoredMessageId);
-                } else {
-                    clearPersistedTodoBlock(args.db, args.sessionId);
+                    setPersistedTodoSyntheticAnchor(
+                        args.db,
+                        args.sessionId,
+                        part.callID,
+                        anchoredMessageId,
+                        // Persist the SNAPSHOT we injected, not just the
+                        // callID. Defer-pass replay rebuilds from THIS state
+                        // so prefix bytes stay identical even if a real
+                        // `todowrite` mutates `last_todo_state` before the
+                        // next cache-busting pass.
+                        args.sessionMeta.lastTodoState,
+                    );
+                } else if (persistedAnchor) {
+                    // No assistant message in this pass — clear stale
+                    // anchor so a later cache-busting pass re-anchors fresh.
+                    clearPersistedTodoSyntheticAnchor(args.db, args.sessionId);
                 }
             }
-        } else if (stickyTodoBlock) {
-            appendReminderToUserMessageById(
-                args.messages,
-                stickyTodoBlock.messageId,
-                stickyTodoBlock.text,
-            );
+        } else if (persistedAnchor && persistedAnchor.stateJson.length > 0) {
+            // Defer pass — byte-identical replay. Rebuild the part from the
+            // PERSISTED snapshot, NOT from `args.sessionMeta.lastTodoState`.
+            //
+            // Why: between the last cache-busting pass T0 and this defer
+            // pass T1, the agent may have called `todowrite` which updated
+            // `last_todo_state`. T0 injected the OLD state at the anchor;
+            // for T1 to keep prefix bytes identical to T0 (so Anthropic
+            // prompt cache stays warm), T1 must inject the SAME old state
+            // at the SAME anchor. The next cache-busting pass will adopt
+            // the new state and re-anchor.
+            //
+            // Empty `stateJson` means the row was persisted by an older
+            // build that didn't store the snapshot — fall through to skip,
+            // matching legacy behavior.
+            const part = buildSyntheticTodoPart(persistedAnchor.stateJson);
+            if (part !== null && part.callID === persistedAnchor.callId) {
+                injectToolPartIntoAssistantById(args.messages, persistedAnchor.messageId, part);
+            }
         }
     }
 

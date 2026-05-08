@@ -272,8 +272,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       note_nudge_sticky_text TEXT DEFAULT '',
       note_nudge_sticky_message_id TEXT DEFAULT '',
       last_todo_state TEXT DEFAULT '',
-      todo_sticky_text TEXT DEFAULT '',
-      todo_sticky_message_id TEXT DEFAULT '',
+      todo_synthetic_call_id TEXT DEFAULT '',
+      todo_synthetic_anchor_message_id TEXT DEFAULT '',
+      todo_synthetic_state_json TEXT DEFAULT '',
       is_subagent INTEGER DEFAULT 0,
       last_context_percentage REAL DEFAULT 0,
       last_input_tokens INTEGER DEFAULT 0,
@@ -340,8 +341,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "note_nudge_sticky_text", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_sticky_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "last_todo_state", "TEXT DEFAULT ''");
-    ensureColumn(db, "session_meta", "todo_sticky_text", "TEXT DEFAULT ''");
-    ensureColumn(db, "session_meta", "todo_sticky_message_id", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "todo_synthetic_call_id", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "todo_synthetic_anchor_message_id", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "todo_synthetic_state_json", "TEXT DEFAULT ''");
     // Timestamp of last ctx_note(read) call for this session. Used by note-nudger
     // to suppress nudges when the agent has already seen notes in recent context
     // and no new notes have been created or updated since.
@@ -513,8 +515,9 @@ function healNullTextColumns(db: Database): void {
         ["note_nudge_sticky_text", ""],
         ["note_nudge_sticky_message_id", ""],
         ["last_todo_state", ""],
-        ["todo_sticky_text", ""],
-        ["todo_sticky_message_id", ""],
+        ["todo_synthetic_call_id", ""],
+        ["todo_synthetic_anchor_message_id", ""],
+        ["todo_synthetic_state_json", ""],
         ["system_prompt_hash", ""],
         ["stripped_placeholder_ids", ""],
         ["memory_block_cache", ""],

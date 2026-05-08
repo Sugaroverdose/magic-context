@@ -77,6 +77,65 @@ export function countMessagesSinceLastUser(messages: MessageLike[]): number {
     return messagesSinceLastUser;
 }
 
+/**
+ * Inject a tool part into the latest assistant message that has an ID.
+ *
+ * Idempotent on `callID` — if a part with the same `callID` already exists,
+ * this is a no-op so defer-pass replays produce byte-identical output.
+ *
+ * Returns the message ID where the part landed, or `null` if no eligible
+ * assistant message exists in the visible window.
+ */
+export function injectToolPartIntoLatestAssistant(
+    messages: MessageLike[],
+    part: { callID: string },
+): string | null {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.info.role !== "assistant") continue;
+        if (typeof message.info.id !== "string") continue;
+        if (hasToolPartWithCallId(message, part.callID)) {
+            // Already present — idempotent no-op for cache stability.
+            return message.info.id;
+        }
+        message.parts.push(part);
+        return message.info.id;
+    }
+    return null;
+}
+
+/**
+ * Inject a tool part into the assistant message with the given ID.
+ *
+ * Idempotent on `callID`. Returns `true` if the message exists and the part
+ * is present after the call, `false` if the anchor message is not in the
+ * visible window.
+ */
+export function injectToolPartIntoAssistantById(
+    messages: MessageLike[],
+    messageId: string,
+    part: { callID: string },
+): boolean {
+    for (const message of messages) {
+        if (message.info.id !== messageId) continue;
+        if (message.info.role !== "assistant") continue;
+        if (hasToolPartWithCallId(message, part.callID)) return true;
+        message.parts.push(part);
+        return true;
+    }
+    return false;
+}
+
+function hasToolPartWithCallId(message: MessageLike, callId: string): boolean {
+    for (const part of message.parts) {
+        if (part === null || typeof part !== "object") continue;
+        const p = part as { type?: unknown; callID?: unknown };
+        if (p.type !== "tool") continue;
+        if (p.callID === callId) return true;
+    }
+    return false;
+}
+
 function appendReminderToUserMessage(message: MessageLike, reminder: string): void {
     for (const part of message.parts) {
         if (!isTextPart(part)) {
