@@ -45,20 +45,9 @@ const MAIN_LATENCY_BUDGET_MS = 5_000;
 
 function isHistorianRequest(body: Record<string, unknown>): boolean {
     const system = body.system;
-    if (typeof system === "string") {
-        return system.includes(HISTORIAN_SYSTEM_MARKER);
-    }
-    if (Array.isArray(system)) {
-        for (const block of system) {
-            if (block && typeof block === "object") {
-                const text = (block as { text?: unknown }).text;
-                if (typeof text === "string" && text.includes(HISTORIAN_SYSTEM_MARKER)) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
+    if (system === undefined || system === null) return false;
+    const asString = typeof system === "string" ? system : JSON.stringify(system);
+    return asString.includes(HISTORIAN_SYSTEM_MARKER);
 }
 
 let h: TestHarness;
@@ -247,6 +236,11 @@ describe("slow historian vs fast main", () => {
             // main turns while the first historian run is still pending.
             await h.sendPrompt(sessionId, "turn 13: additional turn while historian pending.");
             await h.sendPrompt(sessionId, "turn 14: more activity while historian pending.");
+
+            await h.waitFor(
+                () => h.mock.requests().filter((r) => isHistorianRequest(r.body)).length >= 1,
+                { timeoutMs: 10_000, label: "historian request captured" },
+            );
 
             const historianRequests = h.mock
                 .requests()

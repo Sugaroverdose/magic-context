@@ -167,6 +167,7 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
 
                 const mainReqs = h.mock.requests().filter((r) => {
                     const sys = r.body.system;
+                    if (sys === undefined || sys === null) return false;
                     const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
                     return asString.includes("## Magic Context");
                 });
@@ -320,6 +321,7 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
                 // Filter to main-agent requests (not historian/sidekick).
                 const mainReqs = h.mock.requests().filter((r) => {
                     const sys = r.body.system;
+                    if (sys === undefined || sys === null) return false;
                     const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
                     return asString.includes("## Magic Context");
                 });
@@ -478,6 +480,7 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
 
                 const mainReqs = h.mock.requests().filter((r) => {
                     const sys = r.body.system;
+                    if (sys === undefined || sys === null) return false;
                     const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
                     return asString.includes("## Magic Context");
                 });

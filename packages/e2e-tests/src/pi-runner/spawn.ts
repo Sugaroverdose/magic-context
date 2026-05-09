@@ -4,16 +4,52 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const PI_PLUGIN_ROOT = join(REPO_ROOT, "packages/pi-plugin");
-const PI_CLI = join(
-    REPO_ROOT,
-    "node_modules/.bun/@mariozechner+pi-coding-agent@0.70.5+e0f88c919211175f/node_modules/@mariozechner/pi-coding-agent/dist/cli.js",
-);
+const require_ = createRequire(import.meta.url);
+
+function compareSemver(a: string, b: string): number {
+    const left = a.split(".").map((part) => Number(part));
+    const right = b.split(".").map((part) => Number(part));
+    for (let i = 0; i < Math.max(left.length, right.length); i++) {
+        const diff = (left[i] ?? 0) - (right[i] ?? 0);
+        if (diff !== 0) return diff;
+    }
+    return 0;
+}
+
+function resolvePiPackageJson(): string {
+    try {
+        return require_.resolve("@mariozechner/pi-coding-agent/package.json");
+    } catch {
+        const bunModules = join(REPO_ROOT, "node_modules/.bun");
+        const prefix = "@mariozechner+pi-coding-agent@";
+        const candidates = readdirSync(bunModules, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith(prefix))
+            .map((entry) => {
+                const version = entry.name.slice(prefix.length).split("+")[0] ?? "0.0.0";
+                return { name: entry.name, version };
+            })
+            .sort((a, b) => compareSemver(b.version, a.version));
+        const best = candidates[0];
+        if (best === undefined) {
+            throw new Error(`Could not locate @mariozechner/pi-coding-agent under ${bunModules}`);
+        }
+        return join(
+            bunModules,
+            best.name,
+            "node_modules/@mariozechner/pi-coding-agent/package.json",
+        );
+    }
+}
+
+const PI_PACKAGE_JSON = resolvePiPackageJson();
+const PI_CLI = join(dirname(PI_PACKAGE_JSON), "dist/cli.js");
 
 export interface PiIsolatedEnv {
     baseDir: string;

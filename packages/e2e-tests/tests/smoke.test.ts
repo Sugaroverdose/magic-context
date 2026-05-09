@@ -58,6 +58,7 @@ describe("e2e smoke", () => {
                     if (!body.includes("hi there")) return false;
                     // Skip OpenCode's internal small-model agents.
                     if (body.includes("You are a title generator")) return false;
+                    if (body.includes("Generate a title for this conversation:")) return false;
                     if (body.includes("Generate a summary of the conversation")) return false;
                     if (body.includes("Compress the conversation history")) return false;
                     return true;
@@ -82,6 +83,7 @@ describe("e2e smoke", () => {
                 (b) =>
                     b.includes("hi there") &&
                     !b.includes("You are a title generator") &&
+                    !b.includes("Generate a title for this conversation:") &&
                     !b.includes("Generate a summary of the conversation") &&
                     !b.includes("Compress the conversation history"),
             );

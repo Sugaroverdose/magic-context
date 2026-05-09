@@ -47,6 +47,7 @@ const HISTORIAN_MARKER = "You condense long AI coding sessions";
 
 function isHistorian(body: Record<string, unknown>): boolean {
     const sys = body.system;
+    if (sys === undefined || sys === null) return false;
     const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
     return asString.includes(HISTORIAN_MARKER);
 }

@@ -82,6 +82,7 @@ describe("cache stability", () => {
 
         const mainRequests = h.mock.requests().filter((r) => {
             const sys = r.body.system;
+            if (sys === undefined || sys === null) return false;
             const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
             return asString.includes("## Magic Context");
         });
@@ -121,6 +122,7 @@ describe("cache stability", () => {
 
         const mainRequests = h.mock.requests().filter((r) => {
             const sys = r.body.system;
+            if (sys === undefined || sys === null) return false;
             const asString = typeof sys === "string" ? sys : JSON.stringify(sys);
             return asString.includes("## Magic Context");
         });
