@@ -1,3 +1,5 @@
+import { DREAMER_AGENT } from "../../agents/dreamer";
+import { HISTORIAN_AGENT } from "../../agents/historian";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
@@ -23,6 +25,7 @@ import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
+import { resolveFallbackChain } from "../../shared/resolve-fallbacks";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
 import { createEventHandler } from "./event-handler";
@@ -198,6 +201,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // restart, and so all trigger sources produce consistent chunk sizes.
     const getHistorianChunkTokens = (): number =>
         deriveHistorianChunkTokens(resolveHistorianContextLimit(deps.config.historian?.model));
+    const historianFallbackModels = resolveFallbackChain(
+        HISTORIAN_AGENT,
+        deps.config.historian?.fallback_models,
+    );
 
     const nudgePlacements = createNudgePlacementStore(db);
     // Three independent cache-busting signal sets, sourced from the
@@ -293,6 +300,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         executeThresholdPercentage: deps.config.execute_threshold_percentage,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+        fallbackModels: historianFallbackModels,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
                 sessionId,
@@ -412,6 +420,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       min_reads: deps.config.dreamer.pin_key_files.min_reads,
                   }
                 : undefined,
+            fallbackModels: resolveFallbackChain(
+                DREAMER_AGENT,
+                deps.config.dreamer?.fallback_models,
+            ),
         }).catch((error: unknown) => {
             log("[dreamer] scheduled queue processing failed:", error);
         });
@@ -456,6 +468,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     historianChunkTokens: getHistorianChunkTokens(),
                     historianTimeoutMs:
                         deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                    fallbackModels: historianFallbackModels,
                     directory: deps.directory,
                     fallbackModelId: (() => {
                         // DB fallback so /ctx-recomp's last-resort fallback model
@@ -526,6 +539,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                             min_reads: deps.config.dreamer.pin_key_files.min_reads,
                         }
                       : undefined,
+                  fallbackModels: resolveFallbackChain(
+                      DREAMER_AGENT,
+                      deps.config.dreamer.fallback_models,
+                  ),
               }
             : undefined,
     });

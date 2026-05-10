@@ -2,7 +2,7 @@ import { DREAMER_AGENT } from "../../../agents/dreamer";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { getErrorMessage } from "../../../shared/error-message";
+import { describeError, getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { renewLease } from "../dreamer/lease";
@@ -24,6 +24,8 @@ interface ReviewUserMemoriesArgs {
     holderId: string;
     deadline: number;
     promotionThreshold: number;
+    /** Resolved dreamer fallback chain. */
+    fallbackModels?: readonly string[];
 }
 
 interface ReviewResult {
@@ -147,7 +149,12 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
             },
-            { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
+            {
+                timeoutMs: Math.min(remainingMs, 5 * 60 * 1000),
+                signal: abortController.signal,
+                fallbackModels: args.fallbackModels,
+                callContext: "dreamer:user-memories",
+            },
         );
 
         const messagesResponse = await args.client.session.messages({
@@ -233,7 +240,11 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
 
         return result;
     } catch (error) {
-        log(`[dreamer] user-memories: review failed: ${getErrorMessage(error)}`);
+        const errorDescription = describeError(error);
+        log(
+            `[dreamer] user-memories: review failed: ${errorDescription.brief}`,
+            errorDescription.stackHead ? { stackHead: errorDescription.stackHead } : undefined,
+        );
         return result;
     } finally {
         clearInterval(leaseInterval);

@@ -2,6 +2,7 @@
 
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { PluginContext } from "../../../plugin/types";
+import * as shared from "../../../shared";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 
@@ -163,6 +164,69 @@ describe("dreamer", () => {
                     resultChars: expect.any(Number),
                 }),
             ]);
+        });
+
+        it("trips circuit breaker after three consecutive identical model failures", async () => {
+            db = createTestDb();
+            const createdSessionIds: string[] = [];
+            const deletedSessionIds: string[] = [];
+            const client = createDreamClient({ createdSessionIds, deletedSessionIds });
+
+            class ProviderModelNotFoundError extends Error {
+                constructor() {
+                    super("model not found: github-copilot/claude-sonnet-4.6");
+                    this.name = "ProviderModelNotFoundError";
+                }
+            }
+
+            const promptSyncSpy = spyOn(
+                shared,
+                "promptSyncWithModelSuggestionRetry",
+            ).mockRejectedValue(new ProviderModelNotFoundError());
+
+            try {
+                const result = await runDream({
+                    db,
+                    client,
+                    projectIdentity: "/repo/project",
+                    tasks: ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"],
+                    taskTimeoutMinutes: 5,
+                    maxRuntimeMinutes: 10,
+                    parentSessionId: "parent-1",
+                    sessionDirectory: "/repo/project",
+                    experimentalUserMemories: { enabled: true, promotionThreshold: 1 },
+                    experimentalPinKeyFiles: { enabled: true, token_budget: 1000, min_reads: 1 },
+                });
+
+                expect(promptSyncSpy).toHaveBeenCalledTimes(3);
+                expect(result.tasks.map((task) => task.name)).toEqual([
+                    "consolidate",
+                    "verify",
+                    "archive-stale",
+                    "circuit-breaker",
+                    "post-task-phases",
+                ]);
+                expect(result.tasks.slice(0, 3).every((task) => task.error)).toBe(true);
+                expect(result.tasks[0]?.error).toContain("ProviderModelNotFoundError");
+                expect(result.tasks[3]?.error).toContain(
+                    "3 consecutive ProviderModelNotFoundError failures",
+                );
+                expect(result.tasks[4]?.error).toContain("Skipped post-task phases");
+                expect(createdSessionIds).toEqual(["dream-1", "dream-2", "dream-3"]);
+                expect(deletedSessionIds).toEqual(["dream-1", "dream-2", "dream-3"]);
+                expect(getDreamState(db, "last_dream_at")).toBeNull();
+
+                const runs = getDreamRuns(db, "/repo/project");
+                expect(runs[0]?.tasks_failed).toBe(5);
+                expect(JSON.parse(runs[0]?.tasks_json ?? "[]")[3]).toEqual(
+                    expect.objectContaining({
+                        name: "circuit-breaker",
+                        error: expect.stringContaining("ProviderModelNotFoundError"),
+                    }),
+                );
+            } finally {
+                promptSyncSpy.mockRestore();
+            }
         });
 
         it("processes the next queued dream and removes the queue entry", async () => {

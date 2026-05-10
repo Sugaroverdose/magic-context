@@ -204,6 +204,8 @@ export interface TransformDeps {
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
     historianTimeoutMs?: number;
+    /** Resolved fallback chain for historian-family calls. */
+    fallbackModels?: readonly string[];
     getNotificationParams?: (
         sessionId: string,
     ) => import("./send-session-notification").NotificationParams;
@@ -544,6 +546,7 @@ export function createTransform(deps: TransformDeps) {
                 historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
                 historyBudgetTokens,
                 historianTimeoutMs: deps.historianTimeoutMs,
+                fallbackModels: deps.fallbackModels,
                 directory: compartmentDirectory,
                 fallbackModelId,
                 getNotificationParams: () => notificationParams,
@@ -976,6 +979,7 @@ export function createTransform(deps: TransformDeps) {
             historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
             historyBudgetTokens,
             historianTimeoutMs: deps.historianTimeoutMs,
+            fallbackModels: deps.fallbackModels,
             compartmentDirectory,
             messages,
             pendingCompartmentInjection,

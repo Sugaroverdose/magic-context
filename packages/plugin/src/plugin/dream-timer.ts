@@ -1,3 +1,4 @@
+import { DREAMER_AGENT } from "../agents/dreamer";
 import type { DreamerConfig, EmbeddingConfig } from "../config/schema/magic-context";
 import { checkScheduleAndEnqueue, processDreamQueue } from "../features/magic-context/dreamer";
 import {
@@ -8,6 +9,7 @@ import { embedAllUnembeddedMemories } from "../features/magic-context/memory/emb
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { openDatabase } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
+import { resolveFallbackChain } from "../shared/resolve-fallbacks";
 import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
@@ -208,6 +210,7 @@ async function sweepProject(
             experimentalUserMemories: reg.experimentalUserMemories,
             experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
             projectIdentity: registrationIdentity,
+            fallbackModels: resolveFallbackChain(DREAMER_AGENT, reg.dreamerConfig.fallback_models),
         });
     } catch (error) {
         log(`[dreamer] timer-triggered queue processing failed for ${reg.directory}:`, error);

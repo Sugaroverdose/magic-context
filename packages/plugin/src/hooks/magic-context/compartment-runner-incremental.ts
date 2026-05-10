@@ -195,6 +195,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             dumpLabelBase: `incremental-${sessionId}-${chunk.startIndex}-${chunk.endIndex}`,
             timeoutMs: historianTimeoutMs,
             fallbackModelId: deps.fallbackModelId,
+            fallbackModels: deps.fallbackModels,
             twoPass: deps.historianTwoPass,
         });
         if (!validatedPass.ok) {
@@ -288,6 +289,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 directory: sessionDirectory,
                 historyBudgetTokens: deps.historyBudgetTokens,
                 historianTimeoutMs,
+                fallbackModels: deps.fallbackModels,
                 minCompartmentRatio: deps.compressorMinCompartmentRatio,
                 maxMergeDepth: deps.compressorMaxMergeDepth,
             });

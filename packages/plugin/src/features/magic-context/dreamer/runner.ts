@@ -6,7 +6,7 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getDataDir } from "../../../shared/data-path";
-import { getErrorMessage } from "../../../shared/error-message";
+import { describeError, getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
@@ -38,6 +38,7 @@ import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 // Multiple checkouts of the same repo overwrite each other; the last-active checkout wins.
 // Acceptable for v1 since multi-checkout dreaming is an edge case.
 const dreamProjectDirectories = new Map<string, string>();
+const CIRCUIT_BREAKER_THRESHOLD = 3;
 
 interface SessionListEntry {
     id?: string;
@@ -84,6 +85,41 @@ function countNewIds(beforeIds: number[], afterIds: number[]): number {
         }
     }
     return count;
+}
+
+function getCircuitBreakerSignature(error: unknown, brief: string): string {
+    if (error instanceof Error && error.name && error.name !== "Error") {
+        return error.name;
+    }
+
+    const namedError = error as { name?: unknown } | null;
+    if (
+        namedError &&
+        typeof namedError === "object" &&
+        typeof namedError.name === "string" &&
+        namedError.name.length > 0 &&
+        namedError.name !== "Error"
+    ) {
+        return namedError.name;
+    }
+
+    return brief.split(":")[0]?.trim().split(/\s+/)[0] || brief || "unknown";
+}
+
+function shouldSkipCircuitBreaker(error: unknown, brief: string): boolean {
+    const namedError = error as { name?: unknown } | null;
+    const name =
+        error instanceof Error
+            ? error.name
+            : namedError && typeof namedError === "object" && typeof namedError.name === "string"
+              ? namedError.name
+              : "";
+    const combined = `${name} ${brief}`.toLowerCase();
+    return name === "AbortError" || combined.includes("lease");
+}
+
+function logWithStackHead(message: string, stackHead?: string): void {
+    log(message, stackHead ? { stackHead } : undefined);
 }
 
 function getOpenCodeDbPath(): string {
@@ -199,6 +235,8 @@ async function identifyKeyFilesForSession(args: {
     deadline: number;
     sessionId: string;
     config: ExperimentalPinKeyFilesConfig;
+    /** Resolved fallback chain (user config or builtin); see resolveFallbackChain. */
+    fallbackModels?: readonly string[];
 }): Promise<void> {
     let openCodeDb: Database | null = null;
 
@@ -281,7 +319,12 @@ async function identifyKeyFilesForSession(args: {
                         parts: [{ type: "text", text: prompt, synthetic: true }],
                     },
                 },
-                { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
+                {
+                    timeoutMs: Math.min(remainingMs, 5 * 60 * 1000),
+                    signal: abortController.signal,
+                    fallbackModels: args.fallbackModels,
+                    callContext: `dreamer:key-files:${args.sessionId.slice(0, 12)}`,
+                },
             );
 
             const messagesResponse = await args.client.session.messages({
@@ -365,6 +408,8 @@ async function identifyKeyFiles(args: {
     holderId: string;
     deadline: number;
     config: ExperimentalPinKeyFilesConfig;
+    /** Resolved dreamer fallback chain. */
+    fallbackModels?: readonly string[];
 }): Promise<void> {
     const sessionIds = await getActiveProjectSessionIds({
         db: args.db,
@@ -393,6 +438,7 @@ async function identifyKeyFiles(args: {
             parentSessionId: args.parentSessionId,
             sessionDirectory: args.sessionDirectory,
             holderId: args.holderId,
+            fallbackModels: args.fallbackModels,
             deadline: args.deadline,
             sessionId,
             config: args.config,
@@ -412,6 +458,16 @@ export async function runDream(args: {
     sessionDirectory?: string;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
     experimentalPinKeyFiles?: ExperimentalPinKeyFilesConfig;
+    /**
+     * Resolved fallback chain for dreamer subagent calls. When the primary
+     * `dreamer.model` fails (auth, model-not-found, rate limit, transient
+     * network), each entry is tried in order before giving up. Empty/undefined
+     * disables fallback iteration (legacy single-suggestion-retry only).
+     *
+     * Caller (`processDreamQueue` / direct caller) resolves this via
+     * `resolveFallbackChain(DREAMER_AGENT, config.dreamer.fallback_models)`.
+     */
+    fallbackModels?: readonly string[];
 }): Promise<DreamRunResult> {
     const holderId = crypto.randomUUID();
     const startedAt = Date.now();
@@ -472,6 +528,10 @@ export async function runDream(args: {
         getDreamState(args.db, `last_dream_at:${args.projectIdentity}`) ??
         getDreamState(args.db, "last_dream_at");
     log(`[dreamer] last dream at: ${lastDreamAt ?? "never"} (project=${args.projectIdentity})`);
+
+    let lastErrorSignature: string | null = null;
+    let consecutiveSameErrorFailures = 0;
+    let circuitBreakerTripped = false;
 
     try {
         for (const taskName of args.tasks) {
@@ -562,6 +622,8 @@ export async function runDream(args: {
                     {
                         timeoutMs: args.taskTimeoutMinutes * 60 * 1000,
                         signal: taskAbortController.signal,
+                        fallbackModels: args.fallbackModels,
+                        callContext: `dreamer:${taskName}`,
                     },
                 );
 
@@ -586,18 +648,47 @@ export async function runDream(args: {
                     durationMs,
                     result: taskResult,
                 });
+                lastErrorSignature = null;
+                consecutiveSameErrorFailures = 0;
             } catch (error) {
                 const durationMs = Date.now() - taskStartedAt;
-                const errorMsg = getErrorMessage(error);
-                log(
-                    `[dreamer] task ${taskName}: failed after ${(durationMs / 1000).toFixed(1)}s — ${errorMsg}`,
+                const errorDescription = describeError(error);
+                logWithStackHead(
+                    `[dreamer] task ${taskName}: failed after ${(durationMs / 1000).toFixed(1)}s — ${errorDescription.brief}`,
+                    errorDescription.stackHead,
                 );
                 result.tasks.push({
                     name: taskName,
                     durationMs,
                     result: null,
-                    error: errorMsg,
+                    error: errorDescription.brief,
                 });
+
+                if (shouldSkipCircuitBreaker(error, errorDescription.brief)) {
+                    lastErrorSignature = null;
+                    consecutiveSameErrorFailures = 0;
+                } else {
+                    const signature = getCircuitBreakerSignature(error, errorDescription.brief);
+                    if (signature === lastErrorSignature) {
+                        consecutiveSameErrorFailures += 1;
+                    } else {
+                        lastErrorSignature = signature;
+                        consecutiveSameErrorFailures = 1;
+                    }
+
+                    if (consecutiveSameErrorFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+                        circuitBreakerTripped = true;
+                        log(
+                            `[dreamer] circuit breaker: ${consecutiveSameErrorFailures} consecutive ${signature} failures — aborting remaining tasks`,
+                        );
+                        result.tasks.push({
+                            name: "circuit-breaker",
+                            durationMs: 0,
+                            result: "",
+                            error: `Aborted remaining tasks: ${consecutiveSameErrorFailures} consecutive ${signature} failures. Configure dreamer model/fallback_models in magic-context.jsonc.`,
+                        });
+                    }
+                }
             } finally {
                 clearInterval(leaseRenewalInterval);
                 if (agentSessionId) {
@@ -611,10 +702,28 @@ export async function runDream(args: {
                         });
                 }
             }
+
+            if (circuitBreakerTripped) {
+                break;
+            }
+        }
+
+        if (circuitBreakerTripped) {
+            log("[dreamer] circuit breaker: skipping post-task phases");
+            result.tasks.push({
+                name: "post-task-phases",
+                durationMs: 0,
+                result: "",
+                error: "Skipped post-task phases after circuit breaker tripped; configure dreamer model/fallback_models in magic-context.jsonc.",
+            });
         }
         // ── User memory review phase ──
         // Runs after regular dream tasks, reviews user memory candidates for promotion.
-        if (args.experimentalUserMemories?.enabled && Date.now() <= deadline) {
+        if (
+            !circuitBreakerTripped &&
+            args.experimentalUserMemories?.enabled &&
+            Date.now() <= deadline
+        ) {
             const umStart = Date.now();
             try {
                 const reviewResult = await reviewUserMemories({
@@ -625,6 +734,7 @@ export async function runDream(args: {
                     holderId,
                     deadline,
                     promotionThreshold: args.experimentalUserMemories.promotionThreshold,
+                    fallbackModels: args.fallbackModels,
                 });
                 const umOutput = `promoted=${reviewResult.promoted} merged=${reviewResult.merged} dismissed=${reviewResult.dismissed} consumed=${reviewResult.candidatesConsumed}`;
                 if (
@@ -640,19 +750,23 @@ export async function runDream(args: {
                     result: umOutput,
                 });
             } catch (error) {
-                log(`[dreamer] user-memory review failed: ${getErrorMessage(error)}`);
+                const errorDescription = describeError(error);
+                logWithStackHead(
+                    `[dreamer] user-memory review failed: ${errorDescription.brief}`,
+                    errorDescription.stackHead,
+                );
                 result.tasks.push({
                     name: "user memories",
                     durationMs: Date.now() - umStart,
                     result: "",
-                    error: getErrorMessage(error),
+                    error: errorDescription.brief,
                 });
             }
         }
         // ── Smart note evaluation phase ──
         // Runs after regular dream tasks, evaluates pending smart note conditions.
         // Not a user-configurable task — always runs when dreamer has pending smart notes.
-        if (Date.now() <= deadline) {
+        if (!circuitBreakerTripped && Date.now() <= deadline) {
             try {
                 await evaluateSmartNotes({
                     db: args.db,
@@ -663,12 +777,21 @@ export async function runDream(args: {
                     holderId,
                     deadline,
                     result,
+                    fallbackModels: args.fallbackModels,
                 });
             } catch (error) {
-                log(`[dreamer] smart note evaluation failed: ${getErrorMessage(error)}`);
+                const errorDescription = describeError(error);
+                logWithStackHead(
+                    `[dreamer] smart note evaluation failed: ${errorDescription.brief}`,
+                    errorDescription.stackHead,
+                );
             }
         }
-        if (args.experimentalPinKeyFiles?.enabled && Date.now() <= deadline) {
+        if (
+            !circuitBreakerTripped &&
+            args.experimentalPinKeyFiles?.enabled &&
+            Date.now() <= deadline
+        ) {
             const kfStart = Date.now();
             try {
                 await identifyKeyFiles({
@@ -680,6 +803,7 @@ export async function runDream(args: {
                     holderId,
                     deadline,
                     config: args.experimentalPinKeyFiles,
+                    fallbackModels: args.fallbackModels,
                 });
                 result.tasks.push({
                     name: "key files",
@@ -687,12 +811,16 @@ export async function runDream(args: {
                     result: "completed",
                 });
             } catch (error) {
-                log(`[key-files] identification phase failed: ${getErrorMessage(error)}`);
+                const errorDescription = describeError(error);
+                logWithStackHead(
+                    `[key-files] identification phase failed: ${errorDescription.brief}`,
+                    errorDescription.stackHead,
+                );
                 result.tasks.push({
                     name: "key files",
                     durationMs: Date.now() - kfStart,
                     result: "",
-                    error: getErrorMessage(error),
+                    error: errorDescription.brief,
                 });
             }
         }
@@ -742,7 +870,13 @@ export async function runDream(args: {
     // and must NOT mask failures of the configured tasks — otherwise a
     // successful key-file evaluation would suppress re-scheduling a project
     // whose consolidate/verify/archive tasks all failed.
-    const POST_TASK_NAMES = new Set(["smart-notes", "user memories", "key files"]);
+    const POST_TASK_NAMES = new Set([
+        "smart-notes",
+        "user memories",
+        "key files",
+        "post-task-phases",
+        "circuit-breaker",
+    ]);
     const hasSuccessfulTask = result.tasks.some((t) => !t.error && !POST_TASK_NAMES.has(t.name));
     if (hasSuccessfulTask) {
         setDreamState(args.db, `last_dream_at:${args.projectIdentity}`, String(result.finishedAt));
@@ -766,6 +900,8 @@ async function evaluateSmartNotes(args: {
     holderId: string;
     deadline: number;
     result: DreamRunResult;
+    /** Resolved dreamer fallback chain. */
+    fallbackModels?: readonly string[];
 }): Promise<void> {
     const pendingNotes = getPendingSmartNotes(args.db, args.projectIdentity);
     if (pendingNotes.length === 0) {
@@ -850,7 +986,12 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
                     parts: [{ type: "text", text: evaluationPrompt, synthetic: true }],
                 },
             },
-            { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
+            {
+                timeoutMs: Math.min(remainingMs, 5 * 60 * 1000),
+                signal: abortController.signal,
+                fallbackModels: args.fallbackModels,
+                callContext: "dreamer:smart-notes",
+            },
         );
 
         const messagesResponse = await args.client.session.messages({
@@ -918,15 +1059,18 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
         });
     } catch (error) {
         const durationMs = Date.now() - taskStartedAt;
-        const errorMsg = getErrorMessage(error);
+        const errorDescription = describeError(error);
         args.result.smartNotesSurfaced = 0;
         args.result.smartNotesPending = pendingNotes.length;
-        log(`[dreamer] smart notes: failed after ${(durationMs / 1000).toFixed(1)}s — ${errorMsg}`);
+        logWithStackHead(
+            `[dreamer] smart notes: failed after ${(durationMs / 1000).toFixed(1)}s — ${errorDescription.brief}`,
+            errorDescription.stackHead,
+        );
         args.result.tasks.push({
             name: "smart-notes",
             durationMs,
             result: null,
-            error: errorMsg,
+            error: errorDescription.brief,
         });
     } finally {
         clearInterval(leaseInterval);
@@ -965,6 +1109,11 @@ export async function processDreamQueue(args: {
      * handler. Tests pass `undefined` to keep the legacy "dequeue any" semantics.
      */
     projectIdentity?: string;
+    /**
+     * Resolved Dreamer fallback chain. See `runDream` for semantics. Callers
+     * compute via `resolveFallbackChain(DREAMER_AGENT, pluginConfig.dreamer?.fallback_models)`.
+     */
+    fallbackModels?: readonly string[];
 }): Promise<DreamRunResult | null> {
     // Use configured max runtime + 30min buffer for stale threshold instead of hardcoded 2h
     const maxRuntimeMs = args.maxRuntimeMinutes * 60 * 1000;
@@ -993,6 +1142,7 @@ export async function processDreamQueue(args: {
             sessionDirectory: projectDirectory,
             experimentalUserMemories: args.experimentalUserMemories,
             experimentalPinKeyFiles: args.experimentalPinKeyFiles,
+            fallbackModels: args.fallbackModels,
         });
     } catch (error) {
         log(`[dreamer] runDream threw for ${entry.projectIdentity}: ${getErrorMessage(error)}`);

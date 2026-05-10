@@ -4,6 +4,7 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { log, sessionLog } from "../../../shared/logger";
+import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
 import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
 // Re-export the system prompt so existing call sites that import from this
@@ -19,6 +20,7 @@ export async function runSidekick(deps: {
     config: SidekickConfig;
     sessionDirectory?: string;
 }): Promise<string | null> {
+    const fallbackModels = resolveFallbackChain(SIDEKICK_AGENT, deps.config.fallback_models);
     let agentSessionId: string | null = null;
 
     try {
@@ -55,7 +57,7 @@ export async function runSidekick(deps: {
                     parts: [{ type: "text", text: deps.userMessage, synthetic: true }],
                 },
             },
-            { timeoutMs: deps.config.timeout_ms },
+            { timeoutMs: deps.config.timeout_ms, fallbackModels, callContext: "sidekick" },
         );
 
         const messagesResponse = await deps.client.session.messages({

@@ -211,6 +211,8 @@ async function executeDreaming(
                 token_budget: number;
                 min_reads: number;
             };
+            /** Resolved dreamer fallback chain (forwarded to processDreamQueue). */
+            fallbackModels?: readonly string[];
         };
     },
     sessionId: string,
@@ -249,6 +251,7 @@ async function executeDreaming(
               // project's queue entry, never accidentally pick up another
               // host's enqueued work that is sitting at the queue head.
               projectIdentity: deps.dreamer.projectPath,
+              fallbackModels: deps.dreamer.fallbackModels,
           });
 
     await deps.sendNotification(
@@ -303,6 +306,8 @@ export function createMagicContextCommandHandler(deps: {
             token_budget: number;
             min_reads: number;
         };
+        /** Resolved dreamer fallback chain (forwarded to processDreamQueue). */
+        fallbackModels?: readonly string[];
     };
 }) {
     const isStatusCommand = (command: string): boolean => command === "ctx-status";

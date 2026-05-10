@@ -40,6 +40,7 @@ export interface CompressorDeps {
     directory: string;
     historyBudgetTokens: number;
     historianTimeoutMs?: number;
+    fallbackModels?: readonly string[];
     /** Floor = ceil(lastEndMessage / minCompartmentRatio). Default 1000. */
     minCompartmentRatio?: number;
     /** Maximum depth any compartment range can be compressed to. Default 5. */
@@ -617,6 +618,7 @@ interface CompressorPassArgs {
     outputCount: number;
     outputDepth: number;
     historianTimeoutMs?: number;
+    fallbackModels?: readonly string[];
 }
 
 async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
@@ -637,6 +639,7 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
         outputCount,
         outputDepth,
         historianTimeoutMs,
+        fallbackModels,
     } = args;
 
     const prompt = buildCompressorPrompt(
@@ -678,7 +681,11 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
             },
-            { timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS },
+            {
+                timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                fallbackModels,
+                callContext: "compressor",
+            },
         );
 
         const messagesResponse = await client.session.messages({

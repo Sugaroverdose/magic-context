@@ -221,6 +221,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 dumpLabelBase: `recomp-${sessionId}-${chunk.startIndex}-${chunk.endIndex}-pass-${passCount + 1}`,
                 timeoutMs: historianTimeoutMs,
                 fallbackModelId: deps.fallbackModelId,
+                fallbackModels: deps.fallbackModels,
                 twoPass: deps.historianTwoPass,
                 callbacks: {
                     onRepairRetry: async (error) => {
@@ -344,6 +345,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 directory: sessionDirectory,
                 historyBudgetTokens: deps.historyBudgetTokens,
                 historianTimeoutMs,
+                fallbackModels: deps.fallbackModels,
                 minCompartmentRatio: deps.compressorMinCompartmentRatio,
                 maxMergeDepth: deps.compressorMaxMergeDepth,
             });

@@ -13,6 +13,8 @@ export interface CompartmentRunnerDeps {
      */
     historianChunkTokens: number;
     historianTimeoutMs?: number;
+    /** Resolved fallback chain for historian-family calls (historian + compressor). */
+    fallbackModels?: readonly string[];
     directory: string;
     historyBudgetTokens?: number;
     fallbackModelId?: string;

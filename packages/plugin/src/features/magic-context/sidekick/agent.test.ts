@@ -81,7 +81,11 @@ describe("runSidekick", () => {
                     ],
                 },
             },
-            { timeoutMs: 5_000 },
+            {
+                timeoutMs: 5_000,
+                fallbackModels: expect.any(Array),
+                callContext: "sidekick",
+            },
         );
         expect(client.session.messages).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },

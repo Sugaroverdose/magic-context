@@ -47,6 +47,7 @@ interface RunCompartmentPhaseArgs {
     historianChunkTokens: number;
     historyBudgetTokens?: number;
     historianTimeoutMs?: number;
+    fallbackModels?: readonly string[];
     compartmentDirectory: string;
     messages: MessageLike[];
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
@@ -169,6 +170,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 historianChunkTokens: args.historianChunkTokens,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
+                fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,
                 getNotificationParams: args.getNotificationParams,
@@ -210,6 +212,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 historianChunkTokens: args.historianChunkTokens,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
+                fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,
                 getNotificationParams: args.getNotificationParams,
@@ -301,6 +304,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
             directory: args.compartmentDirectory,
             historyBudgetTokens: args.historyBudgetTokens,
             historianTimeoutMs: args.historianTimeoutMs,
+            fallbackModels: args.fallbackModels,
             minCompartmentRatio: args.compressorMinCompartmentRatio,
             maxMergeDepth: args.compressorMaxMergeDepth,
         })
