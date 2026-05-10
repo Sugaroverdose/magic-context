@@ -24,6 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { getCacheDir } from "./data-path";
+import { parseJsonc } from "./jsonc-parser";
 import { sessionLog } from "./logger";
 
 interface OpencodeClientLike {
@@ -195,19 +196,18 @@ function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
     try {
         const configPath = getOpencodeConfigPath();
         if (configPath && existsSync(configPath)) {
-            let raw = readFileSync(configPath, "utf-8");
-            // Strip JSONC single-line comments while preserving // inside strings.
-            raw = raw.replace(/"(?:[^"\\]|\\.)*"|\/\/.*$/gm, (match) =>
-                match.startsWith('"') ? match : "",
-            );
-            const config = JSON.parse(raw) as {
+            // Use the shared JSONC parser — handles `//` comments AND trailing commas.
+            // The previous custom regex stripped comments only; OpenCode's `opencode.jsonc`
+            // frequently contains trailing commas (valid JSONC, invalid JSON), which broke
+            // custom provider model-limit resolution silently. See issue #14 follow-up.
+            const config = parseJsonc<{
                 provider?: Record<
                     string,
                     {
                         models?: Record<string, { limit?: { context?: number; input?: number } }>;
                     }
                 >;
-            };
+            }>(readFileSync(configPath, "utf-8"));
 
             if (config.provider && typeof config.provider === "object") {
                 for (const [providerId, provider] of Object.entries(config.provider)) {
