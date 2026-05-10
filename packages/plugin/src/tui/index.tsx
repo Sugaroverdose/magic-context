@@ -453,6 +453,94 @@ function showStatusDialog(api: TuiPluginApi) {
     })
 }
 
+/**
+ * Register Magic Context command palette entries, preferring the v1.14.42+
+ * `keymap.registerLayer` API and falling back to the legacy
+ * `api.command.register` for older hosts.
+ *
+ * The `keymap.registerLayer` shape uses `name`/`title`/`run`/`namespace`
+ * (see `@opencode-ai/plugin/tui` types) and is what the host's own legacy
+ * command-shim translates into. Calling it directly skips the deprecation
+ * warning and works without depending on the (now-deprecated) `api.command`
+ * namespace existing at all.
+ *
+ * Version coverage:
+ *   1.14.0–1.14.41 — `api.command.register` only
+ *   1.14.42–1.14.43 — both surfaces broken (api.command removed, keymap landed
+ *                     but with bugs); plugins crash on init either way
+ *   1.14.44+        — `api.keymap.registerLayer` canonical, `api.command` shim
+ */
+function registerCommandPaletteEntries(api: TuiPluginApi): void {
+    type ApiAny = {
+        keymap?: {
+            registerLayer?: (layer: {
+                commands: Array<Record<string, unknown>>
+                bindings: Array<Record<string, unknown>>
+            }) => unknown
+        }
+        command?: {
+            register?: (cb: () => Array<Record<string, unknown>>) => unknown
+        }
+    }
+    const apiAny = api as unknown as ApiAny
+
+    if (typeof apiAny.keymap?.registerLayer === "function") {
+        apiAny.keymap.registerLayer({
+            commands: [
+                {
+                    namespace: "palette",
+                    name: "magic-context.status",
+                    title: "Magic Context: Status",
+                    category: "Magic Context",
+                    run() {
+                        showStatusDialog(api)
+                    },
+                },
+                {
+                    namespace: "palette",
+                    name: "magic-context.recomp",
+                    title: "Magic Context: Recomp",
+                    category: "Magic Context",
+                    run() {
+                        showRecompDialog(api)
+                    },
+                },
+            ],
+            bindings: [],
+        })
+        return
+    }
+
+    if (typeof apiAny.command?.register === "function") {
+        apiAny.command.register(() => [
+            {
+                title: "Magic Context: Status",
+                value: "magic-context.status",
+                category: "Magic Context",
+                onSelect() {
+                    showStatusDialog(api)
+                },
+            },
+            {
+                title: "Magic Context: Recomp",
+                value: "magic-context.recomp",
+                category: "Magic Context",
+                onSelect() {
+                    showRecompDialog(api)
+                },
+            },
+        ])
+        return
+    }
+
+    // Neither API surface is present. The TUI host can still load — we only
+    // lose the command palette entry points. The sidebar (registered above
+    // via api.slots.register) remains visible. Status/Recomp are still
+    // reachable through the server-side `/ctx-status` and `/ctx-recomp`
+    // slash commands, which the server handler bridges to the TUI dialogs
+    // via RPC.
+}
+
 const tui: TuiPlugin = async (api, _options, meta) => {
     // Initialize RPC client for server communication
     const directory = api.state.path.directory ?? ""
@@ -465,24 +553,15 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     // are registered server-side so there's only one /ctx-* registration).
     // The server detects TUI mode and sends dialog requests via RPC instead
     // of sendIgnoredMessage.
-    api.command.register(() => [
-        {
-            title: "Magic Context: Status",
-            value: "magic-context.status",
-            category: "Magic Context",
-            onSelect() {
-                showStatusDialog(api)
-            },
-        },
-        {
-            title: "Magic Context: Recomp",
-            value: "magic-context.recomp",
-            category: "Magic Context",
-            onSelect() {
-                showRecompDialog(api)
-            },
-        },
-    ])
+    //
+    // OpenCode 1.14.42 removed `api.command.register` entirely
+    // (anomalyco/opencode#26053). A later patch (1.14.44+) reinstated it as
+    // a deprecated shim that translates to `api.keymap.registerLayer`. To
+    // work across all hosts (1.14.0–1.14.41 with command-only, the broken
+    // 1.14.42–1.14.43, and 1.14.44+ where both exist), we prefer
+    // `api.keymap.registerLayer` and fall back to `api.command.register`
+    // only when keymap is missing.
+    registerCommandPaletteEntries(api)
 
     // Poll for server→TUI messages: toasts and dialog requests.
     // Single poller because consumeTuiMessages() is destructive (deletes consumed rows).
