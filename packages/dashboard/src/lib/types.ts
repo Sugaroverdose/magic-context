@@ -73,6 +73,12 @@ export interface SessionFilter {
   harness?: Harness;
   project_identity?: string;
   search?: string;
+  /**
+   * `true` = subagents only, `false` = primary sessions only, omitted = both.
+   * The "Subagents" toggle on the Hist tab sends `false` when unchecked so
+   * subagent sessions (which dominate the row count) are filtered server-side.
+   */
+  is_subagent?: boolean;
 }
 
 export interface SessionRow {

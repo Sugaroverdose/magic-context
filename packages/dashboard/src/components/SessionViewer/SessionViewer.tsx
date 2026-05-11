@@ -85,6 +85,12 @@ export default function SessionViewer() {
     if (harness !== "all") filter.harness = harness;
     if (projectFilter()) filter.project_identity = projectFilter();
     if (searchQuery()) filter.search = searchQuery();
+    // Server-side subagent filter (issue: subagent rows dominate the table
+    // since most dashboards see 90%+ subagent sessions; client-side filter
+    // also no-op'd because the backend never populated is_subagent). Send
+    // `false` to filter out subagents; skip the key entirely when showing
+    // both so the backend treats it as "no filter".
+    if (!showSubagents()) filter.is_subagent = false;
     return filter;
   });
 
@@ -127,13 +133,12 @@ export default function SessionViewer() {
     return getSessionCacheEvents(selected.harness, selected.sessionId);
   });
 
-  const filteredSessions = createMemo(() => {
-    let list = sessions() ?? [];
-    if (!showSubagents()) {
-      list = list.filter((s) => !s.is_subagent);
-    }
-    return list;
-  });
+  // Subagent filtering now lives in `sessionFilter` (server-side) so result
+  // limits never silently drop primary sessions in favor of subagents.
+  // Keep `filteredSessions` as a memo passthrough so any future client-only
+  // filtering (e.g. search-as-you-type before debounce settles) has one
+  // obvious place to hook into.
+  const filteredSessions = createMemo(() => sessions() ?? []);
 
   let searchTimeout: number;
   const handleSearch = (value: string) => {
@@ -332,17 +337,20 @@ export default function SessionViewer() {
             style={{
               display: "flex",
               "align-items": "center",
-              gap: "4px",
+              gap: "6px",
               "font-size": "12px",
               color: "var(--text-secondary)",
               cursor: "pointer",
               "white-space": "nowrap",
+              "user-select": "none",
             }}
           >
             <input
               type="checkbox"
+              class="tri-checkbox"
               checked={showSubagents()}
               onChange={(e) => setShowSubagents(e.currentTarget.checked)}
+              aria-label="Show subagent sessions"
             />
             Subagents
           </label>

@@ -170,6 +170,10 @@ pub struct SessionFilter {
     pub harness: Option<Harness>,
     pub project_identity: Option<String>,
     pub search: Option<String>,
+    /// `Some(true)` = subagents only, `Some(false)` = primary sessions only,
+    /// `None` = no filter (return both). The dashboard "Subagents" toggle
+    /// sends `Some(false)` when unchecked so subagents are filtered server-side.
+    pub is_subagent: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1914,6 +1918,13 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         return Vec::new();
     };
 
+    // Look up the real `is_subagent` flag from Magic Context's session_meta
+    // table for this harness. Sessions that have never been touched by the
+    // plugin (very rare in practice for OpenCode sessions, since the plugin
+    // tags every session on first prompt) default to `false`, matching the
+    // "primary session" assumption.
+    let subagent_map = load_subagent_map_for_harness(Harness::Opencode);
+
     let rows = stmt.query_map([], |row| {
         let session_id: String = row.get(0)?;
         let title: String = row.get(1)?;
@@ -1922,6 +1933,7 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         let message_count: i64 = row.get(4)?;
         let last_activity_ms: i64 = row.get(5)?;
         let identity = resolve_project_identity(&worktree);
+        let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false);
         Ok(SessionRow {
             harness: Harness::Opencode,
             session_id,
@@ -1934,7 +1946,7 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
             },
             message_count: message_count.max(0) as u32,
             last_activity_ms,
-            is_subagent: false,
+            is_subagent,
         })
     });
 
@@ -1946,10 +1958,12 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     if filter.harness.is_some_and(|h| h != Harness::Pi) {
         return Vec::new();
     }
+    let subagent_map = load_subagent_map_for_harness(Harness::Pi);
     pi_sessions::scan_pi_session_dir()
         .into_iter()
         .map(|meta| {
             let project_identity = resolve_project_identity(&meta.cwd);
+            let is_subagent = subagent_map.get(&meta.session_id).copied().unwrap_or(false);
             SessionRow {
                 harness: Harness::Pi,
                 session_id: meta.session_id,
@@ -1958,7 +1972,7 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
                 project_display: basename(&meta.cwd),
                 message_count: meta.message_count,
                 last_activity_ms: meta.modified,
-                is_subagent: false,
+                is_subagent,
             }
         })
         .filter(|row| session_matches_filter(row, filter))
@@ -1987,7 +2001,48 @@ fn session_matches_filter(row: &SessionRow, filter: &SessionFilter) -> bool {
             return false;
         }
     }
+    if let Some(want_subagent) = filter.is_subagent {
+        if row.is_subagent != want_subagent {
+            return false;
+        }
+    }
     true
+}
+
+/// Load `{session_id -> is_subagent}` from the Magic Context `session_meta`
+/// table for the given harness. Returns an empty map on any DB error so a
+/// missing cortexkit DB never crashes the dashboard — sessions then default
+/// to `is_subagent=false` and the user simply sees no filtering until the
+/// plugin's first run populates the table.
+fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<String, bool> {
+    use std::collections::HashMap;
+    let mut map: HashMap<String, bool> = HashMap::new();
+    let Some(db_path) = resolve_db_path() else {
+        return map;
+    };
+    let Ok(conn) = open_readonly(&db_path) else {
+        return map;
+    };
+    let harness_str = match harness {
+        Harness::Opencode => "opencode",
+        Harness::Pi => "pi",
+    };
+    let Ok(mut stmt) =
+        conn.prepare("SELECT session_id, is_subagent FROM session_meta WHERE harness = ?1")
+    else {
+        return map;
+    };
+    let rows = stmt.query_map([harness_str], |row| {
+        let sid: String = row.get(0)?;
+        let flag: i64 = row.get(1)?;
+        Ok((sid, flag != 0))
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            map.insert(row.0, row.1);
+        }
+    }
+    map
 }
 
 pub fn get_session_detail(

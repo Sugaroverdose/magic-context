@@ -84,6 +84,11 @@ export async function listSessions(filter?: SessionFilter): Promise<SessionRow[]
   if (filter?.harness) sanitized.harness = filter.harness;
   if (filter?.project_identity) sanitized.project_identity = filter.project_identity;
   if (filter?.search) sanitized.search = filter.search;
+  // is_subagent: pass `false` to filter OUT subagents, `true` to keep only
+  // subagents. Skip the key entirely when unset so the backend treats it as
+  // "no filter" — note `typeof === "boolean"` so we don't drop a literal
+  // `false` via truthy check.
+  if (typeof filter?.is_subagent === "boolean") sanitized.is_subagent = filter.is_subagent;
 
   return invoke("list_sessions", {
     filter: Object.keys(sanitized).length > 0 ? sanitized : null,
