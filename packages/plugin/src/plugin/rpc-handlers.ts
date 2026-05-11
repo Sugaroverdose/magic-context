@@ -690,8 +690,9 @@ export function registerRpcHandlers(
         return { ok: true };
     });
 
-    rpcServer.handle("pending-notifications", async () => {
-        const notifications = drainNotifications();
+    rpcServer.handle("pending-notifications", async (params) => {
+        const lastReceivedId = Number(params.lastReceivedId ?? 0);
+        const notifications = drainNotifications(Number.isFinite(lastReceivedId) ? lastReceivedId : 0);
         return { messages: notifications } as unknown as Record<string, unknown>;
     });
 }

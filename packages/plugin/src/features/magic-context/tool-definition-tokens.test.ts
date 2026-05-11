@@ -324,6 +324,37 @@ describe("tool-definition-tokens fingerprint skip", () => {
         }
     });
 
+    test("changed nested parameter schema re-measures", () => {
+        const db = createTestDb();
+        try {
+            setDatabase(db);
+            recordToolDefinition("p", "m", "a", "bash", "desc", {
+                type: "object",
+                properties: { command: { type: "string", description: "short" } },
+            });
+            db.prepare("UPDATE tool_definition_measurements SET recorded_at=? WHERE tool_id=?").run(
+                1,
+                "bash",
+            );
+
+            const tokensBefore = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+            recordToolDefinition("p", "m", "a", "bash", "desc", {
+                type: "object",
+                properties: {
+                    command: {
+                        type: "string",
+                        description: "much longer nested description ".repeat(200),
+                    },
+                },
+            });
+            const tokensAfter = getMeasuredToolDefinitionTokens("p", "m", "a") ?? 0;
+
+            expect(tokensAfter).toBeGreaterThan(tokensBefore);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("skip is per-toolID — different tool always measured", () => {
         const db = createTestDb();
         try {

@@ -38,6 +38,7 @@
  * `db.prepare()` compile cost on first-flight rebuilds.
  */
 
+import { createHash } from "node:crypto";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { Database, Statement } from "../../shared/sqlite";
 
@@ -68,26 +69,30 @@ function keyFor(providerID: string, modelID: string, agentName: string | undefin
 }
 
 /**
- * Build a cheap fingerprint of the inputs that determine the measured value.
- * Returns a short string we compare verbatim with the previous fire's
- * fingerprint. Length-based: real description/schema changes virtually
- * always change at least one length, and the cost of a rare false-positive
- * skip is one stale measurement carrying over for one flight (no
- * correctness impact — the value still represents a real recent tool set).
- *
- * We deliberately avoid hashing the full text because the whole point of
- * the fingerprint is to be cheaper than `JSON.stringify` + `estimateTokens`.
- * If we paid the stringify cost to hash, we'd lose most of the win.
+ * Build a stable fingerprint of all inputs that determine the measured value.
+ * Correctness beats the prior shallow optimization: nested schema changes must
+ * invalidate cached token counts too.
  */
 function fingerprintFor(description: string, parameters: unknown): string {
-    const descLen = description.length;
-    if (parameters === undefined) return `${descLen}:none`;
-    if (parameters === null) return `${descLen}:null`;
-    if (typeof parameters !== "object") return `${descLen}:${typeof parameters}`;
-    // Object: count top-level keys + a stable shallow signature. Cheaper than
-    // a full stringify but distinguishes most realistic schema edits.
-    const keys = Object.keys(parameters as Record<string, unknown>);
-    return `${descLen}:obj:${keys.length}:${keys.sort().join(",")}`;
+    return createHash("sha256")
+        .update(description)
+        .update("\0")
+        .update(stableStringify(parameters))
+        .digest("hex");
+}
+
+function stableStringify(value: unknown, seen = new WeakSet<object>()): string {
+    if (value === undefined) return "undefined";
+    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
+    if (seen.has(value)) return '"[Circular]"';
+    seen.add(value);
+    if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+        a.localeCompare(b),
+    );
+    return `{${entries
+        .map(([key, child]) => `${JSON.stringify(key)}:${stableStringify(child, seen)}`)
+        .join(",")}}`;
 }
 
 /**

@@ -84,6 +84,7 @@ export interface StatusDetail extends SidebarSnapshot {
 }
 
 export interface RpcNotificationMessage {
+    id: number;
     type: string;
     payload: Record<string, unknown>;
     sessionId?: string;
