@@ -1,6 +1,12 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+    getMagicContextHistorianDir as getMagicContextHistorianDirCore,
+    getMagicContextLogPath as getMagicContextLogPathCore,
+    getMagicContextTempDir as getMagicContextTempDirCore,
+} from "@magic-context/core/shared/data-path";
+import type { HarnessId } from "@magic-context/core/shared/harness";
 
 // ============================================================================
 // OpenCode paths
@@ -120,9 +126,31 @@ export function getPiUserExtensionsPath(): string {
 // Plugin / shared paths
 // ============================================================================
 
-/** Standard temp log path the plugin writes to. */
-export function getMagicContextLogPath(): string {
-    return join(tmpdir(), "magic-context.log");
+/**
+ * Per-harness temp directory the plugin writes to.
+ *
+ * Re-exported from the plugin so the CLI and the running plugin always agree
+ * on the path. The CLI uses this with an explicit harness when running
+ * `magic-context doctor --harness opencode` or `--harness pi`, because the
+ * unified CLI never loads the plugin (so `setHarness()` was never called) and
+ * we still need to surface the correct per-harness diagnostics.
+ *
+ * Layout:
+ *   - `getMagicContextTempDir("opencode")` → `${tmpdir}/opencode/magic-context/`
+ *   - `getMagicContextTempDir("pi")`       → `${tmpdir}/pi/magic-context/`
+ */
+export function getMagicContextTempDir(harness: HarnessId): string {
+    return getMagicContextTempDirCore(harness);
+}
+
+/** Plugin log file path under the harness-scoped temp dir. */
+export function getMagicContextLogPath(harness: HarnessId): string {
+    return getMagicContextLogPathCore(harness);
+}
+
+/** Historian dump + state-file dir under the harness-scoped temp dir. */
+export function getMagicContextHistorianDir(harness: HarnessId): string {
+    return getMagicContextHistorianDirCore(harness);
 }
 
 /**

@@ -9,14 +9,19 @@
 // information.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { getOpenCodeCacheDir } from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
 import { getOpenCodeVersion, isOpenCodeInstalled } from "./opencode-helpers";
-import { type ConfigPaths, detectConfigPaths } from "./paths";
+import {
+    type ConfigPaths,
+    detectConfigPaths,
+    getMagicContextHistorianDir,
+    getMagicContextLogPath,
+} from "./paths";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
@@ -254,7 +259,7 @@ function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: stri
 }
 
 function collectHistorianDumps(): DiagnosticReport["historianDumps"] {
-    const dir = join(tmpdir(), "magic-context-historian");
+    const dir = getMagicContextHistorianDir("opencode");
     if (!existsSync(dir)) {
         return { dir, count: 0, recent: [] };
     }
@@ -395,7 +400,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const storageDirPath = getStorageDir();
     const contextDbPath = join(storageDirPath, "context.db");
 
-    const logPath = join(tmpdir(), "magic-context.log");
+    const logPath = getMagicContextLogPath("opencode");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
 
     const conflictResult = detectConflicts(process.cwd());

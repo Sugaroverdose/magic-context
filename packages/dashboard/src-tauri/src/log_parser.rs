@@ -2,10 +2,48 @@ use regex::Regex;
 use serde::Serialize;
 use std::path::PathBuf;
 
-/// Resolves the log file path.
-/// Default: /tmp/magic-context.log (same as the plugin writes to)
+/// Harness identifier — must match the strings used by the TypeScript-side
+/// `HarnessId` type (`packages/plugin/src/shared/harness.ts`) and by the
+/// per-harness temp-directory layout defined in
+/// `packages/plugin/src/shared/data-path.ts:getMagicContextTempDir`.
+#[derive(Debug, Clone, Copy)]
+pub enum Harness {
+    Opencode,
+    Pi,
+}
+
+impl Harness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Harness::Opencode => "opencode",
+            Harness::Pi => "pi",
+        }
+    }
+}
+
+/// Resolve the plugin log file for a specific harness.
+///
+/// The plugin writes separate logs per harness so a single machine running
+/// both can produce two independent issue reports:
+///   - OpenCode → `${tmpdir}/opencode/magic-context/magic-context.log`
+///   - Pi       → `${tmpdir}/pi/magic-context/magic-context.log`
+///
+/// Mirrors the resolution done in TypeScript at
+/// `packages/plugin/src/shared/data-path.ts:getMagicContextLogPath`. Kept
+/// in sync manually because the dashboard doesn't import any TypeScript
+/// source.
+pub fn resolve_log_path_for(harness: Harness) -> PathBuf {
+    std::env::temp_dir()
+        .join(harness.as_str())
+        .join("magic-context")
+        .join("magic-context.log")
+}
+
+/// Backwards-compatible default — returns the OpenCode log path. Existing
+/// dashboard call sites that don't yet pass a harness keep working against
+/// OpenCode, which matches the historical single-harness behavior.
 pub fn resolve_log_path() -> PathBuf {
-    std::env::temp_dir().join("magic-context.log")
+    resolve_log_path_for(Harness::Opencode)
 }
 
 #[derive(Debug, Serialize, Clone)]

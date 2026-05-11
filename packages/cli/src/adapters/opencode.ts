@@ -237,7 +237,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     }
 
     getLogPath(): string {
-        return getMagicContextLogPath();
+        return getMagicContextLogPath("opencode");
     }
 
     getInstalledPluginVersion(): string | null {

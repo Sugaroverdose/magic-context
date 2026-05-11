@@ -1,7 +1,7 @@
 import { execSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
@@ -22,7 +22,11 @@ import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
-import { detectConfigPaths } from "../lib/paths";
+import {
+    detectConfigPaths,
+    getMagicContextHistorianDir,
+    getMagicContextLogPath,
+} from "../lib/paths";
 import { confirm, intro, log, outro, spinner, text } from "../lib/prompts";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
@@ -1010,7 +1014,7 @@ export async function runDoctor(
 
     // 10. Show diagnostics info (log file, historian dumps)
 
-    const logPath = join(tmpdir(), "magic-context.log");
+    const logPath = getMagicContextLogPath("opencode");
     if (existsSync(logPath)) {
         const logStat = statSync(logPath);
         const sizeKb = (logStat.size / 1024).toFixed(0);
@@ -1019,7 +1023,7 @@ export async function runDoctor(
         log.info(`Log file: ${logPath} (not yet created)`);
     }
 
-    const historianDumpDir = join(tmpdir(), "magic-context-historian");
+    const historianDumpDir = getMagicContextHistorianDir("opencode");
     if (existsSync(historianDumpDir)) {
         try {
             const dumps = readdirSync(historianDumpDir)

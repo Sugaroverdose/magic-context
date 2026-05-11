@@ -9,7 +9,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
@@ -29,7 +29,13 @@ import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
 import { bundleIssueReport } from "../lib/logs-pi";
-import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "../lib/paths";
+import {
+    getMagicContextHistorianDir,
+    getMagicContextLogPath,
+    getPiAgentConfigDir,
+    getPiUserConfigPath,
+    getPiUserExtensionsPath,
+} from "../lib/paths";
 import {
     detectPiBinary,
     getPiVersion,
@@ -610,7 +616,7 @@ async function runHealthChecks(options: {
         add(results, "pass", "Pi extension cache clean (no stale cached package found)");
     }
 
-    const logPath = join(tmpdir(), "magic-context.log");
+    const logPath = getMagicContextLogPath("pi");
     if (existsSync(logPath)) {
         const stat = statSync(logPath);
         const sizeKb = (stat.size / 1024).toFixed(0);
@@ -626,7 +632,7 @@ async function runHealthChecks(options: {
 
     // Historian debug dumps — kept on disk after failed historian runs so
     // users can attach them to bug reports. Aligned with OpenCode doctor.
-    const historianDumpDir = join(tmpdir(), "magic-context-historian");
+    const historianDumpDir = getMagicContextHistorianDir("pi");
     if (existsSync(historianDumpDir)) {
         try {
             const dumps = readdirSync(historianDumpDir)

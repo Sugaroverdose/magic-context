@@ -1,14 +1,32 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getMagicContextLogPath } from "./data-path";
 
-const logFile = path.join(os.tmpdir(), "magic-context.log");
 const isTestEnv = process.env.NODE_ENV === "test";
 
 let buffer: string[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const FLUSH_INTERVAL_MS = 500;
 const BUFFER_SIZE_LIMIT = 50;
+
+// Cache the last log directory we mkdir'd successfully so we only retry the
+// filesystem call when the resolved path actually changes. The path is
+// re-evaluated on every flush because `setHarness("pi")` runs after module
+// load on Pi; we MUST NOT freeze it at import time, or Pi's first flush
+// could land in the OpenCode subtree.
+let lastEnsuredDir: string | null = null;
+
+function ensureDir(filePath: string): void {
+    const dir = path.dirname(filePath);
+    if (dir === lastEnsuredDir) return;
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        lastEnsuredDir = dir;
+    } catch {
+        // Intentional: logging must never throw. If mkdir fails we still
+        // try the append; failure there is also swallowed.
+    }
+}
 
 function flush(): void {
     if (flushTimer) {
@@ -19,6 +37,8 @@ function flush(): void {
     const data = buffer.join("");
     buffer = [];
     try {
+        const logFile = getMagicContextLogPath();
+        ensureDir(logFile);
         fs.appendFileSync(logFile, data);
     } catch {
         // Intentional: logging must never throw
@@ -58,8 +78,14 @@ export function sessionLog(sessionId: string, message: string, data?: unknown): 
     log(`[magic-context][${sessionId}] ${message}`, data);
 }
 
+/**
+ * Resolve the current log file path. The path is harness-aware (see
+ * {@link getMagicContextLogPath}) and re-evaluated on every call, so callers
+ * who format diagnostic output with this value always see the path the next
+ * flush will actually use.
+ */
 export function getLogFilePath(): string {
-    return logFile;
+    return getMagicContextLogPath();
 }
 
 // Flush remaining buffer on process exit

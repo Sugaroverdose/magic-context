@@ -12,7 +12,6 @@ import { cleanupHistorianStateFile, maybeWriteHistorianStateFile } from "./histo
 
 export {
     cleanupHistorianStateFile,
-    HISTORIAN_STATE_DIR,
     HISTORIAN_STATE_INLINE_THRESHOLD,
     maybeWriteHistorianStateFile,
 } from "./historian-state-file";

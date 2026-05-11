@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, tmpdir, userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc } from "comment-json";
-import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "./paths";
+import {
+    getMagicContextLogPath,
+    getPiAgentConfigDir,
+    getPiUserConfigPath,
+    getPiUserExtensionsPath,
+} from "./paths";
 import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
 
 const PACKAGE_NAME = "@cortexkit/pi-magic-context";
@@ -198,7 +203,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const loaded = loadPiConfig({ cwd });
     const storageDirPath = getMagicContextStorageDir();
     const dbPath = join(storageDirPath, "context.db");
-    const logPath = join(tmpdir(), "magic-context.log");
+    const logPath = getMagicContextLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
     const otherPiExtensions = packages.filter((entry) => !hasMagicContextPackage([entry]));
 

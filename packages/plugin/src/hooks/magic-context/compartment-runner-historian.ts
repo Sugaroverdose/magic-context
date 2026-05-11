@@ -1,11 +1,11 @@
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "../../agents/historian";
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
+import { getMagicContextHistorianDir } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import { buildHistorianEditorPrompt } from "./compartment-prompt";
 import type {
@@ -19,10 +19,18 @@ import {
     validateHistorianOutput,
 } from "./compartment-runner-validation";
 
-// Intentionally kept: historian validation failure dumps are preserved for debugging.
-// These are written to /tmp and survive until manual cleanup or OS temp pruning.
-// The user has explicitly requested keeping these dumps for now (see audit #21).
-const HISTORIAN_RESPONSE_DUMP_DIR = join(tmpdir(), "magic-context-historian");
+// Intentionally kept: historian validation failure dumps are preserved for
+// debugging. They land in the harness-scoped historian dir
+// (${tmpdir}/${harness}/magic-context/historian) and survive until manual
+// cleanup or OS temp pruning. The user has explicitly requested keeping these
+// dumps for now (see audit #21).
+//
+// Resolved at call time rather than at module load so the path follows the
+// harness set during boot — Pi `setHarness("pi")` may run after this module is
+// first imported when both packages share dist artifacts at build time.
+function historianResponseDumpDir(): string {
+    return getMagicContextHistorianDir();
+}
 const MAX_HISTORIAN_RETRIES = 2;
 
 interface HistorianModelOverride {
@@ -502,13 +510,11 @@ function cleanupHistorianDump(sessionId: string, dumpPath?: string): void {
 
 function dumpHistorianResponse(sessionId: string, label: string, text: string): string | undefined {
     try {
-        mkdirSync(HISTORIAN_RESPONSE_DUMP_DIR, { recursive: true });
+        const dumpDir = historianResponseDumpDir();
+        mkdirSync(dumpDir, { recursive: true });
         const safeSessionId = sanitizeDumpName(sessionId);
         const safeLabel = sanitizeDumpName(label);
-        const dumpPath = join(
-            HISTORIAN_RESPONSE_DUMP_DIR,
-            `${safeSessionId}-${safeLabel}-${Date.now()}.xml`,
-        );
+        const dumpPath = join(dumpDir, `${safeSessionId}-${safeLabel}-${Date.now()}.xml`);
         writeFileSync(dumpPath, text, "utf8");
         shared.sessionLog(sessionId, "compartment agent: historian response dumped", {
             label,
