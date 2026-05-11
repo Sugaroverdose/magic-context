@@ -756,8 +756,11 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                 // `stateJson.length === 0` and the synthetic vanishes
                 // from T1 — exactly the regression Finding #1 was meant
                 // to prevent. callId equality (line 743) under sha256
-                // collision-resistance guarantees current snapshot ===
-                // what the old build hashed, so backfill is safe.
+                // truncated to 64 bits gives negligible collision risk
+                // for non-adversarial inputs (~2^32 distinct stateJsons
+                // expected before one collision), so the current snapshot
+                // is overwhelmingly likely to equal what the old build
+                // hashed; backfill is safe in practice.
                 if (persistedAnchor.stateJson.length === 0) {
                     setPersistedTodoSyntheticAnchor(
                         args.db,

@@ -120,6 +120,15 @@ async function promptWithTimeout(
     timeoutMs: number,
     signal?: AbortSignal,
 ): Promise<void> {
+    // Bail immediately if the caller's signal is already aborted (e.g.
+    // lease loss before this attempt was scheduled). Per spec
+    // `addEventListener('abort', ...)` on an already-aborted signal fires
+    // synchronously in modern Node/Bun, but an explicit guard is clearer
+    // and avoids one wasted upstream `client.session.prompt` round-trip
+    // before `isNonRetryable` catches the cancellation at the chain loop.
+    if (signal?.aborted) {
+        throw new Error("prompt aborted by external signal");
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 

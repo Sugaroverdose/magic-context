@@ -112,7 +112,10 @@ describe("promptSyncWithModelSuggestionRetry", () => {
                 fallbackModels: ["anthropic/claude-sonnet-4-6"],
             }),
         ).rejects.toThrow("prompt aborted by external signal");
-        expect(prompt).toHaveBeenCalledTimes(1);
+        // Pre-aborted signal MUST short-circuit before any upstream prompt
+        // call — Audit Finding #1 hardening. No round-trip wasted on a
+        // request the caller has already cancelled.
+        expect(prompt).toHaveBeenCalledTimes(0);
     });
 
     test("AbortError name short-circuits", async () => {
