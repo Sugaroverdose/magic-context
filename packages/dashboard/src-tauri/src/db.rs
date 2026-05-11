@@ -1062,20 +1062,43 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     stats.into_iter().map(|(_, stat)| stat).collect()
 }
 
-pub fn get_session_cache_events(harness: Harness, session_id: &str) -> Vec<DbCacheEvent> {
+// `limit` caps the returned event count to the most recent N (newest-first
+// selection from the DB, then re-sorted to chronological for the chart).
+// Passing 0 or a huge value effectively returns the whole session — keep
+// the dashboard's PER_SESSION = 200 budget in mind on call sites that go
+// straight into a chart, because every event is ~250 bytes of JSON across
+// the Tauri IPC boundary and a hot session can produce 30k+ events.
+pub fn get_session_cache_events(
+    harness: Harness,
+    session_id: &str,
+    limit: Option<usize>,
+) -> Vec<DbCacheEvent> {
     match harness {
-        Harness::Opencode => get_opencode_session_cache_events(session_id),
-        Harness::Pi => get_pi_session_cache_events(session_id),
+        Harness::Opencode => get_opencode_session_cache_events(session_id, limit),
+        Harness::Pi => get_pi_session_cache_events(session_id, limit),
     }
 }
 
-fn get_opencode_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
+fn get_opencode_session_cache_events(
+    session_id: &str,
+    limit: Option<usize>,
+) -> Vec<DbCacheEvent> {
     let Some(opencode_db_path) = resolve_opencode_db_path() else {
         return Vec::new();
     };
     let Ok(conn) = open_readonly(&opencode_db_path) else {
         return Vec::new();
     };
+
+    // Bound `limit` to something sane. The SQL window is small enough that
+    // rusqlite can bind it as i64 directly; we then reverse to chronological
+    // in build_db_cache_events / by sort below.
+    let lim: i64 = match limit {
+        Some(n) if n > 0 => n as i64,
+        // None == no cap; SQLite treats negative LIMIT as "no limit".
+        _ => -1,
+    };
+
     let Ok(mut stmt) = conn.prepare(
         "SELECT CAST(id AS TEXT), session_id, time_created,
                 COALESCE(CAST(json_extract(data, '$.tokens.input') AS INTEGER), 0),
@@ -1087,11 +1110,12 @@ fn get_opencode_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
          WHERE session_id = ?1
            AND json_extract(data, '$.role') = 'assistant'
            AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
-         ORDER BY time_created ASC",
+         ORDER BY time_created DESC
+         LIMIT ?2",
     ) else {
         return Vec::new();
     };
-    let Ok(rows) = stmt.query_map([session_id], |row| {
+    let Ok(rows) = stmt.query_map(rusqlite::params![session_id, lim], |row| {
         Ok(RawDbCacheEvent {
             harness: Harness::Opencode,
             message_id: row.get(0)?,
@@ -1106,17 +1130,19 @@ fn get_opencode_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
     }) else {
         return Vec::new();
     };
+    // build_db_cache_events sorts by timestamp ASC, so DESC LIMIT then ASC
+    // sort yields the most-recent N in chronological order.
     build_db_cache_events(rows.flatten().collect(), true)
 }
 
-fn get_pi_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
+fn get_pi_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<DbCacheEvent> {
     let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
         return Vec::new();
     };
     let Some(detail) = pi_sessions::read_pi_session_detail(&path) else {
         return Vec::new();
     };
-    let rows = detail
+    let mut rows: Vec<RawDbCacheEvent> = detail
         .messages
         .into_iter()
         .filter(|message| message.role == "assistant")
@@ -1135,6 +1161,14 @@ fn get_pi_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
             })
         })
         .collect();
+    // Tail-truncate to the most-recent N entries (Pi JSONL is naturally
+    // chronological, so the last N are the freshest).
+    if let Some(n) = limit {
+        if n > 0 && rows.len() > n {
+            let start = rows.len() - n;
+            rows.drain(..start);
+        }
+    }
     build_db_cache_events(rows, false)
 }
 
@@ -2056,6 +2090,17 @@ fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<
     map
 }
 
+pub fn get_session_detail(
+    conn: Option<&Connection>,
+    harness: Harness,
+    session_id: &str,
+) -> Result<Option<SessionDetail>, rusqlite::Error> {
+    match harness {
+        Harness::Opencode => get_opencode_session_detail(conn, session_id),
+        Harness::Pi => Ok(get_pi_session_detail(conn, session_id)),
+    }
+}
+
 /// Lazy message-list fetch for the Messages tab. Separated from
 /// `get_session_detail` so opening a session doesn't pay the cost of
 /// JSON-extracting role + aggregating `part` text for tens of thousands of
@@ -2092,17 +2137,6 @@ pub fn get_session_messages(
                 })
                 .collect())
         }
-    }
-}
-
-pub fn get_session_detail(
-    conn: Option<&Connection>,
-    harness: Harness,
-    session_id: &str,
-) -> Result<Option<SessionDetail>, rusqlite::Error> {
-    match harness {
-        Harness::Opencode => get_opencode_session_detail(conn, session_id),
-        Harness::Pi => Ok(get_pi_session_detail(conn, session_id)),
     }
 }
 
@@ -2307,6 +2341,18 @@ pub fn get_pi_session_detail(
     let path = pi_sessions::find_pi_session_path(session_id)?;
     let detail = pi_sessions::read_pi_session_detail(&path)?;
     let title = clean_pi_title(detail.meta.session_name.clone(), &detail.meta.first_message);
+
+    // Counts come from the already-parsed (and mtime-cached) JSONL view, so
+    // they're free. `cache_events_count` matches `get_pi_session_cache_events`
+    // filter exactly: assistant messages with usage.total > 0.
+    let messages_count = detail.messages.len() as i64;
+    let cache_events_count = detail
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .filter(|m| m.usage.as_ref().is_some_and(|u| u.total > 0))
+        .count() as i64;
+
     let compartments = conn
         .and_then(|c| get_compartments(c, session_id).ok())
         .unwrap_or_default();
@@ -2321,18 +2367,6 @@ pub fn get_pi_session_detail(
         .and_then(|c| get_context_token_breakdown(c, session_id).ok())
         .flatten();
     let project_identity = resolve_project_identity(&detail.meta.cwd);
-
-    // Counts come from the already-parsed (and mtime-cached) JSONL view, so
-    // they're free. `cache_events_count` matches `get_pi_session_cache_events`
-    // filter exactly: assistant messages with usage.total > 0.
-    let messages_count = detail.messages.len() as i64;
-    let cache_events_count = detail
-        .messages
-        .iter()
-        .filter(|m| m.role == "assistant")
-        .filter(|m| m.usage.as_ref().is_some_and(|u| u.total > 0))
-        .count() as i64;
-
     Some(SessionDetail {
         harness: Harness::Pi,
         session_id: detail.meta.session_id.clone(),

@@ -128,9 +128,13 @@ pub fn get_session_detail(
 }
 
 #[tauri::command]
-pub fn get_session_cache_events(harness: String, session_id: String) -> Vec<db::DbCacheEvent> {
+pub fn get_session_cache_events(
+    harness: String,
+    session_id: String,
+    limit: Option<usize>,
+) -> Vec<db::DbCacheEvent> {
     match harness.parse::<db::Harness>() {
-        Ok(harness) => db::get_session_cache_events(harness, &session_id),
+        Ok(harness) => db::get_session_cache_events(harness, &session_id, limit),
         Err(_) => Vec::new(),
     }
 }

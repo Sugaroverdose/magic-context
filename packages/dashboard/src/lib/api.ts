@@ -106,8 +106,14 @@ export async function getSessionDetail(
 export async function getSessionCacheEvents(
   harness: Harness,
   sessionId: string,
+  // Caps the returned event count to the most recent N. Pass undefined or omit
+  // for the whole session — but be aware that a hot OpenCode session can emit
+  // 30k+ events (≈8MB of JSON across the Tauri IPC boundary), so chart-bound
+  // callers should always pass a small bound. The dashboard's Cache page uses
+  // 200 to match the per-session window of the global cache-events query.
+  limit?: number,
 ): Promise<DbCacheEvent[]> {
-  return invoke("get_session_cache_events", { harness, sessionId });
+  return invoke("get_session_cache_events", { harness, sessionId, limit });
 }
 
 /**
