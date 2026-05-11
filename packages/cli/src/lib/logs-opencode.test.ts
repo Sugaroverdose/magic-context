@@ -1,7 +1,17 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
-import { sanitizeLogContent } from "./logs-opencode";
+import { afterEach, describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DiagnosticReport } from "./diagnostics-opencode";
+import { bundleIssueReport, sanitizeLogContent } from "./logs-opencode";
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+    for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true, force: true });
+});
 
 describe("sanitizeLogContent — secret token redaction (council finding #9)", () => {
     describe("Anthropic API keys", () => {
@@ -16,7 +26,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
         it("redacts sk-ant-* legacy form", () => {
             const log = "key=sk-ant-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCd";
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain("<ANTHROPIC_API_KEY_REDACTED>");
+            expect(sanitized).toContain("<REDACTED:key>");
         });
     });
 
@@ -27,8 +37,8 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             // The env-var assignment redactor wins first (more specific
             // semantics — keeps the variable name visible). The specific
             // sk-proj- pattern won't trigger because the value is already
-            // replaced with <REDACTED>.
-            expect(sanitized).toBe("OPENAI_API_KEY=<REDACTED>");
+            // replaced with a key-typed redaction marker.
+            expect(sanitized).toBe("OPENAI_API_KEY=<REDACTED:openai_api_key>");
         });
 
         it("redacts standalone sk-* tokens (legacy OpenAI shape)", () => {
@@ -74,7 +84,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const log = "HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
             const sanitized = sanitizeLogContent(log);
             // env-var redactor wins (more semantic context preserved)
-            expect(sanitized).toBe("HF_TOKEN=<REDACTED>");
+            expect(sanitized).toBe("HF_TOKEN=<REDACTED:hf_token>");
         });
 
         it("redacts standalone hf_* tokens not in assignment form", () => {
@@ -89,12 +99,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
         it("redacts AKIA access key IDs", () => {
             const log = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
             const sanitized = sanitizeLogContent(log);
-            // The AKIA-specific pattern is listed BEFORE the env-var
-            // assignment pattern, so it wins for known AWS shapes. The
-            // env-var redactor would also produce a valid result; the
-            // specific one is preferred because it preserves the token
-            // type information ("this looked like an AWS access key").
-            expect(sanitized).toBe("AWS_ACCESS_KEY_ID=<AWS_ACCESS_KEY_ID_REDACTED>");
+            expect(sanitized).toBe("AWS_ACCESS_KEY_ID=<REDACTED:aws_access_key_id>");
         });
 
         it("redacts standalone AKIA in log narration", () => {
@@ -113,7 +118,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
         it("redacts AWS secret access keys in assignment context", () => {
             const log = "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain("<AWS_SECRET_REDACTED>");
+            expect(sanitized).toContain("<REDACTED:aws_secret_access_key>");
             expect(sanitized).not.toContain("wJalrXUtnFEMI");
             // key name preserved
             expect(sanitized).toContain("aws_secret_access_key");
@@ -125,7 +130,7 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const log = "SLACK_BOT_TOKEN=xoxb-1234567890-abcdefghij-ABCDEFG12345";
             const sanitized = sanitizeLogContent(log);
             // env-var wins
-            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED>");
+            expect(sanitized).toBe("SLACK_BOT_TOKEN=<REDACTED:slack_bot_token>");
         });
 
         it("redacts standalone xoxp/xoxr/xoxs", () => {
@@ -152,32 +157,32 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
     describe("Generic env-var assignments", () => {
         it("redacts FOO_API_KEY=value", () => {
             const sanitized = sanitizeLogContent("MY_CUSTOM_API_KEY=abcdef12345");
-            expect(sanitized).toBe("MY_CUSTOM_API_KEY=<REDACTED>");
+            expect(sanitized).toBe("MY_CUSTOM_API_KEY=<REDACTED:my_custom_api_key>");
         });
 
         it("redacts BAR_TOKEN=value", () => {
             const sanitized = sanitizeLogContent("DATABASE_TOKEN=tokenvaluehere");
-            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED>");
+            expect(sanitized).toBe("DATABASE_TOKEN=<REDACTED:database_token>");
         });
 
         it("redacts BAZ_SECRET=value", () => {
             const sanitized = sanitizeLogContent("MY_SECRET=mysecretvalue");
-            expect(sanitized).toBe("MY_SECRET=<REDACTED>");
+            expect(sanitized).toBe("MY_SECRET=<REDACTED:my_secret>");
         });
 
         it("redacts QUX_PASSWORD=value", () => {
             const sanitized = sanitizeLogContent("DB_PASSWORD=hunter2");
-            expect(sanitized).toBe("DB_PASSWORD=<REDACTED>");
+            expect(sanitized).toBe("DB_PASSWORD=<REDACTED:db_password>");
         });
 
         it("redacts COMPOUND_CREDENTIAL=value", () => {
             const sanitized = sanitizeLogContent("AUTH_CREDENTIAL=abcdef");
-            expect(sanitized).toBe("AUTH_CREDENTIAL=<REDACTED>");
+            expect(sanitized).toBe("AUTH_CREDENTIAL=<REDACTED:auth_credential>");
         });
 
         it("redacts PRIVATE_KEY assignments", () => {
             const sanitized = sanitizeLogContent("MY_PRIVATE_KEY=mykey-data");
-            expect(sanitized).toBe("MY_PRIVATE_KEY=<REDACTED>");
+            expect(sanitized).toBe("MY_PRIVATE_KEY=<REDACTED:my_private_key>");
         });
 
         it("does NOT redact non-secret env vars", () => {
@@ -191,26 +196,26 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
         it('redacts "api_key": "value"', () => {
             const log = '{"api_key": "abc123secret"}';
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain('"api_key": "<REDACTED>"');
+            expect(sanitized).toContain('"api_key": "<REDACTED:api_key>"');
             expect(sanitized).not.toContain("abc123secret");
         });
 
         it('redacts "access_token": "value"', () => {
             const log = '{"access_token": "supersecret"}';
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain('"access_token": "<REDACTED>"');
+            expect(sanitized).toContain('"access_token": "<REDACTED:access_token>"');
         });
 
         it('redacts "client_secret": "value"', () => {
             const log = '{"client_secret":"abc"}';
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain('"client_secret":"<REDACTED>"');
+            expect(sanitized).toContain('"client_secret":"<REDACTED:client_secret>"');
         });
 
         it('redacts "password": "value" case-insensitively', () => {
             const log = '{"Password": "hunter2"}';
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain('"<REDACTED>"');
+            expect(sanitized).toContain('"<REDACTED:password>"');
             expect(sanitized).not.toContain("hunter2");
         });
     });
@@ -221,14 +226,14 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("Authorization:");
             expect(sanitized).toContain("Bearer");
-            expect(sanitized).toContain("<BEARER_TOKEN_REDACTED>");
+            expect(sanitized).toContain("<REDACTED:bearer>");
             expect(sanitized).not.toContain("eyJhbGciOiJIUzI1NiJ9.signature");
         });
 
         it("handles case-insensitive header name", () => {
             const log = "authorization: bearer abcdefghij1234567890";
             const sanitized = sanitizeLogContent(log);
-            expect(sanitized).toContain("<BEARER_TOKEN_REDACTED>");
+            expect(sanitized).toContain("<REDACTED:bearer>");
         });
     });
 
@@ -288,8 +293,8 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             ].join("\n");
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("/Users/<USER>/");
-            expect(sanitized).toContain("ANTHROPIC_API_KEY=<REDACTED>");
-            expect(sanitized).toContain('"api_key":"<REDACTED>"');
+            expect(sanitized).toContain("ANTHROPIC_API_KEY=<REDACTED:anthropic_api_key>");
+            expect(sanitized).toContain('"api_key":"<REDACTED:api_key>"');
             expect(sanitized).toContain("Done.");
         });
     });
@@ -310,5 +315,78 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("anthropic/claude-haiku-4-5");
         });
+    });
+});
+
+describe("bundleIssueReport secret redaction", () => {
+    it("redacts secret-looking config keys before writing the issue bundle", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-issue-redaction-"));
+        tempDirs.push(root);
+        const originalCwd = process.cwd();
+        process.chdir(root);
+        try {
+            const report: DiagnosticReport = {
+                timestamp: "2026-05-11T12:00:00.000Z",
+                platform: "darwin",
+                arch: "arm64",
+                nodeVersion: "v24.0.0",
+                pluginVersion: "0.18.0",
+                opencodeInstalled: true,
+                opencodeVersion: "1.0.0",
+                configPaths: {
+                    configDir: join(root, ".config", "opencode"),
+                    opencodeConfig: join(root, ".config", "opencode", "opencode.jsonc"),
+                    opencodeConfigFormat: "jsonc",
+                    magicContextConfig: join(root, ".config", "opencode", "magic-context.jsonc"),
+                    tuiConfig: join(root, ".config", "opencode", "tui.jsonc"),
+                    tuiConfigFormat: "jsonc",
+                    omoConfig: null,
+                },
+                opencodeConfigHasPlugin: true,
+                tuiConfigHasPlugin: true,
+                magicContextConfig: {
+                    exists: true,
+                    flags: {
+                        embedding: {
+                            provider: "openai-compatible",
+                            api_key: "emb-secret-value",
+                            headers: {
+                                Authorization: "Bearer header-secret-value",
+                                "X-Api-Key": "custom-header-secret",
+                            },
+                        },
+                        historian: { api_key: "historian-secret-value" },
+                    },
+                },
+                pluginCache: { path: join(root, "cache") },
+                storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
+                conflicts: { hasConflict: false, reasons: [] },
+                logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
+                historianDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+                historianFailures: [
+                    {
+                        sessionId: "ses_1",
+                        failureCount: 1,
+                        lastError: "Authorization: Bearer historian-last-error-secret",
+                        lastFailureAt: "2026-05-11T12:00:00.000Z",
+                    },
+                ],
+            };
+
+            const bundled = await bundleIssueReport(report, "description", "title");
+            expect(existsSync(bundled.path)).toBe(true);
+            const body = readFileSync(bundled.path, "utf-8");
+
+            expect(body).toContain('"api_key": "<REDACTED:api_key>"');
+            expect(body).toContain('"Authorization": "<REDACTED:authorization>"');
+            expect(body).toContain('"X-Api-Key": "<REDACTED:x-api-key>"');
+            expect(body).not.toContain("emb-secret-value");
+            expect(body).not.toContain("historian-secret-value");
+            expect(body).not.toContain("header-secret-value");
+            expect(body).not.toContain("custom-header-secret");
+            expect(body).not.toContain("historian-last-error-secret");
+        } finally {
+            process.chdir(originalCwd);
+        }
     });
 });

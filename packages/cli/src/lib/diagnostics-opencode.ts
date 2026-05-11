@@ -9,7 +9,7 @@
 // information.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
@@ -22,6 +22,7 @@ import {
     getMagicContextHistorianDir,
     getMagicContextLogPath,
 } from "./paths";
+import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
@@ -170,35 +171,12 @@ function fileSize(path: string): number {
 
 // ── Sanitization ─────────────────────────────────────────────────────
 
-function escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function sanitizeString(value: string): string {
-    const home = homedir();
-    const username = userInfo().username;
-    let sanitized = value;
-    if (home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "~");
-    }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, "/Users/<USER>/");
-    sanitized = sanitized.replace(/\/home\/[^/]+\//g, "/home/<USER>/");
-    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, "C:\\Users\\<USER>\\");
-    if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), "<USER>");
-    }
-    return sanitized;
+    return sanitizePathString(value);
 }
 
 function sanitizeValue(value: unknown): unknown {
-    if (typeof value === "string") return sanitizeString(value);
-    if (Array.isArray(value)) return value.map(sanitizeValue);
-    if (value && typeof value === "object") {
-        return Object.fromEntries(
-            Object.entries(value).map(([key, entry]) => [key, sanitizeValue(entry)]),
-        );
-    }
-    return value;
+    return sanitizeConfigValue(value);
 }
 
 // ── Config + plugin entry detection ────────────────────────────────
@@ -375,7 +353,9 @@ async function collectHistorianFailures(
                 typeof row.historian_last_failure_at === "number"
                     ? new Date(row.historian_last_failure_at).toISOString()
                     : "";
-            const lastError = sanitizeString(rawError.replace(/\s+/g, " ").trim().slice(0, 400));
+            const lastError = sanitizeDiagnosticText(
+                rawError.replace(/\s+/g, " ").trim().slice(0, 400),
+            );
             return { sessionId, failureCount, lastError, lastFailureAt: lastAt };
         });
     } catch {
@@ -497,7 +477,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "",
         "### magic-context.jsonc flags",
         "```jsonc",
-        JSON.stringify(report.magicContextConfig.flags, null, 2),
+        JSON.stringify(sanitizeConfigValue(report.magicContextConfig.flags), null, 2),
         "```",
         "",
         "### Plugin cache",
@@ -519,7 +499,9 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "### Historian failures (session_meta)",
         report.historianFailures.length === 0
             ? "_No sessions with historian failures._"
-            : ["```json", JSON.stringify(report.historianFailures, null, 2), "```"].join("\n"),
+            : ["```json", JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2), "```"].join(
+                  "\n",
+              ),
         "",
         "### Log file",
         `- Path: ${sanitizeString(report.logFile.path)}`,
