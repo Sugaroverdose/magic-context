@@ -15,7 +15,7 @@ const { acquireLease, getLeaseHolder, isLeaseActive, releaseLease, renewLease } 
 const { ensureDreamQueueTable, enqueueDream } = await import("./queue");
 const { processDreamQueue, registerDreamProjectDirectory, runDream } = await import("./runner");
 const { getDreamRuns } = await import("./storage-dream-runs");
-const { getDreamState } = await import("./storage-dream-state");
+const { getDreamState, setDreamState } = await import("./storage-dream-state");
 
 let db: Database | null = null;
 
@@ -120,6 +120,61 @@ describe("dreamer", () => {
     });
 
     describe("dream runner", () => {
+        it("does not force-enqueue over an old started row while the lease is active", () => {
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+
+            expect(enqueueDream(db, "git:repo-1", "manual")).not.toBeNull();
+            db.prepare("UPDATE dream_queue SET started_at = ? WHERE project_path = ?").run(
+                Date.now() - 3 * 60 * 1000,
+                "git:repo-1",
+            );
+            expect(acquireLease(db, "holder-a")).toBe(true);
+
+            expect(enqueueDream(db, "git:repo-1", "manual", true)).toBeNull();
+
+            const rows = db
+                .prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM dream_queue")
+                .get();
+            expect(rows?.count).toBe(1);
+        });
+
+        it("aborts remaining dream work when the lease is lost between tasks", async () => {
+            db = createTestDb();
+            const client = createDreamClient();
+            let promptCalls = 0;
+            const promptSyncSpy = spyOn(
+                shared,
+                "promptSyncWithModelSuggestionRetry",
+            ).mockImplementation(async () => {
+                promptCalls += 1;
+                if (promptCalls === 1 && db) {
+                    setDreamState(db, "dreaming_lease_holder", "stolen-holder");
+                    setDreamState(db, "dreaming_lease_expiry", String(Date.now() + 120_000));
+                }
+            });
+
+            try {
+                const result = await runDream({
+                    db,
+                    client,
+                    projectIdentity: "/repo/project",
+                    tasks: ["consolidate", "verify"],
+                    taskTimeoutMinutes: 5,
+                    maxRuntimeMinutes: 10,
+                    parentSessionId: "parent-1",
+                    sessionDirectory: "/repo/project",
+                });
+
+                expect(promptSyncSpy).toHaveBeenCalledTimes(1);
+                expect(result.tasks.map((task) => task.name)).toEqual(["consolidate", "lease-lost"]);
+                expect(result.tasks[1]?.error).toContain("Dream lease lost");
+                expect(getDreamState(db, "last_dream_at")).toBeNull();
+            } finally {
+                promptSyncSpy.mockRestore();
+            }
+        });
+
         it("orchestrates llm dream tasks in order and releases the lease", async () => {
             db = createTestDb();
             const createdSessionIds: string[] = [];

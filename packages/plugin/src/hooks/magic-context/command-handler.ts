@@ -227,8 +227,9 @@ async function executeDreaming(
     }
 
     // dream_queue table is created in initializeDatabase() — no ensureDreamQueueTable needed.
-    // force=true uses the lease TTL (2 min) as the stale threshold so a crashed or restarted
-    // runner does not permanently block /ctx-dream from the user.
+    // force=true uses the lease-aware stale cleanup path in enqueueDream: a crashed or
+    // restarted runner can be recovered after the lease TTL, but a healthy in-flight
+    // runner with an unexpired lease is never deleted just because it is older than 2m.
     const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual", true);
     if (!entry) {
         await deps.sendNotification(sessionId, "Dream already queued for this project", {});

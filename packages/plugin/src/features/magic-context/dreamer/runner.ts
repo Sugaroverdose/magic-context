@@ -237,6 +237,8 @@ async function identifyKeyFilesForSession(args: {
     config: ExperimentalPinKeyFilesConfig;
     /** Resolved fallback chain (user config or builtin); see resolveFallbackChain. */
     fallbackModels?: readonly string[];
+    onLeaseLost?: (phase: string, error?: unknown) => void;
+    isLeaseLost?: () => boolean;
 }): Promise<void> {
     let openCodeDb: Database | null = null;
 
@@ -278,9 +280,11 @@ async function identifyKeyFilesForSession(args: {
             try {
                 if (!renewLease(args.db, args.holderId)) {
                     log(`[key-files][${args.sessionId}] lease renewal failed — aborting`);
+                    args.onLeaseLost?.(`key-files:${args.sessionId}`);
                     abortController.abort();
                 }
-            } catch {
+            } catch (error) {
+                args.onLeaseLost?.(`key-files:${args.sessionId}`, error);
                 abortController.abort();
             }
         }, 60_000);
@@ -361,6 +365,12 @@ async function identifyKeyFilesForSession(args: {
             );
             applyHeuristicFallback();
         } catch (error) {
+            if (args.isLeaseLost?.() || abortController.signal.aborted) {
+                log(
+                    `[key-files][${args.sessionId}] lease lost during identification — skipping heuristic fallback`,
+                );
+                throw error;
+            }
             log(
                 `[key-files][${args.sessionId}] identification failed: ${getErrorMessage(error)} — using heuristic fallback`,
             );
@@ -410,6 +420,8 @@ async function identifyKeyFiles(args: {
     config: ExperimentalPinKeyFilesConfig;
     /** Resolved dreamer fallback chain. */
     fallbackModels?: readonly string[];
+    onLeaseLost?: (phase: string, error?: unknown) => void;
+    isLeaseLost?: () => boolean;
 }): Promise<void> {
     const sessionIds = await getActiveProjectSessionIds({
         db: args.db,
@@ -427,6 +439,10 @@ async function identifyKeyFiles(args: {
     );
 
     for (const sessionId of sessionIds) {
+        if (args.isLeaseLost?.()) {
+            log("[key-files] lease lost — stopping key-file identification");
+            break;
+        }
         if (Date.now() > args.deadline) {
             log("[key-files] deadline reached — stopping key-file identification");
             break;
@@ -439,6 +455,8 @@ async function identifyKeyFiles(args: {
             sessionDirectory: args.sessionDirectory,
             holderId: args.holderId,
             fallbackModels: args.fallbackModels,
+            onLeaseLost: args.onLeaseLost,
+            isLeaseLost: args.isLeaseLost,
             deadline: args.deadline,
             sessionId,
             config: args.config,
@@ -532,9 +550,52 @@ export async function runDream(args: {
     let lastErrorSignature: string | null = null;
     let consecutiveSameErrorFailures = 0;
     let circuitBreakerTripped = false;
+    let lostLease = false;
+    let lostLeaseReason: string | null = null;
+    let lostLeaseRecorded = false;
+
+    const markLeaseLost = (phase: string, error?: unknown): void => {
+        const detail = error ? `: ${getErrorMessage(error)}` : "";
+        lostLeaseReason = `Dream lease lost during ${phase}${detail}`;
+        if (!lostLease) {
+            log(`[dreamer] FATAL: ${lostLeaseReason}; aborting all remaining dream work`);
+        } else {
+            log(`[dreamer] FATAL: ${lostLeaseReason}; dream work is already aborting`);
+        }
+        lostLease = true;
+    };
+
+    const recordLeaseLostTask = (phase: string): void => {
+        if (lostLeaseRecorded) return;
+        lostLeaseRecorded = true;
+        result.tasks.push({
+            name: "lease-lost",
+            durationMs: 0,
+            result: "",
+            error: lostLeaseReason ?? `Dream lease lost during ${phase}; aborted remaining work`,
+        });
+    };
+
+    const verifyLeaseStillHeld = (phase: string): boolean => {
+        if (lostLease) return false;
+        try {
+            if (!renewLease(args.db, holderId)) {
+                markLeaseLost(phase);
+                return false;
+            }
+            return true;
+        } catch (error) {
+            markLeaseLost(phase, error);
+            return false;
+        }
+    };
 
     try {
         for (const taskName of args.tasks) {
+            if (!verifyLeaseStillHeld(`before task ${taskName}`)) {
+                recordLeaseLostTask(`before task ${taskName}`);
+                break;
+            }
             if (Date.now() > deadline) {
                 log(`[dreamer] deadline reached, stopping after ${result.tasks.length} tasks`);
                 break;
@@ -550,12 +611,14 @@ export async function runDream(args: {
                 try {
                     if (!renewLease(args.db, holderId)) {
                         log(`[dreamer] task ${taskName}: lease renewal failed — aborting LLM call`);
+                        markLeaseLost(`task ${taskName} lease renewal`);
                         taskAbortController.abort();
                     }
                 } catch (err) {
                     log(
                         `[dreamer] task ${taskName}: lease renewal threw — aborting LLM call: ${err}`,
                     );
+                    markLeaseLost(`task ${taskName} lease renewal`, err);
                     taskAbortController.abort();
                 }
             }, 60_000);
@@ -626,6 +689,9 @@ export async function runDream(args: {
                         callContext: `dreamer:${taskName}`,
                     },
                 );
+                if (lostLease) {
+                    throw new Error(lostLeaseReason ?? `Dream lease lost during ${taskName}`);
+                }
 
                 const messagesResponse = await args.client.session.messages({
                     path: { id: agentSessionId },
@@ -664,7 +730,10 @@ export async function runDream(args: {
                     error: errorDescription.brief,
                 });
 
-                if (shouldSkipCircuitBreaker(error, errorDescription.brief)) {
+                if (lostLease) {
+                    lastErrorSignature = null;
+                    consecutiveSameErrorFailures = 0;
+                } else if (shouldSkipCircuitBreaker(error, errorDescription.brief)) {
                     lastErrorSignature = null;
                     consecutiveSameErrorFailures = 0;
                 } else {
@@ -703,12 +772,20 @@ export async function runDream(args: {
                 }
             }
 
+            if (lostLease) {
+                recordLeaseLostTask(`task ${taskName}`);
+                break;
+            }
+
             if (circuitBreakerTripped) {
                 break;
             }
         }
 
-        if (circuitBreakerTripped) {
+        if (lostLease) {
+            log("[dreamer] lease lost: skipping all post-task phases");
+            recordLeaseLostTask("post-task phases");
+        } else if (circuitBreakerTripped) {
             log("[dreamer] circuit breaker: skipping post-task phases");
             result.tasks.push({
                 name: "post-task-phases",
@@ -721,11 +798,15 @@ export async function runDream(args: {
         // Runs after regular dream tasks, reviews user memory candidates for promotion.
         if (
             !circuitBreakerTripped &&
+            !lostLease &&
             args.experimentalUserMemories?.enabled &&
             Date.now() <= deadline
         ) {
             const umStart = Date.now();
             try {
+                if (!verifyLeaseStillHeld("before user-memory review")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost before user-memory review");
+                }
                 const reviewResult = await reviewUserMemories({
                     db: args.db,
                     client: args.client,
@@ -736,6 +817,9 @@ export async function runDream(args: {
                     promotionThreshold: args.experimentalUserMemories.promotionThreshold,
                     fallbackModels: args.fallbackModels,
                 });
+                if (!verifyLeaseStillHeld("after user-memory review")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost after user-memory review");
+                }
                 const umOutput = `promoted=${reviewResult.promoted} merged=${reviewResult.merged} dismissed=${reviewResult.dismissed} consumed=${reviewResult.candidatesConsumed}`;
                 if (
                     reviewResult.promoted > 0 ||
@@ -762,12 +846,16 @@ export async function runDream(args: {
                     error: errorDescription.brief,
                 });
             }
+            if (lostLease) recordLeaseLostTask("user-memory review");
         }
         // ── Smart note evaluation phase ──
         // Runs after regular dream tasks, evaluates pending smart note conditions.
         // Not a user-configurable task — always runs when dreamer has pending smart notes.
-        if (!circuitBreakerTripped && Date.now() <= deadline) {
+        if (!circuitBreakerTripped && !lostLease && Date.now() <= deadline) {
             try {
+                if (!verifyLeaseStillHeld("before smart-note evaluation")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost before smart-note evaluation");
+                }
                 await evaluateSmartNotes({
                     db: args.db,
                     client: args.client,
@@ -778,7 +866,12 @@ export async function runDream(args: {
                     deadline,
                     result,
                     fallbackModels: args.fallbackModels,
+                    onLeaseLost: markLeaseLost,
+                    isLeaseLost: () => lostLease,
                 });
+                if (!verifyLeaseStillHeld("after smart-note evaluation")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost after smart-note evaluation");
+                }
             } catch (error) {
                 const errorDescription = describeError(error);
                 logWithStackHead(
@@ -786,14 +879,19 @@ export async function runDream(args: {
                     errorDescription.stackHead,
                 );
             }
+            if (lostLease) recordLeaseLostTask("smart-note evaluation");
         }
         if (
             !circuitBreakerTripped &&
+            !lostLease &&
             args.experimentalPinKeyFiles?.enabled &&
             Date.now() <= deadline
         ) {
             const kfStart = Date.now();
             try {
+                if (!verifyLeaseStillHeld("before key-file identification")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost before key-file identification");
+                }
                 await identifyKeyFiles({
                     db: args.db,
                     client: args.client,
@@ -804,7 +902,12 @@ export async function runDream(args: {
                     deadline,
                     config: args.experimentalPinKeyFiles,
                     fallbackModels: args.fallbackModels,
+                    onLeaseLost: markLeaseLost,
+                    isLeaseLost: () => lostLease,
                 });
+                if (!verifyLeaseStillHeld("after key-file identification")) {
+                    throw new Error(lostLeaseReason ?? "Dream lease lost after key-file identification");
+                }
                 result.tasks.push({
                     name: "key files",
                     durationMs: Date.now() - kfStart,
@@ -823,6 +926,7 @@ export async function runDream(args: {
                     error: errorDescription.brief,
                 });
             }
+            if (lostLease) recordLeaseLostTask("key-file identification");
         }
     } finally {
         releaseLease(args.db, holderId);
@@ -878,7 +982,7 @@ export async function runDream(args: {
         "circuit-breaker",
     ]);
     const hasSuccessfulTask = result.tasks.some((t) => !t.error && !POST_TASK_NAMES.has(t.name));
-    if (hasSuccessfulTask) {
+    if (hasSuccessfulTask && !lostLease) {
         setDreamState(args.db, `last_dream_at:${args.projectIdentity}`, String(result.finishedAt));
         setDreamState(args.db, "last_dream_at", String(result.finishedAt));
     }
@@ -902,6 +1006,8 @@ async function evaluateSmartNotes(args: {
     result: DreamRunResult;
     /** Resolved dreamer fallback chain. */
     fallbackModels?: readonly string[];
+    onLeaseLost?: (phase: string, error?: unknown) => void;
+    isLeaseLost?: () => boolean;
 }): Promise<void> {
     const pendingNotes = getPendingSmartNotes(args.db, args.projectIdentity);
     if (pendingNotes.length === 0) {
@@ -947,9 +1053,11 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
         try {
             if (!renewLease(args.db, args.holderId)) {
                 log("[dreamer] smart notes: lease renewal failed — aborting");
+                args.onLeaseLost?.("smart notes");
                 abortController.abort();
             }
-        } catch {
+        } catch (error) {
+            args.onLeaseLost?.("smart notes", error);
             abortController.abort();
         }
     }, 60_000);
