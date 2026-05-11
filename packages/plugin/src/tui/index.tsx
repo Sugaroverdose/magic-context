@@ -485,30 +485,47 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
     const apiAny = api as unknown as ApiAny
 
     if (typeof apiAny.keymap?.registerLayer === "function") {
-        apiAny.keymap.registerLayer({
-            commands: [
-                {
-                    namespace: "palette",
-                    name: "magic-context.status",
-                    title: "Magic Context: Status",
-                    category: "Magic Context",
-                    run() {
-                        showStatusDialog(api)
+        // Audit Finding #2 hardening: even when registerLayer exists as a
+        // function, the underlying keymap implementation in OpenCode TUI
+        // 1.14.42-1.14.43 can throw at call time. Without the try-catch the
+        // `return` below would propagate the throw and the legacy
+        // `command.register` fallback path (~20 lines down) would be
+        // unreachable. The cost is one debug log on the rare broken-TUI
+        // build; the benefit is that older command.register-only TUIs
+        // running alongside a partially-broken keymap surface still get
+        // their command palette entries.
+        try {
+            apiAny.keymap.registerLayer({
+                commands: [
+                    {
+                        namespace: "palette",
+                        name: "magic-context.status",
+                        title: "Magic Context: Status",
+                        category: "Magic Context",
+                        run() {
+                            showStatusDialog(api)
+                        },
                     },
-                },
-                {
-                    namespace: "palette",
-                    name: "magic-context.recomp",
-                    title: "Magic Context: Recomp",
-                    category: "Magic Context",
-                    run() {
-                        showRecompDialog(api)
+                    {
+                        namespace: "palette",
+                        name: "magic-context.recomp",
+                        title: "Magic Context: Recomp",
+                        category: "Magic Context",
+                        run() {
+                            showRecompDialog(api)
+                        },
                     },
-                },
-            ],
-            bindings: [],
-        })
-        return
+                ],
+                bindings: [],
+            })
+            return
+        } catch (err) {
+            console.debug(
+                "[magic-context-tui] keymap.registerLayer threw; falling back to command.register",
+                err,
+            )
+            // Fall through to legacy registration.
+        }
     }
 
     if (typeof apiAny.command?.register === "function") {

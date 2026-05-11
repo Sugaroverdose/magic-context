@@ -149,6 +149,15 @@ export async function runValidatedHistorianPass(args: {
  * editor's validated result if successful; falls back to the draft on any
  * failure (editor call, validation, or invalid structure). Editor can never
  * regress behavior — worst case we return the same validated draft.
+ *
+ * Fallback-chain policy (Audit Finding #10 clarification): the editor pass
+ * deliberately does NOT receive `fallbackModels`. If the configured editor
+ * model fails (auth, model-not-found, transient network, or the editor's own
+ * output fails validation), the function returns the already-validated draft
+ * unchanged. Iterating through fallback models here would cost extra LLM
+ * calls per chunk for no compression benefit — the draft is already known to
+ * be valid and the editor pass is purely a polish step. Letting the editor
+ * silently no-op back to the draft is the cheaper and safer behavior.
  */
 async function runEditorPassOrFallback(args: {
     client: PluginContext["client"];

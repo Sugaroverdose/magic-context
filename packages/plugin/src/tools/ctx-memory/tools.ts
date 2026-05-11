@@ -41,10 +41,18 @@ function normalizeLimit(limit?: number): number {
     return Math.max(1, Math.floor(limit));
 }
 
+// Audit Finding #7 hardening: when a caller omits `allowedActions`, fall back
+// to the least-privileged set instead of the dreamer's full action list. The
+// only production caller (`tool-registry.ts`) passes `["write", "delete"]`
+// explicitly, and dreamer child sessions are gated by the runtime
+// `toolContext.agent === DREAMER_AGENT` check below — they bypass
+// `allowedActions` entirely. A future caller that forgets the field would
+// previously have inadvertently let primary agents run `list/update/merge/
+// archive`; fail-closed default prevents that class of regression.
 function getAllowedActions(deps: CtxMemoryToolDeps): [CtxMemoryAction, ...CtxMemoryAction[]] {
     const allowed = deps.allowedActions?.length
         ? deps.allowedActions
-        : [...CTX_MEMORY_DREAMER_ACTIONS];
+        : (["write", "delete"] as const);
     return [...allowed] as [CtxMemoryAction, ...CtxMemoryAction[]];
 }
 

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { DREAMER_AGENT } from "../../agents/dreamer";
 import { getMemoriesByProject, getMemoryById, insertMemory } from "../../features/magic-context";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -231,7 +232,7 @@ describe("createCtxMemoryTools", () => {
 
             const result = await tools.ctx_memory.execute(
                 { action: "list", limit: 10 },
-                toolContext(),
+                toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
             expect(result).toContain("Found 2 active memories");
@@ -255,7 +256,7 @@ describe("createCtxMemoryTools", () => {
                     id: memory.id,
                     content: "cache_ttl=10m",
                 },
-                toolContext(),
+                toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
             expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
@@ -282,7 +283,7 @@ describe("createCtxMemoryTools", () => {
                     ids: [first.id, second.id],
                     content: "Use bun for all scripts in this repository.",
                 },
-                toolContext("ses-dreamer"),
+                toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
             expect(result).toContain("Merged memories");
@@ -308,7 +309,7 @@ describe("createCtxMemoryTools", () => {
                     id: memory.id,
                     reason: "Removed subsystem no longer exists",
                 },
-                toolContext(),
+                toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
             expect(result).toContain("Archived memory");

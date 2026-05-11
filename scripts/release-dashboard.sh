@@ -99,7 +99,16 @@ fi
 BRANCH=$(git branch --show-current)
 if [[ "$BRANCH" != "main" && "$BRANCH" != "master" ]]; then
   echo "Warning: releasing from '$BRANCH' (not main/master)"
-  read -rp "Continue? [y/N] " confirm
+  # Audit Finding #9 hardening: an interactive `read -rp` here would hang
+  # forever when the script is invoked without a controlling TTY (CI, nohup,
+  # background task). Refuse the release explicitly in that case — the user
+  # has to either switch to main/master or re-run from a real terminal.
+  if ! have_tty; then
+    echo "Error: refusing to release from non-main branch in non-interactive mode."
+    echo "       Re-run from a TTY, or switch to main/master first."
+    exit 1
+  fi
+  read -rp "Continue? [y/N] " confirm </dev/tty
   if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     echo "Aborted."
     exit 1
