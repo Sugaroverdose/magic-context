@@ -6,7 +6,7 @@ import { cosineSimilarity } from "./cosine-similarity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 import type { EmbeddingProvider } from "./embedding-provider";
-import { computeNormalizedHash } from "./normalize-hash";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { saveEmbedding } from "./storage-memory-embeddings";
 
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
@@ -66,19 +66,8 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
     return { provider: "off" };
 }
 
-function resolveModelId(config: EmbeddingConfig): string {
-    if (config.provider === "off") {
-        return "off";
-    }
-
-    if (config.provider === "openai-compatible") {
-        const endpoint = config.endpoint.trim();
-        const model = config.model.trim();
-        const keyHash = config.api_key ? computeNormalizedHash(config.api_key) : "nokey";
-        return `openai-compat:${endpoint}:${model}:${keyHash}`;
-    }
-
-    return config.model.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL;
+function resolveProviderIdentity(config: EmbeddingConfig): string {
+    return getEmbeddingProviderIdentity(config);
 }
 
 function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
@@ -108,11 +97,11 @@ function getOrCreateProvider(): EmbeddingProvider | null {
 
 export function initializeEmbedding(config: EmbeddingConfig): void {
     const nextConfig = resolveEmbeddingConfig(config);
-    const nextModelId = resolveModelId(nextConfig);
+    const nextProviderIdentity = resolveProviderIdentity(nextConfig);
     const previousProvider = provider;
-    const previousModelId = previousProvider?.modelId ?? resolveModelId(embeddingConfig);
+    const previousProviderIdentity = previousProvider?.modelId ?? resolveProviderIdentity(embeddingConfig);
 
-    if (previousModelId === nextModelId) {
+    if (previousProviderIdentity === nextProviderIdentity) {
         embeddingConfig = nextConfig;
         return;
     }

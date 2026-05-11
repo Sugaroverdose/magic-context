@@ -1,4 +1,5 @@
 import { log } from "../../../shared/logger";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import type { EmbeddingProvider } from "./embedding-provider";
 
 interface OpenAICompatibleEmbeddingProviderOptions {
@@ -70,7 +71,12 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.endpoint = normalizeEndpoint(options.endpoint);
         this.model = options.model?.trim() ?? "";
         this.apiKey = options.apiKey?.trim() ?? "";
-        this.modelId = `openai-compat:${this.endpoint}:${this.model}`;
+        this.modelId = getEmbeddingProviderIdentity({
+            provider: "openai-compatible",
+            endpoint: this.endpoint,
+            model: this.model,
+            ...(this.apiKey ? { api_key: this.apiKey } : {}),
+        });
     }
 
     async initialize(): Promise<boolean> {

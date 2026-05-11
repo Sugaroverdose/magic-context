@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
 import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { log } from "../../../shared/logger";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import type { EmbeddingProvider } from "./embedding-provider";
 
 /**
@@ -230,7 +231,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
     constructor(model = DEFAULT_LOCAL_EMBEDDING_MODEL) {
         this.model = model;
-        this.modelId = `local:${model}`;
+        this.modelId = getEmbeddingProviderIdentity({ provider: "local", model });
     }
 
     async initialize(): Promise<boolean> {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../storage";
 import { cosineSimilarity } from "./cosine-similarity";
 import { _resetEmbeddingSweepGuard, embedAllUnembeddedMemories } from "./embedding";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 
@@ -67,7 +68,9 @@ describe("embedding module", () => {
         it("local provider uses default model id and starts unloaded", () => {
             const provider = new LocalEmbeddingProvider();
 
-            expect(provider.modelId).toBe("local:Xenova/all-MiniLM-L6-v2");
+            expect(provider.modelId).toBe(
+                getEmbeddingProviderIdentity({ provider: "local", model: "Xenova/all-MiniLM-L6-v2" }),
+            );
             expect(provider.isLoaded()).toBe(false);
         });
 
@@ -79,9 +82,35 @@ describe("embedding module", () => {
             });
 
             expect(provider.modelId).toBe(
-                "openai-compat:http://localhost:1234/v1:text-embedding-3-small",
+                getEmbeddingProviderIdentity({
+                    provider: "openai-compatible",
+                    endpoint: "http://localhost:1234/v1",
+                    model: "text-embedding-3-small",
+                    api_key: "present",
+                }),
             );
             expect(provider.isLoaded()).toBe(false);
+        });
+
+        it("openai-compatible identity tracks api-key presence but not secret value", () => {
+            const first = new OpenAICompatibleEmbeddingProvider({
+                endpoint: "http://localhost:1234/v1/",
+                model: "text-embedding-3-small",
+                apiKey: "secret-one",
+            });
+            const rotated = new OpenAICompatibleEmbeddingProvider({
+                endpoint: "http://localhost:1234/v1",
+                model: "text-embedding-3-small",
+                apiKey: "secret-two",
+            });
+            const anonymous = new OpenAICompatibleEmbeddingProvider({
+                endpoint: "http://localhost:1234/v1",
+                model: "text-embedding-3-small",
+            });
+
+            expect(first.modelId).toBe(rotated.modelId);
+            expect(first.modelId).not.toBe(anonymous.modelId);
+            expect(first.modelId).not.toContain("secret");
         });
     });
 
