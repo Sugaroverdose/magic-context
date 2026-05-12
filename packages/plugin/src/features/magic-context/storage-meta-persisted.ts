@@ -1,5 +1,6 @@
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { stableStringify } from '../../shared/stable-json';
 import { ensureSessionMetaRow } from "./storage-meta-shared";
 import type { ContextUsage } from "./types";
 
@@ -703,4 +704,134 @@ export function removeStrippedPlaceholderId(
 
     setStrippedPlaceholderIds(db, sessionId, ids);
     return true;
+}
+
+
+// ── Pending compaction marker state (plan v6 deferred drain) ──
+
+/**
+ * Payload stored in `session_meta.pending_compaction_marker_state` between
+ * a background historian/compressor publish and its consuming pass in the
+ * transform. The transform's drain step CAS-compares this blob against its
+ * own copy so concurrent publishers don't double-clear.
+ *
+ * `endMessageId` lets the consuming pass validate the marker target is still
+ * present (raw OpenCode message + compartment row), then write
+ * `PersistedCompactionMarkerState` and clear pending atomically.
+ *
+ * Stored as a JSON string via `stableStringify` for byte-identical CAS.
+ * Absence is signalled as SQL NULL, NEVER as `""` — the migration v13 column
+ * is intentionally declared without a DEFAULT clause and is excluded from
+ * `healNullTextColumns`.
+ */
+export interface PendingCompactionMarker {
+    /** Raw ordinal at which the marker should land. */
+    ordinal: number;
+    /** OpenCode message ID at the boundary (the user message just before the marker). */
+    endMessageId: string;
+    /** Unix ms of publication. Diagnostic only; used by doctor stale-pending checks. */
+    publishedAt: number;
+}
+
+/** Type guard for a parsed PendingCompactionMarker payload. */
+function isPendingCompactionMarker(value: unknown): value is PendingCompactionMarker {
+    return (
+        typeof value === "object" &&
+        value !== null &&
+        typeof (value as { ordinal?: unknown }).ordinal === "number" &&
+        typeof (value as { endMessageId?: unknown }).endMessageId === "string" &&
+        typeof (value as { publishedAt?: unknown }).publishedAt === "number"
+    );
+}
+
+export function getPendingCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+): PendingCompactionMarker | null {
+    const row = db
+        .prepare(
+            "SELECT pending_compaction_marker_state FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as { pending_compaction_marker_state?: string | null } | null;
+    const raw = row?.pending_compaction_marker_state;
+    // Defensive: NULL is the canonical absence, but legacy / cross-version
+    // writes might still put `""` here. Both treated as absent.
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (isPendingCompactionMarker(parsed)) {
+            return parsed;
+        }
+    } catch {
+        // Intentional: corrupt JSON → treat as absent. Next publish will
+        // overwrite cleanly; next consuming pass will read the new value.
+    }
+    return null;
+}
+
+/**
+ * Write or clear the pending-marker blob.
+ *
+ * Setting `state === null` writes SQL NULL (NOT `""`) so the absence sentinel
+ * stays consistent across upgrades. Stringification uses `stableStringify`
+ * so callers can later CAS-compare with the same serializer.
+ */
+export function setPendingCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+    state: PendingCompactionMarker | null,
+): void {
+    ensureSessionMetaRow(db, sessionId);
+    const blob = state ? stableStringify(state) : null;
+    db.prepare(
+        "UPDATE session_meta SET pending_compaction_marker_state = ? WHERE session_id = ?",
+    ).run(blob, sessionId);
+}
+
+/**
+ * Compare-and-swap clear: only writes NULL when the currently-stored blob
+ * matches `expected` byte-for-byte. Returns true if the CAS succeeded (we
+ * cleared the row), false if the row had drifted (another publish overwrote
+ * it; that publish's own consuming pass owns the heal).
+ *
+ * Used by the transform postprocess drain to clear pending without racing
+ * a newer background publish: if Publish A's drain reads blob_X then Publish
+ * B overwrites with blob_Y before A's CAS runs, A's CAS fails and B's
+ * pending stays intact for B's own next consuming pass.
+ */
+export function clearPendingCompactionMarkerStateIf(
+    db: Database,
+    sessionId: string,
+    expected: PendingCompactionMarker,
+): boolean {
+    const expectedBlob = stableStringify(expected);
+    const result = db
+        .prepare(
+            `UPDATE session_meta SET pending_compaction_marker_state = NULL
+             WHERE session_id = ? AND pending_compaction_marker_state = ?`,
+        )
+        .run(sessionId, expectedBlob);
+    return result.changes > 0;
+}
+
+/**
+ * List all sessions with a deferred marker still pending. Used at hook init
+ * to re-seed `deferredHistoryRefreshSessions` and
+ * `pendingMaterializationSessions` after a plugin restart — without this,
+ * a publish that ran before a crash would lose its deferred-history signal
+ * and the next transform pass would not consume the marker.
+ *
+ * Defensive `!= ''` filter: even though setter writes NULL, an earlier
+ * codepath or external write could have left an empty string. Treat both as
+ * absent.
+ */
+export function getSessionsWithPendingMarker(db: Database): string[] {
+    const rows = db
+        .prepare(
+            `SELECT session_id FROM session_meta
+             WHERE pending_compaction_marker_state IS NOT NULL
+               AND pending_compaction_marker_state != ''`,
+        )
+        .all() as Array<{ session_id: string }>;
+    return rows.map((r) => r.session_id);
 }

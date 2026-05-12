@@ -228,6 +228,31 @@ export function findBoundaryUserMessage(
     return bestMatch;
 }
 
+/**
+ * Check whether an OpenCode message ID still exists for a given session.
+ *
+ * Used by plan v6's deferred marker drain to validate that a deferred
+ * compaction-marker target hasn't been wiped by recomp / revert / partial
+ * recomp between publication and the consuming pass. Errors propagate
+ * (unlike the swallow-and-return-empty helpers in `read-session-db.ts`):
+ * the marker-manager wraps this call in its own try/catch so missing or
+ * locked OpenCode DBs become `retryable-failure` outcomes, not silent skips.
+ *
+ * Note: returns `{ id }` rather than a richer row shape because the only
+ * thing the caller needs is existence. If a future caller needs role or
+ * timestamps, widen the return type but keep the throw-on-failure contract.
+ */
+export function getOpenCodeMessageById(
+    sessionId: string,
+    messageId: string,
+): { id: string } | null {
+    const db = getWritableOpenCodeDb();
+    const row = db
+        .prepare(`SELECT id FROM message WHERE session_id = ? AND id = ? LIMIT 1`)
+        .get(sessionId, messageId) as { id: string } | null | undefined;
+    return row ?? null;
+}
+
 // ── Marker State ─────────────────────────────────────────────────
 
 interface CompactionMarkerState {

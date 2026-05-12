@@ -32,6 +32,26 @@ const MARKER_SUMMARY_TEXT =
     "[Compacted by magic-context — session history is managed by the plugin]";
 
 /**
+ * Outcome of `updateCompactionMarkerAfterPublication` after the plan-v6
+ * refactor. Currently UNUSED — the legacy `void`-returning entry point is
+ * still the call site for incremental, recomp, and partial-recomp runners.
+ * Step 2 of plan v6 wires this in.
+ *
+ * Drain policy (consumer reads this in transform-postprocess-phase):
+ *   - `applied` / `already-current` / `stale-skip` → CAS-clear pending
+ *   - `retryable-failure` → keep pending, do NOT consume
+ *     `deferredHistoryRefreshSessions`
+ */
+export type MarkerUpdateOutcome =
+    | { kind: "applied"; markerOrdinal: number }
+    | { kind: "already-current" }
+    | {
+          kind: "stale-skip";
+          reason: "compartment-removed" | "target-superseded";
+      }
+    | { kind: "retryable-failure"; error: Error };
+
+/**
  * After historian publishes new compartments, inject or move the compaction marker.
  * Only moves the boundary forward; summary text is a static placeholder.
  */

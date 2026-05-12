@@ -41,6 +41,7 @@
 import { createHash } from "node:crypto";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { Database, Statement } from "../../shared/sqlite";
+import { stableStringify } from '../../shared/stable-json';
 
 // Inner map: toolID → measured tokens for that tool (description + params).
 // Outer map: composite key → per-tool breakdown.
@@ -79,21 +80,6 @@ function fingerprintFor(description: string, parameters: unknown): string {
         .update("\0")
         .update(stableStringify(parameters))
         .digest("hex");
-}
-
-function stableStringify(value: unknown, seen = new WeakSet<object>()): string {
-    if (value === undefined) return "undefined";
-    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
-    if (seen.has(value)) return '"[Circular]"';
-    seen.add(value);
-    if (Array.isArray(value))
-        return `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
-    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
-        a.localeCompare(b),
-    );
-    return `{${entries
-        .map(([key, child]) => `${JSON.stringify(key)}:${stableStringify(child, seen)}`)
-        .join(",")}}`;
 }
 
 /**

@@ -55,7 +55,11 @@ describe("migration v12 — FK cascades and orphan cleanup", () => {
             initializeDatabase(db);
             db.exec("PRAGMA foreign_keys=OFF");
             runMigrations(db);
-            db.prepare("DELETE FROM schema_migrations WHERE version = 12").run();
+            // Delete v12 AND any later versions (e.g. v13+) so runMigrations
+            // sees `currentVersion < 12` and re-runs v12's cleanup logic.
+            // Without this, MAX(version) stays at the latest applied migration
+            // and the `m.version > currentVersion` filter skips v12.
+            db.prepare("DELETE FROM schema_migrations WHERE version >= 12").run();
 
             db.prepare(
                 "INSERT INTO memory_embeddings (memory_id, embedding, model_id) VALUES (999, ?, 'model')",
@@ -73,7 +77,8 @@ describe("migration v12 — FK cascades and orphan cleanup", () => {
             expect(count(db, "memory_embeddings")).toBe(0);
             expect(count(db, "git_commit_embeddings")).toBe(0);
 
-            db.prepare("DELETE FROM schema_migrations WHERE version = 12").run();
+            // Same forward-compatible deletion for the idempotency check.
+            db.prepare("DELETE FROM schema_migrations WHERE version >= 12").run();
             runMigrations(db);
 
             expect(count(db, "memory_embeddings")).toBe(0);

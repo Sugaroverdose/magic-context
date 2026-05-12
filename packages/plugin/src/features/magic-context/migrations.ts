@@ -496,6 +496,26 @@ const MIGRATIONS: Migration[] = [
             );
         },
     },
+    {
+        version: 13,
+        description: "Add pending_compaction_marker_state column for deferred marker drain",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            // CAS blob storing the deferred compaction-marker payload between
+            // background publish (compartment-runner-incremental) and the
+            // next consuming pass (transform-postprocess-phase). Intentionally
+            // declared WITHOUT `DEFAULT ''` so absence is signalled as SQL
+            // NULL — see `getSessionsWithPendingMarker` / `healNullTextColumns`
+            // contracts in storage-db.ts. Plan v6 §3.
+            if (!cols.some((c) => c.name === "pending_compaction_marker_state")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN pending_compaction_marker_state TEXT",
+                );
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

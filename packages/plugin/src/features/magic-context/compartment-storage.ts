@@ -188,6 +188,30 @@ export function getLastCompartmentEndMessage(db: Database, sessionId: string): n
     return row?.max_end ?? -1;
 }
 
+/**
+ * Look up compartments whose stored `end_message_id` matches the given
+ * OpenCode message id. Returns an ARRAY — schema only enforces
+ * `UNIQUE(session_id, sequence)`, NOT `(session_id, end_message_id)`, so
+ * a future bug could in principle leave two rows sharing a boundary. The
+ * marker drain's `validatePendingTarget` treats `length > 1` as a schema
+ * invariant violation and bails to stale-skip (plan v6 section 5).
+ *
+ * Normal path: exactly one match → caller treats it as the target row.
+ */
+export function getCompartmentsByEndMessageId(
+    db: Database,
+    sessionId: string,
+    endMessageId: string,
+): Compartment[] {
+    const rows = db
+        .prepare(
+            "SELECT * FROM compartments WHERE session_id = ? AND end_message_id = ? ORDER BY sequence ASC",
+        )
+        .all(sessionId, endMessageId)
+        .filter(isCompartmentRow);
+    return rows.map(toCompartment);
+}
+
 export function replaceAllCompartments(
     db: Database,
     sessionId: string,

@@ -292,7 +292,13 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       system_prompt_hash TEXT DEFAULT '',
       memory_block_cache TEXT DEFAULT '',
       memory_block_count INTEGER DEFAULT 0,
-      memory_block_ids TEXT DEFAULT ''
+      memory_block_ids TEXT DEFAULT '',
+      -- pending_compaction_marker_state: intentionally NULLABLE without a
+      -- default. Absence of a deferred marker is SQL NULL; presence is a
+      -- valid JSON blob written via setPendingCompactionMarkerState.
+      -- Excluded from healNullTextColumns. Readers filter IS NOT NULL AND
+      -- != empty-string defensively. Plan v6 section 3.
+      pending_compaction_marker_state TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
@@ -421,6 +427,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // request, fire historian + aggressive drops) on its next transform pass.
     // Cleared once recovery succeeds.
     ensureColumn(db, "session_meta", "needs_emergency_recovery", "INTEGER DEFAULT 0");
+    // Deferred compaction-marker drain (plan v6). Intentionally NO DEFAULT
+    // clause — absence is SQL NULL, presence is a JSON blob. Reader must
+    // filter `IS NOT NULL AND != ''`. This column MUST NOT be added to
+    // `healNullTextColumns` (NULL is the load-bearing absence sentinel).
+    ensureColumn(db, "session_meta", "pending_compaction_marker_state", "TEXT");
 
     // NULL-column healing runs as migration v5 (one-shot at schema upgrade).
     // Previously it ran on every plugin startup — each heal function issued
