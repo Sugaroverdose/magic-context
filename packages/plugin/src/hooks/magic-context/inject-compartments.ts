@@ -19,11 +19,12 @@ import { formatDate } from "./temporal-awareness";
 export interface PreparedCompartmentInjection {
     block: string;
     compartmentEndMessage: number;
-    compartmentEndMessageId: string;
+    compartmentEndMessageId: string | null;
     compartmentCount: number;
     skippedVisibleMessages: number;
     factCount: number;
     memoryCount: number;
+    rebuiltFromDb: boolean;
 }
 
 /**
@@ -42,7 +43,7 @@ export interface PreparedCompartmentInjection {
  */
 const INJECTION_CACHE_MAX = 100;
 type InjectionCacheEntry =
-    | { kind: "empty"; compartmentEndMessageId: ""; renderedBytes: 0 }
+    | { kind: "empty"; compartmentEndMessageId: string; renderedBytes: number }
     | { kind: "populated"; injection: PreparedCompartmentInjection };
 
 const injectionCache = new BoundedSessionMap<InjectionCacheEntry>(INJECTION_CACHE_MAX);
@@ -219,27 +220,34 @@ export function prepareCompartmentInjection(
             return null;
         }
         const prepared = cached.injection;
-        // Re-do the splice with the cached boundary (messages are rebuilt fresh each pass)
-        if (prepared.compartmentEndMessageId.length > 0) {
-            const cutoffIndex = messages.findIndex(
-                (message) => message.info.id === prepared.compartmentEndMessageId,
+        if (prepared.compartmentEndMessageId === null) {
+            sessionLog(
+                sessionId,
+                "compartment injection cache in degraded mode (null boundary), forcing rebuild",
             );
-            if (cutoffIndex >= 0) {
-                const remaining = messages.slice(cutoffIndex + 1);
-                messages.splice(0, messages.length, ...remaining);
-            } else {
-                // Boundary message not in array — covered messages were already
-                // trimmed by OpenCode (compaction, old history not sent). The splice
-                // is effectively a no-op because there's nothing to splice out.
-                // Keep the cached injection so <session-history> stays stable on
-                // defer passes instead of alternating between injected/not-injected.
-                sessionLog(
-                    sessionId,
-                    `compartment injection: cached boundary ${prepared.compartmentEndMessageId} not in messages (already trimmed), reusing cache`,
+        } else {
+            // Re-do the splice with the cached boundary (messages are rebuilt fresh each pass)
+            if (prepared.compartmentEndMessageId.length > 0) {
+                const cutoffIndex = messages.findIndex(
+                    (message) => message.info.id === prepared.compartmentEndMessageId,
                 );
+                if (cutoffIndex >= 0) {
+                    const remaining = messages.slice(cutoffIndex + 1);
+                    messages.splice(0, messages.length, ...remaining);
+                } else {
+                    // Boundary message not in array — covered messages were already
+                    // trimmed by OpenCode (compaction, old history not sent). The splice
+                    // is effectively a no-op because there's nothing to splice out.
+                    // Keep the cached injection so <session-history> stays stable on
+                    // defer passes instead of alternating between injected/not-injected.
+                    sessionLog(
+                        sessionId,
+                        `compartment injection: cached boundary ${prepared.compartmentEndMessageId} not in messages (already trimmed), reusing cache`,
+                    );
+                }
             }
+            return { ...prepared, rebuiltFromDb: false };
         }
-        return prepared;
     }
 
     const compartments = getCompartments(db, sessionId);
@@ -344,6 +352,7 @@ export function prepareCompartmentInjection(
             skippedVisibleMessages: 0,
             factCount: facts.length,
             memoryCount,
+            rebuiltFromDb: true,
         };
         injectionCache.set(sessionId, { kind: "populated", injection: result });
         return result;
@@ -370,6 +379,7 @@ export function prepareCompartmentInjection(
             skippedVisibleMessages: 0,
             factCount: facts.length,
             memoryCount,
+            rebuiltFromDb: true,
         };
         injectionCache.set(sessionId, { kind: "populated", injection: result });
         return result;
@@ -381,16 +391,22 @@ export function prepareCompartmentInjection(
         skippedVisibleMessages = cutoffIndex + 1;
         const remaining = messages.slice(cutoffIndex + 1);
         messages.splice(0, messages.length, ...remaining);
+    } else {
+        sessionLog(
+            sessionId,
+            `compartment injection entering degraded mode: boundary ${lastEndMessageId} not in visible messages`,
+        );
     }
 
     const result: PreparedCompartmentInjection = {
         block,
         compartmentEndMessage: lastEnd,
-        compartmentEndMessageId: lastEndMessageId,
+        compartmentEndMessageId: cutoffIndex >= 0 ? lastEndMessageId : null,
         compartmentCount: compartments.length,
         skippedVisibleMessages,
         factCount: facts.length,
         memoryCount,
+        rebuiltFromDb: true,
     };
     injectionCache.set(sessionId, { kind: "populated", injection: result });
     return result;

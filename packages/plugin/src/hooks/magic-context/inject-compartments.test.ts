@@ -238,7 +238,19 @@ describe("prepareCompartmentInjection — transition from empty to compartment",
             false,
             PROJECT_PATH,
         );
-        expect(cached).toBe(busted);
+        // Replayed-from-cache output must match the busted output structurally
+        // on every field except `rebuiltFromDb` — that flag intentionally
+        // differs (true on bust, false on replay) as a per-pass provenance
+        // signal consumed by the postprocess drain. Plan v6.
+        expect(busted?.rebuiltFromDb).toBe(true);
+        expect(cached?.rebuiltFromDb).toBe(false);
+        expect(cached?.block).toBe(busted?.block);
+        expect(cached?.compartmentEndMessage).toBe(busted?.compartmentEndMessage);
+        expect(cached?.compartmentEndMessageId).toBe(busted?.compartmentEndMessageId);
+        expect(cached?.compartmentCount).toBe(busted?.compartmentCount);
+        expect(cached?.skippedVisibleMessages).toBe(busted?.skippedVisibleMessages);
+        expect(cached?.factCount).toBe(busted?.factCount);
+        expect(cached?.memoryCount).toBe(busted?.memoryCount);
         // Empty boundary id ⇒ no splice
         expect(deferMessages.length).toBe(2);
     });

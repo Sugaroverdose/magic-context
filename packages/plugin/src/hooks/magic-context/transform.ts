@@ -698,6 +698,14 @@ export function createTransform(deps: TransformDeps) {
             // re-fired prepareCompartmentInjection with isCacheBusting=true
             // and burned cache reuse for nothing.
             if (isCacheBusting) {
+                // Cache-busting pass invoked prepareCompartmentInjection. Treat
+                // this as a history rebuild regardless of whether the prepare
+                // returned a populated injection — even a null result (no
+                // compartments yet) consumes the deferred-history signal
+                // because the next pass will get a fresh prepare. The
+                // separate `compartmentInjectionRebuiltFromDb` flag (plan v6)
+                // exposes the narrower "real rebuild happened" signal to
+                // postprocess for the marker-drain decision.
                 rebuiltHistoryFromInitialPrepare = true;
             }
             if (historyRefreshExplicitBeforePrepare) {
@@ -1084,6 +1092,8 @@ export function createTransform(deps: TransformDeps) {
             phaseJustAwaitedPublication: compartmentPhase.justAwaitedPublication,
             compartmentInProgress,
             historyRefreshExplicitBeforePrepare,
+            compartmentInjectionRebuiltFromDb:
+                pendingCompartmentInjection?.rebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare,
             historyRebuiltThisPass,
             canConsumeDeferredLate,
@@ -1109,6 +1119,7 @@ export function createTransform(deps: TransformDeps) {
             forceMaterializationPercentage: FORCE_MATERIALIZE_PERCENTAGE,
             hasRecentReduceCall,
             projectPath: deps.projectPath,
+            sessionDirectory,
             autoSearch: deps.autoSearch,
             // Only forward caveman config when ctx_reduce is disabled — the
             // feature replaces manual ctx_reduce text-dropping for users

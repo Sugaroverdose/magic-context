@@ -9,7 +9,11 @@ import { clearCompressionDepth } from "../../features/magic-context/compression-
 import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
-import { updateSessionMeta } from "../../features/magic-context/storage-meta";
+import {
+    clearPendingCompactionMarkerStateIf,
+    getPendingCompactionMarkerState,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta";
 import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
@@ -138,7 +142,11 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
             }
 
-            // Update compaction marker after recomp if experimental flag is enabled
+            // Update compaction marker after recomp if experimental flag is enabled.
+            // Recomp is explicit (eagerly clears injection cache), so the marker
+            // applies directly here. Plan v6 §6: also CAS-clear any stale pending
+            // marker that a prior in-flight incremental publish may have left
+            // behind — recomp now owns the boundary.
             if (deps.experimentalCompactionMarkers && lastCompartmentEnd > 0) {
                 updateCompactionMarkerAfterPublication(
                     db,
@@ -146,6 +154,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     lastCompartmentEnd,
                     deps.directory,
                 );
+                const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                if (stalePending) {
+                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                }
             }
 
             return [

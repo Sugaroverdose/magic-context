@@ -15,10 +15,15 @@ import {
 import { clearCompressionDepthRange } from "../../features/magic-context/compression-depth-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
-import { updateSessionMeta } from "../../features/magic-context/storage-meta";
+import {
+    clearPendingCompactionMarkerStateIf,
+    getPendingCompactionMarkerState,
+    updateSessionMeta,
+} from "../../features/magic-context/storage-meta";
 import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
+import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import { buildExistingStateXml } from "./compartment-runner-state-xml";
@@ -327,6 +332,22 @@ export async function executePartialRecompInternal(
             deps.onCompartmentStatePublished?.(sessionId);
 
             const lastEnd = merged[merged.length - 1]?.endMessage ?? snapEnd;
+            // Plan v6 §6: partial recomp is explicit (eager cache clear). Apply
+            // the marker directly here AND CAS-clear any stale pending blob a
+            // prior in-flight incremental publish may have left behind — partial
+            // recomp now owns the boundary up to lastEnd.
+            if (deps.experimentalCompactionMarkers && lastEnd > 0) {
+                updateCompactionMarkerAfterPublication(
+                    db,
+                    sessionId,
+                    lastEnd,
+                    deps.directory,
+                );
+                const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                if (stalePending) {
+                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                }
+            }
             return { compartmentCount: merged.length, lastEndMessage: lastEnd };
         }
 

@@ -55,6 +55,14 @@ export interface CompartmentRunnerDeps {
      * later materializing pass consumes the deferred refresh.
      */
     preserveInjectionCacheUntilConsumed?: boolean;
+    /**
+     * Plan v6 §4: Called when historian/recomp publication wrote a pending
+     * compaction-marker row in-transaction (deferring marker application to a
+     * later materializing pass). Consumer (hook.ts) seeds
+     * `liveSessionState.deferredHistoryRefreshSessions` so the next consuming
+     * postprocess pass drains the pending blob and applies the marker.
+     */
+    onDeferredMarkerPending?: (sessionId: string) => void;
 }
 
 export interface CandidateCompartment {

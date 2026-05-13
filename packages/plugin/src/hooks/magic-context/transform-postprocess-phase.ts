@@ -1,7 +1,9 @@
 import {
     type ContextDatabase,
+    clearPendingCompactionMarkerStateIf,
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
+    getPendingCompactionMarkerState,
     getPendingOps,
     getPersistedStickyTurnReminder,
     getPersistedTodoSyntheticAnchor,
@@ -17,6 +19,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { applyContextNudge } from "./apply-context-nudge";
 import { runAutoSearchHint } from "./auto-search-runner";
+import { applyDeferredCompactionMarker } from "./compaction-marker-manager";
 import { getActiveCompartmentRun } from "./compartment-runner";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
@@ -60,6 +63,13 @@ import {
 } from "./transform-operations";
 import { logTransformTiming } from "./transform-stage-logger";
 
+const DEGRADE_CACHE_WARNING_THRESHOLD = 10;
+const degradedCacheCountBySession = new Map<string, number>();
+
+export function resetDegradedCacheCount(sessionId: string): void {
+    degradedCacheCountBySession.delete(sessionId);
+}
+
 interface RunPostTransformPhaseArgs {
     sessionId: string;
     db: ContextDatabase;
@@ -77,6 +87,7 @@ interface RunPostTransformPhaseArgs {
     phaseJustAwaitedPublication: boolean;
     compartmentInProgress: boolean;
     historyRefreshExplicitBeforePrepare: boolean;
+    compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
     historyRebuiltThisPass: boolean;
     canConsumeDeferredLate: boolean;
@@ -113,6 +124,7 @@ interface RunPostTransformPhaseArgs {
     forceMaterializationPercentage: number;
     hasRecentReduceCall: boolean;
     projectPath?: string;
+    sessionDirectory?: string;
     /** Experimental auto-search: when enabled, runs ctx_search on the latest
      *  user prompt and appends a compact fragment hint. */
     autoSearch?: {
@@ -859,12 +871,72 @@ export async function runPostTransformPhase(
         !deferredMaterializationWasPending ||
         explicitMaterializedSuccessfully ||
         deferredMaterializedSuccessfully;
-    const deferredHistoryDrainEligible =
+    const historyWasConsumedThisPass =
         args.historyRebuiltThisPass &&
         (args.canConsumeDeferredLate ||
             args.phaseJustAwaitedPublication ||
             explicitRebuildHappened) &&
         materializationSatisfied;
+
+    // Plan v6 §3 degraded-cache counter: track consecutive null-boundary
+    // rebuilds. Independent of the drain logic below.
+    if (args.compartmentInjectionRebuiltFromDb && args.pendingCompartmentInjection) {
+        if (args.pendingCompartmentInjection.compartmentEndMessageId === null) {
+            const nextCount = (degradedCacheCountBySession.get(args.sessionId) ?? 0) + 1;
+            degradedCacheCountBySession.set(args.sessionId, nextCount);
+            if (nextCount === DEGRADE_CACHE_WARNING_THRESHOLD) {
+                sessionLog(
+                    args.sessionId,
+                    `WARNING: compartment injection cache has rebuilt with a degraded null boundary ${nextCount} consecutive times; investigate missing boundary messages`,
+                );
+            }
+        } else {
+            degradedCacheCountBySession.delete(args.sessionId);
+        }
+    }
+
+    // Plan v6 §3 deferred-marker drain. Runs when v12's
+    // `historyWasConsumedThisPass` is true AND we hold the deferred-history
+    // signal AND a pending marker blob exists. The blob is the in-tx record
+    // written by the incremental runner at publication time (plan v6 §4); the
+    // drain finally applies the marker movement to OpenCode's DB.
+    //
+    // The v12 drain of `deferredHistoryRefreshSessions` still fires below — we
+    // only conditionally suppress it when the marker apply returned
+    // `retryable-failure`, so the next consuming pass retries.
+    let suppressV12HistoryDrain = false;
+    if (
+        historyWasConsumedThisPass &&
+        args.deferredHistoryRefreshSessions.has(args.sessionId)
+    ) {
+        const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+        if (pending) {
+            const outcome = applyDeferredCompactionMarker(
+                args.db,
+                args.sessionId,
+                pending,
+                args.sessionDirectory,
+            );
+            switch (outcome.kind) {
+                case "applied":
+                case "already-current":
+                case "stale-skip":
+                    clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending);
+                    // v12 drain proceeds normally below.
+                    break;
+                case "retryable-failure":
+                    sessionLog(
+                        args.sessionId,
+                        "compaction-marker drain: retryable failure; preserving deferred history refresh signal",
+                        outcome.error,
+                    );
+                    suppressV12HistoryDrain = true;
+                    break;
+            }
+        }
+    }
+
+    const deferredHistoryDrainEligible = historyWasConsumedThisPass && !suppressV12HistoryDrain;
     if (deferredHistoryDrainEligible) {
         args.deferredHistoryRefreshSessions.delete(args.sessionId);
     }
