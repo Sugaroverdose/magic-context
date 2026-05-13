@@ -21,7 +21,7 @@ NC='\033[0m'
 PASS=0
 FAIL=0
 DB_PATH="$HOME/.local/share/cortexkit/magic-context/context.db"
-PLUGIN_LOG="$(node -e 'console.log(require("os").tmpdir())')/magic-context.log"
+PLUGIN_LOG="$(node -e 'console.log(require("os").tmpdir())')/opencode/magic-context/magic-context.log"
 
 check() {
     local label="$1"
