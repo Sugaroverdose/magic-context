@@ -298,9 +298,12 @@ export interface DbCacheEvent {
   cache_write: number;
   total_tokens: number;
   hit_ratio: number;
-  severity: "stable" | "info" | "warning" | "bust" | "full_bust";
+  severity: "stable" | "info" | "warning" | "bust" | "full_bust" | "warming";
   cause: string | null;
   agent: string | null;
+  finish?: string;
+  turn_id: string;
+  is_turn_start: boolean;
 }
 
 export interface SessionCacheStats {

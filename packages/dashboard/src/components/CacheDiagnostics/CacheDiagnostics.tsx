@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   formatDateTime,
   getCacheEventsFromDb,
@@ -47,6 +47,22 @@ export default function CacheDiagnostics() {
   const [harnessFilter, setHarnessFilter] = createSignal<HarnessFilter>("all");
   const [hideSubagents, setHideSubagents] = createSignal(true);
   const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
+  const [expandedTurns, setExpandedTurns] = createSignal<Set<string>>(new Set());
+
+  interface CacheTurn {
+    turnId: string;
+    sessionId: string;
+    harness: Harness;
+    startTime: number;
+    endTime: number;
+    events: DbCacheEvent[];
+    totalCacheWrite: number;
+    firstCacheRead: number;
+    lastCacheRead: number;
+    worstSeverity: DbCacheEvent["severity"];
+    totalInputTokens: number;
+    agent: string | null;
+  }
 
   // The Rust backend windows by session: each session_id gets up to PER_SESSION
   // recent events, capped globally at PER_SESSION × 10. With this client-side
@@ -319,6 +335,52 @@ export default function CacheDiagnostics() {
       : all;
   };
 
+  const cacheTurns = createMemo(() => {
+    const turns: CacheTurn[] = [];
+    const map = new Map<string, CacheTurn>();
+    for (const event of filteredEvents()) {
+      let turn = map.get(event.turn_id);
+      if (!turn) {
+        turn = {
+          turnId: event.turn_id,
+          sessionId: event.session_id,
+          harness: event.harness,
+          startTime: event.timestamp,
+          endTime: event.timestamp,
+          events: [],
+          totalCacheWrite: 0,
+          firstCacheRead: event.cache_read,
+          lastCacheRead: event.cache_read,
+          worstSeverity: event.severity,
+          totalInputTokens: 0,
+          agent: event.agent,
+        };
+        map.set(event.turn_id, turn);
+        turns.push(turn);
+      }
+      turn.events.push(event);
+      turn.endTime = Math.max(turn.endTime, event.timestamp);
+      turn.totalCacheWrite += event.cache_write;
+      turn.lastCacheRead = event.cache_read;
+      turn.totalInputTokens += event.input_tokens;
+    }
+    // Sort by start time descending (newest first) so the list is chronological
+    // when reversed below, matching the original event order.
+    return turns.sort((a, b) => a.startTime - b.startTime);
+  });
+
+  const toggleTurn = (turnId: string) => {
+    setExpandedTurns((prev) => {
+      const next = new Set(prev);
+      if (next.has(turnId)) {
+        next.delete(turnId);
+      } else {
+        next.add(turnId);
+      }
+      return next;
+    });
+  };
+
   const severityIcon = (severity: string) => {
     switch (severity) {
       case "stable":
@@ -327,6 +389,8 @@ export default function CacheDiagnostics() {
         return "🔵";
       case "warning":
         return "🟡";
+      case "warming":
+        return "⚪";
       case "bust":
         return "🔴";
       case "full_bust":
@@ -529,7 +593,7 @@ export default function CacheDiagnostics() {
       <div class="scroll-area">
         <Show when={!loading()} fallback={<div class="empty-state">Loading cache events...</div>}>
           <Show
-            when={filteredEvents().length > 0}
+            when={cacheTurns().length > 0}
             fallback={
               <div class="empty-state">
                 <span class="empty-state-icon">📊</span>
@@ -539,23 +603,26 @@ export default function CacheDiagnostics() {
             }
           >
             <div class="list-gap">
-              <For each={[...filteredEvents()].reverse()}>
-                {(event) => {
-                  const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
+              <For each={[...cacheTurns()].reverse()}>
+                {(turn) => {
+                  const first = turn.events[0];
+                  const isExpanded = () => expandedTurns().has(turn.turnId);
+                  const totalPrompt =
+                    first.cache_read + turn.totalCacheWrite + first.input_tokens;
+                  const turnHitRatio =
+                    totalPrompt > 0 ? first.cache_read / totalPrompt : first.hit_ratio;
                   return (
-                    <div class="card">
-                      <div
-                        style={{
-                          display: "flex",
-                          "align-items": "center",
-                          gap: "8px",
-                          "margin-bottom": "4px",
-                          "min-width": "0",
-                        }}
+                    <div class="card cache-turn-row">
+                      <button
+                        type="button"
+                        class="cache-turn-header"
+                        onClick={() => toggleTurn(turn.turnId)}
                       >
-                        <span style={{ "flex-shrink": "0" }}>{severityIcon(event.severity)}</span>
+                        <span style={{ "flex-shrink": "0" }}>
+                          {severityIcon(turn.worstSeverity)}
+                        </span>
                         <span style={{ "flex-shrink": "0", display: "inline-flex" }}>
-                          <HarnessBadge harness={event.harness} />
+                          <HarnessBadge harness={turn.harness} />
                         </span>
                         <span
                           class="mono"
@@ -565,18 +632,33 @@ export default function CacheDiagnostics() {
                             "flex-shrink": "0",
                           }}
                         >
-                          {formatDateTime(event.timestamp)}
+                          {formatDateTime(turn.startTime)}
                         </span>
                         <span
-                          class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}
+                          class={`pill ${
+                            turn.worstSeverity === "stable"
+                              ? "green"
+                              : turn.worstSeverity === "info"
+                                ? "blue"
+                                : turn.worstSeverity === "warning"
+                                  ? "amber"
+                                  : turn.worstSeverity === "warming"
+                                    ? "gray"
+                                    : "red"
+                          }`}
                           style={{ "flex-shrink": "0" }}
                         >
-                          {event.severity === "full_bust"
+                          {turn.worstSeverity === "full_bust"
                             ? "FULL BUST"
-                            : event.severity === "info"
+                            : turn.worstSeverity === "info"
                               ? "NEW SESSION"
-                              : event.severity.toUpperCase()}
+                              : turn.worstSeverity.toUpperCase()}
                         </span>
+                        <Show when={turn.events.length > 1}>
+                          <span class="pill gray" style={{ "flex-shrink": "0" }}>
+                            {turn.events.length} steps
+                          </span>
+                        </Show>
                         <span
                           class="mono"
                           style={{
@@ -588,29 +670,37 @@ export default function CacheDiagnostics() {
                             "white-space": "nowrap",
                             flex: "1 1 auto",
                           }}
-                          title={resolveTitle(event.harness, event.session_id)}
+                          title={resolveTitle(turn.harness, turn.sessionId)}
                         >
-                          {resolveTitle(event.harness, event.session_id)}
+                          {resolveTitle(turn.harness, turn.sessionId)}
                         </span>
-                      </div>
+                        <span
+                          class="cache-turn-chevron"
+                          style={{
+                            transform: isExpanded() ? "rotate(180deg)" : "rotate(0deg)",
+                          }}
+                        >
+                          ▼
+                        </span>
+                      </button>
                       <div class="card-meta" style={{ gap: "12px" }}>
                         <span
                           class="mono"
-                          style={{ color: hitColor(event.hit_ratio), "font-weight": "600" }}
+                          style={{ color: hitColor(turnHitRatio), "font-weight": "600" }}
                         >
-                          {(event.hit_ratio * 100).toFixed(1)}%
+                          {(turnHitRatio * 100).toFixed(1)}%
                         </span>
                         <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
-                        <span class="mono">cached={event.cache_read.toLocaleString()}</span>
-                        <span class="mono">new={event.cache_write.toLocaleString()}</span>
+                        <span class="mono">cached={first.cache_read.toLocaleString()}</span>
+                        <span class="mono">new={turn.totalCacheWrite.toLocaleString()}</span>
                         <div class="cache-bar">
                           <div
-                            class={`cache-bar-fill ${severityBarClass(event.hit_ratio)}`}
-                            style={{ width: `${event.hit_ratio * 100}%` }}
+                            class={`cache-bar-fill ${severityBarClass(turnHitRatio)}`}
+                            style={{ width: `${turnHitRatio * 100}%` }}
                           />
                         </div>
                       </div>
-                      <Show when={event.cause}>
+                      <Show when={first.cause}>
                         <div
                           style={{
                             "margin-top": "6px",
@@ -618,7 +708,93 @@ export default function CacheDiagnostics() {
                             color: "var(--amber)",
                           }}
                         >
-                          Cause: {event.cause}
+                          Cause: {first.cause}
+                        </div>
+                      </Show>
+                      <Show when={isExpanded()}>
+                        <div class="cache-turn-expanded">
+                          <For each={turn.events}>
+                            {(event) => {
+                              const evTotalPrompt =
+                                event.cache_read + event.cache_write + event.input_tokens;
+                              return (
+                                <div class="cache-step-row">
+                                  <div class="cache-step-header">
+                                    <span style={{ "flex-shrink": "0" }}>
+                                      {severityIcon(event.severity)}
+                                    </span>
+                                    <span
+                                      class="mono"
+                                      style={{
+                                        "font-size": "11px",
+                                        color: "var(--text-secondary)",
+                                        "flex-shrink": "0",
+                                      }}
+                                    >
+                                      {formatDateTime(event.timestamp)}
+                                    </span>
+                                    <span
+                                      class={`pill ${
+                                        event.severity === "stable"
+                                          ? "green"
+                                          : event.severity === "info"
+                                            ? "blue"
+                                            : event.severity === "warning"
+                                              ? "amber"
+                                              : event.severity === "warming"
+                                                ? "gray"
+                                                : "red"
+                                      }`}
+                                      style={{ "flex-shrink": "0" }}
+                                    >
+                                      {event.severity === "full_bust"
+                                        ? "FULL BUST"
+                                        : event.severity === "info"
+                                          ? "NEW SESSION"
+                                          : event.severity.toUpperCase()}
+                                    </span>
+                                  </div>
+                                  <div class="cache-step-meta">
+                                    <span
+                                      class="mono"
+                                      style={{
+                                        color: hitColor(event.hit_ratio),
+                                        "font-weight": "600",
+                                      }}
+                                    >
+                                      {(event.hit_ratio * 100).toFixed(1)}%
+                                    </span>
+                                    <span class="mono">
+                                      prompt={evTotalPrompt.toLocaleString()}
+                                    </span>
+                                    <span class="mono">
+                                      cached={event.cache_read.toLocaleString()}
+                                    </span>
+                                    <span class="mono">
+                                      new={event.cache_write.toLocaleString()}
+                                    </span>
+                                    <div class="cache-bar">
+                                      <div
+                                        class={`cache-bar-fill ${severityBarClass(event.hit_ratio)}`}
+                                        style={{ width: `${event.hit_ratio * 100}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <Show when={event.cause}>
+                                    <div
+                                      style={{
+                                        "margin-top": "4px",
+                                        "font-size": "11px",
+                                        color: "var(--amber)",
+                                      }}
+                                    >
+                                      Cause: {event.cause}
+                                    </div>
+                                  </Show>
+                                </div>
+                              );
+                            }}
+                          </For>
                         </div>
                       </Show>
                     </div>

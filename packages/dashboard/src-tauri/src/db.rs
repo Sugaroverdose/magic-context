@@ -375,6 +375,9 @@ pub struct DbCacheEvent {
     pub severity: String,
     pub cause: Option<String>,
     pub agent: Option<String>,
+    pub finish: Option<String>,
+    pub turn_id: String,
+    pub is_turn_start: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -401,6 +404,7 @@ struct RawDbCacheEvent {
     cache_write: i64,
     total_tokens: i64,
     agent: Option<String>,
+    finish: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +678,7 @@ fn load_raw_db_cache_events(
                        COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
                        COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
                        CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent,
+                       CAST(json_extract(m.data, '$.finish') AS TEXT) AS finish,
                        ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.time_created DESC) AS rn
                 FROM message m
                 WHERE json_extract(m.data, '$.role') = 'assistant'
@@ -681,7 +686,7 @@ fn load_raw_db_cache_events(
                   AND m.time_created > ?1
             )
             SELECT msg_id, session_id, time_created, input_tokens, cache_read,
-                   cache_write, total_tokens, agent
+                   cache_write, total_tokens, agent, finish
             FROM ranked
             WHERE rn <= ?2
             ORDER BY time_created DESC
@@ -703,13 +708,14 @@ fn load_raw_db_cache_events(
                        COALESCE(CAST(json_extract(m.data, '$.tokens.cache.write') AS INTEGER), 0) AS cache_write,
                        COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) AS total_tokens,
                        CAST(json_extract(m.data, '$.agent') AS TEXT) AS agent,
+                       CAST(json_extract(m.data, '$.finish') AS TEXT) AS finish,
                        ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.time_created DESC) AS rn
                 FROM message m
                 WHERE json_extract(m.data, '$.role') = 'assistant'
                   AND COALESCE(CAST(json_extract(m.data, '$.tokens.total') AS INTEGER), 0) > 0
             )
             SELECT msg_id, session_id, time_created, input_tokens, cache_read,
-                   cache_write, total_tokens, agent
+                   cache_write, total_tokens, agent, finish
             FROM ranked
             WHERE rn <= ?1
             ORDER BY time_created DESC
@@ -734,6 +740,7 @@ fn load_raw_db_cache_events(
             cache_write: row.get(5)?,
             total_tokens: row.get(6)?,
             agent: row.get(7)?,
+            finish: row.get(8)?,
         })
     })?;
 
@@ -779,6 +786,7 @@ fn load_raw_pi_cache_events(limit: usize, since_timestamp: Option<i64>) -> Vec<R
                     cache_write: usage.cache_write as i64,
                     total_tokens: usage.total as i64,
                     agent: None,
+                    finish: message.stop_reason.clone(),
                 })
             })
             .collect();
@@ -982,7 +990,66 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             severity,
             cause,
             agent: row.agent,
+            finish: row.finish,
+            turn_id: String::new(),
+            is_turn_start: false,
         });
+    }
+
+    // ── Turn grouping & warming severity ────────────────────────────
+    // Walk chronological events per session. A new turn starts when:
+    //   - this is the first event for the session, OR
+    //   - the PREVIOUS event in the same session had finish != "tool-calls"
+    // Continuation events that show cache_read < 90% of expected
+    // (previous.cache_read + previous.cache_write) are downgraded to "warming".
+    //
+    // Inputs to this function may arrive in any order; the severity-loop above
+    // happens to consume rows newest→oldest via .rev(), producing a vec that
+    // is NOT guaranteed chronological. Sort ascending by timestamp here so
+    // "previous" really means "earlier in time" before computing turn IDs.
+    chronological.sort_by_key(|e| e.timestamp);
+
+    let mut last_finish_by_session: HashMap<(Harness, String), String> = HashMap::new();
+    let mut current_turn_id_by_session: HashMap<(Harness, String), String> = HashMap::new();
+    let mut prev_event_idx_by_session: HashMap<(Harness, String), usize> = HashMap::new();
+
+    for i in 0..chronological.len() {
+        let session_key = (chronological[i].harness, chronological[i].session_id.clone());
+        let prev_finish = last_finish_by_session.get(&session_key).cloned();
+        let is_new_turn = match prev_finish.as_deref() {
+            None => true,
+            Some("tool-calls") => false,
+            Some(_) => true,
+        };
+
+        chronological[i].is_turn_start = is_new_turn;
+        if is_new_turn {
+            chronological[i].turn_id = chronological[i].message_id.clone();
+            current_turn_id_by_session.insert(session_key.clone(), chronological[i].message_id.clone());
+        } else {
+            chronological[i].turn_id = current_turn_id_by_session
+                .get(&session_key)
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        // Warming check for continuation events
+        if !is_new_turn {
+            if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
+                let prev = &chronological[prev_idx];
+                let expected = prev.cache_read + prev.cache_write;
+                if expected > 0 && chronological[i].cache_read < (expected as f64 * 0.9) as i64 {
+                    if chronological[i].severity == "warning"
+                        || chronological[i].severity == "bust"
+                    {
+                        chronological[i].severity = "warming".to_string();
+                    }
+                }
+            }
+        }
+
+        prev_event_idx_by_session.insert(session_key.clone(), i);
+        last_finish_by_session.insert(session_key, chronological[i].finish.clone().unwrap_or_default());
     }
 
     chronological
@@ -1111,7 +1178,8 @@ fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> 
                 COALESCE(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER), 0),
                 COALESCE(CAST(json_extract(data, '$.tokens.cache.write') AS INTEGER), 0),
                 COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0),
-                CAST(json_extract(data, '$.agent') AS TEXT)
+                CAST(json_extract(data, '$.agent') AS TEXT),
+                CAST(json_extract(data, '$.finish') AS TEXT)
          FROM message
          WHERE session_id = ?1
            AND json_extract(data, '$.role') = 'assistant'
@@ -1132,6 +1200,7 @@ fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> 
             cache_write: row.get(5)?,
             total_tokens: row.get(6)?,
             agent: row.get(7)?,
+            finish: row.get(8)?,
         })
     }) else {
         return Vec::new();
@@ -1164,6 +1233,7 @@ fn get_pi_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<Db
                 cache_write: usage.cache_write as i64,
                 total_tokens: usage.total as i64,
                 agent: None,
+                finish: message.stop_reason,
             })
         })
         .collect();
@@ -3410,5 +3480,174 @@ mod load_messages_tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].text_preview, "text for a");
         assert_eq!(messages[1].text_preview, "text for b");
+    }
+}
+
+#[cfg(test)]
+mod cache_turn_tests {
+    use super::*;
+
+    fn raw(
+        harness: Harness,
+        message_id: &str,
+        session_id: &str,
+        timestamp: i64,
+        input: i64,
+        cache_read: i64,
+        cache_write: i64,
+        total: i64,
+        finish: Option<&str>,
+    ) -> RawDbCacheEvent {
+        RawDbCacheEvent {
+            harness,
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            timestamp,
+            input_tokens: input,
+            cache_read,
+            cache_write,
+            total_tokens: total,
+            agent: None,
+            finish: finish.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn first_event_is_new_turn() {
+        let rows = vec![raw(
+            Harness::Opencode,
+            "m1",
+            "s1",
+            100,
+            10,
+            80,
+            10,
+            100,
+            Some("stop"),
+        )];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_turn_start);
+        assert_eq!(events[0].turn_id, "m1");
+    }
+
+    #[test]
+    fn tool_calls_continuation_same_turn() {
+        let rows = vec![
+            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
+            raw(Harness::Opencode, "m2", "s1", 200, 10, 85, 5, 100, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events.len(), 2);
+        assert!(events[0].is_turn_start);
+        assert!(!events[1].is_turn_start);
+        assert_eq!(events[0].turn_id, "m1");
+        assert_eq!(events[1].turn_id, "m1");
+    }
+
+    #[test]
+    fn stop_then_new_turn() {
+        let rows = vec![
+            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("stop")),
+            raw(Harness::Opencode, "m2", "s1", 200, 10, 80, 10, 100, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events.len(), 2);
+        assert!(events[0].is_turn_start);
+        assert!(events[1].is_turn_start);
+        assert_eq!(events[0].turn_id, "m1");
+        assert_eq!(events[1].turn_id, "m2");
+    }
+
+    #[test]
+    fn end_turn_acts_like_stop() {
+        let rows = vec![
+            raw(Harness::Opencode, "m1", "s1", 100, 10, 80, 10, 100, Some("end_turn")),
+            raw(Harness::Opencode, "m2", "s1", 200, 10, 80, 10, 100, Some("tool-calls")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert!(events[0].is_turn_start);
+        assert!(events[1].is_turn_start);
+    }
+
+    #[test]
+    fn interleaved_sessions_keep_per_session_turns() {
+        let rows = vec![
+            raw(Harness::Opencode, "a1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
+            raw(Harness::Opencode, "b1", "s2", 101, 10, 80, 10, 100, Some("tool-calls")),
+            raw(Harness::Opencode, "a2", "s1", 200, 10, 85, 5, 100, Some("stop")),
+            raw(Harness::Opencode, "b2", "s2", 201, 10, 85, 5, 100, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events[0].turn_id, "a1");
+        assert_eq!(events[1].turn_id, "b1");
+        assert_eq!(events[2].turn_id, "a1");
+        assert_eq!(events[3].turn_id, "b1");
+    }
+
+    #[test]
+    fn warming_downgrades_continuation_with_degraded_cache() {
+        // First event: cache_read=120, cache_write=20 → expected next prefix ~140.
+        //   total_prompt = input(10)+read(120)+write(20)=150; hit_ratio=0.80 → "warning".
+        //   But this is a TURN START so warming downgrade does not apply.
+        //   We accept "warning" here — the point of THIS test is the second event.
+        // Second event: cache_read=50 (< 0.9 * 140 = 126) and hit_ratio < 0.5 → bust → warming
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                10,
+                120,
+                20,
+                150,
+                Some("tool-calls"),
+            ),
+            raw(Harness::Opencode, "m2", "s1", 200, 10, 50, 90, 150, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        // events[0] is the turn-start; severity stays whatever the absolute hit_ratio classifies it as.
+        // events[1] is the continuation with degraded cache_read → downgraded from bust/warning to warming.
+        assert_eq!(events[1].severity, "warming");
+    }
+
+    #[test]
+    fn warming_does_not_downgrade_stable() {
+        // Continuation with good cache_read stays stable.
+        // m1: total_prompt=10+135+5=150, hit_ratio=0.90 → "stable".
+        // m2: cache_read=140 ≥ 0.9*(135+5)=126, total_prompt=10+140+5=155, hit_ratio≈0.903 → "stable".
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                10,
+                135,
+                5,
+                150,
+                Some("tool-calls"),
+            ),
+            raw(Harness::Opencode, "m2", "s1", 200, 10, 140, 5, 155, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events[0].severity, "stable");
+        assert_eq!(events[1].severity, "stable");
+    }
+
+    #[test]
+    fn pi_stop_reason_extracted_as_finish() {
+        // build_db_cache_events is harness-agnostic for grouping;
+        // just verify Pi rows with stop_reason are processed correctly.
+        let rows = vec![
+            raw(Harness::Pi, "p1", "s1", 100, 10, 80, 10, 100, Some("tool-calls")),
+            raw(Harness::Pi, "p2", "s1", 200, 10, 80, 10, 100, Some("stop")),
+        ];
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(events.len(), 2);
+        assert!(events[0].is_turn_start);
+        assert!(!events[1].is_turn_start);
+        assert_eq!(events[1].turn_id, "p1");
     }
 }

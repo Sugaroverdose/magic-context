@@ -35,6 +35,7 @@ pub struct PiMessage {
     pub role: String,
     pub text_preview: String,
     pub usage: Option<PiUsage>,
+    pub stop_reason: Option<String>,
     pub raw_json: Value,
 }
 
@@ -292,6 +293,7 @@ fn read_pi_session_detail_uncached(
                         entry.get("summary").and_then(Value::as_str).unwrap_or(""),
                     ),
                     usage: None,
+                    stop_reason: None,
                     raw_json: entry,
                 });
             }
@@ -304,6 +306,7 @@ fn read_pi_session_detail_uncached(
                     entry.get("summary").and_then(Value::as_str).unwrap_or(""),
                 ),
                 usage: None,
+                stop_reason: None,
                 raw_json: entry,
             }),
             Some("custom_message") | Some("custom") => messages.push(PiMessage {
@@ -313,6 +316,7 @@ fn read_pi_session_detail_uncached(
                 role: "custom".to_string(),
                 text_preview: truncate_preview(&extract_entry_text(&entry)),
                 usage: None,
+                stop_reason: None,
                 raw_json: entry,
             }),
             _ => {}
@@ -340,6 +344,10 @@ fn pi_message_from_entry(entry: Value) -> Option<PiMessage> {
         role,
         text_preview: truncate_preview(&extract_text_content(message)),
         usage: extract_usage(message),
+        stop_reason: message
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
         raw_json: entry,
     })
 }
