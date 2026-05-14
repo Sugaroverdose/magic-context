@@ -726,10 +726,6 @@ body {
 }
 
 /* ── Cache turn rows ─────────────────────────────────── */
-.cache-turn-row:hover {
-  background: rgba(255, 255, 255, 0.02);
-}
-
 .cache-turn-expanded {
   margin-top: 8px;
   display: flex;
