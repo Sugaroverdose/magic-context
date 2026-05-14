@@ -1,7 +1,6 @@
 import {
-    clearDeferredExecutePendingIfMatches,
-    peekDeferredExecutePending,
     type ContextDatabase,
+    clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
@@ -11,6 +10,7 @@ import {
     getPersistedTodoSyntheticAnchor,
     getStrippedPlaceholderIds,
     getTopNBySize,
+    peekDeferredExecutePending,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
     setStrippedPlaceholderIds,

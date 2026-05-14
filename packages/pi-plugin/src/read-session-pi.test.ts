@@ -50,7 +50,9 @@ describe("isMidTurnPi", () => {
 		expect(
 			isMidTurnPi(
 				{
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					messages: [
+						{ role: "assistant", content: [{ type: "text", text: "done" }] },
+					],
 				},
 				"session-1",
 			),

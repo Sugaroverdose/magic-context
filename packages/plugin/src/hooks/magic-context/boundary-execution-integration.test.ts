@@ -3,18 +3,18 @@
 import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { Database } from "../../shared/sqlite";
 import {
     clearDeferredExecutePendingIfMatches,
+    type DeferredExecutePayload,
     peekDeferredExecutePending,
     setDeferredExecutePendingIfAbsent,
-    type DeferredExecutePayload,
 } from "../../features/magic-context/storage-meta-persisted";
 import { ensureSessionMetaRow } from "../../features/magic-context/storage-meta-shared";
+import { Database } from "../../shared/sqlite";
 import {
     applyMidTurnDeferral,
-    detectMidTurnBypassReason,
     type BypassReason,
+    detectMidTurnBypassReason,
 } from "./boundary-execution";
 
 function createDb(): Database {
@@ -206,7 +206,9 @@ describe("boundary execution OpenCode integration", () => {
 });
 
 function repoRoot(): string {
-    return process.cwd().endsWith(join("packages", "plugin")) ? join(process.cwd(), "../..") : process.cwd();
+    return process.cwd().endsWith(join("packages", "plugin"))
+        ? join(process.cwd(), "../..")
+        : process.cwd();
 }
 
 function sourceFiles(dir: string): string[] {
@@ -258,7 +260,11 @@ function findUnpairedOpenCodeProducers(): string[] {
     for (const file of sourceFiles(base)) {
         const source = readFileSync(file, "utf8");
         for (const match of source.matchAll(/historyRefreshSessions\.add\(/g)) {
-            if (!blockAround(source, match.index ?? 0).includes("pendingMaterializationSessions.add(")) {
+            if (
+                !blockAround(source, match.index ?? 0).includes(
+                    "pendingMaterializationSessions.add(",
+                )
+            ) {
                 failures.push(relative(root, file));
             }
         }
@@ -275,7 +281,9 @@ function findUnpairedPiProducers(): string[] {
         for (const match of source.matchAll(/signalPiHistoryRefresh\(/g)) {
             const prefix = source.slice(Math.max(0, (match.index ?? 0) - 32), match.index ?? 0);
             if (prefix.includes("function ")) continue;
-            if (!blockAround(source, match.index ?? 0).includes("signalPiPendingMaterialization(")) {
+            if (
+                !blockAround(source, match.index ?? 0).includes("signalPiPendingMaterialization(")
+            ) {
                 failures.push(relative(root, file));
             }
         }

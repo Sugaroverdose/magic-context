@@ -48,7 +48,13 @@ function insertAssistant(
     ).run(id, sessionId, Date.now(), Date.now(), JSON.stringify({ role: "assistant", ...data }));
 }
 
-function insertPart(db: Database, sessionId: string, messageId: string, id: string, data: unknown): void {
+function insertPart(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    id: string,
+    data: unknown,
+): void {
     db.prepare(
         "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(id, messageId, sessionId, Date.now(), Date.now(), JSON.stringify(data));

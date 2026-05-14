@@ -53,13 +53,13 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
-    clearDeferredExecutePendingIfMatches,
-    clearEmergencyRecovery,
-    getOverflowState,
-    getPersistedStickyTurnReminder,
-    peekDeferredExecutePending,
-    setDeferredExecutePendingIfAbsent,
-    setPersistedStickyTurnReminder,
+	clearDeferredExecutePendingIfMatches,
+	clearEmergencyRecovery,
+	getOverflowState,
+	getPersistedStickyTurnReminder,
+	peekDeferredExecutePending,
+	setDeferredExecutePendingIfAbsent,
+	setPersistedStickyTurnReminder,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	createTagger,
@@ -69,11 +69,11 @@ import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
-import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
-    applyMidTurnDeferral,
-    detectMidTurnBypassReason,
+	applyMidTurnDeferral,
+	detectMidTurnBypassReason,
 } from "@magic-context/core/hooks/magic-context/boundary-execution";
+import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
@@ -1010,11 +1010,12 @@ export function registerPiContextHandler(
 				sessionId,
 			});
 
-			const { midTurnAdjustedSchedulerDecision, sideEffect } = applyMidTurnDeferral({
-				base: schedulerDecisionEarly,
-				bypassReason,
-				midTurn,
-			});
+			const { midTurnAdjustedSchedulerDecision, sideEffect } =
+				applyMidTurnDeferral({
+					base: schedulerDecisionEarly,
+					bypassReason,
+					midTurn,
+				});
 
 			if (sideEffect === "set-flag") {
 				const flagPayload = {
@@ -2171,10 +2172,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		try {
 			const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
 			if (currentFlag !== null) {
-				clearDeferredExecutePendingIfMatches(args.db, args.sessionId, currentFlag);
+				clearDeferredExecutePendingIfMatches(
+					args.db,
+					args.sessionId,
+					currentFlag,
+				);
 			}
 		} catch (err) {
-			sessionLog(args.sessionId, `pi [boundary-exec] drain failed (continuing): ${err}`);
+			sessionLog(
+				args.sessionId,
+				`pi [boundary-exec] drain failed (continuing): ${err}`,
+			);
 		}
 	}
 

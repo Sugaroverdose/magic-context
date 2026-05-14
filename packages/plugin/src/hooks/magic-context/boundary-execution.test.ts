@@ -3,9 +3,9 @@
 import { describe, expect, it } from "bun:test";
 import {
     applyMidTurnDeferral,
+    type BypassInput,
     detectMidTurnBypassReason,
     FORCE_MATERIALIZE_PERCENTAGE,
-    type BypassInput,
 } from "./boundary-execution";
 
 describe("applyMidTurnDeferral", () => {
@@ -33,7 +33,11 @@ describe("applyMidTurnDeferral", () => {
 
     it("keeps defer base decisions deferred even when a bypass reason is present", () => {
         expect(
-            applyMidTurnDeferral({ base: "defer", bypassReason: "force-materialize", midTurn: true }),
+            applyMidTurnDeferral({
+                base: "defer",
+                bypassReason: "force-materialize",
+                midTurn: true,
+            }),
         ).toEqual({ midTurnAdjustedSchedulerDecision: "defer", sideEffect: "none" });
     });
 });

@@ -27,9 +27,7 @@ export interface ApplyMidTurnDeferralOutput {
     sideEffect: "set-flag" | "none";
 }
 
-export function applyMidTurnDeferral(
-    input: ApplyMidTurnDeferralInput,
-): ApplyMidTurnDeferralOutput {
+export function applyMidTurnDeferral(input: ApplyMidTurnDeferralInput): ApplyMidTurnDeferralOutput {
     // Scope: bypass evaluation is nested under base === "execute".
     if (input.base === "defer") {
         return { midTurnAdjustedSchedulerDecision: "defer", sideEffect: "none" };
