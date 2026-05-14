@@ -60,11 +60,19 @@ export default function ModelSelect(props: ModelSelectProps) {
     stopListening();
   };
 
+  // Memoize a normalized string view of props.value so JSX reads can't
+  // see a stale "truthy" outer ternary while the inner .substring() call
+  // re-evaluates against a now-undefined / non-string value.
+  // Reproduces in dashboard ConfigEditor when switching Pi → OpenCode
+  // config tabs: createEffect updates formData asynchronously, so the
+  // ternary at line 80 and the inner reads at 82-83 could observe
+  // different snapshots of props.value within the same render.
+  const valueStr = createMemo(() => (typeof props.value === "string" ? props.value : ""));
+
   const displayValue = () => {
-    if (!props.value) return props.placeholder ?? "— Use fallback chain —";
-    // Show just model name after provider/
-    const slash = props.value.indexOf("/");
-    return slash >= 0 ? props.value : props.value;
+    const v = valueStr();
+    if (!v) return props.placeholder ?? "— Use fallback chain —";
+    return v;
   };
 
   const providerOf = (model: string) => {
@@ -76,11 +84,11 @@ export default function ModelSelect(props: ModelSelectProps) {
     <div class="model-select" ref={containerRef}>
       {/* Trigger button */}
       <button class="model-select-trigger" onClick={openDropdown} type="button">
-        <span class={`model-select-value ${!props.value ? "placeholder" : ""}`}>
-          {props.value ? (
+        <span class={`model-select-value ${!valueStr() ? "placeholder" : ""}`}>
+          {valueStr() ? (
             <>
-              <span class="model-select-provider">{providerOf(props.value)}/</span>
-              {props.value.substring(props.value.indexOf("/") + 1)}
+              <span class="model-select-provider">{providerOf(valueStr())}/</span>
+              {valueStr().substring(valueStr().indexOf("/") + 1)}
             </>
           ) : (
             displayValue()
