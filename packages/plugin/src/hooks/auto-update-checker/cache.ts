@@ -126,7 +126,30 @@ export function resolveInstallContext(
         if (nodeModulesDir && basename(nodeModulesDir) === "node_modules") {
             const installDir = dirname(nodeModulesDir);
             const packageJsonPath = join(installDir, "package.json");
-            if (existsSync(packageJsonPath)) return { installDir, packageJsonPath };
+
+            // Issue #73: OpenCode's plugin installer extracts the npm tarball
+            // into node_modules/ but doesn't materialize a root package.json
+            // in the install dir. When that file is missing, seed a minimal
+            // one so ensureDependencyVersion has something to rewrite and
+            // npm install has a manifest to resolve from. Otherwise users see
+            // "Auto-update could not prepare the active install" indefinitely.
+            if (!existsSync(packageJsonPath)) {
+                try {
+                    writeFileSync(
+                        packageJsonPath,
+                        `${JSON.stringify({ private: true, dependencies: {} }, null, 2)}\n`,
+                    );
+                    log(
+                        `[auto-update-checker] Seeded missing package.json at ${packageJsonPath} (issue #73)`,
+                    );
+                } catch (err) {
+                    warn(
+                        `[auto-update-checker] Could not seed package.json at ${packageJsonPath}: ${String(err)}`,
+                    );
+                    return null;
+                }
+            }
+            return { installDir, packageJsonPath };
         }
 
         return null;

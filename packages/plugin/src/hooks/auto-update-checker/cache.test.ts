@@ -38,7 +38,63 @@ describe("auto-update-checker/cache", () => {
         });
 
         test("does not fall back when runtime path exists but wrapper root is invalid", async () => {
+            // When the runtime path resolves to a path that's NOT under a
+            // node_modules/ directory (e.g. malformed input), we return null
+            // without attempting to seed anything. Issue #73's seed behavior
+            // only fires when stripPackageNameFromPath produces a valid
+            // node_modules ancestor.
             const existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
+            const { resolveInstallContext } = await freshCacheImport();
+
+            expect(
+                resolveInstallContext(
+                    "/home/user/.cache/opencode/packages/not-a-magic-context-path/whatever/package.json",
+                ),
+            ).toBeNull();
+
+            existsSpy.mockRestore();
+        });
+
+        test("seeds missing package.json when node_modules exists (issue #73)", async () => {
+            // OpenCode's installer extracts the npm tarball into node_modules/
+            // but leaves the install dir's root package.json missing.
+            // resolveInstallContext should seed a minimal one so the rest of
+            // the auto-update path can proceed instead of returning null.
+            const root =
+                "/home/user/.cache/opencode/packages/@cortexkit/opencode-magic-context@latest";
+            const existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
+            const writes: Array<{ path: string; data: string }> = [];
+            const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(
+                (p: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView) => {
+                    writes.push({ path: String(p), data: String(data) });
+                },
+            );
+            const { resolveInstallContext } = await freshCacheImport();
+
+            expect(
+                resolveInstallContext(
+                    `${root}/node_modules/@cortexkit/opencode-magic-context/package.json`,
+                ),
+            ).toEqual({
+                installDir: root,
+                packageJsonPath: `${root}/package.json`,
+            });
+            expect(writes).toHaveLength(1);
+            expect(writes[0]?.path).toBe(`${root}/package.json`);
+            expect(JSON.parse(writes[0]?.data ?? "{}")).toEqual({
+                private: true,
+                dependencies: {},
+            });
+
+            existsSpy.mockRestore();
+            writeSpy.mockRestore();
+        });
+
+        test("returns null when seeding fails with a write error", async () => {
+            const existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
+            const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {
+                throw new Error("EACCES: permission denied");
+            });
             const { resolveInstallContext } = await freshCacheImport();
 
             expect(
@@ -48,6 +104,7 @@ describe("auto-update-checker/cache", () => {
             ).toBeNull();
 
             existsSpy.mockRestore();
+            writeSpy.mockRestore();
         });
     });
 
