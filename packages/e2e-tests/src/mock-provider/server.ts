@@ -413,6 +413,18 @@ export class MockProvider {
                                 stop_sequence: null,
                             },
                             usage: {
+                                // Newer OpenCode/AI SDK builds read the final
+                                // cumulative usage from message_delta when
+                                // constructing message.updated events. Keep the
+                                // same values in message_start above for older
+                                // parsers, but repeat them here so threshold-
+                                // driven e2e tests continue to exercise the
+                                // plugin's scheduler instead of seeing zeros.
+                                input_tokens: usage.input_tokens,
+                                cache_creation_input_tokens:
+                                    usage.cache_creation_input_tokens ?? 0,
+                                cache_read_input_tokens:
+                                    usage.cache_read_input_tokens ?? 0,
                                 output_tokens: usage.output_tokens,
                             },
                         });

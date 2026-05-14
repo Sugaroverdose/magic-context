@@ -104,13 +104,19 @@ describe("memory injection", () => {
             label: "plugin initialized",
         });
 
-        // Seed one memory scoped to the workdir's project identity.
+        // Seed one memory scoped to the workdir's project identity. This test
+        // writes directly to SQLite, bypassing the production ctx_memory path
+        // that clears the plugin process's in-memory empty-injection cache. Use
+        // a fresh session for the assertion so we are testing the intended
+        // zero-compartment first-turn path, not cache invalidation mechanics.
         const projectIdentity = computeDirIdentity(h.opencode.env.workdir);
         seedMemory(
             h,
             projectIdentity,
             "test seeded directive: always prefer bun over npm for running scripts",
         );
+
+        const memorySessionId = await h.createSession();
 
         // Clear captured requests so the assertion targets only turn 2's payload.
         h.mock.reset();
@@ -124,11 +130,11 @@ describe("memory injection", () => {
             },
         });
 
-        await h.sendPrompt(sessionId, "second turn");
+        await h.sendPrompt(memorySessionId, "first turn after seeded memory");
 
         // Still no compartments at this point — we're testing the zero-compartment
         // memory injection path specifically.
-        expect(h.countCompartments(sessionId)).toBe(0);
+        expect(h.countCompartments(memorySessionId)).toBe(0);
 
         const req = h.mock.lastRequest();
         expect(req).not.toBeNull();
