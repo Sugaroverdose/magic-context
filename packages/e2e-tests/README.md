@@ -35,6 +35,30 @@ cd packages/e2e-tests && bun test
   OpenCode runner. Spawns a real Pi child process pointed at the same mock
   Anthropic server and loads the Pi plugin from local source.
 
+### Pi RPC harness
+
+Pi e2e tests run through `pi --mode rpc`, not `pi --print --mode json`. Each
+`PiTestHarness` owns one persistent Pi subprocess for its lifetime and talks to
+it over strict JSONL on stdio: commands are newline-delimited JSON objects on
+stdin, while stdout interleaves `type: "response"` command replies with async
+agent events such as `agent_start`, `message_end`, and `agent_end`.
+
+`harness.sendPrompt()` sends a `prompt` RPC command, collects the event slice
+from `agent_start` through `agent_end`, and returns the historical
+`PiRunResult` shape. Because the Pi process remains alive after each turn,
+`exitCode` and `signalCode` are `null` until `harness.dispose()` shuts the
+worker down. Multi-turn tests do not need `--continue`; the existing
+`continueSession` option is accepted as a compatibility no-op.
+
+The harness also exposes thin RPC helpers for tests that need persistent-process
+state directly: `getState()`, `getMessages()`, `getSessionStats()`,
+`compactNow()`, and `newSession()`.
+
+RPC mode is available in the installed Pi peer range. The current peer is
+`@mariozechner/pi-coding-agent@^0.71.0`; the lockfile resolves `0.71.1`, whose
+packaged docs specify the JSONL RPC protocol, and the changelog shows the
+current JSON protocol was introduced in `0.16.0`.
+
 - **`tests/*.test.ts`** — Test suites. OpenCode-flavored suites use `harness.ts` /
   `opencode-runner`; Pi-flavored suites (`tests/pi-*.test.ts`) use `pi-harness.ts` /
   `pi-runner`. Each test creates a session, sends prompts, and asserts against
