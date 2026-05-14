@@ -572,17 +572,25 @@ export default function CacheDiagnostics() {
               }}
             >
               <span>Cache Hit Timeline</span>
-              <span>{filteredEvents().length} events</span>
+              <span>{cacheTurns().length} turns</span>
             </div>
             <div class="chart-bars">
-              <For each={filteredEvents()}>
-                {(event) => (
-                  <div
-                    class={`chart-bar ${event.hit_ratio === 0 ? "black" : severityBarClass(event.hit_ratio)}`}
-                    style={{ height: `${Math.max(3, event.hit_ratio * 100)}%` }}
-                    title={`${formatDateTime(event.timestamp)}\nHit: ${(event.hit_ratio * 100).toFixed(1)}%\nPrompt: ${(event.cache_read + event.cache_write + event.input_tokens).toLocaleString()}\nCached: ${event.cache_read.toLocaleString()}\nNew: ${event.cache_write.toLocaleString()}\nUncached: ${event.input_tokens.toLocaleString()}${event.cause ? `\nCause: ${event.cause}` : ""}`}
-                  />
-                )}
+              <For each={cacheTurns()}>
+                {(turn) => {
+                  const first = turn.events[0];
+                  const totalPrompt =
+                    first.cache_read + turn.totalCacheWrite + first.input_tokens;
+                  const turnHitRatio =
+                    totalPrompt > 0 ? first.cache_read / totalPrompt : first.hit_ratio;
+                  const stepLabel = turn.events.length > 1 ? `\n${turn.events.length} steps` : "";
+                  return (
+                    <div
+                      class={`chart-bar ${turnHitRatio === 0 ? "black" : severityBarClass(turnHitRatio)}`}
+                      style={{ height: `${Math.max(3, turnHitRatio * 100)}%` }}
+                      title={`${formatDateTime(turn.startTime)}${stepLabel}\nHit: ${(turnHitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${first.cache_read.toLocaleString()}\nNew: ${turn.totalCacheWrite.toLocaleString()}\nUncached: ${first.input_tokens.toLocaleString()}${first.cause ? `\nCause: ${first.cause}` : ""}`}
+                    />
+                  );
+                }}
               </For>
             </div>
           </div>
@@ -611,12 +619,21 @@ export default function CacheDiagnostics() {
                     first.cache_read + turn.totalCacheWrite + first.input_tokens;
                   const turnHitRatio =
                     totalPrompt > 0 ? first.cache_read / totalPrompt : first.hit_ratio;
+                  const isMultiStep = turn.events.length > 1;
                   return (
-                    <div class="card cache-turn-row">
-                      <button
-                        type="button"
-                        class="cache-turn-header"
-                        onClick={() => toggleTurn(turn.turnId)}
+                    <div
+                      class="card cache-turn-row"
+                      onClick={() => isMultiStep && toggleTurn(turn.turnId)}
+                      style={{ cursor: isMultiStep ? "pointer" : "default" }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          "align-items": "center",
+                          gap: "8px",
+                          "margin-bottom": "4px",
+                          "min-width": "0",
+                        }}
                       >
                         <span style={{ "flex-shrink": "0" }}>
                           {severityIcon(turn.worstSeverity)}
@@ -654,9 +671,9 @@ export default function CacheDiagnostics() {
                               ? "NEW SESSION"
                               : turn.worstSeverity.toUpperCase()}
                         </span>
-                        <Show when={turn.events.length > 1}>
+                        <Show when={isMultiStep}>
                           <span class="pill gray" style={{ "flex-shrink": "0" }}>
-                            {turn.events.length} steps
+                            {isExpanded() ? "▾" : "▸"} {turn.events.length} steps
                           </span>
                         </Show>
                         <span
@@ -674,15 +691,7 @@ export default function CacheDiagnostics() {
                         >
                           {resolveTitle(turn.harness, turn.sessionId)}
                         </span>
-                        <span
-                          class="cache-turn-chevron"
-                          style={{
-                            transform: isExpanded() ? "rotate(180deg)" : "rotate(0deg)",
-                          }}
-                        >
-                          ▼
-                        </span>
-                      </button>
+                      </div>
                       <div class="card-meta" style={{ gap: "12px" }}>
                         <span
                           class="mono"
