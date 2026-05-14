@@ -22,7 +22,7 @@ describe("pi conflict disable", () => {
         });
 
         const turn = await h.sendPrompt("this should not get magic context", { timeoutMs: 60_000 });
-        expect(turn.exitCode).toBe(0);
+        expect(turn.exitCode).toBeNull();
         expect(turn.stderr).not.toContain("Failed to load extension");
 
         const body = JSON.stringify(h.mock.lastRequest()!.body);

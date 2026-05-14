@@ -21,6 +21,8 @@ export interface PiTestHarnessOptions {
   mockDefault?: MockResponse;
   /** Share the cortexkit DB with another harness. */
   sharedDataDir?: string;
+  /** Optional working directory override before the persistent Pi process starts. */
+  workdir?: string;
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -52,6 +54,7 @@ export class PiTestHarness {
     await mock.start();
     mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
     const env = createPiIsolatedEnv(options.sharedDataDir);
+    if (options.workdir) env.workdir = options.workdir;
     const rpc = new PiRpcClient({
       env,
       mockProviderURL: PiTestHarness.mockBaseURL(mock),

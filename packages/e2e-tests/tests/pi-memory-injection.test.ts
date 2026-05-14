@@ -50,10 +50,11 @@ describe("pi memory injection", () => {
             usage: { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 100 },
         });
         const bootstrap = await h.sendPrompt("bootstrap pi memory db", { timeoutMs: 60_000 });
-        expect(bootstrap.exitCode).toBe(0);
+        expect(bootstrap.exitCode).toBeNull();
 
         const directive = "pi seeded directive: prefer stable cross-harness memory checks";
         seedMemory(directive);
+        await h.newSession();
 
         h.mock.reset();
         h.mock.setDefault({

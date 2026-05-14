@@ -27,7 +27,7 @@ describe("pi smoke", () => {
         });
 
         const turn = await h.sendPrompt("hello from pi smoke", { timeoutMs: 60_000 });
-        expect(turn.exitCode).toBe(0);
+        expect(turn.exitCode).toBeNull();
         expect(turn.stderr).not.toContain("Failed to load extension");
         expect(turn.sessionId).toBeTruthy();
 

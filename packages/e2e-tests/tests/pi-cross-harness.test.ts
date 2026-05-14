@@ -17,29 +17,37 @@ afterAll(async () => {
     await oc?.dispose();
 });
 
-function insertMemory(dbPath: string, projectIdentity: string, sessionId: string | null, content: string) {
-    const db = new Database(dbPath);
-    try {
-        const now = Date.now();
-        db.prepare(
-            `INSERT INTO memories (
-                project_path, category, content, normalized_hash,
-                source_session_id, source_type, seen_count, retrieval_count,
-                first_seen_at, created_at, updated_at, last_seen_at, status
-            ) VALUES (?, 'WORKFLOW_RULES', ?, ?, ?, 'agent', 1, 0, ?, ?, ?, ?, 'active')`,
-        ).run(projectIdentity, content, computeNormalizedHash(content), sessionId, now, now, now, now);
-    } finally {
-        db.close();
+async function insertMemory(dbPath: string, projectIdentity: string, sessionId: string | null, content: string) {
+    const deadline = Date.now() + 10_000;
+    while (true) {
+        const db = new Database(dbPath);
+        try {
+            db.exec("PRAGMA busy_timeout = 1000");
+            const now = Date.now();
+            db.prepare(
+                `INSERT INTO memories (
+                    project_path, category, content, normalized_hash,
+                    source_session_id, source_type, seen_count, retrieval_count,
+                    first_seen_at, created_at, updated_at, last_seen_at, status
+                ) VALUES (?, 'WORKFLOW_RULES', ?, ?, ?, 'agent', 1, 0, ?, ?, ?, ?, 'active')`,
+            ).run(projectIdentity, content, computeNormalizedHash(content), sessionId, now, now, now, now);
+            return;
+        } catch (error) {
+            if (!(error instanceof Error) || !error.message.includes("database is locked") || Date.now() > deadline) {
+                throw error;
+            }
+            await Bun.sleep(100);
+        } finally {
+            db.close();
+        }
     }
 }
 
 describe("pi cross harness", () => {
     it("shares project memories between OpenCode and Pi both directions", async () => {
         oc = await TestHarness.create();
-        pi = await PiTestHarness.create({ sharedDataDir: oc.opencode.env.dataDir });
-
         const sharedWorkdir = realpathSync(pathResolve(oc.opencode.env.workdir));
-        (pi.env as { workdir: string }).workdir = sharedWorkdir;
+        pi = await PiTestHarness.create({ sharedDataDir: oc.opencode.env.dataDir, workdir: sharedWorkdir });
         const projectIdentity = resolveProjectIdentity(sharedWorkdir);
 
         oc.mock.reset();
@@ -60,7 +68,8 @@ describe("pi cross harness", () => {
 
         const dbPath = pi.contextDbPath();
         const fromOpenCode = "OpenCode wrote this memory for Pi flagship search";
-        insertMemory(dbPath, projectIdentity, ocSession, fromOpenCode);
+        await insertMemory(dbPath, projectIdentity, ocSession, fromOpenCode);
+        await pi.newSession();
 
         pi.mock.reset();
         pi.mock.setDefault({
@@ -77,14 +86,15 @@ describe("pi cross harness", () => {
         expect(JSON.stringify(pi.mock.lastRequest()!.body)).toContain(fromOpenCode);
 
         const fromPi = "Pi wrote this memory for OpenCode injection";
-        insertMemory(dbPath, piProjectIdentity, piTurn.sessionId, fromPi);
+        await insertMemory(dbPath, piProjectIdentity, piTurn.sessionId, fromPi);
 
         oc.mock.reset();
         oc.mock.setDefault({
             text: "oc sees pi",
             usage: { input_tokens: 130, output_tokens: 10, cache_creation_input_tokens: 130 },
         });
-        await oc.sendPrompt(ocSession, "read pi memory from opencode");
+        const ocReadSession = await oc.createSession();
+        await oc.sendPrompt(ocReadSession, "read pi memory from opencode");
         expect(JSON.stringify(oc.mock.lastRequest()!.body)).toContain(fromPi);
     }, 120_000);
 });

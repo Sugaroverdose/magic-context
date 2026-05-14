@@ -22,7 +22,7 @@ describe("pi tagging", () => {
         });
 
         const turn = await h.sendPrompt("please tag this pi message", { timeoutMs: 60_000 });
-        expect(turn.exitCode).toBe(0);
+        expect(turn.exitCode).toBeNull();
         expect(turn.sessionId).toBeTruthy();
 
         const req = h.mock.lastRequest();

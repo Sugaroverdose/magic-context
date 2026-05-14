@@ -58,7 +58,7 @@ describe("pi drops", () => {
             timeoutMs: 60_000,
             continueSession: true,
         });
-        expect(second.exitCode).toBe(0);
+        expect(second.exitCode).toBeNull();
 
         expect(h.countPendingOps(first.sessionId!)).toBe(0);
         expect(h.countDroppedTags(first.sessionId!)).toBeGreaterThan(0);

@@ -98,7 +98,7 @@ describe("pi cache stability", () => {
             });
 
             const first = await h.sendPrompt(original, { timeoutMs: 60_000 });
-            expect(first.exitCode).toBe(0);
+            expect(first.exitCode).toBeNull();
             expect(first.sessionId).toBeTruthy();
 
             await h.waitFor(() => h.countTags(first.sessionId!) > 0, {
@@ -139,7 +139,7 @@ describe("pi cache stability", () => {
                 timeoutMs: 60_000,
                 continueSession: true,
             });
-            expect(second.exitCode).toBe(0);
+            expect(second.exitCode).toBeNull();
 
             const after = readDb(h, (db) => {
                 const count = db
