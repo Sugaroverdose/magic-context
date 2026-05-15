@@ -513,30 +513,47 @@ export async function runKeyFilesTask(args: {
 
     const prompt = buildV6KeyFilesPrompt({ candidates, currentRows, config: args.config });
     let validated: ValidatedKeyFilesOutput;
+    // Renew the dream lease every 60s while the LLM call is in flight so the
+    // commit-time lease check (peekLeaseHolderAndExpiry) sees a live expiry.
+    // Without this, key-files runs longer than the 2-minute lease TTL fail at
+    // commit time with "lease lost" even though no other holder took over.
+    const leaseInterval = setInterval(() => {
+        try {
+            if (!renewLease(args.db, args.holderId)) {
+                log("[key-files] lease renewal failed during LLM call");
+            }
+        } catch (error) {
+            log(`[key-files] lease renewal threw: ${getErrorMessage(error)}`);
+        }
+    }, 60_000);
     try {
-        const raw = await runKeyFilesLlm({
-            client: args.client,
-            parentSessionId: args.parentSessionId,
+        try {
+            const raw = await runKeyFilesLlm({
+                client: args.client,
+                parentSessionId: args.parentSessionId,
+                projectPath,
+                prompt,
+                deadline: args.deadline,
+                fallbackModels: args.fallbackModels,
+            });
+            validated = validateLlmOutput(raw, args.config, projectPath);
+        } catch (error) {
+            log(`[key-files] LLM validation failed: ${getErrorMessage(error)}`);
+            throw error;
+        }
+        if (validated.no_change)
+            return { committedVersion: null, candidates: candidates.length, noChange: true };
+        const committedVersion = commitKeyFiles({
+            db: args.db,
             projectPath,
-            prompt,
-            deadline: args.deadline,
-            fallbackModels: args.fallbackModels,
+            validated,
+            configHash,
+            modelId: args.fallbackModels?.[0] ?? "dreamer",
+            leaseHolderId: args.holderId,
         });
-        validated = validateLlmOutput(raw, args.config, projectPath);
-    } catch (error) {
-        log(`[key-files] LLM validation failed: ${getErrorMessage(error)}`);
-        throw error;
+        renewLease(args.db, args.holderId);
+        return { committedVersion, candidates: candidates.length, noChange: false };
+    } finally {
+        clearInterval(leaseInterval);
     }
-    if (validated.no_change)
-        return { committedVersion: null, candidates: candidates.length, noChange: true };
-    const committedVersion = commitKeyFiles({
-        db: args.db,
-        projectPath,
-        validated,
-        configHash,
-        modelId: args.fallbackModels?.[0] ?? "dreamer",
-        leaseHolderId: args.holderId,
-    });
-    renewLease(args.db, args.holderId);
-    return { committedVersion, candidates: candidates.length, noChange: false };
 }
