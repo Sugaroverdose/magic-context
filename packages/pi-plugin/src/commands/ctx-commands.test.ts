@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { replaceAllCompartmentState } from "@magic-context/core/features/magic-context/compartment-storage";
 import { enqueueDream } from "@magic-context/core/features/magic-context/dreamer/queue";
+import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { queuePendingOp } from "@magic-context/core/features/magic-context/storage-ops";
 import { insertTag } from "@magic-context/core/features/magic-context/storage-tags";
@@ -44,6 +45,7 @@ interface MockCommandContext {
 function createDb() {
 	const db = new Database(":memory:");
 	initializeDatabase(db);
+	runMigrations(db);
 	return db;
 }
 
@@ -172,6 +174,59 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.message.content).toContain("/ctx-dream");
 		expect(sent[0]?.options?.triggerTurn).toBe(false);
 		expect(enqueueDream(db, "/tmp/project", "manual")).toBeNull();
+	});
+
+	it("/ctx-dream reports friendly disabled state without queueing", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+
+		registerCtxDreamCommand(pi as never, {
+			db,
+			projectDir: "/tmp/project",
+			projectIdentity: "/tmp/project",
+			dreamerEnabled: false,
+		});
+		await handlers.get("ctx-dream")?.("", createCtx());
+
+		expect(sent[0]?.message.content).toContain("Dreamer is not configured");
+		expect(enqueueDream(db, "/tmp/project", "manual")).not.toBeNull();
+	});
+
+	it("/ctx-status resolves project identity at command time", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+		registerCtxStatusCommand(pi as never, {
+			db,
+			projectIdentity: "/tmp/boot",
+			resolveProject: (ctx) => ({
+				projectDir: ctx.cwd,
+				projectIdentity: "/tmp/current",
+			}),
+		});
+
+		await handlers.get("ctx-status")?.("", createCtx());
+		expect(sent[0]?.message.details).toMatchObject({
+			details: {
+				projectIdentity: "/tmp/current",
+			},
+		});
+	});
+
+	it("/ctx-status passes dreamer enabled field through details", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+		registerCtxStatusCommand(pi as never, {
+			db,
+			projectIdentity: "/tmp/project",
+			dreamer: { enabled: true, schedule: "daily" },
+		});
+
+		await handlers.get("ctx-status")?.("", createCtx());
+		expect(sent[0]?.message.details).toMatchObject({
+			details: {
+				dreamer: { enabled: true, schedule: "daily" },
+			},
+		});
 	});
 
 	it("registers /ctx-recomp and requires confirmation before running", async () => {

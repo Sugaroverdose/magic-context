@@ -16,6 +16,10 @@ import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 export interface RegisterCtxStatusDeps {
 	db: ContextDatabase;
 	projectIdentity: string;
+	resolveProject?: (ctx: { cwd: string }) => {
+		projectDir: string;
+		projectIdentity: string;
+	};
 	protectedTags?: number;
 	nudgeIntervalTokens?: number;
 	executeThresholdPercentage?:
@@ -63,6 +67,9 @@ export function registerCtxStatusCommand(
 	pi.registerCommand("ctx-status", {
 		description: "Show Magic Context status for the current Pi session",
 		handler: async (_args, ctx) => {
+			const projectIdentity =
+				deps.resolveProject?.(ctx).projectIdentity ?? deps.projectIdentity;
+			const currentDeps = { ...deps, projectIdentity };
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) {
 				sendCtxStatusMessage(pi, {
@@ -75,7 +82,7 @@ export function registerCtxStatusCommand(
 
 			try {
 				if (ctx.hasUI) {
-					await showStatusDialog(pi, ctx, deps);
+					await showStatusDialog(pi, ctx, currentDeps);
 					return;
 				}
 
@@ -84,18 +91,18 @@ export function registerCtxStatusCommand(
 					? `${ctx.model.provider}/${ctx.model.id}`
 					: undefined;
 				const statusText = executeStatus(
-					deps.db,
+					currentDeps.db,
 					sessionId,
-					deps.protectedTags ?? 20,
-					deps.nudgeIntervalTokens,
-					deps.executeThresholdPercentage,
+					currentDeps.protectedTags ?? 20,
+					currentDeps.nudgeIntervalTokens,
+					currentDeps.executeThresholdPercentage,
 					modelKey,
-					deps.historyBudgetPercentage,
-					deps.commitClusterTrigger,
-					deps.executeThresholdTokens,
+					currentDeps.historyBudgetPercentage,
+					currentDeps.commitClusterTrigger,
+					currentDeps.executeThresholdTokens,
 					usage?.contextWindow,
 				);
-				const details = buildStatusDetails(deps, sessionId);
+				const details = buildStatusDetails(currentDeps, sessionId);
 				sendCtxStatusMessage(
 					pi,
 					{ title: "/ctx-status", text: statusText, level: "info" },

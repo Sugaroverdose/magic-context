@@ -60,7 +60,11 @@ import {
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	clearDeferredExecutePendingIfMatches,
+	clearDetectedContextLimit,
 	clearEmergencyRecovery,
+	clearHistorianFailureState,
+	clearPersistedReasoningWatermark,
+	clearPersistedStickyTurnReminder,
 	getAutoSearchHintDecisions,
 	getNoteNudgeAnchors,
 	getOverflowState,
@@ -133,8 +137,10 @@ import {
 	piMessageStableId,
 	replayClearedReasoningPi,
 	replayStrippedInlineThinkingPi,
+	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
+import { clearPiSystemPromptSession } from "./system-prompt";
 import { injectPiTemporalMarkers } from "./temporal-awareness-pi";
 import { tokenizePiMessages } from "./tokenize-pi-messages";
 import { createPiTranscript } from "./transcript-pi";
@@ -212,6 +218,12 @@ const commitSeenLastPass = new Map<string, boolean>();
 const historyRefreshSessions = new Set<string>();
 const systemPromptRefreshSessions = new Set<string>();
 const pendingMaterializationSessions = new Set<string>();
+const deferredHistoryRefreshSessions = new Set<string>();
+const deferredMaterializationSessions = new Set<string>();
+const sessionsByProject = new Map<string, Set<string>>();
+const lastSeenProjectIdentityBySession = new Map<string, string>();
+const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
+const lastHeuristicsTurnIdBySession = new Map<string, string>();
 const firstContextPassSeenBySession = new Set<string>();
 const recentReduceBySession = new Map<string, number>();
 const liveModelBySession = new Map<string, string>();
@@ -277,6 +289,63 @@ export function signalPiSystemPromptRefresh(sessionId: string): void {
  */
 export function signalPiPendingMaterialization(sessionId: string): void {
 	pendingMaterializationSessions.add(sessionId);
+}
+
+export function signalPiDeferredHistoryRefresh(sessionId: string): void {
+	deferredHistoryRefreshSessions.add(sessionId);
+}
+
+export function signalPiDeferredMaterialization(sessionId: string): void {
+	deferredMaterializationSessions.add(sessionId);
+}
+
+export function consumeDeferredHistoryRefresh(sessionId: string): boolean {
+	const wasSet = deferredHistoryRefreshSessions.has(sessionId);
+	deferredHistoryRefreshSessions.delete(sessionId);
+	return wasSet;
+}
+
+export function consumeDeferredMaterialization(sessionId: string): boolean {
+	const wasSet = deferredMaterializationSessions.has(sessionId);
+	deferredMaterializationSessions.delete(sessionId);
+	return wasSet;
+}
+
+export function trackSessionForProject(
+	projectIdentity: string,
+	sessionId: string,
+): void {
+	let sessions = sessionsByProject.get(projectIdentity);
+	if (!sessions) {
+		sessions = new Set();
+		sessionsByProject.set(projectIdentity, sessions);
+	}
+	sessions.add(sessionId);
+}
+
+function updateSessionProjectTracking(
+	sessionId: string,
+	projectIdentity: string,
+): void {
+	const prev = lastSeenProjectIdentityBySession.get(sessionId);
+	if (prev && prev !== projectIdentity) {
+		const prevSessions = sessionsByProject.get(prev);
+		prevSessions?.delete(sessionId);
+		if (prevSessions?.size === 0) sessionsByProject.delete(prev);
+		clearPiSystemPromptSession(sessionId);
+	}
+	trackSessionForProject(projectIdentity, sessionId);
+	lastSeenProjectIdentityBySession.set(sessionId, projectIdentity);
+}
+
+export function signalPiSystemPromptRefreshForProject(
+	projectIdentity: string,
+): void {
+	const sessions = sessionsByProject.get(projectIdentity);
+	if (!sessions) return;
+	for (const sessionId of sessions) {
+		systemPromptRefreshSessions.add(sessionId);
+	}
 }
 
 export function recordPiLiveModel(sessionId: string, modelKey: string): void {
@@ -863,8 +932,6 @@ export function registerPiContextHandler(
 	options: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
-	const projectDirectory = process.cwd();
-	const projectIdentity = resolveProjectIdentity(projectDirectory);
 
 	// Build a real shared scheduler so cache-busting stages (heuristic
 	// cleanup, compartment injection rebuild) only run on execute passes.
@@ -906,6 +973,9 @@ export function registerPiContextHandler(
 				return;
 			}
 			sessionIdForError = sessionId;
+			const projectDirectory = ctx.cwd;
+			const projectIdentity = resolveProjectIdentity(projectDirectory);
+			updateSessionProjectTracking(sessionId, projectIdentity);
 			logTransformTiming(
 				sessionId,
 				"findSessionId",
@@ -918,7 +988,12 @@ export function registerPiContextHandler(
 				readMessageById: (messageId: string) =>
 					readPiSessionMessageById(ctx, messageId),
 			};
-			setRawMessageProvider(sessionId, rawMessageProvider);
+			rawMessageProviderUnregistersBySession.get(sessionId)?.();
+			const unregisterRaw = setRawMessageProvider(
+				sessionId,
+				rawMessageProvider,
+			);
+			rawMessageProviderUnregistersBySession.set(sessionId, unregisterRaw);
 			scheduleReconciliation(options.db, sessionId, readRawSessionMessages);
 			const strictEntryIds = collectMessageEntryIdsStrict(
 				ctx,
@@ -1006,11 +1081,17 @@ export function registerPiContextHandler(
 					lastInputTokens: 0,
 					observedSafeInputTokens: 0,
 					cacheAlertSent: false,
+					clearedReasoningThroughTag: 0,
 				});
+				clearHistorianFailureState(options.db, sessionId);
+				clearPersistedReasoningWatermark(options.db, sessionId);
+				clearDetectedContextLimit(options.db, sessionId);
+				clearEmergencyRecovery(options.db, sessionId);
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
+				sessionMetaForUsage.clearedReasoningThroughTag = 0;
 			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
@@ -1311,6 +1392,7 @@ export function registerPiContextHandler(
 					usagePercentage,
 					usageInputTokens,
 					usageContextLimit,
+					schedulerDecision,
 				});
 			}
 
@@ -1321,6 +1403,23 @@ export function registerPiContextHandler(
 			// already-mutated messages unchanged.
 			const tPostTransform = performance.now();
 			let outputMessages = result.messages as PiAgentMessage[];
+
+			try {
+				const cacheBustingPass = isCacheBusting || result.executedWorkThisPass;
+				outputMessages = applyStickyTurnReminder({
+					sessionId,
+					db: options.db,
+					messages: outputMessages,
+					entryIds: entryIds ?? null,
+					hasRecentReduceCall: recentReduceBySession.has(sessionId),
+					isCacheBustingPass: cacheBustingPass,
+				});
+			} catch (err) {
+				sessionLog(
+					sessionId,
+					`sticky turn reminder failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 
 			if (nudgerFn && options.nudge) {
 				try {
@@ -1547,11 +1646,12 @@ function maybeFireCompressor(args: {
 	usagePercentage: number;
 	usageInputTokens: number;
 	usageContextLimit: number | undefined;
+	schedulerDecision: "execute" | "defer";
 }): void {
 	const { ctx, sessionId, db, historian } = args;
 	const compressor = historian.compressor;
 	if (!compressor?.enabled) return;
-	if (!args.isCacheBusting) return;
+	if (!args.isCacheBusting && args.schedulerDecision !== "execute") return;
 	if (inFlightHistorian.has(sessionId) || inFlightCompressor.has(sessionId)) {
 		sessionLog(
 			sessionId,
@@ -1574,7 +1674,6 @@ function maybeFireCompressor(args: {
 	});
 	if (!historyBudgetTokens || historyBudgetTokens <= 0) return;
 
-	markPiCompressorRun(sessionId);
 	const runPromise = runPiCompressionPassIfNeeded({
 		db,
 		sessionId,
@@ -1606,11 +1705,16 @@ function maybeFireCompressor(args: {
 			// We deliberately do NOT signal systemPromptRefresh — historian
 			// /compressor don't change disk-backed adjuncts (docs/profile/
 			// key-files), so re-reading them would burn IO for nothing.
-			signalPiHistoryRefresh(sessionId);
-			signalPiPendingMaterialization(sessionId);
+			signalPiDeferredHistoryRefresh(sessionId);
+			signalPiDeferredMaterialization(sessionId);
 			historian.onStatusChange?.(ctx, sessionId);
 		},
 	})
+		.then((didPublish) => {
+			if (didPublish === true) {
+				markPiCompressorRun(sessionId);
+			}
+		})
 		.catch((err) => {
 			sessionLog(
 				sessionId,
@@ -1714,8 +1818,8 @@ function spawnPiHistorianRun(args: {
 			// We deliberately do NOT signal systemPromptRefresh — historian
 			// doesn't change disk-backed adjuncts (docs/profile/key-files),
 			// so re-reading them would burn IO for nothing.
-			signalPiHistoryRefresh(sessionId);
-			signalPiPendingMaterialization(sessionId);
+			signalPiDeferredHistoryRefresh(sessionId);
+			signalPiDeferredMaterialization(sessionId);
 			historian.onStatusChange?.(ctx, sessionId);
 		},
 	}).finally(() => {
@@ -2064,6 +2168,26 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	}
 
 	const transcript = createPiTranscript(args.messages, args.sessionId);
+	const currentTurnId = (() => {
+		const ids = buildPiMessageIdByIndex(
+			args.messages as PiAgentMessage[],
+			args.entryIds ?? null,
+		);
+		return (
+			findLatestUserMessageIdPi(args.messages as PiAgentMessage[], ids)
+				?.messageId ?? null
+		);
+	})();
+	const alreadyRanHeuristicsThisTurn =
+		currentTurnId !== null &&
+		lastHeuristicsTurnIdBySession.get(args.sessionId) === currentTurnId;
+	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
+	// transform path, subagents should bypass this once-per-turn guard like
+	// OpenCode does, because they do not share the primary agent's turn cache.
+	const shouldRunHeuristics =
+		args.heuristics !== undefined &&
+		(args.forceMaterialization === true ||
+			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
 	// ctx_reduce_enabled is false, in which case prefixes are skipped
@@ -2125,17 +2249,33 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Drops in the protected window are deferred (re-queued) so the
 	// agent's recent working context stays intact.
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
+	const deferredMaterializationWasPending = deferredMaterializationSessions.has(
+		args.sessionId,
+	);
+	const deferredHistoryRefreshWasPending = deferredHistoryRefreshSessions.has(
+		args.sessionId,
+	);
 	const pendingOps = getPendingOps(args.db, args.sessionId);
-	const shouldApplyPendingOps =
+	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal;
+	const canConsumeDeferredLate =
+		baseShouldApplyPendingOps || shouldRunHeuristics;
+	const deferredMaterialize =
+		canConsumeDeferredLate && deferredMaterializationWasPending;
+	const deferredHistoryRefresh =
+		canConsumeDeferredLate && deferredHistoryRefreshWasPending;
+	const shouldApplyPendingOps =
+		baseShouldApplyPendingOps || deferredMaterialize;
 	if (shouldApplyPendingOps) {
 		const applyReason = hasPendingMaterializeSignal
 			? "explicit_flush"
-			: args.forceMaterialization
-				? "force_materialization"
-				: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+			: deferredMaterialize
+				? "deferred_publication"
+				: args.forceMaterialization
+					? "force_materialization"
+					: `scheduler_execute (scheduler=${args.schedulerDecision})`;
 		sessionLog(
 			args.sessionId,
 			`pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
@@ -2160,6 +2300,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// the flag stays set so the next pass retries.
 			if (hasPendingMaterializeSignal) {
 				consumePendingMaterialization(args.sessionId);
+			}
+			if (deferredMaterialize) {
+				consumeDeferredMaterialization(args.sessionId);
 			}
 		} catch (err) {
 			sessionLog(
@@ -2328,10 +2471,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		tActiveTags,
 		`count=${activeTags.length}`,
 	);
-	const shouldRunHeuristics =
-		args.heuristics !== undefined &&
-		(args.schedulerDecision === "execute" ||
-			args.forceMaterialization === true);
 	if (shouldRunHeuristics) {
 		const reason = args.forceMaterialization
 			? "force_materialization"
@@ -2364,6 +2503,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			);
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
+			if (currentTurnId !== null) {
+				lastHeuristicsTurnIdBySession.set(args.sessionId, currentTurnId);
+			}
 			logTransformTiming(
 				args.sessionId,
 				"applyHeuristicCleanup",
@@ -2393,24 +2535,32 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	) {
 		try {
 			const tClearReasoning = performance.now();
+			const meta = getOrCreateSessionMeta(args.db, args.sessionId);
+			const prevWatermark = meta.clearedReasoningThroughTag ?? 0;
 			const clearOutcome = clearOldReasoningPi({
 				messages: args.messages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId,
 			});
-			const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-			const prevWatermark = meta.clearedReasoningThroughTag ?? 0;
-			if (clearOutcome.cleared > 0 && clearOutcome.newWatermark > 0) {
-				if (clearOutcome.newWatermark > prevWatermark) {
-					updateSessionMeta(args.db, args.sessionId, {
-						clearedReasoningThroughTag: clearOutcome.newWatermark,
-					});
-					sessionLog(
-						args.sessionId,
-						`reasoning cleanup: cleared=${clearOutcome.cleared} inlineStripped=0 watermark=${prevWatermark}→${clearOutcome.newWatermark}`,
-					);
-				}
+			const stripOutcome = stripInlineThinkingPi({
+				messages: args.messages,
+				messageIdToMaxTag,
+				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
+				piMessageStableId,
+			});
+			const combinedWatermark = Math.max(
+				clearOutcome.newWatermark,
+				stripOutcome.newWatermark,
+			);
+			if (combinedWatermark > prevWatermark) {
+				updateSessionMeta(args.db, args.sessionId, {
+					clearedReasoningThroughTag: combinedWatermark,
+				});
+				sessionLog(
+					args.sessionId,
+					`reasoning cleanup: cleared=${clearOutcome.cleared} inlineStripped=${stripOutcome.stripped} watermark=${prevWatermark}→${combinedWatermark}`,
+				);
 			}
 			logTransformTiming(args.sessionId, "clearOldReasoning", tClearReasoning);
 			logTransformTiming(args.sessionId, "watermarkCleanup", tClearReasoning);
@@ -2444,7 +2594,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.sessionId,
 				args.messages as Parameters<typeof injectSessionHistoryIntoPi>[2],
-				args.isCacheBusting,
+				args.isCacheBusting || deferredHistoryRefresh,
 				args.projectIdentity,
 				args.injection.injectionBudgetTokens,
 				args.injection.temporalAwareness,
@@ -2457,6 +2607,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// retries the rebuild.
 			if (args.isCacheBusting) {
 				historyRefreshSessions.delete(args.sessionId);
+			}
+			if (deferredHistoryRefresh) {
+				consumeDeferredHistoryRefresh(args.sessionId);
 			}
 			logTransformTiming(
 				args.sessionId,
@@ -2599,6 +2752,52 @@ function applyRollingNudge(args: {
 	if (!nudge) return messages;
 
 	return injectPiNudge(messages, nudge);
+}
+
+function applyStickyTurnReminder(args: {
+	sessionId: string;
+	db: ContextDatabase;
+	messages: PiAgentMessage[];
+	entryIds: readonly (string | undefined)[] | null;
+	hasRecentReduceCall: boolean;
+	isCacheBustingPass: boolean;
+}): PiAgentMessage[] {
+	const reminder = getPersistedStickyTurnReminder(args.db, args.sessionId);
+	if (!reminder) return args.messages;
+
+	if (args.hasRecentReduceCall && args.isCacheBustingPass) {
+		clearPersistedStickyTurnReminder(args.db, args.sessionId);
+		return args.messages;
+	}
+
+	const messageIdByIndex = buildPiMessageIdByIndex(
+		args.messages,
+		args.entryIds,
+	);
+	if (reminder.messageId) {
+		const reinjected = appendReminderToUserMessageByIdPi(
+			args.messages,
+			messageIdByIndex,
+			reminder.messageId,
+			reminder.text,
+		);
+		if (!reinjected && args.isCacheBustingPass) {
+			clearPersistedStickyTurnReminder(args.db, args.sessionId);
+		}
+		return args.messages;
+	}
+
+	const latest = findLatestUserMessageIdPi(args.messages, messageIdByIndex);
+	if (latest) {
+		appendReminderToPiUserMessage(args.messages[latest.index], reminder.text);
+		setPersistedStickyTurnReminder(
+			args.db,
+			args.sessionId,
+			reminder.text,
+			latest.messageId,
+		);
+	}
+	return args.messages;
 }
 
 /**
@@ -2900,12 +3099,25 @@ export function clearContextHandlerSession(sessionId: string): void {
 	historyRefreshSessions.delete(sessionId);
 	pendingMaterializationSessions.delete(sessionId);
 	systemPromptRefreshSessions.delete(sessionId);
+	deferredHistoryRefreshSessions.delete(sessionId);
+	deferredMaterializationSessions.delete(sessionId);
 	firstContextPassSeenBySession.delete(sessionId);
 	commitSeenLastPass.delete(sessionId);
 	recentReduceBySession.delete(sessionId);
 	liveModelBySession.delete(sessionId);
 	toolUsageSinceUserTurn.delete(sessionId);
 	latestUserMessageBySession.delete(sessionId);
+	lastHeuristicsTurnIdBySession.delete(sessionId);
+	lastSeenProjectIdentityBySession.delete(sessionId);
+	for (const [projectIdentity, sessions] of sessionsByProject) {
+		sessions.delete(sessionId);
+		if (sessions.size === 0) sessionsByProject.delete(projectIdentity);
+	}
+	const unregister = rawMessageProviderUnregistersBySession.get(sessionId);
+	if (unregister) {
+		unregister();
+		rawMessageProviderUnregistersBySession.delete(sessionId);
+	}
 	clearSessionTracking(sessionId);
 	clearPiCompressorState(sessionId);
 }

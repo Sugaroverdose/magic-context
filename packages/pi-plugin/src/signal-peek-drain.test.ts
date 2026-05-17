@@ -20,12 +20,18 @@ import { join } from "node:path";
 
 import {
 	clearSystemPromptRefresh,
+	consumeDeferredHistoryRefresh,
+	consumeDeferredMaterialization,
 	consumePendingMaterialization,
 	hasPendingMaterialization,
 	hasSystemPromptRefresh,
+	signalPiDeferredHistoryRefresh,
+	signalPiDeferredMaterialization,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 	signalPiSystemPromptRefresh,
+	signalPiSystemPromptRefreshForProject,
+	trackSessionForProject,
 } from "./context-handler";
 import { createTestDb } from "./test-utils.test";
 
@@ -111,6 +117,25 @@ describe("signal helpers: peek vs drain semantics", () => {
 			db.close();
 		}
 	});
+
+	test("deferred signals are independent one-shot drains", () => {
+		signalPiDeferredHistoryRefresh("ses-deferred");
+		signalPiDeferredMaterialization("ses-deferred");
+		expect(consumeDeferredHistoryRefresh("ses-deferred")).toBe(true);
+		expect(consumeDeferredHistoryRefresh("ses-deferred")).toBe(false);
+		expect(consumeDeferredMaterialization("ses-deferred")).toBe(true);
+		expect(consumeDeferredMaterialization("ses-deferred")).toBe(false);
+	});
+
+	test("project system-prompt refresh helper signals all tracked sessions", () => {
+		trackSessionForProject("/project-a", "ses-a1");
+		trackSessionForProject("/project-a", "ses-a2");
+		signalPiSystemPromptRefreshForProject("/project-a");
+		expect(hasSystemPromptRefresh("ses-a1")).toBe(true);
+		expect(hasSystemPromptRefresh("ses-a2")).toBe(true);
+		clearSystemPromptRefresh("ses-a1");
+		clearSystemPromptRefresh("ses-a2");
+	});
 });
 
 describe("source contract: peek-then-drain in runPipeline (history)", () => {
@@ -136,6 +161,71 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		// The drain must mention historyRefreshSessions.delete and isCacheBusting
 		expect(segment).toContain("historyRefreshSessions.delete(args.sessionId)");
 		expect(segment).toMatch(/if\s*\(\s*args\.isCacheBusting\s*\)/);
+	});
+
+	test("deferred publication drains only on a pass that can consume late", () => {
+		expect(code).toMatch(
+			/const\s+canConsumeDeferredLate\s*=\s*baseShouldApplyPendingOps\s*\|\|\s*shouldRunHeuristics/,
+		);
+		expect(code).toContain("const deferredMaterialize =");
+		expect(code).toContain("const deferredHistoryRefresh =");
+		expect(code).toContain("consumeDeferredMaterialization(args.sessionId)");
+		expect(code).toContain("consumeDeferredHistoryRefresh(args.sessionId)");
+	});
+
+	test("once-per-turn heuristics guard uses latest user turn id", () => {
+		expect(code).toContain("lastHeuristicsTurnIdBySession");
+		expect(code).toContain("alreadyRanHeuristicsThisTurn");
+		expect(code).toContain(
+			'args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn',
+		);
+	});
+
+	test("raw message provider unregister is retained and cleaned", () => {
+		expect(code).toContain("rawMessageProviderUnregistersBySession");
+		expect(code).toContain(
+			"rawMessageProviderUnregistersBySession.set(sessionId, unregisterRaw)",
+		);
+		expect(code).toContain(
+			"rawMessageProviderUnregistersBySession.delete(sessionId)",
+		);
+	});
+
+	test("inline thinking stripping shares the reasoning watermark", () => {
+		expect(code).toContain("stripInlineThinkingPi({");
+		expect(code).toContain("const combinedWatermark = Math.max(");
+		expect(code).toContain("clearedReasoningThroughTag: combinedWatermark");
+	});
+
+	test("compressor runs on scheduler execute and stamps cooldown only on publish", () => {
+		expect(code).toContain('args.schedulerDecision !== "execute"');
+		const markIdx = code.indexOf("markPiCompressorRun(sessionId)");
+		const thenIdx = code.indexOf(".then((didPublish) =>");
+		expect(thenIdx).toBeGreaterThan(0);
+		expect(markIdx).toBeGreaterThan(thenIdx);
+	});
+
+	test("model switch reset clears usage, reasoning, failure, limit, and recovery state", () => {
+		expect(code).toContain("clearedReasoningThroughTag: 0");
+		expect(code).toContain("clearHistorianFailureState(options.db, sessionId)");
+		expect(code).toContain(
+			"clearPersistedReasoningWatermark(options.db, sessionId)",
+		);
+		expect(code).toContain("clearDetectedContextLimit(options.db, sessionId)");
+		expect(code).toContain("clearEmergencyRecovery(options.db, sessionId)");
+		expect(code).toContain(
+			"sessionMetaForUsage.clearedReasoningThroughTag = 0",
+		);
+	});
+
+	test("sticky turn reminder is wired after runPipeline before note nudges", () => {
+		const pipelineIdx = code.indexOf("const result = await runPipeline(");
+		const stickyIdx = code.indexOf("applyStickyTurnReminder(");
+		const noteIdx = code.indexOf("applyNoteNudges(");
+		expect(pipelineIdx).toBeGreaterThan(0);
+		expect(stickyIdx).toBeGreaterThan(pipelineIdx);
+		expect(noteIdx).toBeGreaterThan(stickyIdx);
+		expect(code).toContain("isCacheBusting || result.executedWorkThisPass");
 	});
 });
 
@@ -195,5 +285,35 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 		const clearIdx = code.indexOf("clearSystemPromptRefresh(sessionId)");
 		const window = code.slice(Math.max(0, clearIdx - 200), clearIdx + 100);
 		expect(window).toMatch(/if\s*\(\s*isCacheBusting\s*\)/);
+	});
+
+	test("system-prompt injection supports global disable, skip signatures, and existing prompt dedup", () => {
+		expect(code).toContain("config.system_prompt_injection?.enabled === false");
+		expect(code).toContain("config.system_prompt_injection?.skip_signatures");
+		expect(code).toContain("existingSystemPrompt: event.systemPrompt");
+	});
+
+	test("message_end indexes the ended assistant by deferred id lookup", () => {
+		expect(code).toContain("const messageId = endedMsg.id");
+		expect(code).toContain("readPiSessionMessages(ctx)");
+		expect(code).toContain("message.id === messageId");
+	});
+
+	test("runtime project identity resolves from ctx.cwd and tracks prompt path sessions", () => {
+		expect(code).toContain("function resolveCurrentProject");
+		expect(code).toContain("const projectDir = ctx.cwd");
+		expect(code).toContain(
+			"trackSessionForProject(currentProject.projectIdentity, sessionId)",
+		);
+		expect(code).toContain("resolveProject: resolveCurrentProject");
+	});
+
+	test("hash-change path remains eager for all three refresh sets", () => {
+		const idx = code.indexOf("if (result.hashChanged)");
+		expect(idx).toBeGreaterThan(0);
+		const segment = code.slice(idx, idx + 500);
+		expect(segment).toContain("signalPiHistoryRefresh(sessionId)");
+		expect(segment).toContain("signalPiSystemPromptRefresh(sessionId)");
+		expect(segment).toContain("signalPiPendingMaterialization(sessionId)");
 	});
 });

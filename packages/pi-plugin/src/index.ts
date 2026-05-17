@@ -83,6 +83,8 @@ import {
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
 	signalPiSystemPromptRefresh,
+	signalPiSystemPromptRefreshForProject,
+	trackSessionForProject,
 } from "./context-handler";
 import {
 	awaitInFlightDreamers,
@@ -103,6 +105,15 @@ import {
 import { registerMagicContextTools } from "./tools";
 
 const PREFIX = "[magic-context][pi]";
+
+function resolveCurrentProject(ctx: { cwd: string }): {
+	projectDir: string;
+	projectIdentity: string;
+} {
+	const projectDir = ctx.cwd;
+	const projectIdentity = resolveProjectIdentity(projectDir);
+	return { projectDir, projectIdentity };
+}
 
 export function persistPiMessageEndModelMeta(args: {
 	db: ContextDatabase;
@@ -450,11 +461,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return;
 	}
 
-	// Snapshot project identity at boot. Used downstream for memory/
-	// embedding scoping. Resolution is cached for the process lifetime, so
-	// calling here just primes the cache.
+	// Capture boot project for initial config load and logging only. Runtime
+	// identity/path resolution uses ctx.cwd per hook/command so session cwd
+	// switches follow the active project without reloading config.
 	const projectDir = process.cwd();
 	const projectIdentity = resolveProjectIdentity(projectDir);
+	const seenDreamerProjectIdentities = new Set<string>([projectIdentity]);
 
 	info(
 		`loaded v${PLUGIN_VERSION} | harness=pi | db=${dbPath} | ` +
@@ -528,7 +540,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const historianConfig = resolveHistorianFromConfig(config);
 	if (historianConfig) {
 		historianConfig.onStatusChange = (ctx) => {
-			updateStatusLine(ctx, { db, projectIdentity });
+			updateStatusLine(ctx, {
+				db,
+				projectIdentity: resolveCurrentProject(ctx).projectIdentity,
+			});
 		};
 	}
 	const nudgeConfig = resolveNudgeFromConfig(config);
@@ -620,12 +635,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	registerCtxStatusCommand(pi, {
 		db,
 		projectIdentity,
+		resolveProject: resolveCurrentProject,
 		protectedTags: config.protected_tags,
 		nudgeIntervalTokens: config.nudge_interval_tokens,
 		executeThresholdPercentage: config.execute_threshold_percentage,
 		historyBudgetPercentage: config.history_budget_percentage,
 		commitClusterTrigger: config.commit_cluster_trigger,
 		executeThresholdTokens: config.execute_threshold_tokens,
+		dreamer: {
+			enabled: config.dreamer?.enabled ?? false,
+			schedule: config.dreamer?.schedule,
+		},
 	});
 	info("registered /ctx-status");
 	registerStatusLine(pi, { db, projectIdentity });
@@ -656,6 +676,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		db,
 		projectDir,
 		projectIdentity,
+		resolveProject: resolveCurrentProject,
+		dreamerEnabled: config.dreamer?.enabled ?? false,
+		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
 	});
 	info("registered /ctx-dream");
 
@@ -677,6 +700,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			embeddingConfig: config.embedding,
 			memoryEnabled: config.memory.enabled,
 			gitCommitIndexing: config.experimental.git_commit_indexing,
+			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 		info(
 			dreamerConfig.enabled
@@ -702,6 +726,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// `system-prompt-hash.ts`.
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
+			const currentProject = resolveCurrentProject(ctx);
+			seenDreamerProjectIdentities.add(currentProject.projectIdentity);
 			// Pi exposes `sessionManager.getSessionId()` once a session is
 			// active. We resolve it here defensively because before_agent_start
 			// fires once per agent turn.
@@ -718,6 +744,21 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						// Fail open — sessionId stays undefined.
 					}
 				}
+			}
+			if (sessionId) {
+				trackSessionForProject(currentProject.projectIdentity, sessionId);
+			}
+
+			if (config.system_prompt_injection?.enabled === false) {
+				return;
+			}
+			const skipSigs = config.system_prompt_injection?.skip_signatures ?? [];
+			if (
+				skipSigs.some(
+					(sig) => sig.length > 0 && event.systemPrompt.includes(sig),
+				)
+			) {
+				return;
 			}
 
 			// PEEK the system-prompt refresh signal. Set by:
@@ -740,7 +781,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 			const block = buildMagicContextBlock({
 				db,
-				cwd: ctx.cwd,
+				cwd: currentProject.projectDir,
 				sessionId,
 				memoryEnabled: config.memory.enabled,
 				injectDocs: config.dreamer?.inject_docs ?? true,
@@ -770,6 +811,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				pinKeyFilesTokenBudget:
 					config.dreamer?.pin_key_files?.token_budget ?? 10_000,
 				isCacheBusting,
+				existingSystemPrompt: event.systemPrompt,
 			});
 
 			// Compose the final system prompt: base prompt from Pi + our
@@ -1042,10 +1084,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				| undefined;
 			const sessionId = sm?.getSessionId?.();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
-			const rawMessages = readPiSessionMessages(ctx);
-			const latest = rawMessages[rawMessages.length - 1];
-			if (latest?.role === "assistant" && latest.id.length > 0) {
-				scheduleIncrementalIndex(db, sessionId, latest.id, () => latest);
+			const endedMsg = event.message as unknown as {
+				id?: string;
+				role?: string;
+			};
+			if (
+				endedMsg?.role === "assistant" &&
+				typeof endedMsg.id === "string" &&
+				endedMsg.id.length > 0
+			) {
+				const messageId = endedMsg.id;
+				scheduleIncrementalIndex(db, sessionId, messageId, () => {
+					const rawMessages = readPiSessionMessages(ctx);
+					return (
+						rawMessages.find((message) => message.id === messageId) ?? null
+					);
+				});
 			}
 			persistPiMessageEndModelMeta({
 				db,
@@ -1241,7 +1295,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			warn("shutdown: dreamer drain threw:", err);
 		}
 		try {
-			unregisterPiDreamerProject({ projectIdentity });
+			for (const identity of seenDreamerProjectIdentities) {
+				unregisterPiDreamerProject({ projectIdentity: identity });
+			}
 		} catch (err) {
 			warn("shutdown: unregisterPiDreamerProject threw:", err);
 		}

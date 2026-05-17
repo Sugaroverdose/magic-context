@@ -11,12 +11,10 @@ import { join } from "node:path";
  * historian queued sat in `pending_ops` and never materialized until
  * usage crossed the 85% force-materialization threshold.
  *
- * Root cause: Pi historian + compressor `onPublished` callbacks only
- * called `signalPiHistoryRefresh(sessionId)`, missing the matching
- * `signalPiPendingMaterialization(sessionId)` call. Without that
- * second signal, the next pipeline pass had no reason to materialize
- * pending ops (`runPipeline` gates on
- * `consumePendingMaterialization()`), so the queued drops never ran.
+ * Root cause: Pi historian + compressor publications were signaled too
+ * eagerly or incompletely. They must now use the deferred refresh /
+ * materialization signals so defer passes remain cache-stable, then the
+ * next execute/materialization pass drains both together.
  *
  * OpenCode parity reference: `transform.ts:502-505` signals BOTH sets
  * inside `onInjectionCacheCleared` (the equivalent callback). Comment
@@ -70,17 +68,17 @@ describe("historian + compressor onPublished signals", () => {
 		expect(bodies.length).toBe(2);
 	});
 
-	test("every onPublished signals signalPiHistoryRefresh", () => {
+	test("every onPublished signals deferred history refresh", () => {
 		for (const body of bodies) {
-			expect(body).toContain("signalPiHistoryRefresh(sessionId)");
+			expect(body).toContain("signalPiDeferredHistoryRefresh(sessionId)");
 		}
 	});
 
-	test("every onPublished signals signalPiPendingMaterialization", () => {
-		// THE bug: this signal was missing from both callbacks. Without
-		// it, drops the runner queued sit until 85% emergency.
+	test("every onPublished signals deferred materialization", () => {
 		for (const body of bodies) {
-			expect(body).toContain("signalPiPendingMaterialization(sessionId)");
+			expect(body).toContain("signalPiDeferredMaterialization(sessionId)");
+			expect(body).not.toContain("signalPiHistoryRefresh(sessionId)");
+			expect(body).not.toContain("signalPiPendingMaterialization(sessionId)");
 		}
 	});
 

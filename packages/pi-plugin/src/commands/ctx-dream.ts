@@ -11,12 +11,43 @@ export function registerCtxDreamCommand(
 		db: ContextDatabase;
 		projectDir: string;
 		projectIdentity: string;
+		resolveProject?: (ctx: { cwd: string }) => {
+			projectDir: string;
+			projectIdentity: string;
+		};
+		dreamerEnabled?: boolean;
+		onProjectSeen?: (projectIdentity: string) => void;
 	},
 ): void {
 	pi.registerCommand("ctx-dream", {
 		description: "Run a Magic Context dreamer cycle for this project now",
-		handler: async () => {
-			const enqueued = enqueueDream(deps.db, deps.projectIdentity, "manual");
+		handler: async (_args, ctx) => {
+			const project = deps.resolveProject?.(ctx) ?? {
+				projectDir: deps.projectDir,
+				projectIdentity: deps.projectIdentity,
+			};
+			deps.onProjectSeen?.(project.projectIdentity);
+			if (deps.dreamerEnabled === false) {
+				sendCtxStatusMessage(
+					pi,
+					{
+						title: "/ctx-dream",
+						text: "## /ctx-dream\n\nDreamer is not configured for this project (`dreamer.enabled=false`).",
+						level: "info",
+					},
+					{
+						projectDir: project.projectDir,
+						projectIdentity: project.projectIdentity,
+					},
+				);
+				return;
+			}
+			const enqueued = enqueueDream(
+				deps.db,
+				project.projectIdentity,
+				"manual",
+				true,
+			);
 			if (!enqueued) {
 				// Already queued or actively running. Mirrors OpenCode's
 				// behavior at command-handler.ts:230 — if enqueue returns
@@ -28,13 +59,13 @@ export function registerCtxDreamCommand(
 						text: [
 							"## /ctx-dream",
 							"",
-							`Dream already queued or running for ${deps.projectIdentity}.`,
+							`Dream already queued or running for ${project.projectIdentity}.`,
 						].join("\n"),
 						level: "info",
 					},
 					{
-						projectDir: deps.projectDir,
-						projectIdentity: deps.projectIdentity,
+						projectDir: project.projectDir,
+						projectIdentity: project.projectIdentity,
 						entry: null,
 					},
 				);
@@ -49,14 +80,14 @@ export function registerCtxDreamCommand(
 					text: [
 						"## /ctx-dream",
 						"",
-						`Starting dream run #${enqueued.id} for ${deps.projectIdentity}…`,
-						`Project directory: ${deps.projectDir}`,
+						`Starting dream run #${enqueued.id} for ${project.projectIdentity}…`,
+						`Project directory: ${project.projectDir}`,
 					].join("\n"),
 					level: "info",
 				},
 				{
-					projectDir: deps.projectDir,
-					projectIdentity: deps.projectIdentity,
+					projectDir: project.projectDir,
+					projectIdentity: project.projectIdentity,
 					entry: enqueued,
 				},
 			);
@@ -66,7 +97,7 @@ export function registerCtxDreamCommand(
 			// timer uses. Pi previously left this to the 15-min timer, so
 			// /ctx-dream felt broken.
 			try {
-				const result = await runPiDreamForProject(deps.projectIdentity);
+				const result = await runPiDreamForProject(project.projectIdentity);
 				let summary: string;
 				if (!result) {
 					summary =
@@ -96,15 +127,15 @@ export function registerCtxDreamCommand(
 						level: result ? "success" : "info",
 					},
 					{
-						projectDir: deps.projectDir,
-						projectIdentity: deps.projectIdentity,
+						projectDir: project.projectDir,
+						projectIdentity: project.projectIdentity,
 						entry: enqueued,
 					},
 				);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				sessionLog(
-					deps.projectIdentity,
+					project.projectIdentity,
 					`/ctx-dream failed to drain queue: ${message}`,
 				);
 				sendCtxStatusMessage(
@@ -120,8 +151,8 @@ export function registerCtxDreamCommand(
 						level: "error",
 					},
 					{
-						projectDir: deps.projectDir,
-						projectIdentity: deps.projectIdentity,
+						projectDir: project.projectDir,
+						projectIdentity: project.projectIdentity,
 						entry: enqueued,
 					},
 				);
