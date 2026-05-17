@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
+import { escapeXmlContent } from "../../features/magic-context/compartment-storage";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
@@ -97,7 +98,7 @@ function readProjectDocs(directory: string): string | null {
             if (existsSync(filePath)) {
                 const content = readFileSync(filePath, "utf-8").trim();
                 if (content.length > 0) {
-                    sections.push(`<${filename}>\n${content}\n</${filename}>`);
+                    sections.push(`<${filename}>\n${escapeXmlContent(content)}\n</${filename}>`);
                 }
             }
         } catch (error) {
@@ -344,7 +345,9 @@ export function createSystemPromptHashHandler(deps: {
             if (!hasCachedProfile || isCacheBusting) {
                 const memories = getActiveUserMemories(deps.db);
                 if (memories.length > 0) {
-                    const items = memories.map((m) => `- ${m.content}`).join("\n");
+                    const items = memories
+                        .map((m) => `- ${escapeXmlContent(m.content)}`)
+                        .join("\n");
                     cachedUserProfileBySession.set(
                         sessionId,
                         `${USER_PROFILE_MARKER}\n${items}\n</user-profile>`,

@@ -65,6 +65,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
+import { escapeXmlContent } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	type ContextDatabase,
 	getOrCreateSessionMeta,
@@ -80,6 +81,7 @@ import { log, sessionLog } from "@magic-context/core/shared/logger";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
+const KEY_FILES_MARKER = "<key-files>";
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 
 /**
@@ -103,7 +105,9 @@ function readProjectDocs(directory: string): string | null {
 			if (existsSync(filePath)) {
 				const content = readFileSync(filePath, "utf-8").trim();
 				if (content.length > 0) {
-					sections.push(`<${filename}>\n${content}\n</${filename}>`);
+					sections.push(
+						`<${filename}>\n${escapeXmlContent(content)}\n</${filename}>`,
+					);
 				}
 			}
 		} catch (error) {
@@ -123,7 +127,9 @@ function readProjectDocs(directory: string): string | null {
 function buildUserProfileBlock(db: ContextDatabase): string | null {
 	const memories = getActiveUserMemories(db);
 	if (memories.length === 0) return null;
-	const items = memories.map((m) => `- ${m.content}`).join("\n");
+	const items = memories
+		.map((m) => `- ${escapeXmlContent(m.content)}`)
+		.join("\n");
 	return `${USER_PROFILE_MARKER}\n${items}\n</user-profile>`;
 }
 
@@ -168,6 +174,8 @@ export interface BuildMagicContextBlockOptions {
 	pinKeyFilesEnabled?: boolean;
 	/** Token budget for `<key-files>` content (default: 10000). */
 	pinKeyFilesTokenBudget?: number;
+	/** Base system prompt (or empty string) from Pi — used for marker dedup. */
+	existingSystemPrompt?: string;
 	/**
 	 * When true, this turn is already busting the prefix cache (the system
 	 * prompt hash changed last turn, dreamer just published new docs,
@@ -201,9 +209,10 @@ export function buildMagicContextBlock(
 	const sections: string[] = [];
 	const sessionId = opts.sessionId;
 	const isCacheBusting = opts.isCacheBusting ?? false;
+	const existing = opts.existingSystemPrompt ?? "";
 
 	// 1. Project docs (ARCHITECTURE.md / STRUCTURE.md from the project root).
-	if (opts.injectDocs) {
+	if (opts.injectDocs && !existing.includes(PROJECT_DOCS_MARKER)) {
 		const docsBlock = readCachedAdjunct({
 			cache: cachedDocsBySession,
 			sessionId,
@@ -215,7 +224,7 @@ export function buildMagicContextBlock(
 	}
 
 	// 2. Stable user memories as <user-profile>.
-	if (opts.userMemoriesEnabled) {
+	if (opts.userMemoriesEnabled && !existing.includes(USER_PROFILE_MARKER)) {
 		const profileBlock = readCachedAdjunct({
 			cache: cachedUserProfileBySession,
 			sessionId,
@@ -227,7 +236,11 @@ export function buildMagicContextBlock(
 	}
 
 	// 3. Pinned key files as <key-files>.
-	if (opts.pinKeyFilesEnabled && sessionId) {
+	if (
+		opts.pinKeyFilesEnabled &&
+		sessionId &&
+		!existing.includes(KEY_FILES_MARKER)
+	) {
 		let sessionMeta:
 			| import("@magic-context/core/features/magic-context/types").SessionMeta
 			| null = null;
@@ -257,7 +270,8 @@ export function buildMagicContextBlock(
 			? `<magic-context>\n${sections.join("\n\n")}\n</magic-context>`
 			: null;
 
-	const includeGuidance = opts.includeGuidance ?? true;
+	const includeGuidance =
+		(opts.includeGuidance ?? true) && !existing.includes(MAGIC_CONTEXT_MARKER);
 	if (!includeGuidance) {
 		return dataBlock;
 	}

@@ -6,8 +6,11 @@ import {
 	appendCompartments,
 	replaceSessionFacts,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import { setAftAvailabilityOverride } from "@magic-context/core/features/magic-context/key-files/aft-availability";
+import { replaceProjectKeyFiles } from "@magic-context/core/features/magic-context/key-files/project-key-files";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { insertUserMemory } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { buildMagicContextBlock } from "./system-prompt";
 import { createTestDb } from "./test-utils.test";
@@ -20,8 +23,13 @@ function tempDir(prefix: string): string {
 	return dir;
 }
 
+function countOccurrences(haystack: string, needle: string): number {
+	return haystack.split(needle).length - 1;
+}
+
 describe("buildMagicContextBlock", () => {
 	afterEach(() => {
+		setAftAvailabilityOverride(null);
 		for (const dir of tempDirs.splice(0))
 			rmSync(dir, { recursive: true, force: true });
 	});
@@ -108,6 +116,211 @@ describe("buildMagicContextBlock", () => {
 			expect(block).toContain("<ARCHITECTURE.md>");
 			expect(block).toContain("Runtime map");
 			expect(block).toContain("<STRUCTURE.md>");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("escapes project-docs content without escaping wrapper tags", () => {
+		const db = createTestDb();
+		const cwd = tempDir("pi-docs-escape-");
+		writeFileSync(
+			join(cwd, "ARCHITECTURE.md"),
+			"Alpha <closing-tag> & beta",
+			"utf-8",
+		);
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd,
+				memoryEnabled: false,
+				injectDocs: true,
+				includeGuidance: false,
+			});
+
+			expect(block).toContain("<project-docs>");
+			expect(block).toContain("<ARCHITECTURE.md>");
+			expect(block).toContain(
+				"Alpha &lt;closing-tag&gt; &amp; beta\n</ARCHITECTURE.md>",
+			);
+			expect(block).not.toContain("Alpha <closing-tag> & beta");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("escapes user-profile memory content so literal closing tags cannot terminate the wrapper", () => {
+		const db = createTestDb();
+		try {
+			insertUserMemory(db, "User wrote literal </user-profile> & <xml>", []);
+
+			const block = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-profile-escape-"),
+				memoryEnabled: false,
+				injectDocs: false,
+				includeGuidance: false,
+				userMemoriesEnabled: true,
+			});
+
+			expect(block).toContain("<user-profile>");
+			expect(block).toContain(
+				"- User wrote literal &lt;/user-profile&gt; &amp; &lt;xml&gt;",
+			);
+			expect(countOccurrences(block ?? "", "</user-profile>")).toBe(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("dedups project-docs when existingSystemPrompt already contains the marker", () => {
+		const db = createTestDb();
+		const cwd = tempDir("pi-docs-dedup-");
+		writeFileSync(
+			join(cwd, "ARCHITECTURE.md"),
+			"Docs should be skipped",
+			"utf-8",
+		);
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd,
+				memoryEnabled: false,
+				injectDocs: true,
+				includeGuidance: false,
+				existingSystemPrompt:
+					"base\n<project-docs>already there</project-docs>",
+			});
+
+			expect(block).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("dedups user-profile when existingSystemPrompt already contains the marker", () => {
+		const db = createTestDb();
+		try {
+			insertUserMemory(db, "Profile should be skipped", []);
+
+			const block = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-profile-dedup-"),
+				memoryEnabled: false,
+				injectDocs: false,
+				includeGuidance: false,
+				userMemoriesEnabled: true,
+				existingSystemPrompt:
+					"base\n<user-profile>already there</user-profile>",
+			});
+
+			expect(block).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("dedups key-files when existingSystemPrompt already contains the marker", () => {
+		const db = createTestDb();
+		setAftAvailabilityOverride(true);
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-keyfiles-dedup-"),
+				sessionId: "ses-keyfiles-dedup",
+				memoryEnabled: false,
+				injectDocs: false,
+				includeGuidance: false,
+				pinKeyFilesEnabled: true,
+				existingSystemPrompt: "base\n<key-files>already there</key-files>",
+			});
+
+			expect(block).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("dedups Magic Context guidance when existingSystemPrompt already contains the marker", () => {
+		const db = createTestDb();
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd: tempDir("pi-guidance-dedup-"),
+				sessionId: "ses-guidance-dedup",
+				memoryEnabled: false,
+				injectDocs: false,
+				includeGuidance: true,
+				existingSystemPrompt: "base\n## Magic Context\nalready there",
+			});
+
+			expect(block).toBeNull();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("dedups per section: existing project-docs does not suppress missing user-profile", () => {
+		const db = createTestDb();
+		const cwd = tempDir("pi-dedup-mixed-");
+		writeFileSync(
+			join(cwd, "ARCHITECTURE.md"),
+			"Docs should be skipped",
+			"utf-8",
+		);
+		try {
+			insertUserMemory(db, "Profile should still render", []);
+
+			const block = buildMagicContextBlock({
+				db,
+				cwd,
+				memoryEnabled: false,
+				injectDocs: true,
+				includeGuidance: false,
+				userMemoriesEnabled: true,
+				existingSystemPrompt:
+					"base\n<project-docs>already there</project-docs>",
+			});
+
+			expect(block).not.toContain("<project-docs>");
+			expect(block).toContain("<user-profile>");
+			expect(block).toContain("Profile should still render");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps backward-compatible default behavior when existingSystemPrompt is omitted", () => {
+		const db = createTestDb();
+		const cwd = tempDir("pi-default-all-");
+		writeFileSync(join(cwd, "ARCHITECTURE.md"), "Default docs", "utf-8");
+		writeFileSync(join(cwd, "src.ts"), "export const value = 1;", "utf-8");
+		setAftAvailabilityOverride(true);
+		try {
+			insertUserMemory(db, "Default profile", []);
+			replaceProjectKeyFiles(db, cwd, [
+				{
+					path: "src.ts",
+					content: "export const value = 1;",
+					localTokenEstimate: 8,
+					generationConfigHash: "test-hash",
+				},
+			]);
+
+			const block = buildMagicContextBlock({
+				db,
+				cwd,
+				sessionId: "ses-default-all",
+				memoryEnabled: false,
+				injectDocs: true,
+				userMemoriesEnabled: true,
+				pinKeyFilesEnabled: true,
+			});
+
+			expect(block).toContain("## Magic Context");
+			expect(block).toContain("<project-docs>");
+			expect(block).toContain("<user-profile>");
+			expect(block).toContain("<key-files>");
 		} finally {
 			closeQuietly(db);
 		}

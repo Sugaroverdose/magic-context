@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { DreamerConfigSchema } from "@magic-context/core/config/schema/magic-context";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import {
+	type DreamerConfig,
+	DreamerConfigSchema,
+} from "@magic-context/core/config/schema/magic-context";
 import { ensureDreamQueueTable } from "@magic-context/core/features/magic-context/dreamer";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
@@ -12,6 +15,21 @@ import {
 } from ".";
 
 let db: Database | null = null;
+
+type CapturedDreamClient = {
+	session: {
+		create: (args: unknown) => Promise<unknown>;
+		prompt: (args: unknown) => Promise<unknown>;
+	};
+};
+
+function requireCapturedClient(
+	client: CapturedDreamClient | null,
+): CapturedDreamClient {
+	expect(client).not.toBeNull();
+	if (!client) throw new Error("dreamer client was not captured");
+	return client;
+}
 
 function createDb(): Database {
 	const database = new Database(":memory:");
@@ -33,6 +51,42 @@ function disabledConfig() {
 	return DreamerConfigSchema.parse({ enabled: false });
 }
 
+function dreamerOptions(args: {
+	database: Database;
+	projectIdentity: string;
+	projectDir?: string;
+	config?: DreamerConfig;
+	onAdjunctsRefreshNeeded?: (projectIdentity: string) => void;
+}) {
+	return {
+		db: args.database,
+		projectDir:
+			args.projectDir ??
+			`/tmp/${args.projectIdentity.replace(/[^a-z0-9-]/gi, "-")}`,
+		projectIdentity: args.projectIdentity,
+		config: args.config ?? enabledConfig(),
+		embeddingConfig: { provider: "off" as const },
+		memoryEnabled: true,
+		gitCommitIndexing: { enabled: false, since_days: 30, max_commits: 200 },
+		onAdjunctsRefreshNeeded: args.onAdjunctsRefreshNeeded,
+	};
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
 afterEach(() => {
 	__test.reset();
 	if (db) {
@@ -45,12 +99,14 @@ describe("Pi dreamer wiring", () => {
 	test("disabled config is a no-op", () => {
 		db = createDb();
 
-		registerPiDreamerProject({
-			db,
-			projectDir: "/tmp/pi-project-disabled",
-			projectIdentity: "git:pi-disabled",
-			config: disabledConfig(),
-		});
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/pi-project-disabled",
+				projectIdentity: "git:pi-disabled",
+				config: disabledConfig(),
+			}),
+		);
 
 		expect(__test.registeredProjectCount()).toBe(0);
 	});
@@ -58,12 +114,12 @@ describe("Pi dreamer wiring", () => {
 	test("enabled config registers once for the same project", () => {
 		db = createDb();
 		const config = enabledConfig();
-		const opts = {
-			db,
+		const opts = dreamerOptions({
+			database: db,
 			projectDir: "/tmp/pi-project-enabled",
 			projectIdentity: "git:pi-enabled",
 			config,
-		};
+		});
 
 		registerPiDreamerProject(opts);
 		registerPiDreamerProject(opts);
@@ -73,12 +129,13 @@ describe("Pi dreamer wiring", () => {
 
 	test("unregister removes the project", () => {
 		db = createDb();
-		registerPiDreamerProject({
-			db,
-			projectDir: "/tmp/pi-project-unregister",
-			projectIdentity: "git:pi-unregister",
-			config: enabledConfig(),
-		});
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/pi-project-unregister",
+				projectIdentity: "git:pi-unregister",
+			}),
+		);
 
 		unregisterPiDreamerProject({ projectIdentity: "git:pi-unregister" });
 
@@ -87,5 +144,146 @@ describe("Pi dreamer wiring", () => {
 
 	test("awaitInFlightDreamers resolves immediately when nothing is running", async () => {
 		await expect(awaitInFlightDreamers()).resolves.toBeUndefined();
+	});
+
+	test("fires onAdjunctsRefreshNeeded after successful dreamer prompt", async () => {
+		db = createDb();
+		let capturedClient: CapturedDreamClient | null = null;
+		const timerCleanup = mock(() => {});
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			capturedClient = registration.client as unknown as CapturedDreamClient;
+			return timerCleanup;
+		});
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({ ok: true, assistantText: "done" })),
+				}) as never,
+		);
+		const onAdjunctsRefreshNeeded = mock(() => {});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:pi-g5-success",
+				onAdjunctsRefreshNeeded,
+			}),
+		);
+		const client = requireCapturedClient(capturedClient);
+		const created = (await client.session.create({})) as {
+			id: string;
+		};
+		await client.session.prompt({
+			path: { id: created.id },
+			body: { system: "system", parts: [{ text: "run dreamer" }] },
+		});
+
+		expect(onAdjunctsRefreshNeeded).toHaveBeenCalledTimes(1);
+		expect(onAdjunctsRefreshNeeded).toHaveBeenCalledWith("git:pi-g5-success");
+	});
+
+	test("undefined onAdjunctsRefreshNeeded is a no-op after successful dreamer prompt", async () => {
+		db = createDb();
+		let capturedClient: CapturedDreamClient | null = null;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			capturedClient = registration.client as unknown as CapturedDreamClient;
+			return mock(() => {});
+		});
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({ ok: true, assistantText: "done" })),
+				}) as never,
+		);
+
+		registerPiDreamerProject(
+			dreamerOptions({ database: db, projectIdentity: "git:pi-g5-noop" }),
+		);
+		const client = requireCapturedClient(capturedClient);
+		const created = (await client.session.create({})) as {
+			id: string;
+		};
+		await expect(
+			client.session.prompt({
+				path: { id: created.id },
+				body: { system: "system", parts: [{ text: "run dreamer" }] },
+			}),
+		).resolves.toBeUndefined();
+	});
+
+	test("does not fire onAdjunctsRefreshNeeded when dreamer prompt fails", async () => {
+		db = createDb();
+		let capturedClient: CapturedDreamClient | null = null;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			capturedClient = registration.client as unknown as CapturedDreamClient;
+			return mock(() => {});
+		});
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({
+						ok: false,
+						reason: "error",
+						error: "boom",
+					})),
+				}) as never,
+		);
+		const onAdjunctsRefreshNeeded = mock(() => {});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:pi-g5-failure",
+				onAdjunctsRefreshNeeded,
+			}),
+		);
+		const client = requireCapturedClient(capturedClient);
+		const created = (await client.session.create({})) as {
+			id: string;
+		};
+		await expect(
+			client.session.prompt({
+				path: { id: created.id },
+				body: { system: "system", parts: [{ text: "run dreamer" }] },
+			}),
+		).rejects.toThrow("Pi dreamer subagent failed");
+
+		expect(onAdjunctsRefreshNeeded).not.toHaveBeenCalled();
+	});
+
+	test("unregister before timer promise resolves invokes timer cleanup when it eventually resolves", async () => {
+		db = createDb();
+		const timerCleanup = mock(() => {});
+		const timer = deferred<() => void>();
+		__test.setStartDreamScheduleTimerFactory(() => timer.promise);
+
+		registerPiDreamerProject(
+			dreamerOptions({ database: db, projectIdentity: "git:pi-g12-race" }),
+		);
+		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-race" });
+		expect(timerCleanup).not.toHaveBeenCalled();
+
+		timer.resolve(timerCleanup);
+		await flushMicrotasks();
+
+		expect(timerCleanup).toHaveBeenCalledTimes(1);
+	});
+
+	test("normal timer lifecycle invokes cleanup exactly once on unregister", async () => {
+		db = createDb();
+		const timerCleanup = mock(() => {});
+		const timer = deferred<() => void>();
+		__test.setStartDreamScheduleTimerFactory(() => timer.promise);
+
+		registerPiDreamerProject(
+			dreamerOptions({ database: db, projectIdentity: "git:pi-g12-normal" }),
+		);
+		timer.resolve(timerCleanup);
+		await flushMicrotasks();
+
+		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-normal" });
+		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-normal" });
+
+		expect(timerCleanup).toHaveBeenCalledTimes(1);
 	});
 });

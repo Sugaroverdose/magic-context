@@ -8,7 +8,7 @@ import {
 } from "@magic-context/core/features/magic-context/dreamer";
 import type { DreamRunResult } from "@magic-context/core/features/magic-context/dreamer/runner";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { startDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
+import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
 
@@ -38,9 +38,20 @@ export interface PiDreamerOptions {
 		since_days: number;
 		max_commits: number;
 	};
+	/**
+	 * G5: fired after dreamer publishes content that may affect
+	 * <project-docs>, <user-profile>, or <key-files>. Implementation
+	 * lives in context-handler (Slice 3); when undefined, refresh is a
+	 * no-op (no harm — caches just stay stale until next /ctx-flush or
+	 * system-prompt hash change). Slice 3 passes
+	 * `signalPiSystemPromptRefreshForProject` here.
+	 */
+	onAdjunctsRefreshNeeded?: (projectIdentity: string) => void;
 }
 
-type DreamTimerRegistration = Parameters<typeof startDreamScheduleTimer>[0];
+type DreamTimerRegistration = Parameters<
+	typeof defaultStartDreamScheduleTimer
+>[0];
 type DreamTimerClient = DreamTimerRegistration["client"];
 
 interface SessionCreateArgs {
@@ -82,6 +93,8 @@ const inFlightDreams = new Set<Promise<unknown>>();
 let sessionCounter = 0;
 let piSubagentRunnerFactory: PiSubagentRunnerFactory = () =>
 	new PiSubagentRunner();
+let startDreamScheduleTimerFn: typeof defaultStartDreamScheduleTimer =
+	defaultStartDreamScheduleTimer;
 
 /** Initialize the Pi-side dreamer integration: register this project with
  *  the singleton timer, ensure PiSubagentRunner is the active runner. */
@@ -117,7 +130,8 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		: undefined;
 
 	let cleanup: (() => void) | undefined;
-	void startDreamScheduleTimer({
+	let cancelled = false;
+	void startDreamScheduleTimerFn({
 		directory: opts.projectDir,
 		projectIdentity: opts.projectIdentity,
 		client,
@@ -127,6 +141,12 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		gitCommitIndexing: opts.gitCommitIndexing,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
 	}).then((timerCleanup) => {
+		if (cancelled) {
+			// Registration was cancelled before timer setup completed —
+			// immediately invoke cleanup to prevent leaked timer registration.
+			timerCleanup?.();
+			return;
+		}
 		cleanup = timerCleanup;
 	});
 
@@ -159,7 +179,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		});
 
 	registeredProjects.set(opts.projectIdentity, {
-		cleanup: () => cleanup?.(),
+		cleanup: () => {
+			cancelled = true;
+			cleanup?.();
+		},
 		runOnce,
 	});
 }
@@ -264,6 +287,13 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 						{ type: "text", text: result.assistantText },
 					]),
 				];
+				// G5: fire conservatively after every successful dreamer task. Many
+				// dreamer tasks (consolidate, verify, decay) don't touch the system-
+				// prompt adjuncts, but improve / maintain-docs / user-memory-review
+				// can update <project-docs>, <user-profile>, or <key-files>. The cost
+				// of one extra disk read per session next turn is tiny compared to
+				// stale adjuncts surviving until restart.
+				opts.onAdjunctsRefreshNeeded?.(opts.projectIdentity);
 			} finally {
 				inFlightDreams.delete(runPromise);
 			}
@@ -367,6 +397,11 @@ export const __test = {
 	setPiSubagentRunnerFactory: (factory: PiSubagentRunnerFactory) => {
 		piSubagentRunnerFactory = factory;
 	},
+	setStartDreamScheduleTimerFactory: (
+		factory: typeof defaultStartDreamScheduleTimer,
+	) => {
+		startDreamScheduleTimerFn = factory;
+	},
 	reset: () => {
 		for (const registration of registeredProjects.values()) {
 			registration.cleanup();
@@ -376,5 +411,6 @@ export const __test = {
 		inFlightDreams.clear();
 		sessionCounter = 0;
 		piSubagentRunnerFactory = () => new PiSubagentRunner();
+		startDreamScheduleTimerFn = defaultStartDreamScheduleTimer;
 	},
 };

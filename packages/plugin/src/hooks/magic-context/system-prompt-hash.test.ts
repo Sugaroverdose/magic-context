@@ -17,7 +17,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,7 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 
 const tempDirs: string[] = [];
@@ -52,22 +53,31 @@ function buildHandler(opts?: {
     pendingMaterializationSessions?: Set<string>;
     injectionEnabled?: boolean;
     injectionSkipSignatures?: string[];
+    dreamerEnabled?: boolean;
+    injectDocs?: boolean;
+    directory?: string;
+    experimentalUserMemories?: boolean;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
         protectedTags: 1,
         ctxReduceEnabled: true,
         dropToolStructure: true,
-        dreamerEnabled: false,
-        injectDocs: false,
-        directory: "/tmp",
+        dreamerEnabled: opts?.dreamerEnabled ?? false,
+        injectDocs: opts?.injectDocs ?? false,
+        directory: opts?.directory ?? "/tmp",
         historyRefreshSessions: opts?.historyRefreshSessions ?? new Set<string>(),
         systemPromptRefreshSessions: opts?.systemPromptRefreshSessions ?? new Set<string>(),
         pendingMaterializationSessions: opts?.pendingMaterializationSessions ?? new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
         injectionEnabled: opts?.injectionEnabled,
         injectionSkipSignatures: opts?.injectionSkipSignatures,
+        experimentalUserMemories: opts?.experimentalUserMemories,
     });
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
 }
 
 describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A1)", () => {
@@ -210,6 +220,45 @@ describe("system-prompt-hash token estimation (council audit bg_51106601 #2)", (
         const unchangedMeta = getOrCreateSessionMeta(db, sessionId);
         expect(unchangedMeta.systemPromptHash).toBe(initializedMeta.systemPromptHash);
         expect(unchangedMeta.systemPromptTokens).toBe(1);
+    });
+});
+
+describe("system-prompt-hash XML escaping for system-prompt adjuncts", () => {
+    it("escapes project-docs content without escaping wrapper tags", async () => {
+        useTempDataHome("sph-docs-escape-");
+        const directory = mkdtempSync(join(tmpdir(), "sph-docs-project-"));
+        tempDirs.push(directory);
+        writeFileSync(join(directory, "ARCHITECTURE.md"), "Alpha <closing-tag> & beta", "utf-8");
+        const sessionId = "ses-docs-escape";
+        const { handler } = buildHandler({
+            dreamerEnabled: true,
+            injectDocs: true,
+            directory,
+        });
+
+        const system = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system });
+        const joined = system.join("\n");
+
+        expect(joined).toContain("<project-docs>");
+        expect(joined).toContain("<ARCHITECTURE.md>");
+        expect(joined).toContain("Alpha &lt;closing-tag&gt; &amp; beta\n</ARCHITECTURE.md>");
+        expect(joined).not.toContain("Alpha <closing-tag> & beta");
+    });
+
+    it("escapes user-profile memory content so literal closing tags cannot terminate the wrapper", async () => {
+        useTempDataHome("sph-profile-escape-");
+        const sessionId = "ses-profile-escape";
+        insertUserMemory(openDatabase(), "User wrote literal </user-profile> & <xml>", []);
+        const { handler } = buildHandler({ experimentalUserMemories: true });
+
+        const system = ["You are a helpful coding assistant."];
+        await handler({ sessionID: sessionId }, { system });
+        const joined = system.join("\n");
+
+        expect(joined).toContain("<user-profile>");
+        expect(joined).toContain("- User wrote literal &lt;/user-profile&gt; &amp; &lt;xml&gt;");
+        expect(countOccurrences(joined, "</user-profile>")).toBe(1);
     });
 });
 
