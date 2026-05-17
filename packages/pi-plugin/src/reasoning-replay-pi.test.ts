@@ -14,6 +14,7 @@ import {
 	piMessageStableId,
 	replayClearedReasoningPi,
 	replayStrippedInlineThinkingPi,
+	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
 
 setHarness("pi");
@@ -181,6 +182,57 @@ describe("replayClearedReasoningPi", () => {
 		expect(cleared).toBe(1);
 		expect(messages[0].content[0]).toMatchObject({ thinking: "[cleared]" });
 		expect(messages[1].content[0]).toMatchObject({ thinking: "still visible" });
+	});
+});
+
+describe("stripInlineThinkingPi", () => {
+	it("strips both inline thinking tag forms below the age cutoff and reports a watermark", () => {
+		const messages = [
+			{
+				role: "assistant",
+				timestamp: 1,
+				content: [
+					{
+						type: "text",
+						text: "A <thinking>secret</thinking> visible",
+					},
+				],
+			},
+			{
+				role: "assistant",
+				timestamp: 2,
+				content: [{ type: "text", text: "B <think>hidden</think> visible" }],
+			},
+			{
+				role: "assistant",
+				timestamp: 3,
+				content: [
+					{
+						type: "text",
+						text: "C <thinking>keep</thinking><think>keep</think> visible",
+					},
+				],
+			},
+		];
+		const messageIdToMaxTag = new Map<string, number>([
+			[requireId(messages[0], 0), 1],
+			[requireId(messages[1], 1), 2],
+			[requireId(messages[2], 2), 3],
+		]);
+
+		const result = stripInlineThinkingPi({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 1,
+			piMessageStableId,
+		});
+
+		expect(result).toEqual({ stripped: 2, newWatermark: 2 });
+		expect(messages[0].content[0]).toMatchObject({ text: "A visible" });
+		expect(messages[1].content[0]).toMatchObject({ text: "B visible" });
+		expect(messages[2].content[0]).toMatchObject({
+			text: "C <thinking>keep</thinking><think>keep</think> visible",
+		});
 	});
 });
 

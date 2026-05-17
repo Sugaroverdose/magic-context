@@ -17,7 +17,122 @@ import {
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
+function tagMessages(
+	sessionId: string,
+	db: ReturnType<typeof createTestDb>,
+	messages: unknown[],
+) {
+	const tagger = createTagger();
+	tagger.initFromDb(sessionId, db);
+	const transcript = createPiTranscript(messages, sessionId);
+	const tagged = tagTranscript(sessionId, transcript, tagger, db);
+	return { tagger, transcript, targets: tagged.targets };
+}
+
 describe("applyPiHeuristicCleanup", () => {
+	it("keeps identical read-tool fingerprints distinct across assistant owners", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-heuristic-cross-owner";
+			const messages = [
+				userMessage("read once", 1),
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "read-call-a",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+					],
+					timestamp: 2,
+				},
+				userMessage("read again", 3),
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "read-call-b",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+					],
+					timestamp: 4,
+				},
+			];
+			const { transcript, targets } = tagMessages(sessionId, db, messages);
+
+			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
+				autoDropToolAge: 100,
+				dropToolStructure: true,
+				protectedTags: 0,
+			});
+			transcript.commit();
+
+			expect(result.deduplicatedTools).toBe(0);
+			expect(
+				getTagsBySession(db, sessionId)
+					.filter((tag) => tag.type === "tool")
+					.map((tag) => [tag.messageId, tag.toolOwnerMessageId, tag.status]),
+			).toEqual([
+				["read-call-a", "pi-msg-1-2-assistant", "active"],
+				["read-call-b", "pi-msg-3-4-assistant", "active"],
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("deduplicates same-owner parallel read calls with identical arguments", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-heuristic-same-owner";
+			const messages = [
+				userMessage("read twice", 1),
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "read-call-a",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+						{
+							type: "toolCall",
+							id: "read-call-b",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+					],
+					timestamp: 2,
+				},
+			];
+			const { transcript, targets } = tagMessages(sessionId, db, messages);
+
+			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
+				autoDropToolAge: 100,
+				dropToolStructure: true,
+				protectedTags: 0,
+			});
+			transcript.commit();
+
+			expect(result.deduplicatedTools).toBe(1);
+			expect(
+				getTagsBySession(db, sessionId)
+					.filter((tag) => tag.type === "tool")
+					.map((tag) => [tag.messageId, tag.toolOwnerMessageId, tag.status]),
+			).toEqual([
+				["read-call-a", "pi-msg-1-2-assistant", "dropped"],
+				["read-call-b", "pi-msg-1-2-assistant", "active"],
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("persists full drops for stale ctx_reduce calls and paired tool results", () => {
 		const db = createTestDb();
 		try {

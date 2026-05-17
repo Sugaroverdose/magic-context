@@ -56,9 +56,20 @@ type PiAssistantMessage = {
 	timestamp?: number;
 };
 
-const INLINE_THINKING_PATTERN = /<thinking>[\s\S]*?<\/thinking>\s*/gi;
+const INLINE_THINKING_PATTERNS = [
+	/<thinking>[\s\S]*?<\/thinking>\s*/gi,
+	/<think>[\s\S]*?<\/think>\s*/gi,
+] as const;
 
 const CLEARED = "[cleared]";
+
+function stripInlineThinkingMarkup(text: string): string {
+	let cleaned = text;
+	for (const pattern of INLINE_THINKING_PATTERNS) {
+		cleaned = cleaned.replace(pattern, "");
+	}
+	return cleaned;
+}
 
 /**
  * Build a `messageIdToTagNumber` map from the tagger's `targets` map
@@ -140,6 +151,66 @@ export function clearOldReasoningPi(args: {
 	}
 
 	return { cleared, newWatermark };
+}
+
+/**
+ * Strip inline `<thinking>...</thinking>` and `<think>...</think>` markup
+ * from assistant text content on execute passes. Returns the highest
+ * message tag actually stripped so callers can persist it through
+ * `setReasoningWatermark` and replay the same stripping on defer passes.
+ */
+export function stripInlineThinkingPi(args: {
+	messages: unknown[];
+	messageIdToMaxTag: Map<string, number>;
+	clearReasoningAge: number;
+	piMessageStableId: (msg: unknown, index: number) => string | undefined;
+}): { stripped: number; newWatermark: number } {
+	const { messages, messageIdToMaxTag, clearReasoningAge, piMessageStableId } =
+		args;
+
+	let maxTag = 0;
+	for (const t of messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
+	if (maxTag === 0) return { stripped: 0, newWatermark: 0 };
+
+	const ageCutoff = maxTag - clearReasoningAge;
+	if (ageCutoff <= 0) return { stripped: 0, newWatermark: 0 };
+
+	let stripped = 0;
+	let newWatermark = 0;
+
+	for (let i = 0; i < messages.length; i++) {
+		const raw = messages[i];
+		if (!raw || typeof raw !== "object") continue;
+		const msg = raw as PiAssistantMessage;
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+
+		const id = piMessageStableId(raw, i);
+		if (!id) continue;
+		const msgTag = messageIdToMaxTag.get(id) ?? 0;
+		if (msgTag === 0 || msgTag > ageCutoff) continue;
+
+		let strippedThisMessage = false;
+		for (const part of msg.content) {
+			if (
+				part &&
+				typeof part === "object" &&
+				(part as { type?: unknown }).type === "text"
+			) {
+				const tp = part as PiTextContent;
+				if (typeof tp.text !== "string") continue;
+				const cleaned = stripInlineThinkingMarkup(tp.text);
+				if (cleaned !== tp.text) {
+					tp.text = cleaned;
+					stripped++;
+					strippedThisMessage = true;
+				}
+			}
+		}
+
+		if (strippedThisMessage && msgTag > newWatermark) newWatermark = msgTag;
+	}
+
+	return { stripped, newWatermark };
 }
 
 /**
@@ -233,7 +304,7 @@ export function replayStrippedInlineThinkingPi(args: {
 			) {
 				const tp = part as PiTextContent;
 				if (typeof tp.text !== "string") continue;
-				const cleaned = tp.text.replace(INLINE_THINKING_PATTERN, "");
+				const cleaned = stripInlineThinkingMarkup(tp.text);
 				if (cleaned !== tp.text) {
 					tp.text = cleaned;
 					stripped++;

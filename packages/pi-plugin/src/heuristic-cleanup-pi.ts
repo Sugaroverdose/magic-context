@@ -100,8 +100,9 @@ export interface PiHeuristicCleanupResult {
  * Pi `AgentMessage[]` walker for tool-dedup fingerprinting.
  *
  * Returns one entry per assistant `toolCall` part whose tool name is
- * in DEDUP_SAFE_TOOLS, keyed by callId so the dedup pass can match
- * fingerprints to tool tags (which carry callId as `messageId`).
+ * in DEDUP_SAFE_TOOLS, keyed by composite `<ownerMsgId>\x00<callId>` so
+ * the dedup pass can match fingerprints to tool tags without collapsing
+ * cross-owner reused call IDs.
  *
  * Mirrors OpenCode's `buildToolFingerprints` semantics, just with Pi
  * shape: assistant `content: PiToolCall[]` instead of OpenCode
@@ -111,11 +112,22 @@ function buildPiToolFingerprints(
 	messages: readonly unknown[],
 ): Map<string, string> {
 	const fingerprints = new Map<string, string>();
-	for (const message of messages) {
+	for (let i = 0; i < messages.length; i++) {
+		const message = messages[i];
 		if (!message || typeof message !== "object") continue;
-		const msg = message as { role?: unknown; content?: unknown };
+		const msg = message as {
+			role?: unknown;
+			content?: unknown;
+			timestamp?: number;
+		};
 		if (msg.role !== "assistant") continue;
 		if (!Array.isArray(msg.content)) continue;
+		// Derive ownerMsgId using the same Pi-stable scheme as
+		// collectStaleReduceCallIds / transcript-pi.ts.
+		const ownerMsgId =
+			typeof msg.timestamp === "number"
+				? `pi-msg-${i}-${msg.timestamp}-assistant`
+				: `pi-msg-${i}-assistant`;
 		for (const part of msg.content) {
 			if (!part || typeof part !== "object") continue;
 			const p = part as {
@@ -151,7 +163,12 @@ function buildPiToolFingerprints(
 			} catch {
 				continue; // unrepresentable args — skip dedup for this call
 			}
-			fingerprints.set(p.id, `${p.name}:${serialized}`);
+			// Owner in BOTH key AND value: cross-owner identical read tools
+			// are distinct invocations, while same-owner parallel duplicates
+			// still share a fingerprint and can be deduplicated.
+			const fingerprint = `${ownerMsgId}:${p.name}:${serialized}`;
+			const compositeKey = `${ownerMsgId}\x00${p.id}`;
+			fingerprints.set(compositeKey, fingerprint);
 		}
 	}
 	return fingerprints;
@@ -329,16 +346,19 @@ export function applyPiHeuristicCleanup(
 	// ── Pass 3: tool dedup (Pi-shape fingerprinter) ───────────────────
 	const toolFingerprints = buildPiToolFingerprints(piMessages);
 	if (toolFingerprints.size > 0) {
-		const tagsByMessageId = new Map<string, TagEntry>();
+		const tagsByCompositeKey = new Map<string, TagEntry>();
 		for (const tag of tags) {
 			if (tag.type === "tool" && tag.status === "active" && tag.messageId) {
-				tagsByMessageId.set(tag.messageId, tag);
+				const key = tag.toolOwnerMessageId
+					? `${tag.toolOwnerMessageId}\x00${tag.messageId}`
+					: tag.messageId; // legacy NULL-owner fallback
+				tagsByCompositeKey.set(key, tag);
 			}
 		}
 
 		const fingerprintGroups = new Map<string, TagEntry[]>();
-		for (const [callId, fingerprint] of toolFingerprints) {
-			const tag = tagsByMessageId.get(callId);
+		for (const [compositeKey, fingerprint] of toolFingerprints) {
+			const tag = tagsByCompositeKey.get(compositeKey);
 			if (!tag || tag.tagNumber > protectedCutoff) continue;
 			const group = fingerprintGroups.get(fingerprint) ?? [];
 			group.push(tag);

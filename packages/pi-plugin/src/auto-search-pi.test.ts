@@ -183,10 +183,12 @@ describe("runAutoSearchHintForPi", () => {
 				userMessage(
 					[
 						"§42§ <!-- +5m -->",
-						"<system-reminder>ignore me</system-reminder>",
+						"<system-reminder>outer <system-reminder>inner</system-reminder> tail</system-reminder>",
+						"</system-reminder>",
 						'<instruction name="ctx_reduce_turn_cleanup">drop</instruction>',
 						"actual project prompt survives",
 						"<!-- OMO_INTERNAL_INITIATOR -->",
+						"<!-- ALFONSO_INTERNAL_INITIATOR -->",
 					].join("\n"),
 					1,
 				),

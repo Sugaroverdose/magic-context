@@ -151,17 +151,44 @@ function hasStackedAugmentation(rawText: string): boolean {
 	);
 }
 
+function stripNestedSystemReminders(text: string): string {
+	const OPEN = "<system-reminder>";
+	const CLOSE = "</system-reminder>";
+	let result = "";
+	let depth = 0;
+	let i = 0;
+	while (i < text.length) {
+		if (text.startsWith(OPEN, i)) {
+			depth += 1;
+			i += OPEN.length;
+		} else if (text.startsWith(CLOSE, i)) {
+			// Orphan close tag (depth already 0) is dropped silently — we
+			// don't want a leaked closing tag from a malformed/cut input
+			// to bleed into the embedded text.
+			if (depth > 0) depth -= 1;
+			i += CLOSE.length;
+		} else if (depth === 0) {
+			result += text[i];
+			i += 1;
+		} else {
+			// Inside a system-reminder — skip the character.
+			i += 1;
+		}
+	}
+	return result;
+}
+
 function extractUserPromptText(message: UserMessage): string {
 	return (
-		collectUserPromptParts(message)
+		stripNestedSystemReminders(collectUserPromptParts(message))
 			// Magic Context tag prefix: "§123§ " at any position.
 			.replace(/§\d+§\s*/g, "")
 			// Temporal awareness gap markers: <!-- +5m -->, <!-- +1w 2d -->, etc.
 			.replace(/<!--\s*\+[\d\s.hmdw]+\s*-->/g, "")
 			// OMO internal initiator markers and similar HTML-comment markers.
 			.replace(/<!--\s*OMO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-			// System reminders wrapped by OpenCode or magic-context.
-			.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+			// ALFONSO internal initiator markers used by the Alfonso harness.
+			.replace(/<!--\s*ALFONSO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
 			// Previously-appended plugin tags on this same user turn.
 			.replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
 			.replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")

@@ -7,9 +7,9 @@
  *  Always-allowed (for any agent that can call ctx_memory):
  *    - write: insert a new memory (or no-op + bump seenCount on dedup hit)
  *    - delete: archive the memory (soft delete via status = 'archived')
- *    - list: list active memories for the current project
  *
  *  Dreamer-only (gated on `allowDreamerActions: true`):
+ *    - list: list active memories for the current project
  *    - update: rewrite a memory's content (recomputes normalized_hash + queues re-embed)
  *    - merge: combine N memories into one canonical, supersede the rest
  *    - archive: soft-delete with optional reason (different from delete in that it can take a reason)
@@ -76,6 +76,7 @@ const ALL_ACTIONS = [
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
 const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set([
+	"list",
 	"update",
 	"merge",
 	"archive",
@@ -208,9 +209,9 @@ export interface CtxMemoryToolDeps {
 	) => Promise<void>;
 	memoryEnabled?: boolean;
 	embeddingEnabled?: boolean;
-	/** When true, dreamer-only actions (update, merge, archive) are exposed.
+	/** When true, dreamer-only actions (list, update, merge, archive) are exposed.
 	 *  Set by the subagent extension entry when the parent passes
-	 *  `--magic-context-dreamer-actions`. Default: false (write/delete/list only). */
+	 *  `--magic-context-dreamer-actions`. Default: false (write/delete only). */
 	allowDreamerActions?: boolean;
 }
 
@@ -224,7 +225,7 @@ export function createCtxMemoryTool(
 			"Supported actions: write, delete, list, update, merge, archive."
 		: "Manage cross-session project memories. Memories persist across sessions and are " +
 			"shared with OpenCode sessions on the same project. " +
-			"Supported actions: write, delete, list.";
+			"Supported actions: write, delete.";
 
 	return {
 		name: "ctx_memory",

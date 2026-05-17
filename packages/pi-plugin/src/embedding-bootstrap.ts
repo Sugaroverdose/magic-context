@@ -2,7 +2,6 @@ import {
 	type EmbeddingFeatures,
 	registerProjectEmbeddingAndMaybeWipe,
 } from "@magic-context/core/features/magic-context/memory/embedding";
-import { invalidateProject } from "@magic-context/core/features/magic-context/memory/embedding-cache";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -16,7 +15,6 @@ export async function ensureProjectRegisteredFromPiDirectory(
 	db: ContextDatabase,
 ): Promise<void> {
 	const projectIdentity = resolveProjectIdentity(directory);
-	invalidateProject(projectIdentity);
 
 	const detailed = loadPiConfigDetailed({ cwd: directory });
 	if (isConfigLoadUntrusted(detailed)) {
