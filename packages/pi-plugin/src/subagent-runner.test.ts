@@ -18,6 +18,8 @@ function createMockChild({ stdout = true }: { stdout?: boolean } = {}) {
 	const stdoutStream = stdout ? new PassThrough() : null;
 	const stderrStream = new PassThrough();
 	let killed = false;
+	let exitCode: number | null = null;
+	let signalCode: NodeJS.Signals | null = null;
 	const killSignals: Array<NodeJS.Signals | number | undefined> = [];
 
 	const child = {
@@ -26,6 +28,12 @@ function createMockChild({ stdout = true }: { stdout?: boolean } = {}) {
 		stderr: stderrStream,
 		get killed() {
 			return killed;
+		},
+		get exitCode() {
+			return exitCode;
+		},
+		get signalCode() {
+			return signalCode;
 		},
 		kill: mock((signal?: NodeJS.Signals | number) => {
 			killSignals.push(signal);
@@ -38,9 +46,19 @@ function createMockChild({ stdout = true }: { stdout?: boolean } = {}) {
 			code: number | null = 0,
 			signal: NodeJS.Signals | null = null,
 		) => {
+			exitCode = code;
+			signalCode = signal;
 			stdoutStream?.end();
 			stderrStream.end();
 			setTimeout(() => events.emit("close", code, signal), 0);
+		},
+		emitExit: (
+			code: number | null = 0,
+			signal: NodeJS.Signals | null = null,
+		) => {
+			exitCode = code;
+			signalCode = signal;
+			events.emit("exit", code, signal);
 		},
 		emitError: (error: Error) => events.emit("error", error),
 		writeStdoutLine: (event: unknown) => {
@@ -287,6 +305,56 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
+	it("returns model_failed when the final assistant stopReason is aborted", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "partial" }],
+					stopReason: "aborted",
+				},
+			]),
+		);
+		child.emitClose(0);
+
+		expect(await resultPromise).toEqual({
+			ok: false,
+			reason: "model_failed",
+			error: 'pi assistant stopped with reason "aborted"',
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+	});
+
+	it("returns truncated when the final assistant stopReason is length", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "partial" }],
+					stopReason: "length",
+				},
+			]),
+		);
+		child.emitClose(0);
+
+		expect(await resultPromise).toEqual({
+			ok: false,
+			reason: "truncated",
+			error: 'pi assistant stopped with reason "length"',
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+	});
+
 	it("returns spawn_failed when spawn throws synchronously", async () => {
 		const spawnImpl = mock(() => {
 			throw new Error("ENOENT pi");
@@ -510,5 +578,24 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		}
 		expect(child.kill).toHaveBeenCalledWith("SIGTERM");
 		expect(child.killSignals).toEqual(["SIGTERM"]);
+	});
+
+	it("does not send SIGKILL when child exits after SIGTERM before escalation timeout", async () => {
+		const child = createMockChild();
+
+		__test.terminateChild(child as never);
+		child.emitExit(0, null);
+		await new Promise((resolve) => setTimeout(resolve, 2100));
+
+		expect(child.killSignals).toEqual(["SIGTERM"]);
+	});
+
+	it("sends SIGKILL when child remains alive past escalation timeout", async () => {
+		const child = createMockChild();
+
+		__test.terminateChild(child as never);
+		await new Promise((resolve) => setTimeout(resolve, 2100));
+
+		expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
 	});
 });

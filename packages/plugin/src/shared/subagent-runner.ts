@@ -148,6 +148,7 @@ export type SubagentProgressEvent =
  *     - `"timeout"`: hit `timeoutMs` before the child finished
  *     - `"abort"`: caller's `signal` was triggered
  *     - `"model_failed"`: every configured model + fallback returned an error
+ *     - `"truncated"`: child stopped because model output hit length limits
  *     - `"spawn_failed"`: subprocess couldn't start (Pi only — binary missing,
  *       permission denied, etc.)
  *     - `"non_zero_exit"`: child exited unsuccessfully before a final answer
@@ -173,6 +174,7 @@ export type SubagentRunResult =
               | "timeout"
               | "abort"
               | "model_failed"
+              | "truncated"
               | "spawn_failed"
               | "non_zero_exit"
               | "no_assistant"

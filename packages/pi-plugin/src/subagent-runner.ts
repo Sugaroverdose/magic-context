@@ -512,10 +512,15 @@ export class PiSubagentRunner implements SubagentRunner {
 						});
 						return;
 					}
-					if (finalStopReason === "error" || finalStopReason === "aborted") {
+					if (
+						finalStopReason === "error" ||
+						finalStopReason === "aborted" ||
+						finalStopReason === "length"
+					) {
 						settle({
 							ok: false,
-							reason: "model_failed",
+							reason:
+								finalStopReason === "length" ? "truncated" : "model_failed",
 							error:
 								finalErrorMessage ??
 								`pi assistant stopped with reason "${finalStopReason}"`,
@@ -752,9 +757,18 @@ export function parsePiEventLine(
 }
 
 function terminateChild(child: ReturnType<typeof childProcess.spawn>) {
+	let exited = false;
+	child.once("close", () => {
+		exited = true;
+	});
+	child.once("exit", () => {
+		exited = true;
+	});
 	child.kill("SIGTERM");
 	const killHandle = setTimeout(() => {
-		if (!child.killed) child.kill("SIGKILL");
+		if (!exited && child.exitCode === null && child.signalCode === null) {
+			child.kill("SIGKILL");
+		}
 	}, 2000);
 	if (typeof killHandle.unref === "function") {
 		killHandle.unref();
@@ -765,4 +779,5 @@ export const __test = {
 	buildArgs,
 	extractFinalAssistant,
 	parsePiEventLine,
+	terminateChild,
 };
