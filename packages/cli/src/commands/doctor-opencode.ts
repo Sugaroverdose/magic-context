@@ -488,6 +488,13 @@ export async function runDoctor(
     // 1. Check OpenCode is installed
     if (!isOpenCodeInstalled()) {
         fail("OpenCode is not installed or not in PATH");
+        // Help users whose binary IS on PATH but is shadowed by a wrapper
+        // script or lives in a directory not searched by our detection
+        // (e.g. tool-version shims that only inject PATH at shell time).
+        log.info("Doctor checked ~/.opencode/bin/opencode and each entry in $PATH.");
+        log.info(
+            "If `which opencode` succeeds outside doctor, your wrapper or shim may not be readable by Node — please share that wrapper in the issue.",
+        );
         outro("Doctor failed — install OpenCode first");
         return 1;
     }

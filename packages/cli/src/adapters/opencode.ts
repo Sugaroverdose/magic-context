@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { findOnPath } from "../lib/find-on-path";
 import {
     detectConfigPaths,
     dirSizeBytes,
@@ -35,25 +35,13 @@ export class OpenCodeAdapter implements HarnessAdapter {
             : join(homedir(), ".opencode", "bin", "opencode");
         if (existsSync(stockBin)) return true;
 
-        // Probe PATH. `command -v` is a Bash builtin that doesn't exist in
-        // PowerShell/CMD; use `where.exe opencode` on Windows. Both forms
-        // exit non-zero when the binary is absent, which is our cue.
-        const probe = isWindows
-            ? { cmd: "where", args: ["opencode"] }
-            : { cmd: "command", args: ["-v", "opencode"] };
-        try {
-            // Note: on POSIX, `command -v` is a shell builtin and execFileSync
-            // can't run it directly. Fall back to a real binary lookup via
-            // `which` instead.
-            if (!isWindows) {
-                execFileSync("which", ["opencode"], { stdio: "ignore" });
-            } else {
-                execFileSync(probe.cmd, probe.args, { stdio: "ignore" });
-            }
-            return true;
-        } catch {
-            return false;
-        }
+        // PATH walk via Node primitives (issue #75). Previously shelled out
+        // to `which`/`where`, which fails in environments where those
+        // binaries aren't on PATH (Alpine/slim containers, bunx sandboxes,
+        // NixOS) — even when `opencode` itself is reachable. Manually
+        // walking PATH using process.env.PATH + path.delimiter is portable
+        // and works regardless of which shell utilities are installed.
+        return findOnPath("opencode") !== null;
     }
 
     hasPluginEntry(): boolean {
