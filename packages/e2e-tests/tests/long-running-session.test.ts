@@ -269,16 +269,32 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
     } catch (err) {
         const elapsed = Date.now() - startedAt;
         const reqsAfter = h.mock.requests().length;
-        const recent = h.mock.requests().slice(reqsBefore).map((r, i) => {
-            const body = r.body as { messages?: Array<{ role?: string; content?: unknown }> };
-            const lastMsg = body.messages?.at(-1);
-            const role = lastMsg?.role ?? "?";
-            const preview = JSON.stringify(lastMsg?.content ?? "").slice(0, 200);
-            return `[${i}] role=${role} content=${preview}`;
-        });
+        const sinceStart = h.mock.requests().slice(reqsBefore);
         console.error(`[LR-DIAG] turn ${turn} FAIL after ${elapsed}ms; mockReqs delta=${reqsAfter - reqsBefore}`);
-        console.error(`[LR-DIAG] turn ${turn} requests since start:`);
-        for (const line of recent) console.error(`  ${line}`);
+        // Show first 5 + last 5 requests (more useful than first 50 identical)
+        const ofInterest: Array<{ i: number; r: typeof sinceStart[number] }> = [];
+        for (let i = 0; i < Math.min(5, sinceStart.length); i += 1) ofInterest.push({ i, r: sinceStart[i]! });
+        if (sinceStart.length > 10) {
+            for (let i = sinceStart.length - 5; i < sinceStart.length; i += 1) ofInterest.push({ i, r: sinceStart[i]! });
+        }
+        for (const { i, r } of ofInterest) {
+            const body = r.body as {
+                messages?: Array<{ role?: string; content?: unknown }>;
+                system?: unknown;
+                tools?: unknown[];
+                model?: string;
+            };
+            const msgs = body.messages ?? [];
+            const roles = msgs.map((m) => m?.role ?? "?").join(",");
+            const isHist = isHistorianRequest(body as Record<string, unknown>);
+            const isMC = isMagicContextRequest(body as Record<string, unknown>);
+            const lastMsg = msgs.at(-1);
+            const lastRole = lastMsg?.role ?? "?";
+            const lastContent = JSON.stringify(lastMsg?.content ?? "").slice(0, 150);
+            console.error(`  [${i}] path=${r.path} msgs=${msgs.length} model=${body.model ?? "?"} histReq=${isHist} mcReq=${isMC}`);
+            console.error(`       roles=${roles}`);
+            console.error(`       lastRole=${lastRole} lastContent=${lastContent}`);
+        }
         throw err;
     }
 }
