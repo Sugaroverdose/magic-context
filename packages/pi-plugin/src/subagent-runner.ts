@@ -1,6 +1,7 @@
 import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, resolve as resolvePath } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type {
@@ -9,6 +10,42 @@ import type {
 	SubagentRunOptions,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+
+/**
+ * Resolve the Pi CLI entry that should be spawned for historian/dreamer/
+ * sidekick subagents.
+ *
+ * Why this isn't just "pi": when the Pi plugin runs inside an interactive
+ * `pi` session, that user has the `pi` binary on PATH and `spawn("pi", ...)`
+ * works. But in other deployment shapes the plugin runs without that:
+ *   - CI runners and e2e harnesses: Pi is installed only into node_modules
+ *     via `bun install` / `npm install`. No `pi` symlink on PATH.
+ *   - npm-only user installs: same shape — `@earendil-works/pi-coding-agent`
+ *     is in node_modules but its bin entry isn't globally linked.
+ *   - Any environment where the user uses `npx`/`bunx` rather than the
+ *     globally-installed Pi CLI.
+ *
+ * Strategy: try to resolve `@earendil-works/pi-coding-agent`'s package.json
+ * via Node's `require.resolve` rooted at this module, then use the package's
+ * `dist/cli.js` directly with bun. Fall back to plain `pi` on PATH so the
+ * happy path for interactive Pi users is unchanged. This mirrors how the
+ * e2e harness resolves PI_CLI in `packages/e2e-tests/src/pi-runner/spawn.ts`.
+ *
+ * Returns null when resolution fails — caller falls back to "pi" on PATH.
+ */
+function resolveBundledPiCli(): string | null {
+	try {
+		const require_ = createRequire(import.meta.url);
+		const pkgJson = require_.resolve(
+			"@earendil-works/pi-coding-agent/package.json",
+		);
+		const cliPath = join(dirname(pkgJson), "dist/cli.js");
+		if (existsSync(cliPath)) return cliPath;
+		return null;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Resolve the path to the lean subagent extension entry that gets loaded
@@ -132,8 +169,22 @@ const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
 export class PiSubagentRunner implements SubagentRunner {
 	readonly harness = "pi";
 
-	/** Path to the `pi` binary. Defaults to whatever's on $PATH. */
+	/**
+	 * What to invoke to spawn a Pi subagent. Resolution order:
+	 *   1. Explicit `options.piBinary` (test seam, advanced users).
+	 *   2. The bundled `@earendil-works/pi-coding-agent/dist/cli.js` resolved
+	 *      via `require.resolve` against this module — runs as `bun <cli.js>`.
+	 *      Works for CI, e2e, npm-only installs, npx/bunx users.
+	 *   3. Fallback to `pi` on PATH — happy path for interactive Pi CLI users
+	 *      who installed the global binary.
+	 *
+	 * The `cliViaBun` flag changes argv shape: when true, we spawn `bun` with
+	 * the resolved CLI script as first arg; when false, we spawn the binary
+	 * directly. Tests pinning argv via `spawnImpl` need to know which mode is
+	 * active — see subagent-runner.test.ts.
+	 */
 	private readonly piBinary: string;
+	private readonly cliViaBun: boolean;
 	private readonly spawnImpl: typeof childProcess.spawn;
 
 	constructor(
@@ -143,7 +194,25 @@ export class PiSubagentRunner implements SubagentRunner {
 			spawnImpl?: typeof childProcess.spawn;
 		} = {},
 	) {
-		this.piBinary = options.piBinary ?? "pi";
+		if (options.piBinary) {
+			// Explicit override always wins. Used by tests + advanced users
+			// who already point at their own pi build.
+			this.piBinary = options.piBinary;
+			this.cliViaBun = false;
+		} else {
+			const bundled = resolveBundledPiCli();
+			if (bundled) {
+				// node_modules-resolved CLI: invoke through bun so we don't
+				// need the bin symlink on PATH.
+				this.piBinary = bundled;
+				this.cliViaBun = true;
+			} else {
+				// Last-ditch fallback: assume `pi` is on PATH. This is the
+				// happy path for interactive Pi CLI users.
+				this.piBinary = "pi";
+				this.cliViaBun = false;
+			}
+		}
 		this.spawnImpl = options.spawnImpl ?? childProcess.spawn;
 	}
 
@@ -180,9 +249,17 @@ export class PiSubagentRunner implements SubagentRunner {
 				}
 			};
 
+			// When we resolved a node_modules-bundled CLI script we need to
+			// run it via bun (the script has no shebang exec bit and we
+			// can't rely on the OS to spawn a .js file). When piBinary is
+			// the actual `pi` binary on PATH (or an explicit override), we
+			// spawn it directly with `args` as-is.
+			const spawnCmd = this.cliViaBun ? "bun" : this.piBinary;
+			const spawnArgs = this.cliViaBun ? [this.piBinary, ...args] : args;
+
 			let child: ReturnType<typeof childProcess.spawn>;
 			try {
-				child = this.spawnImpl(this.piBinary, args, {
+				child = this.spawnImpl(spawnCmd, spawnArgs, {
 					cwd: options.cwd,
 					// Inherit env so OAuth tokens (~/.pi/agent/auth.json),
 					// API key env vars, and PATH all flow through. The Pi
@@ -206,7 +283,11 @@ export class PiSubagentRunner implements SubagentRunner {
 				return;
 			}
 
-			emitProgress({ type: "spawned", argv: args, pid: child.pid });
+			// Report the actual argv we spawned (including bun + script when
+			// using the resolved bundled CLI) so historian failure dumps and
+			// progress consumers see the real command, not just the user-
+			// message args.
+			emitProgress({ type: "spawned", argv: spawnArgs, pid: child.pid });
 
 			// Capture stderr so we can attach it to error reasons. Pi prints
 			// unrecoverable errors (auth failures, network) here before the
