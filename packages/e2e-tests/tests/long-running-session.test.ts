@@ -1,0 +1,434 @@
+/// <reference types="bun-types" />
+
+import { Database } from "bun:sqlite";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { realpathSync } from "node:fs";
+import { join, resolve as pathResolve } from "node:path";
+import { computeNormalizedHash } from "../../plugin/src/features/magic-context/memory/normalize-hash";
+import { resolveProjectIdentity } from "../../plugin/src/features/magic-context/memory/project-identity";
+import { computeSyntheticCallId } from "../../plugin/src/hooks/magic-context/todo-view";
+import { TestHarness } from "../src/harness";
+import type { MockUsage } from "../src/mock-provider/server";
+
+const HISTORIAN_SYSTEM_MARKER = "You condense long AI coding sessions";
+
+const LOW_USAGE: MockUsage = {
+    input_tokens: 1_000,
+    output_tokens: 20,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 1_000,
+};
+
+const HIGH_USAGE: MockUsage = {
+    input_tokens: 30_000,
+    output_tokens: 20,
+    cache_creation_input_tokens: 30_000,
+    cache_read_input_tokens: 0,
+};
+
+const HISTORIAN_TRIGGER_USAGE: MockUsage = {
+    input_tokens: 90_000,
+    output_tokens: 20,
+    cache_creation_input_tokens: 90_000,
+    cache_read_input_tokens: 0,
+};
+
+const FORCE_CLEANUP_USAGE: MockUsage = {
+    input_tokens: 85_000,
+    output_tokens: 20,
+    cache_creation_input_tokens: 85_000,
+    cache_read_input_tokens: 0,
+};
+
+const ACTIVE_TODOS = [
+    { content: "Ship long-running OpenCode fixture", status: "in_progress", priority: "high" },
+    { content: "Verify cache replay after synthetic todo", status: "pending", priority: "medium" },
+];
+
+const TERMINAL_TODOS = [
+    { content: "Finish note boundary", status: "completed", priority: "high" },
+    { content: "Trigger note nudge", status: "cancelled", priority: "medium" },
+];
+
+type WireMessage = { role?: string; content?: unknown };
+
+let h: TestHarness;
+
+beforeAll(async () => {
+    h = await TestHarness.create({
+        modelContextLimit: 100_000,
+        magicContextConfig: {
+            execute_threshold_percentage: 20,
+            protected_tags: 1,
+            auto_drop_tool_age: 10,
+            compaction_markers: true,
+            memory: { enabled: true, auto_promote: false, injection_budget_tokens: 500 },
+            experimental: {
+                auto_search: { enabled: true, score_threshold: 0.1, min_prompt_chars: 12 },
+                git_commit_indexing: { enabled: false },
+            },
+            dreamer: { enabled: false },
+            sidekick: { enabled: false },
+            compressor: { enabled: false },
+        },
+    });
+});
+
+afterAll(async () => {
+    await h.dispose();
+});
+
+function stripCacheControl(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(stripCacheControl);
+    if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [key, child] of Object.entries(value)) {
+            if (key === "cache_control") continue;
+            out[key] = stripCacheControl(child);
+        }
+        return out;
+    }
+    return value;
+}
+
+function serialize(value: unknown): string {
+    return JSON.stringify(stripCacheControl(value));
+}
+
+function isMagicContextRequest(body: Record<string, unknown>): boolean {
+    return JSON.stringify(body.system ?? "").includes("## Magic Context");
+}
+
+function isHistorianRequest(body: Record<string, unknown>): boolean {
+    return JSON.stringify(body.system ?? "").includes(HISTORIAN_SYSTEM_MARKER);
+}
+
+function mainRequests() {
+    return h.mock.requests().filter((request) => isMagicContextRequest(request.body));
+}
+
+function requestsSince(index: number) {
+    return h
+        .mock
+        .requests()
+        .slice(index)
+        .filter((request) => isMagicContextRequest(request.body));
+}
+
+function requestMessages(body: Record<string, unknown>): WireMessage[] {
+    return Array.isArray(body.messages) ? (body.messages as WireMessage[]) : [];
+}
+
+function textFromContent(content: unknown): string {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+        .map((block) => {
+            if (!block || typeof block !== "object") return "";
+            const text = (block as { text?: unknown }).text;
+            return typeof text === "string" ? text : "";
+        })
+        .join("\n");
+}
+
+function latestUserText(body: Record<string, unknown>): string {
+    const messages = requestMessages(body);
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i]?.role === "user") return textFromContent(messages[i]?.content);
+    }
+    return "";
+}
+
+function findToolName(body: Record<string, unknown>, pattern: RegExp): string | null {
+    const tools = body.tools;
+    if (!Array.isArray(tools)) return null;
+    for (const tool of tools) {
+        if (!tool || typeof tool !== "object") continue;
+        const name = (tool as { name?: unknown }).name;
+        if (typeof name === "string" && pattern.test(name)) return name;
+    }
+    return null;
+}
+
+function emitToolOnce(pattern: RegExp, input: Record<string, unknown>, usage: MockUsage = LOW_USAGE): void {
+    let emitted = false;
+    h.mock.addMatcher((body) => {
+        if (emitted || !isMagicContextRequest(body)) return null;
+        const name = findToolName(body, pattern);
+        if (!name) return null;
+        emitted = true;
+        return {
+            content: [
+                {
+                    type: "tool_use",
+                    id: `toolu_long_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+                    name,
+                    input,
+                },
+            ],
+            stop_reason: "tool_use",
+            usage,
+        };
+    });
+}
+
+function findOrdinalRange(body: Record<string, unknown>): { start: number; end: number } | null {
+    for (const message of requestMessages(body)) {
+        const content = Array.isArray(message.content) ? message.content : [];
+        for (const block of content) {
+            const text = (block as { text?: unknown } | null)?.text;
+            if (typeof text !== "string" || !text.includes("<new_messages>")) continue;
+            const ordinals = [...text.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
+            if (ordinals.length > 0) return { start: Math.min(...ordinals), end: Math.max(...ordinals) };
+        }
+    }
+    return null;
+}
+
+function readMeta<T>(sessionId: string, columns: string): T | null {
+    return h
+        .contextDb()
+        .prepare(`SELECT ${columns} FROM session_meta WHERE session_id = ?`)
+        .get(sessionId) as T | null;
+}
+
+function contextDbPath(): string {
+    return join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
+}
+
+function writeDb(fn: (db: Database) => void): void {
+    const db = new Database(contextDbPath(), { readwrite: true });
+    try {
+        db.query("PRAGMA busy_timeout = 5000").run();
+        fn(db);
+    } finally {
+        db.close();
+    }
+}
+
+function seedMemory(content: string): void {
+    const projectIdentity = resolveProjectIdentity(realpathSync(pathResolve(h.opencode.env.workdir)));
+    writeDb((db) => {
+        const now = Date.now();
+        db.prepare(
+            `INSERT INTO memories (
+                project_path, category, content, normalized_hash,
+                source_session_id, source_type, seen_count, retrieval_count,
+                first_seen_at, created_at, updated_at, last_seen_at, status
+            ) VALUES (?, 'WORKFLOW_RULES', ?, ?, NULL, 'historian', 5, 0, ?, ?, ?, ?, 'active')`,
+        ).run(projectIdentity, content, computeNormalizedHash(content), now, now, now, now);
+    });
+}
+
+function normalizedTodos(todos: typeof ACTIVE_TODOS): string {
+    return JSON.stringify(todos.map(({ content, status, priority }) => ({ content, status, priority })));
+}
+
+function contentBlocks(content: unknown): unknown[] {
+    return Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
+}
+
+function findSyntheticTodoPair(body: Record<string, unknown>, callId: string): { bytes: string } | null {
+    const messages = requestMessages(body);
+    for (let i = 0; i < messages.length - 1; i += 1) {
+        const assistant = messages[i]!;
+        if (assistant.role !== "assistant") continue;
+        const toolUse = contentBlocks(assistant.content).find((block) => {
+            const b = block as { type?: unknown; id?: unknown; name?: unknown } | null;
+            return b?.type === "tool_use" && b.id === callId && /todo.*write|write.*todo|todowrite/i.test(String(b.name ?? ""));
+        });
+        if (!toolUse) continue;
+        const toolResult = contentBlocks(messages[i + 1]!.content).find((block) => {
+            const b = block as { type?: unknown; tool_use_id?: unknown } | null;
+            return b?.type === "tool_result" && b.tool_use_id === callId;
+        });
+        if (toolResult) return { bytes: serialize([toolUse, toolResult]) };
+    }
+    return null;
+}
+
+async function send(sessionId: string, prompt: string, text: string, usage: MockUsage = LOW_USAGE): Promise<void> {
+    h.mock.setDefault({ text, usage });
+    await h.sendPrompt(sessionId, prompt, { timeoutMs: 90_000 });
+}
+
+describe("long-running OpenCode Magic Context session", () => {
+    it("exercises execute, notes, reduce, historian, todo synthesis, and auto-search over one realistic session", async () => {
+        h.mock.reset();
+
+        let historianRange: { start: number; end: number } | null = null;
+        h.mock.addMatcher((body) => {
+            if (!isHistorianRequest(body)) return null;
+            const range = findOrdinalRange(body) ?? { start: 1, end: 2 };
+            historianRange = range;
+            return {
+                text: [
+                    "<output>",
+                    "<compartments>",
+                    `<compartment start="${range.start}" end="${range.end}" title="Long OpenCode e2e chunk">`,
+                    "The long-running OpenCode test covered warmup, execute cleanup, notes, ctx_reduce, todo synthesis, and auto-search hints.",
+                    "</compartment>",
+                    "</compartments>",
+                    "<facts></facts>",
+                    `<unprocessed_from>${range.end + 1}</unprocessed_from>`,
+                    "</output>",
+                ].join("\n"),
+                usage: { input_tokens: 500, output_tokens: 200, cache_creation_input_tokens: 500 },
+            };
+        });
+
+        const sessionId = await h.createSession();
+
+        // Phase 1: Warm-up turns 1-3 stay below threshold; the cached prefix is byte-identical.
+        for (let i = 1; i <= 3; i += 1) {
+            await send(sessionId, `turn ${i}: OpenCode warm-up cache-stability probe`, `phase 1 assistant ${i}`);
+        }
+        const warmup = mainRequests();
+        expect(warmup.length).toBeGreaterThanOrEqual(3);
+        expect(serialize(warmup[2]!.body.messages?.[0])).toBe(serialize(warmup[1]!.body.messages?.[0]));
+        expect(new Set(warmup.slice(1, 3).map((request) => serialize(request.body.system))).size).toBe(1);
+        expect(readMeta<{ last_context_percentage: number }>(sessionId, "last_context_percentage")?.last_context_percentage ?? 100).toBeLessThan(20);
+
+        // Phase 2: First execute. Turn 4 records high pressure; turn 5 executes cleanup; turn 6 recovers stability.
+        const beforeExecutePressure = readMeta<{ last_context_percentage: number }>(sessionId, "last_context_percentage")?.last_context_percentage ?? 0;
+        emitToolOnce(/^ctx_search$/, { query: "phase two harmless cleanup probe", limit: 1 }, FORCE_CLEANUP_USAGE);
+        await send(sessionId, "turn 4: raise pressure with a harmless tool call so the next pass must execute", "phase 2 pressure", FORCE_CLEANUP_USAGE);
+        const afterExecutePressure = readMeta<{ last_context_percentage: number }>(sessionId, "last_context_percentage")?.last_context_percentage ?? 0;
+        expect(beforeExecutePressure).toBeLessThan(20);
+        expect(afterExecutePressure).toBeGreaterThanOrEqual(20);
+        await send(sessionId, "turn 5: execute pass should run heuristic cleanup", "phase 2 execute cleanup");
+        await h.waitFor(() => h.countTagsByStatus(sessionId, "dropped") > 0, { label: "heuristic cleanup drops tags" });
+        const droppedAfterExecute = h.countTagsByStatus(sessionId, "dropped");
+        await send(sessionId, "turn 6: defer after first execute should recover cache", "phase 2 cache recovery");
+        const phase2Tail = mainRequests().slice(-2);
+        expect(phase2Tail.length).toBe(2);
+        expect(serialize(phase2Tail[1]!.body.messages?.[0])).toBe(serialize(phase2Tail[0]!.body.messages?.[0]));
+        expect(droppedAfterExecute).toBeGreaterThan(0);
+
+        // Phase 3: ctx_note write plus terminal todo trigger. The nudge is delayed to a fresh user turn and then replayed.
+        emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification." });
+        await send(sessionId, "turn 7: write a deferred session note with ctx_note", "phase 3 after note write");
+        expect(
+            h.contextDb().prepare("SELECT COUNT(*) AS n FROM notes WHERE session_id = ?").get(sessionId) as { n: number },
+        ).toMatchObject({ n: 1 });
+        emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: TERMINAL_TODOS });
+        await send(sessionId, "turn 8: mark terminal todos to create a work-boundary note trigger", "phase 3 after terminal todos");
+        await send(sessionId, "turn 9: first post-trigger turn records the nudge anchor", "phase 3 nudge anchor");
+        await send(sessionId, "turn 10: second post-trigger turn should receive the note nudge", "phase 3 nudge delivery");
+        let nudgeBody = mainRequests().at(-1)!.body;
+        for (let retry = 0; retry < 4 && !JSON.stringify(nudgeBody).includes("deferred note"); retry += 1) {
+            await send(sessionId, `turn ${11 + retry}: extra post-trigger turn for persisted nudge delivery`, "phase 3 nudge delivery retry");
+            nudgeBody = mainRequests().at(-1)!.body;
+        }
+        expect(JSON.stringify(nudgeBody)).toContain("deferred note");
+        await send(sessionId, "turn 15: note nudge sticky replay should be byte-identical", "phase 3 nudge replay");
+        const replayNudgeBody = mainRequests().at(-1)!.body;
+        expect(JSON.stringify(replayNudgeBody)).toContain("deferred note");
+        expect(readMeta<{ note_nudge_anchors: string }>(sessionId, "note_nudge_anchors")?.note_nudge_anchors ?? "").toContain("deferred note");
+        // The 15-minute cooldown uses process-local wall-clock time; this long test cannot advance it without sleeping.
+
+        // Phase 4: ctx_reduce queues a real drop; the next execute materializes a dropped shell and suppresses cleanup nudges.
+        const reduceTarget = await h.waitFor(
+            () => {
+                const row = h
+                    .contextDb()
+                    .prepare(
+                        "SELECT t.tag_number AS tag FROM tags t JOIN source_contents s ON s.session_id = t.session_id AND s.tag_id = t.tag_number WHERE t.session_id = ? AND t.status = 'active' AND s.content LIKE 'phase 1 assistant%' ORDER BY t.tag_number ASC LIMIT 1",
+                    )
+                    .get(sessionId) as { tag: number } | null;
+                return row?.tag ?? 0;
+            },
+            { label: "assistant tag for ctx_reduce" },
+        );
+        emitToolOnce(/^ctx_reduce$/, { drop: String(reduceTarget) });
+        await send(sessionId, `turn 13: drop old assistant tag ${reduceTarget} with ctx_reduce`, "phase 4 after ctx_reduce");
+        await send(sessionId, "turn 14: pressure after ctx_reduce so pending op applies next", "phase 4 pressure", FORCE_CLEANUP_USAGE);
+        await send(sessionId, "turn 15: materialize ctx_reduce pending op", "phase 4 materialize");
+        await h.waitFor(() => {
+            const row = h.contextDb().prepare("SELECT status FROM tags WHERE session_id = ? AND tag_number = ?").get(sessionId, reduceTarget) as { status: string } | null;
+            return row?.status === "dropped";
+        }, { label: "ctx_reduce target dropped" });
+        const reducedBody = JSON.stringify(mainRequests().at(-1)!.body);
+        expect(reducedBody).not.toContain("phase 1 assistant 1");
+        expect(reducedBody).not.toContain("ctx_reduce_turn_cleanup");
+        await send(sessionId, "turn 16: ctx_reduce defer replay remains stable", "phase 4 stable replay");
+        expect(JSON.stringify(mainRequests().at(-1)!.body)).not.toContain("phase 1 assistant 1");
+
+        // Phase 5: Historian publishes; OpenCode writes a deferred marker that drains only on a later execute pass.
+        await send(sessionId, "turn 17: historian trigger pressure with eligible long tail", "phase 5 historian trigger", HISTORIAN_TRIGGER_USAGE);
+        await send(sessionId, "turn 18: follow-up starts historian publication", "phase 5 historian follow-up");
+        await h.waitFor(
+            () => {
+                const row = h
+                    .contextDb()
+                    .prepare("SELECT COUNT(*) AS n FROM compartments WHERE session_id = ?")
+                    .get(sessionId) as { n: number } | null;
+                return (row?.n ?? 0) > 0;
+            },
+            { timeoutMs: 30_000, label: "historian compartment published" },
+        );
+        const compartment = h
+            .contextDb()
+            .prepare("SELECT start_message, end_message, title FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1")
+            .get(sessionId) as { start_message: number; end_message: number; title: string };
+        expect(historianRange).not.toBeNull();
+        expect(compartment.start_message).toBe(historianRange!.start);
+        expect(compartment.end_message).toBe(historianRange!.end);
+        const markerAfterPublish = readMeta<{ pending_compaction_marker_state: string | null; compaction_marker_state: string | null }>(
+            sessionId,
+            "pending_compaction_marker_state, compaction_marker_state",
+        );
+        expect(Boolean(markerAfterPublish?.pending_compaction_marker_state) || Boolean(markerAfterPublish?.compaction_marker_state)).toBe(true);
+        const pendingBeforeDefer = markerAfterPublish?.pending_compaction_marker_state ?? null;
+
+        // Phase 6: Synthetic todowrite rides the next cache-busting pass, while the marker drains with that pass.
+        emitToolOnce(/todo.*write|write.*todo|todowrite/i, { todos: ACTIVE_TODOS });
+        await send(sessionId, "turn 19: active todowrite snapshot while marker must remain pending", "phase 6 active todos");
+        if (pendingBeforeDefer !== null) {
+            expect(readMeta<{ pending_compaction_marker_state: string | null }>(sessionId, "pending_compaction_marker_state")?.pending_compaction_marker_state).toBe(pendingBeforeDefer);
+        }
+        const stateJson = normalizedTodos(ACTIVE_TODOS);
+        expect(readMeta<{ last_todo_state: string }>(sessionId, "last_todo_state")?.last_todo_state).toBe(stateJson);
+        await send(sessionId, "turn 20: pressure to make synthetic todowrite visible on next execute", "phase 6 pressure", HIGH_USAGE);
+        await send(sessionId, "turn 21: execute pass injects synthetic todowrite and consumes history", "phase 6 synthetic execute");
+        const syntheticCallId = computeSyntheticCallId(stateJson);
+        const syntheticPair = findSyntheticTodoPair(mainRequests().at(-1)!.body, syntheticCallId);
+        const syntheticBody = JSON.stringify(mainRequests().at(-1)!.body);
+        expect(syntheticPair !== null || syntheticBody.includes("Ship long-running OpenCode fixture")).toBe(true);
+        const markerAfterExecute = readMeta<{ pending_compaction_marker_state: string | null; compaction_marker_state: string | null }>(
+            sessionId,
+            "pending_compaction_marker_state, compaction_marker_state",
+        );
+        expect(Boolean(markerAfterExecute?.compaction_marker_state) || markerAfterExecute?.pending_compaction_marker_state === pendingBeforeDefer).toBe(true);
+        expect(JSON.stringify(mainRequests().at(-1)!.body)).toContain("<session-history>");
+        expect(JSON.stringify(mainRequests().at(-1)!.body)).toContain("Long OpenCode e2e chunk");
+        await send(sessionId, "turn 22: defer pass replays synthetic todowrite bytes", "phase 6 synthetic replay");
+        if (syntheticPair) {
+            expect(findSyntheticTodoPair(mainRequests().at(-1)!.body, syntheticCallId)?.bytes).toBe(syntheticPair.bytes);
+        } else {
+            expect(JSON.stringify(mainRequests().at(-1)!.body)).toContain("Ship long-running OpenCode fixture");
+        }
+
+        // Phase 7: Auto-search hint from a seeded memory is appended and persisted for same-turn replay.
+        seedMemory("zebra cache ritual: when debugging long sessions, inspect prefix bytes before changing runtime code");
+        const beforeAutoSearch = h.mock.requests().length;
+        emitToolOnce(/^ctx_note$/, { action: "read" });
+        await send(
+            sessionId,
+            "turn 23: zebra cache ritual question should surface vague recall from memory",
+            "phase 7 after auto-search tool",
+        );
+        const autoRequests = requestsSince(beforeAutoSearch);
+        expect(autoRequests.length).toBeGreaterThanOrEqual(1);
+        const hinted = autoRequests.map((request) => latestUserText(request.body)).filter((text) => text.includes("<ctx-search-hint>"));
+        const autoSearchDecisions = readMeta<{ auto_search_hint_decisions: string }>(sessionId, "auto_search_hint_decisions")?.auto_search_hint_decisions ?? "";
+        if (hinted.length > 0) {
+            expect(hinted[0]).toContain("zebra cache ritual");
+            if (hinted.length > 1) expect(hinted.at(-1)).toBe(hinted[0]);
+            expect(autoSearchDecisions).toContain("ctx-search-hint");
+        }
+
+        // Phase 8: Compressor is intentionally disabled for this file to keep the long e2e under the 10-15 minute budget.
+        await send(sessionId, "turn 24: final low-pressure defer confirms session still works", "phase 8 compressor skipped");
+    }, 900_000);
+});
