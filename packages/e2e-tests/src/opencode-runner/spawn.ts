@@ -162,7 +162,11 @@ function writeConfigs(
  * Wait until the opencode server responds to GET /doc (an endpoint that exists in
  * OpenCode's server). Polls for up to `timeoutMs`.
  */
-async function waitForReady(url: string, timeoutMs = 30_000): Promise<void> {
+// Default bumped from 30s → 120s. GitHub-hosted runners can take much longer
+// than 30s for `opencode serve` to bind its port + finish plugin init under
+// cold-start + CPU contention. Local hardware finishes in <2s, so this only
+// affects CI scenarios where the spawn would otherwise spuriously fail.
+async function waitForReady(url: string, timeoutMs = 120_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let lastErr: unknown = null;
     while (Date.now() < deadline) {

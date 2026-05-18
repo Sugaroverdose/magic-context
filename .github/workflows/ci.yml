@@ -154,7 +154,7 @@ jobs:
     # Gated on Docker e2e: no point exercising the deep behavior suite if
     # the simpler install+smoke path is broken.
     needs: [e2e-opencode]
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -197,13 +197,13 @@ jobs:
           cd packages/e2e-tests
           files=$(ls tests/*.test.ts | grep -v "/pi-" | tr '\n' ' ')
           echo "Running OpenCode host tests: $files"
-          bun test --timeout 300000 $files
+          bun test --timeout 600000 $files
 
   e2e-host-pi:
     name: E2E (Pi, host behavior)
     runs-on: ubuntu-latest
     needs: [e2e-pi]
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -246,4 +246,4 @@ jobs:
           NODE_ENV: ""
         run: |
           cd packages/e2e-tests
-          bun test --timeout 300000 tests/pi-*.test.ts
+          bun test --timeout 600000 tests/pi-*.test.ts

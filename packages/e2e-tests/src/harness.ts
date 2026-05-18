@@ -183,7 +183,12 @@ export class TestHarness {
             timeoutMs?: number;
         } = {},
     ): Promise<unknown> {
-        const timeoutMs = options.timeoutMs ?? 30_000;
+        // Default bumped from 30s → 180s. CI runners (GitHub-hosted ubuntu)
+        // can take 10-30s just for opencode serve to process a single prompt
+        // when historian/compressor work is involved. 180s leaves room for
+        // multi-step assistant turns while still catching genuinely stuck
+        // prompts. Individual tests can still pass a smaller timeoutMs.
+        const timeoutMs = options.timeoutMs ?? 180_000;
         const promptPromise = this.client.session.prompt({
             path: { id: sessionId },
             body: {
@@ -242,7 +247,12 @@ export class TestHarness {
         predicate: () => T | null | undefined | false,
         opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
     ): Promise<T> {
-        const timeoutMs = opts.timeoutMs ?? 10_000;
+        // Default bumped from 10s → 60s for CI. waitFor is called by tests
+        // to poll for DB rows / queued ops to appear; on CI shared runners
+        // there can be material latency between an event firing and the
+        // SQLite row being visible. Individual tests can still pass a
+        // smaller timeoutMs.
+        const timeoutMs = opts.timeoutMs ?? 60_000;
         const intervalMs = opts.intervalMs ?? 100;
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
