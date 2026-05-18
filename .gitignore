@@ -41,5 +41,9 @@ packages/plugin/docs/animation[0-9]*/
 
 .pi/
 
-# Local agent task outputs / scratch state
-.alfonso/
+# Local agent task outputs / scratch state.
+# Selectively expose .alfonso/release-notes/ — CI reads it for release body
+# + Discord announcement. Must use `.alfonso/*` rather than `.alfonso/` so
+# git descends into the directory and can re-include nested paths.
+.alfonso/*
+!.alfonso/release-notes/
