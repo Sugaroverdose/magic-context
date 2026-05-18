@@ -142,7 +142,10 @@ describe("pi historian success path", () => {
                         .get(sessionId) as { c: number } | null;
                     return (row?.c ?? 0) >= 1;
                 },
-                { timeoutMs: 30_000, label: "pi compartment row appears" },
+                // Bumped from 30s → 90s for CI: Pi historian publishes via
+                // pi --print subprocess + HTTP mock provider; slower on shared
+                // runners.
+                { timeoutMs: 90_000, label: "pi compartment row appears" },
             );
 
             const compartmentCount = (
@@ -169,6 +172,7 @@ describe("pi historian success path", () => {
             );
             expect(meta?.compartment_in_progress ?? 1).toBe(0);
         },
-        120_000,
+        // Bumped from 120s → 300s for CI.
+        300_000,
     );
 });

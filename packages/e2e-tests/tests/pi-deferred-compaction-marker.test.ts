@@ -176,7 +176,10 @@ describe("pi compaction marker", () => {
                     const entries = readCompactionEntries(h);
                     return entries.length > 0 ? entries : null;
                 },
-                { timeoutMs: 30_000, label: "Pi native compaction entry written to JSONL" },
+                // Bumped from 30s → 90s for CI: Pi historian publishes via
+                // pi --print subprocess + HTTP mock provider; slower on shared
+                // runners.
+                { timeoutMs: 90_000, label: "Pi native compaction entry written to JSONL" },
             );
 
             expect(compactions.length).toBeGreaterThan(0);

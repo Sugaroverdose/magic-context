@@ -177,6 +177,10 @@ describe("short context accumulating overflow", () => {
             // Peak should stay under context limit with a margin.
             expect(peakObservedPct).toBeLessThan(100);
         },
-        240_000,
+        // Bumped from 240s → 600s for CI: this test does ~30 escalating-load
+        // turns to drive a 128K-context session past 95% pressure. On idle local
+        // hardware this finishes in ~30s, but on GitHub-hosted runners with CPU
+        // contention it can take longer.
+        600_000,
     );
 });

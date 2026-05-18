@@ -257,6 +257,9 @@ describe("slow historian vs fast main", () => {
             // for context in the comment above.
             void MAIN_LATENCY_BUDGET_MS;
         },
-        120_000,
+        // Bumped from 120s → 600s for CI: the test makes 12+ turns plus a slow
+        // historian with an 8s mock delay. On idle local hardware this runs in
+        // ~10s, but GitHub-hosted runners with CPU contention can take longer.
+        600_000,
     );
 });
