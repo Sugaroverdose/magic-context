@@ -249,11 +249,13 @@ function findSyntheticTodoPair(body: Record<string, unknown>, callId: string): {
 
 async function send(sessionId: string, prompt: string, text: string, usage: MockUsage = LOW_USAGE): Promise<void> {
     h.mock.setDefault({ text, usage });
-    // Bumped from 90s → 300s for CI: sendPrompt over the mock provider
-    // makes a real HTTP roundtrip per turn; on GitHub-hosted runners with
-    // CPU contention this can take 10–20s/turn, and the long-running test
-    // does 27+ turns sequentially.
-    await h.sendPrompt(sessionId, prompt, { timeoutMs: 300_000 });
+    // Bumped from 90s → 600s for CI. The long-running test does 27+ turns
+    // sequentially, some of which spawn historian subagents over HTTP to the
+    // mock provider. On GitHub-hosted runners, a single turn that triggers
+    // a subagent round-trip can take several minutes due to cold-start +
+    // process spawn + CPU contention. 600s covers worst-case observed
+    // (300s+) with headroom; matches the per-test budget.
+    await h.sendPrompt(sessionId, prompt, { timeoutMs: 600_000 });
 }
 
 describe("long-running OpenCode Magic Context session", () => {
