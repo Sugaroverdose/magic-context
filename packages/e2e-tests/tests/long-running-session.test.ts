@@ -267,7 +267,7 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
             lastDumpAt = now;
             // Open opencode's session DB directly (Database is imported at top of file)
             try {
-                const ocDbPath = join(h.opencode.env.dataDir, "opencode", "storage", "session", "messages.db");
+                const ocDbPath = join(h.opencode.env.dataDir, "opencode", "opencode.db");
                 const ocDb = new Database(ocDbPath, { readonly: true });
                 ocDb.query("PRAGMA busy_timeout = 1000").run();
                 // Get latest messages in the session
