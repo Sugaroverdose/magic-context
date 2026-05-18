@@ -255,6 +255,31 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
     const startedAt = Date.now();
     // [LR-DIAG] console.error flushes immediately on CI even when console.log is buffered
     console.error(`[LR-DIAG] turn ${turn} START prompt="${prompt.slice(0, 60)}" mockReqs=${reqsBefore}`);
+
+    // OC-DIAG: every 50 mock requests, log opencode's view of session state
+    // to diagnose the CI loop. We tap the mock to count and dump.
+    let lastDumpAt = 0;
+    const dumpTimer = setInterval(() => {
+        const now = Date.now();
+        const reqs = h.mock.requests().length;
+        if (reqs > reqsBefore + 50 && now - lastDumpAt > 5000) {
+            lastDumpAt = now;
+            const recent = h.mock.requests().slice(-3);
+            for (const [i, r] of recent.entries()) {
+                const body = r.body as {
+                    messages?: Array<{ role?: string; content?: unknown; id?: string }>;
+                };
+                const msgs = body.messages ?? [];
+                const lastTwo = msgs.slice(-2).map((m) => {
+                    const role = m?.role ?? "?";
+                    const contentPreview = JSON.stringify(m?.content ?? "").slice(0, 100);
+                    return `${role}|${contentPreview}`;
+                });
+                console.error(`[LR-DIAG] PROBE turn=${turn} mockReqs=${reqs} req[-${3 - i}] msgs=${msgs.length} lastTwo=${JSON.stringify(lastTwo)}`);
+            }
+        }
+    }, 2000);
+
     try {
         // Bumped from 90s → 600s for CI. The long-running test does 27+ turns
         // sequentially, some of which spawn historian subagents over HTTP to the
@@ -263,10 +288,12 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
         // process spawn + CPU contention. 600s covers worst-case observed
         // (300s+) with headroom; matches the per-test budget.
         await h.sendPrompt(sessionId, prompt, { timeoutMs: 600_000 });
+        clearInterval(dumpTimer);
         const elapsed = Date.now() - startedAt;
         const reqsAfter = h.mock.requests().length;
         console.error(`[LR-DIAG] turn ${turn} DONE in ${elapsed}ms; new mockReqs=${reqsAfter - reqsBefore}`);
     } catch (err) {
+        clearInterval(dumpTimer);
         const elapsed = Date.now() - startedAt;
         const reqsAfter = h.mock.requests().length;
         const sinceStart = h.mock.requests().slice(reqsBefore);
