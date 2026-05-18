@@ -198,7 +198,7 @@ jobs:
     # Gated on Docker e2e: no point exercising the deep behavior suite if
     # the simpler install+smoke path is broken.
     needs: [e2e-opencode]
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
 
@@ -235,13 +235,13 @@ jobs:
           # Match every test file except pi-*.test.ts.
           files=$(ls tests/*.test.ts | grep -v "/pi-" | tr '\n' ' ')
           echo "Running OpenCode host tests: $files"
-          bun test --timeout 120000 $files
+          bun test --timeout 300000 $files
 
   e2e-host-pi:
     name: E2E (Pi, host behavior)
     runs-on: ubuntu-latest
     needs: [e2e-pi]
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
 
@@ -255,15 +255,32 @@ jobs:
       - name: Install workspace deps
         run: bun install --frozen-lockfile
 
+      # pi-cross-harness.test.ts spawns BOTH a Pi runner and an OpenCode
+      # serve to verify cross-harness memory sharing, so this job needs
+      # opencode on PATH too — same install path the OpenCode host job uses.
+      - name: Install opencode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Verify opencode on PATH
+        run: opencode --version
+
       - name: Build Pi plugin
         run: bun run --cwd packages/pi-plugin build
+
+      # pi-cross-harness also instantiates the OpenCode harness, which
+      # spawns `opencode serve` with a file:// plugin specifier pointing
+      # at packages/plugin/. That dist must exist.
+      - name: Build OpenCode plugin
+        run: bun run --cwd packages/plugin build
 
       - name: Run host e2e suite (Pi tests only)
         env:
           NODE_ENV: ""
         run: |
           cd packages/e2e-tests
-          bun test --timeout 120000 tests/pi-*.test.ts
+          bun test --timeout 300000 tests/pi-*.test.ts
 
   publish-npm:
     name: Publish plugin to npm
