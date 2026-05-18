@@ -247,15 +247,40 @@ function findSyntheticTodoPair(body: Record<string, unknown>, callId: string): {
     return null;
 }
 
+let turnCounter = 0;
 async function send(sessionId: string, prompt: string, text: string, usage: MockUsage = LOW_USAGE): Promise<void> {
     h.mock.setDefault({ text, usage });
-    // Bumped from 90s → 600s for CI. The long-running test does 27+ turns
-    // sequentially, some of which spawn historian subagents over HTTP to the
-    // mock provider. On GitHub-hosted runners, a single turn that triggers
-    // a subagent round-trip can take several minutes due to cold-start +
-    // process spawn + CPU contention. 600s covers worst-case observed
-    // (300s+) with headroom; matches the per-test budget.
-    await h.sendPrompt(sessionId, prompt, { timeoutMs: 600_000 });
+    const turn = ++turnCounter;
+    const reqsBefore = h.mock.requests().length;
+    const startedAt = Date.now();
+    // [LR-DIAG] console.error flushes immediately on CI even when console.log is buffered
+    console.error(`[LR-DIAG] turn ${turn} START prompt="${prompt.slice(0, 60)}" mockReqs=${reqsBefore}`);
+    try {
+        // Bumped from 90s → 600s for CI. The long-running test does 27+ turns
+        // sequentially, some of which spawn historian subagents over HTTP to the
+        // mock provider. On GitHub-hosted runners, a single turn that triggers
+        // a subagent round-trip can take several minutes due to cold-start +
+        // process spawn + CPU contention. 600s covers worst-case observed
+        // (300s+) with headroom; matches the per-test budget.
+        await h.sendPrompt(sessionId, prompt, { timeoutMs: 600_000 });
+        const elapsed = Date.now() - startedAt;
+        const reqsAfter = h.mock.requests().length;
+        console.error(`[LR-DIAG] turn ${turn} DONE in ${elapsed}ms; new mockReqs=${reqsAfter - reqsBefore}`);
+    } catch (err) {
+        const elapsed = Date.now() - startedAt;
+        const reqsAfter = h.mock.requests().length;
+        const recent = h.mock.requests().slice(reqsBefore).map((r, i) => {
+            const body = r.body as { messages?: Array<{ role?: string; content?: unknown }> };
+            const lastMsg = body.messages?.at(-1);
+            const role = lastMsg?.role ?? "?";
+            const preview = JSON.stringify(lastMsg?.content ?? "").slice(0, 200);
+            return `[${i}] role=${role} content=${preview}`;
+        });
+        console.error(`[LR-DIAG] turn ${turn} FAIL after ${elapsed}ms; mockReqs delta=${reqsAfter - reqsBefore}`);
+        console.error(`[LR-DIAG] turn ${turn} requests since start:`);
+        for (const line of recent) console.error(`  ${line}`);
+        throw err;
+    }
 }
 
 describe("long-running OpenCode Magic Context session", () => {
