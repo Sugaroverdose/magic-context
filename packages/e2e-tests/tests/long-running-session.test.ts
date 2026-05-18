@@ -249,7 +249,11 @@ function findSyntheticTodoPair(body: Record<string, unknown>, callId: string): {
 
 async function send(sessionId: string, prompt: string, text: string, usage: MockUsage = LOW_USAGE): Promise<void> {
     h.mock.setDefault({ text, usage });
-    await h.sendPrompt(sessionId, prompt, { timeoutMs: 90_000 });
+    // Bumped from 90s → 300s for CI: sendPrompt over the mock provider
+    // makes a real HTTP roundtrip per turn; on GitHub-hosted runners with
+    // CPU contention this can take 10–20s/turn, and the long-running test
+    // does 27+ turns sequentially.
+    await h.sendPrompt(sessionId, prompt, { timeoutMs: 300_000 });
 }
 
 describe("long-running OpenCode Magic Context session", () => {
@@ -365,7 +369,10 @@ describe("long-running OpenCode Magic Context session", () => {
                     .get(sessionId) as { n: number } | null;
                 return (row?.n ?? 0) > 0;
             },
-            { timeoutMs: 30_000, label: "historian compartment published" },
+            // Bumped from 30s → 300s for CI: OpenCode historian publishes
+            // via background subagent which has its own LLM round-trip
+            // through the mock; slow on CI cold runners.
+            { timeoutMs: 300_000, label: "historian compartment published" },
         );
         const compartment = h
             .contextDb()
