@@ -256,26 +256,31 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
     // [LR-DIAG] console.error flushes immediately on CI even when console.log is buffered
     console.error(`[LR-DIAG] turn ${turn} START prompt="${prompt.slice(0, 60)}" mockReqs=${reqsBefore}`);
 
-    // OC-DIAG: every 50 mock requests, log opencode's view of session state
-    // to diagnose the CI loop. We tap the mock to count and dump.
+    // OC-DIAG: every 50 mock requests, query opencode's session DB to see
+    // what its filterCompacted/latest() actually returns. This tells us why
+    // OpenCode's loop break condition isn't firing.
     let lastDumpAt = 0;
     const dumpTimer = setInterval(() => {
         const now = Date.now();
         const reqs = h.mock.requests().length;
         if (reqs > reqsBefore + 50 && now - lastDumpAt > 5000) {
             lastDumpAt = now;
-            const recent = h.mock.requests().slice(-3);
-            for (const [i, r] of recent.entries()) {
-                const body = r.body as {
-                    messages?: Array<{ role?: string; content?: unknown; id?: string }>;
-                };
-                const msgs = body.messages ?? [];
-                const lastTwo = msgs.slice(-2).map((m) => {
-                    const role = m?.role ?? "?";
-                    const contentPreview = JSON.stringify(m?.content ?? "").slice(0, 100);
-                    return `${role}|${contentPreview}`;
-                });
-                console.error(`[LR-DIAG] PROBE turn=${turn} mockReqs=${reqs} req[-${3 - i}] msgs=${msgs.length} lastTwo=${JSON.stringify(lastTwo)}`);
+            // Open opencode's session DB directly (Database is imported at top of file)
+            try {
+                const ocDbPath = join(h.opencode.env.dataDir, "opencode", "storage", "session", "messages.db");
+                const ocDb = new Database(ocDbPath, { readonly: true });
+                ocDb.query("PRAGMA busy_timeout = 1000").run();
+                // Get latest messages in the session
+                const rows = ocDb.prepare(
+                    "SELECT id, json_extract(data, '$.role') AS role, json_extract(data, '$.finish') AS finish, json_extract(data, '$.summary') AS summary FROM message WHERE session_id = ? ORDER BY id DESC LIMIT 6",
+                ).all(sessionId) as Array<{ id: string; role: string; finish: string | null; summary: number | null }>;
+                ocDb.close();
+                const stateStr = rows
+                    .map((r) => `${r.role}/${r.id.slice(0, 16)}/finish=${r.finish ?? "null"}/summary=${r.summary ?? "null"}`)
+                    .join("  ");
+                console.error(`[LR-DIAG] OC-STATE turn=${turn} mockReqs=${reqs}  topMsgs(newest first):  ${stateStr}`);
+            } catch (e) {
+                console.error(`[LR-DIAG] OC-STATE turn=${turn} mockReqs=${reqs} DB read failed: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
     }, 2000);
