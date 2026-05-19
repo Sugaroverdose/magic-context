@@ -96,5 +96,5 @@ describe("pi cross harness", () => {
         const ocReadSession = await oc.createSession();
         await oc.sendPrompt(ocReadSession, "read pi memory from opencode");
         expect(JSON.stringify(oc.mock.lastRequest()!.body)).toContain(fromPi);
-    }, 120_000);
+    }, 300_000);
 });

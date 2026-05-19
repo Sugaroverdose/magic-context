@@ -263,7 +263,10 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
     const dumpTimer = setInterval(() => {
         const now = Date.now();
         const reqs = h.mock.requests().length;
-        if (reqs > reqsBefore + 50 && now - lastDumpAt > 5000) {
+        // Fire diagnostic as soon as we see >=25 unexpected requests, then
+        // every 5s while the hang persists. The earlier we capture data the
+        // less likely it is to be lost to a job-level CI timeout.
+        if (reqs > reqsBefore + 25 && now - lastDumpAt > 5000) {
             lastDumpAt = now;
             // Open opencode's session DB directly (Database is imported at top of file)
             try {
