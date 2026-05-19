@@ -162,12 +162,21 @@ async function getSessionMessages(client: unknown, sessionId: string): Promise<S
     try {
         const c = client as {
             session?: {
-                messages?: (input: { path: { id: string } }) => Promise<{ data?: SdkMessage[] }>;
+                messages?: (input: {
+                    path: { id: string };
+                    query?: { limit?: number };
+                }) => Promise<{ data?: SdkMessage[] }>;
             };
         };
 
         if (typeof c.session?.messages === "function") {
-            const result = await c.session.messages({ path: { id: sessionId } });
+            // Bounded limit prevents loading the entire session into memory.
+            // We only scan the tail for recent conflict warning user messages,
+            // which are typically the last 1-3 messages.
+            const result = await c.session.messages({
+                path: { id: sessionId },
+                query: { limit: 50 },
+            });
             return result?.data ?? [];
         }
     } catch (error) {

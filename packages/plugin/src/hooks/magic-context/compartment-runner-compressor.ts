@@ -690,7 +690,7 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
 
         const messagesResponse = await client.session.messages({
             path: { id: agentSessionId },
-            query: { directory },
+            query: { directory, limit: 50 },
         });
         const messages = normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

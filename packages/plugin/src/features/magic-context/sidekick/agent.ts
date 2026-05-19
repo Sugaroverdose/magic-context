@@ -62,7 +62,7 @@ export async function runSidekick(deps: {
 
         const messagesResponse = await deps.client.session.messages({
             path: { id: agentSessionId },
-            query: { directory: deps.sessionDirectory ?? deps.projectPath },
+            query: { directory: deps.sessionDirectory ?? deps.projectPath, limit: 50 },
         });
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

@@ -89,7 +89,7 @@ describe("runSidekick", () => {
         );
         expect(client.session.messages).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },
-            query: { directory: "/repo/project" },
+            query: { directory: "/repo/project", limit: 50 },
         });
         expect(client.session.delete).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },

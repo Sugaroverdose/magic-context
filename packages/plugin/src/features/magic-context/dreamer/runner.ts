@@ -334,7 +334,7 @@ async function identifyKeyFilesForSession(args: {
 
             const messagesResponse = await args.client.session.messages({
                 path: { id: agentSessionId },
-                query: { directory: args.sessionDirectory },
+                query: { directory: args.sessionDirectory, limit: 50 },
             });
             const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                 preferResponseOnMissingData: true,
@@ -695,7 +695,7 @@ export async function runDream(args: {
 
                 const messagesResponse = await args.client.session.messages({
                     path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory ?? args.projectIdentity },
+                    query: { directory: args.sessionDirectory ?? args.projectIdentity, limit: 50 },
                 });
                 const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                     preferResponseOnMissingData: true,
@@ -1118,7 +1118,7 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
 
         const messagesResponse = await args.client.session.messages({
             path: { id: agentSessionId },
-            query: { directory: args.sessionDirectory ?? args.projectIdentity },
+            query: { directory: args.sessionDirectory ?? args.projectIdentity, limit: 50 },
         });
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

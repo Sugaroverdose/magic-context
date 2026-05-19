@@ -452,7 +452,7 @@ async function runKeyFilesLlm(args: {
         );
         const messagesResponse = await args.client.session.messages({
             path: { id: agentSessionId },
-            query: { directory: args.projectPath },
+            query: { directory: args.projectPath, limit: 50 },
         });
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,

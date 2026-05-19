@@ -159,7 +159,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
 
         const messagesResponse = await args.client.session.messages({
             path: { id: agentSessionId },
-            query: { directory: args.sessionDirectory },
+            query: { directory: args.sessionDirectory, limit: 50 },
         });
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,
