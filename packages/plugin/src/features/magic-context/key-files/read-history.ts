@@ -80,6 +80,59 @@ function normalizeProjectRelativePath(projectPath: string, filePath: string): st
     return rel;
 }
 
+/**
+ * Documentation and project-meta files that should never be pinned as key
+ * files. Key files exist to give the agent orientation context on the
+ * project's *source* — files it will need to read repeatedly while working.
+ * Prose documentation (README, CONTRIBUTING, CHANGELOG, etc.), license
+ * boilerplate, and lockfiles are heavily *read* by users but rarely useful
+ * as repeated-reference orientation context — they don't fit in a token
+ * budget without crowding out real source, and their content is better
+ * surfaced through the docs-injection path or ad-hoc reads.
+ *
+ * Matched case-insensitively against the project-relative path's BASENAME
+ * (extensions like `.md`) or against full normalized lowercase basename
+ * (filenames like `LICENSE`).
+ */
+function isDocumentationOrMetaFile(rel: string): boolean {
+    const lower = rel.toLowerCase();
+    // Any markdown or plain-text doc, anywhere in the tree.
+    if (lower.endsWith(".md") || lower.endsWith(".mdx") || lower.endsWith(".rst")) return true;
+    if (lower.endsWith(".txt")) return true;
+    // Common project-meta basenames (with or without extension).
+    const base = lower.split("/").pop() ?? "";
+    const baseNoExt = base.replace(/\.[^.]+$/, "");
+    const META_BASENAMES = new Set([
+        "license",
+        "licence",
+        "notice",
+        "copying",
+        "authors",
+        "contributors",
+        "changelog",
+        "changes",
+        "history",
+        "readme",
+        "contributing",
+        "code_of_conduct",
+        "security",
+        "support",
+        "maintainers",
+        "governance",
+        // Lockfiles — touched often, but not orientation content.
+        "package-lock",
+        "bun.lock",
+        "bun.lockb",
+        "yarn.lock",
+        "pnpm-lock",
+        "cargo.lock",
+        "uv.lock",
+        "poetry.lock",
+        "gemfile.lock",
+    ]);
+    return META_BASENAMES.has(base) || META_BASENAMES.has(baseNoExt);
+}
+
 function primarySessionIds(db: Database): Set<string> {
     try {
         const rows = db
@@ -122,6 +175,11 @@ export function collectKeyFileCandidates(args: {
         if (!primaryIds.has(row.session_id) || !row.file_path) continue;
         const rel = normalizeProjectRelativePath(args.projectPath, row.file_path);
         if (!rel) continue;
+        // Filter prose docs and project-meta files out of the candidate pool
+        // so Dreamer never considers README.md, LICENSE, lockfiles, etc. as
+        // key-file pin candidates. They can be heavily read but are not
+        // useful as repeated-reference orientation content.
+        if (isDocumentationOrMetaFile(rel)) continue;
         const timestamp = toMs(row.time_created);
         const candidate =
             byPath.get(rel) ??

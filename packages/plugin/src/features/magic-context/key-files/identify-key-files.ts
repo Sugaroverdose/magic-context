@@ -280,7 +280,8 @@ Rules:
 - Total approx_token_estimate must be < ${args.config.token_budget}.
 - path must be relative, no .., no absolute paths, no symlinks escaping project root.
 - path must be unique case-sensitively and case-insensitively.
-- content must be plain text; no XML tags inside.`;
+- content must be plain text; no XML tags inside.
+- DO NOT pick prose documentation (README.md, CONTRIBUTING.md, CHANGELOG, LICENSE, *.md/*.mdx/*.rst/*.txt) or lockfiles. Key files are project SOURCE the agent needs repeated orientation context on, not reference docs. Project docs are surfaced through a separate injection path.`;
 }
 
 export function validateLlmOutput(
