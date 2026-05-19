@@ -11,6 +11,14 @@ import type { CompartmentRunnerDeps } from "./compartment-runner-types";
 export interface ActiveCompartmentRun {
     promise: Promise<void>;
     published: boolean;
+    /**
+     * Set to true once the 95%-emergency user-facing notification has been
+     * dispatched for this run. Prevents the notification from re-firing on
+     * every subsequent transform pass while the same compartment run is
+     * still active — which would otherwise persist a fresh ignored user
+     * message every pass and drive OpenCode's runLoop break condition false.
+     */
+    notificationSent?: boolean;
 }
 
 const activeRuns = new Map<string, ActiveCompartmentRun>();

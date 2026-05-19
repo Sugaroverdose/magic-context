@@ -258,7 +258,21 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         if (activeRun) {
             // Notify user before blocking — the session will appear frozen at "Thinking"
             // while historian compacts. Without this, users have no idea what's happening.
-            if (args.client) {
+            //
+            // CRITICAL: This notification creates a user message via session.prompt
+            // with noReply:true. The message is PERSISTED to OpenCode's session DB,
+            // which gives it a higher ID than the latest assistant. OpenCode's
+            // runLoop break condition checks `lastUser.id < lastAssistant.id`, and
+            // a fresh notification-user-message every transform pass makes that
+            // condition stay false → runLoop keeps iterating → mock returns text
+            // with >85% usage → transform fires again → notification fires again
+            // → INFINITE LOOP. We've observed this on CI with >1700 requests per turn.
+            //
+            // Guard: only send the notification ONCE per active compartment run.
+            // The flag lives on the activeRun and is cleared when the run completes,
+            // so a future compartment run can notify again.
+            if (args.client && !activeRun.notificationSent) {
+                activeRun.notificationSent = true;
                 const notifParams = args.getNotificationParams?.() ?? {};
                 void sendIgnoredMessage(
                     args.client,
