@@ -21,7 +21,6 @@ beforeAll(async () => {
   h = await PiTestHarness.create({
     magicContextConfig: {
       execute_threshold_percentage: 80,
-      compaction_markers: false,
     },
   });
 });

@@ -143,12 +143,12 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
             }
 
-            // Update compaction marker after recomp if experimental flag is enabled.
+            // Update compaction marker after recomp.
             // Recomp is explicit (eagerly clears injection cache), so the marker
             // applies directly here. Plan v6 §6: also CAS-clear any stale pending
             // marker that a prior in-flight incremental publish may have left
             // behind — recomp now owns the boundary.
-            if (deps.experimentalCompactionMarkers && lastCompartmentEnd > 0) {
+            if (lastCompartmentEnd > 0) {
                 updateCompactionMarkerAfterPublication(
                     db,
                     sessionId,

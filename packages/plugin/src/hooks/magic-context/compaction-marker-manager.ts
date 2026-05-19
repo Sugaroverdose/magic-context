@@ -2,8 +2,9 @@
  * Compaction Marker Manager
  *
  * Coordinates compaction marker injection/update/removal with historian
- * publication. Called after compartments are published, behind the
- * `compaction_markers` config flag (default: true).
+ * publication. Called after compartments are published. Always-on since
+ * v0.21.4 — the `compaction_markers` config knob was removed because the
+ * feature is required for sane transform performance on long sessions.
  *
  * The marker summary text is a static placeholder — the real <session-history>
  * is injected by the transform pipeline via inject-compartments.ts. The marker
@@ -237,8 +238,7 @@ export function applyDeferredCompactionMarker(
  *
  * Plan v6: callers in incremental / recomp / partial-recomp paths invoke this
  * directly only when they are NOT deferring (i.e.
- * `preserveInjectionCacheUntilConsumed === false` OR
- * `experimentalCompactionMarkers === false`). Deferred path uses
+ * `preserveInjectionCacheUntilConsumed === false`). Deferred path uses
  * `applyDeferredCompactionMarker` from postprocess drain.
  */
 export function updateCompactionMarkerAfterPublication(

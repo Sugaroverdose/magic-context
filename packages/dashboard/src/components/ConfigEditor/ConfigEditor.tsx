@@ -205,15 +205,6 @@ const FIELD_DEFS: FieldDef[] = [
     section: "General",
     defaultValue: true,
   },
-  {
-    key: "compaction_markers",
-    label: "Compaction Markers",
-    type: "boolean",
-    description:
-      "Inject boundary into OpenCode's DB so transform only processes the live tail after historian compaction. Significantly reduces transform input size for long sessions.",
-    section: "General",
-    defaultValue: true,
-  },
   // Thresholds
   // cache_ttl and execute_threshold_percentage are rendered as custom PerModelField components
   {

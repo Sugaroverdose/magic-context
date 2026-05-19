@@ -13,7 +13,7 @@ import { TestHarness } from "../src/harness";
  * `<session-history>` rebuild AND the marker boundary advance.
  *
  * This test drives:
- *   1. Multiple turns with `compaction_markers: true` (default) to trigger
+ *   1. Multiple turns with compaction markers (always-on since v0.21.4) to trigger
  *      historian publication.
  *   2. After publish: asserts the `pending_compaction_marker_state` column on
  *      `session_meta` is populated (in-tx pending blob, plan v6 §4).
@@ -93,10 +93,6 @@ beforeAll(async () => {
     h = await TestHarness.create({
         magicContextConfig: {
             execute_threshold_percentage: 40,
-            // compaction_markers: true — the DEFAULT, but make it explicit so
-            // future schema-default changes don't silently turn this test into
-            // a no-op.
-            compaction_markers: true,
         },
     });
 });

@@ -65,8 +65,6 @@ interface RunCompartmentPhaseArgs {
     deferredHistoryRefreshSessions: Set<string>;
     /** True when transform already triggered recovery/emergency historian work this pass. */
     skipAwaitForThisPass?: boolean;
-    /** When true, inject compaction markers into OpenCode's DB after historian publication */
-    experimentalCompactionMarkers?: boolean;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
     /** When true, inject wall-clock dates on compartments in <session-history>. */
@@ -194,7 +192,6 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 fallbackModelId: args.fallbackModelId,
                 ensureProjectRegistered: args.ensureProjectRegistered,
                 getNotificationParams: args.getNotificationParams,
-                experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
                 compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,
@@ -238,7 +235,6 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 fallbackModelId: args.fallbackModelId,
                 ensureProjectRegistered: args.ensureProjectRegistered,
                 getNotificationParams: args.getNotificationParams,
-                experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
                 compressorMinCompartmentRatio: args.compressorMinCompartmentRatio,

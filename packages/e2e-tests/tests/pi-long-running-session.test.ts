@@ -239,7 +239,6 @@ describe("long-running Pi Magic Context session", () => {
                 execute_threshold_percentage: 20,
                 protected_tags: 1,
                 auto_drop_tool_age: 10,
-                compaction_markers: true,
                 memory: { enabled: true, auto_promote: false, injection_budget_tokens: 500 },
                 historian: { model: "anthropic/claude-haiku-4-5" },
                 experimental: {

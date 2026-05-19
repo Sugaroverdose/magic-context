@@ -336,7 +336,7 @@ export async function executePartialRecompInternal(
             // the marker directly here AND CAS-clear any stale pending blob a
             // prior in-flight incremental publish may have left behind — partial
             // recomp now owns the boundary up to lastEnd.
-            if (deps.experimentalCompactionMarkers && lastEnd > 0) {
+            if (lastEnd > 0) {
                 updateCompactionMarkerAfterPublication(db, sessionId, lastEnd, deps.directory);
                 const stalePending = getPendingCompactionMarkerState(db, sessionId);
                 if (stalePending) {

@@ -44,7 +44,6 @@ beforeAll(async () => {
     h = await PiTestHarness.create({
         magicContextConfig: {
             execute_threshold_percentage: 40,
-            compaction_markers: false,
             historian: { model: "anthropic/claude-haiku-4-5" },
         },
     });

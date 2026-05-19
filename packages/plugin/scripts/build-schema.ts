@@ -214,13 +214,6 @@ function buildSchema(): Record<string, unknown> {
                     "Fire historian when enough commit clusters accumulate in the unsummarized tail",
             },
 
-            compaction_markers: {
-                type: "boolean",
-                default: true,
-                description:
-                    "Inject compaction boundaries into OpenCode's DB after historian publishes. Reduces transform input size for long sessions by letting OpenCode's filterCompacted skip older messages.",
-            },
-
             compressor: {
                 type: "object",
                 properties: {

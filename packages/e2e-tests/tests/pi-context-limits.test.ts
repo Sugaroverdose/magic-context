@@ -23,7 +23,6 @@ beforeAll(async () => {
         modelContextLimit: 50_000,
         magicContextConfig: {
             execute_threshold_percentage: 80,
-            compaction_markers: false,
         },
     });
 });

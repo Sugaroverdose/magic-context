@@ -57,7 +57,6 @@ beforeAll(async () => {
             // Keep the nudge band active but not aggressive — tests will
             // inject specific usage percentages via mock responses.
             execute_threshold_percentage: 80,
-            compaction_markers: false,
         },
         modelContextLimit: 50_000,
     });

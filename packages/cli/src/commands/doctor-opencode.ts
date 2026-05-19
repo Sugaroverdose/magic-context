@@ -568,29 +568,38 @@ export async function runDoctor(
             const mcConfig = parse(mcRaw) as Record<string, unknown>;
             let mcChanged = false;
 
-            // Migrate experimental.compaction_markers → top-level compaction_markers.
+            // Remove deprecated compaction_markers config — always-on since v0.21.4.
+            //
+            // The flag lived in two places across releases:
+            //   - `experimental.compaction_markers` (early experimental phase)
+            //   - top-level `compaction_markers` (graduated stable, default true,
+            //     v0.9.0+)
+            //
+            // As of v0.21.4 the feature is mandatory and the knob is gone from
+            // the schema. We clean BOTH locations so users don't see a
+            // "compaction_markers is not allowed" warning at plugin load.
             //
             // Intentional: comment-json stores comments on hidden Symbol keys
             // attached to the parent object via their associated key. Deleting
-            // a key also drops its "before-property" comment. To minimize
-            // comment loss, we:
-            //   1. Do not delete the `experimental` object even when it becomes
-            //      empty — its header comment is anchored there.
-            //   2. Accept that the comment immediately preceding
-            //      `compaction_markers` is lost on delete; it refers to a
-            //      feature that is no longer experimental, so the comment
-            //      would be stale anyway.
+            // a key drops its immediately-preceding "before-property" comment.
+            // We accept that single-comment loss; the rest of the user's
+            // comments (block comments, other properties' before-comments,
+            // trailing comments on sibling keys) survive untouched. We do NOT
+            // delete the `experimental` object even when it becomes empty,
+            // because its header comment is anchored there.
             const experimental = mcConfig.experimental as Record<string, unknown> | undefined;
             if (experimental && "compaction_markers" in experimental) {
-                if (!("compaction_markers" in mcConfig)) {
-                    // Promote value to top level only if not already set
-                    mcConfig.compaction_markers = experimental.compaction_markers;
-                }
                 delete experimental.compaction_markers;
                 mcChanged = true;
                 log.success(
-                    "Migrated experimental.compaction_markers → compaction_markers (now default: true)",
+                    "Removed deprecated experimental.compaction_markers (always-on since v0.21.4)",
                 );
+                fixed++;
+            }
+            if ("compaction_markers" in mcConfig) {
+                delete mcConfig.compaction_markers;
+                mcChanged = true;
+                log.success("Removed deprecated compaction_markers (always-on since v0.21.4)");
                 fixed++;
             }
 

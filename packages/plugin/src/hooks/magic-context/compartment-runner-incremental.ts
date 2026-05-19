@@ -237,20 +237,18 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             return;
         }
 
-        // Plan v6 §4: when the runner is preserving the injection cache AND
-        // compaction-marker injection is enabled, defer marker movement until
-        // a later materializing transform pass. We persist a pending blob
-        // INSIDE the same publish transaction so a crash between publish and
-        // drain cannot leave the marker out of sync — either both land or
-        // neither does. The drain in transform-postprocess-phase consumes the
-        // blob via `applyDeferredCompactionMarker`.
+        // Plan v6 §4: when the runner is preserving the injection cache,
+        // defer marker movement until a later materializing transform pass.
+        // We persist a pending blob INSIDE the same publish transaction so a
+        // crash between publish and drain cannot leave the marker out of sync
+        // — either both land or neither does. The drain in
+        // transform-postprocess-phase consumes the blob via
+        // `applyDeferredCompactionMarker`.
         //
         // Direct apply (legacy path) still fires for non-deferring callers
         // (recomp / partial-recomp / explicit flushes), which clear the
         // injection cache eagerly anyway.
-        const deferMarkerApplication =
-            deps.preserveInjectionCacheUntilConsumed === true &&
-            deps.experimentalCompactionMarkers === true;
+        const deferMarkerApplication = deps.preserveInjectionCacheUntilConsumed === true;
 
         const lastCompartmentEnd = lastNewEnd;
         const lastNewEndMessageId = newCompartments[newCompartments.length - 1]?.endMessageId;
@@ -300,21 +298,19 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
 
         queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
 
-        // Inject compaction marker into OpenCode's DB if experimental flag is enabled.
+        // Inject compaction marker into OpenCode's DB.
         // When deferring (plan v6 §4), the pending blob was already written
         // in-transaction and `onDeferredMarkerPending` signals the drain set.
         // When NOT deferring, fall back to the legacy direct-apply path.
-        if (deps.experimentalCompactionMarkers) {
-            if (deferMarkerApplication) {
-                deps.onDeferredMarkerPending?.(sessionId);
-            } else {
-                updateCompactionMarkerAfterPublication(
-                    db,
-                    sessionId,
-                    lastCompartmentEnd,
-                    sessionDirectory,
-                );
-            }
+        if (deferMarkerApplication) {
+            deps.onDeferredMarkerPending?.(sessionId);
+        } else {
+            updateCompactionMarkerAfterPublication(
+                db,
+                sessionId,
+                lastCompartmentEnd,
+                sessionDirectory,
+            );
         }
 
         // Run compression pass if history block exceeds budget

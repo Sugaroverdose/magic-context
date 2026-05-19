@@ -209,7 +209,6 @@ export interface MagicContextConfig {
         enabled: boolean;
         min_clusters: number;
     };
-    compaction_markers: boolean;
     /**
      * Controls whether and where Magic Context augments the system prompt
      * (`## Magic Context` guidance, `<project-docs>`, `<user-profile>`,
@@ -359,10 +358,6 @@ export const MagicContextConfigSchema = z
                 min_clusters: z.number().min(1).default(3),
             })
             .default({ enabled: true, min_clusters: 3 }),
-        /** Inject compaction markers into OpenCode's DB so transform receives only the live tail.
-         *  After historian publishes compartments, a compaction boundary is written into
-         *  OpenCode's message/part tables so older messages are skipped at load time. Default: true. */
-        compaction_markers: z.boolean().default(true),
         /** Controls whether and where Magic Context augments the system prompt.
          *  Lets users opt specific agents out of `## Magic Context` guidance and
          *  the surrounding `<project-docs>` / `<user-profile>` / `<key-files>`

@@ -48,7 +48,6 @@ beforeAll(async () => {
     h = await TestHarness.create({
         magicContextConfig: {
             execute_threshold_percentage: 40,
-            compaction_markers: false,
         },
     });
 });

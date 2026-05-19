@@ -20,8 +20,6 @@ export interface CompartmentRunnerDeps {
     fallbackModelId?: string;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     getNotificationParams?: () => NotificationParams;
-    /** When true, inject compaction markers into OpenCode's DB after publication */
-    experimentalCompactionMarkers?: boolean;
     /** When true, extract user behavior observations from historian output */
     experimentalUserMemories?: boolean;
     /** When true, inject wall-clock dates on compartments in <session-history>. */

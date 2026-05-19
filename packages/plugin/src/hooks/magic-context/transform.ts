@@ -223,7 +223,6 @@ export interface TransformDeps {
     getModelKey?: (sessionId: string) => string | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
-    experimentalCompactionMarkers?: boolean;
     experimentalUserMemories?: boolean;
     /** When true, inject wall-clock gap markers (<!-- +Xm -->) on user messages and
      *  add start/end date attributes to <compartment> elements in <session-history>.
@@ -602,7 +601,6 @@ export function createTransform(deps: TransformDeps) {
                 directory: compartmentDirectory,
                 fallbackModelId,
                 getNotificationParams: () => notificationParams,
-                experimentalCompactionMarkers: deps.experimentalCompactionMarkers,
                 experimentalUserMemories: deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                 historianTwoPass: deps.historianTwoPass,
@@ -1063,7 +1061,6 @@ export function createTransform(deps: TransformDeps) {
             suppressBackgroundCompressionThisPass: historyBustThisPass,
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
-            experimentalCompactionMarkers: deps.experimentalCompactionMarkers,
             experimentalUserMemories: deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: deps.historianTwoPass,

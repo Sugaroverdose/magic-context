@@ -25,7 +25,6 @@ beforeAll(async () => {
     h = await TestHarness.create({
         magicContextConfig: {
             execute_threshold_percentage: 80,
-            compaction_markers: false,
         },
         modelContextLimit: 50_000,
     });

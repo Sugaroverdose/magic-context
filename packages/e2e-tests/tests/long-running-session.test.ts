@@ -61,7 +61,6 @@ beforeAll(async () => {
             execute_threshold_percentage: 20,
             protected_tags: 1,
             auto_drop_tool_age: 10,
-            compaction_markers: true,
             memory: { enabled: true, auto_promote: false, injection_budget_tokens: 500 },
             experimental: {
                 auto_search: { enabled: true, score_threshold: 0.1, min_prompt_chars: 12 },

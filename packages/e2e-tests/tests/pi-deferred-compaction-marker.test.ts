@@ -118,7 +118,6 @@ describe("pi compaction marker", () => {
             modelContextLimit: 100_000,
             magicContextConfig: {
                 execute_threshold_percentage: 40,
-                compaction_markers: true,
                 historian: { model: "anthropic/claude-haiku-4-5" },
             },
         });

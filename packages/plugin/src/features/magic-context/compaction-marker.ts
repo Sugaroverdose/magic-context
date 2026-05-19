@@ -6,7 +6,9 @@
  * the transform hook receives only post-boundary messages instead
  * of the full session history.
  *
- * Gated behind the `compaction_markers` config flag (default: true).
+ * Always-on as of v0.21.4. Previously gated behind `compaction_markers`
+ * config (default true since v0.9.0); the knob was removed because the
+ * feature is required for sane transform performance.
  *
  * ## What gets injected (3 rows):
  * 1. A `compaction` part on the boundary user message

@@ -93,7 +93,6 @@ export interface MagicContextDeps {
         sidekick?: SidekickConfig;
         dreamer?: DreamerConfig;
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
-        compaction_markers?: boolean;
         /** Issue #53: per-agent system-prompt injection opt-out. Optional in
          *  the inline type so legacy tests/callers don't have to construct it;
          *  Zod's .default() guarantees it's present in real loaded configs. */
@@ -185,13 +184,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // references rows that no longer exist in OpenCode's DB. This can happen
     // if the plugin crashed between DB writes (context.db + opencode.db are
     // separate stores with no cross-DB transaction) or if OpenCode's DB was
-    // modified externally. Gated on the same flag as marker writes.
-    if (deps.config.compaction_markers !== false) {
-        try {
-            checkCompactionMarkerConsistency(db);
-        } catch (error) {
-            log("[magic-context] startup compaction-marker consistency check failed:", error);
-        }
+    // modified externally.
+    try {
+        checkCompactionMarkerConsistency(db);
+    } catch (error) {
+        log("[magic-context] startup compaction-marker consistency check failed:", error);
     }
 
     let lastScheduleCheckMs = 0;
@@ -348,7 +345,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             return model ? `${model.providerID}/${model.modelID}` : undefined;
         },
         projectPath,
-        experimentalCompactionMarkers: deps.config.compaction_markers,
         experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
