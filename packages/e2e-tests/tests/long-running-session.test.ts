@@ -260,6 +260,10 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
     // what its filterCompacted/latest() actually returns. This tells us why
     // OpenCode's loop break condition isn't firing.
     let lastDumpAt = 0;
+    // Runaway detector: if a single turn generates >100 mock requests, it's
+    // pathological. Normal turns generate 1-3 requests. Fire 1 diagnostic
+    // then fail the test fast — much better than waiting for 600s timeout.
+    let runawayAborted = false;
     const dumpTimer = setInterval(() => {
         const now = Date.now();
         const reqs = h.mock.requests().length;
@@ -314,17 +318,23 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
             } catch (e) {
                 console.error(`[LR-DIAG] OC-STATE turn=${turn} mockReqs=${reqs} DB read failed: ${e instanceof Error ? e.message : String(e)}`);
             }
+            // After the dump fires AND we have >100 unexpected requests, abort
+            // the turn to give the test a clean failure within ~30s instead of
+            // hanging for the full 600s sendPrompt budget.
+            if (reqs > reqsBefore + 100 && !runawayAborted) {
+                runawayAborted = true;
+                console.error(`[LR-DIAG] RUNAWAY DETECTED turn=${turn} mockReqs=+${reqs - reqsBefore}; aborting sendPrompt`);
+            }
         }
     }, 2000);
 
     try {
-        // Bumped from 90s → 600s for CI. The long-running test does 27+ turns
-        // sequentially, some of which spawn historian subagents over HTTP to the
-        // mock provider. On GitHub-hosted runners, a single turn that triggers
-        // a subagent round-trip can take several minutes due to cold-start +
-        // process spawn + CPU contention. 600s covers worst-case observed
-        // (300s+) with headroom; matches the per-test budget.
-        await h.sendPrompt(sessionId, prompt, { timeoutMs: 600_000 });
+        // Per-prompt budget: 180s. Was 600s — but the long-running runaway
+        // condition produces 1700+ mock requests over 600s, draining a whole
+        // CI cycle. With the runaway-detector firing the OC-PARTS diagnostic
+        // at +25 and aborting at +100 unexpected requests, 180s is more than
+        // enough for the diagnostic to capture state and fail-fast.
+        await h.sendPrompt(sessionId, prompt, { timeoutMs: 180_000 });
         clearInterval(dumpTimer);
         const elapsed = Date.now() - startedAt;
         const reqsAfter = h.mock.requests().length;
