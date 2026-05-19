@@ -162,6 +162,26 @@ describe("pi historian success path", () => {
             console.log(`[TEST] pi historian requests: ${historianRequests.length}`);
             expect(historianRequests.length).toBeGreaterThanOrEqual(1);
 
+            // Wait for the runner to fully exit — compartment_in_progress is
+            // cleared in the runner's `finally` block AFTER post-publish work
+            // (memory promotion, queue drops, compaction marker, compressor).
+            // The compartment row appears earlier in the flow, so seeing the
+            // row doesn't guarantee the flag has flipped yet. On shared CI
+            // runners the gap between publish and `finally` can stretch
+            // beyond the initial 300ms sleep.
+            await h.waitFor(
+                () => {
+                    const meta = h
+                        .contextDb()
+                        .prepare(
+                            "SELECT compartment_in_progress FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { compartment_in_progress: number } | null;
+                    return (meta?.compartment_in_progress ?? 1) === 0;
+                },
+                { timeoutMs: 60_000, label: "pi compartment_in_progress clears" },
+            );
+
             const meta = h
                 .contextDb()
                 .prepare("SELECT compartment_in_progress FROM session_meta WHERE session_id = ?")
