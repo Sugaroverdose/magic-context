@@ -99,6 +99,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 sessionId,
                 `historian failure: source=existing-validation reason="${existingValidationError}"`,
             );
+            // This is a real failure (stored compartments are corrupt) — record
+            // it so `doctor --issue` and the >=95% abort path can see it.
+            incrementHistorianFailure(db, sessionId, existingValidationError);
             await notifyHistorianIssue(
                 `## Historian alert\n\nHistorian skipped this session because existing stored compartments are invalid: ${existingValidationError}\n\nNo new compartments or facts were written. Rebuild or clear the broken compartments before continuing.`,
             );
@@ -112,11 +115,36 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
 
         const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
         if (protectedTailStart <= offset) {
+            // No eligible raw history before the protected tail. Nothing to
+            // compact — this is a successful no-op, not a failure. If the
+            // session was force-bumped to 95% by `needs_emergency_recovery`,
+            // we'd otherwise loop forever: the bump fires this run, the run
+            // bails silently, no publish path clears the recovery flag, the
+            // next turn bumps and runs again. Disarm here so legitimate
+            // future overflows can re-arm cleanly. The `detectedContextLimit`
+            // is intentionally preserved — that's authoritative model data
+            // that stays useful for pressure math.
+            sessionLog(
+                sessionId,
+                `historian no-op: protectedTailStart=${protectedTailStart} <= offset=${offset} — nothing to compact`,
+            );
+            clearEmergencyRecovery(db, sessionId);
             return;
         }
 
         const chunk = readSessionChunk(sessionId, historianChunkTokens, offset, protectedTailStart);
         if (!chunk.text || chunk.messageCount === 0) {
+            // Same logic as above: there are eligible raw messages by
+            // ordinal, but every one of them was filtered as noise (ignored
+            // notifications, structural-only messages, etc.). Disarm
+            // recovery — there's nothing for historian to act on, and
+            // leaving the flag armed produces the issue #85 notification
+            // loop.
+            sessionLog(
+                sessionId,
+                `historian no-op: chunk empty after filtering (messageCount=${chunk.messageCount}, textLen=${chunk.text?.length ?? 0}) range=${offset}-${protectedTailStart - 1}`,
+            );
+            clearEmergencyRecovery(db, sessionId);
             return;
         }
 
@@ -126,6 +154,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 sessionId,
                 `historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
             );
+            // Record this so `doctor --issue` reports it and `>=95%` abort
+            // can react. Previously this path was silent (no failure count,
+            // recovery flag unchanged), making the loop bug invisible in
+            // diagnostics.
+            incrementHistorianFailure(db, sessionId, chunkCoverageError);
             await notifyHistorianIssue(
                 `## Historian alert\n\nHistorian skipped this session because the raw chunk could not be represented safely: ${chunkCoverageError}\n\nNo new compartments or facts were written.`,
             );
