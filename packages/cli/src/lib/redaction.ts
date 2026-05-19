@@ -4,7 +4,34 @@ function escapeRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-const SECRET_KEY_PATTERN = /(?:key|token|secret|password|auth|bearer|credential)/i;
+// Whole-segment match: the key (or its components when split on common
+// separators) must BE one of these words, not merely contain them as a
+// substring. The previous bare-substring pattern wrongly redacted plain
+// config fields like `pin_key_files`, `token_budget`, `nudge_interval_tokens`,
+// `injection_budget_tokens`, etc. — none of which are secrets but all of
+// which contain a secret-related word as part of a compound name.
+//
+// `authorization` is included as a whole-segment match because that's the
+// canonical HTTP header name and config field name. `auth` matches too;
+// `authentication_method` is a known false-positive corner — values are
+// usually enum strings, redacting them is conservative but harmless.
+const SECRET_WORDS = [
+    "key",
+    "token",
+    "secret",
+    "password",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+];
+const SECRET_SEGMENT_PATTERN = new RegExp(
+    `^(?:${SECRET_WORDS.map((w) => `${w}s?`).join("|")})$`,
+    "i",
+);
+// Descriptive suffixes that don't change the credential nature of the key —
+// e.g. `aws_access_key_id`, `secret_key_value`, `auth_token_header`.
+const TRAILING_DESCRIPTORS = new Set(["id", "ids", "value", "values", "header", "headers"]);
 
 function redactionTypeForKey(key: string): string {
     const normalized = key
@@ -15,8 +42,86 @@ function redactionTypeForKey(key: string): string {
     return suffix || "secret";
 }
 
+// Qualifying prefixes that strongly indicate a `key`/`token`/`secret`/etc.
+// segment is naming a real credential rather than a benign compound. So
+// `api_key` ✓, `access_token` ✓, `aws_access_key_id` ✓ — but `key_files` ✗,
+// `token_budget` ✗.
+const SECRET_QUALIFIERS = new Set([
+    "api",
+    "access",
+    "private",
+    "client",
+    "auth",
+    "authorization",
+    "secret",
+    "bearer",
+    "session",
+    "refresh",
+    "service",
+    "x", // x-api-key
+    "openai",
+    "anthropic",
+    "google",
+    "github",
+    "huggingface",
+    "aws",
+    "azure",
+]);
+
 export function isSecretKey(key: string): boolean {
-    return SECRET_KEY_PATTERN.test(key);
+    // Split the key on common separators (`_`, `-`, `.`, camelCase) and
+    // look for a secret-word segment. Once found, the preceding context
+    // must include a qualifier (e.g. `api`, `access`, `secret`) for it to
+    // count as a real credential field. Trailing descriptors like `id`,
+    // `value`, `header` are allowed — `aws_access_key_id` redacts while
+    // `pin_key_files` does not.
+    const segments = key
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2") // camelCase → snake_case
+        .toLowerCase()
+        .split(/[._-]+/)
+        .filter(Boolean);
+    if (segments.length === 0) return false;
+
+    // Whole-key match: a bare `key`, `token`, `password`, `secret`, `auth`,
+    // `authorization`, `bearer`, `credential` (with optional trailing `s`).
+    // Bare singletons are credentials by convention even without a qualifier
+    // (e.g. an HTTP header object with `{ Authorization: "..." }`).
+    if (segments.length === 1) {
+        const first = segments[0];
+        return Boolean(first && SECRET_SEGMENT_PATTERN.test(first));
+    }
+
+    // Find every secret-word segment. For each, accept if there's a
+    // qualifying preceding segment AND every following segment is a
+    // recognized descriptor (`id`, `value`, `header`...) or another
+    // secret-word continuation. This handles `aws_access_key_id` (key
+    // followed by `id`) and `secret_key_value` while rejecting
+    // `key_files`/`token_budget` (the trailing word isn't a descriptor).
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        if (!seg || !SECRET_SEGMENT_PATTERN.test(seg)) continue;
+
+        // Trailing context: every segment after `seg` must be a descriptor
+        // or another secret-word (e.g. `secret_key`, `key_id`).
+        let trailingOk = true;
+        for (let j = i + 1; j < segments.length; j++) {
+            const tail = segments[j];
+            if (!tail) continue;
+            if (TRAILING_DESCRIPTORS.has(tail)) continue;
+            if (SECRET_SEGMENT_PATTERN.test(tail)) continue;
+            trailingOk = false;
+            break;
+        }
+        if (!trailingOk) continue;
+
+        // Leading context: at least one preceding segment must be a
+        // qualifier. Walk leftward.
+        for (let k = i - 1; k >= 0; k--) {
+            const lead = segments[k];
+            if (lead && SECRET_QUALIFIERS.has(lead)) return true;
+        }
+    }
+    return false;
 }
 
 export function sanitizePathString(value: string): string {
