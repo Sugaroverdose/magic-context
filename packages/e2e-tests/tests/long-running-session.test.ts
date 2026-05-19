@@ -274,11 +274,40 @@ async function send(sessionId: string, prompt: string, text: string, usage: Mock
                 const rows = ocDb.prepare(
                     "SELECT id, json_extract(data, '$.role') AS role, json_extract(data, '$.finish') AS finish, json_extract(data, '$.summary') AS summary FROM message WHERE session_id = ? ORDER BY id DESC LIMIT 6",
                 ).all(sessionId) as Array<{ id: string; role: string; finish: string | null; summary: number | null }>;
-                ocDb.close();
                 const stateStr = rows
                     .map((r) => `${r.role}/${r.id.slice(0, 16)}/finish=${r.finish ?? "null"}/summary=${r.summary ?? "null"}`)
                     .join("  ");
                 console.error(`[LR-DIAG] OC-STATE turn=${turn} mockReqs=${reqs}  topMsgs(newest first):  ${stateStr}`);
+
+                // Dump parts of the TOP 3 newest messages — reveals source of mystery user messages
+                // (compaction marker? autocontinue text? tool result? synthetic ignored notification?)
+                try {
+                    const ocDb2 = new Database(ocDbPath, { readonly: true });
+                    ocDb2.query("PRAGMA busy_timeout = 1000").run();
+                    const topIds = rows.slice(0, 3).map((r) => r.id);
+                    for (const msgId of topIds) {
+                        const parts = ocDb2.prepare(
+                            "SELECT id, json_extract(data, '$.type') AS type, json_extract(data, '$.text') AS text, json_extract(data, '$.synthetic') AS synthetic, json_extract(data, '$.ignored') AS ignored, json_extract(data, '$.metadata') AS metadata, json_extract(data, '$.callID') AS callID, json_extract(data, '$.tool') AS tool, json_extract(data, '$.state') AS state, json_extract(data, '$.auto') AS auto, json_extract(data, '$.overflow') AS overflow FROM part WHERE message_id = ? ORDER BY id ASC LIMIT 4",
+                        ).all(msgId) as Array<{ id: string; type: string; text: string | null; synthetic: number | null; ignored: number | null; metadata: string | null; callID: string | null; tool: string | null; state: string | null; auto: number | null; overflow: number | null }>;
+                        const partsStr = parts.map((p) => {
+                            const flags = [
+                                p.synthetic ? "synth" : null,
+                                p.ignored ? "ignored" : null,
+                                p.auto !== null ? `auto=${p.auto}` : null,
+                                p.overflow !== null ? `overflow=${p.overflow}` : null,
+                                p.callID ? `callID=${p.callID.slice(0, 12)}` : null,
+                                p.tool ? `tool=${p.tool}` : null,
+                            ].filter(Boolean).join(",");
+                            const preview = p.text ? p.text.slice(0, 80).replace(/\n/g, "\\n") : (p.state ? `state=${p.state.slice(0, 60)}` : "");
+                            return `${p.type}${flags ? `[${flags}]` : ""}=${preview}`;
+                        }).join(" || ");
+                        console.error(`[LR-DIAG] OC-PARTS turn=${turn} msg=${msgId.slice(0, 16)} parts: ${partsStr}`);
+                    }
+                    ocDb2.close();
+                } catch (e) {
+                    console.error(`[LR-DIAG] OC-PARTS turn=${turn} dump failed: ${e instanceof Error ? e.message : String(e)}`);
+                }
+                ocDb.close();
             } catch (e) {
                 console.error(`[LR-DIAG] OC-STATE turn=${turn} mockReqs=${reqs} DB read failed: ${e instanceof Error ? e.message : String(e)}`);
             }
