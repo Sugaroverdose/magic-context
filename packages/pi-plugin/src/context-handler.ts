@@ -920,6 +920,134 @@ export function collectMessageEntryIdsStrict(
 }
 
 /**
+ * Resolve the SessionEntry id for each `event.messages[i]` by reference
+ * identity against `sessionManager.getBranch()` entries.
+ *
+ * Why this exists alongside `collectMessageEntryIds`: the position-based
+ * walk in `collectMessageEntryIds` assumes that filtering `getBranch()`
+ * to message/custom_message/branch_summary entries produces an array
+ * 1:1 with `event.messages` in length. That assumption breaks when Pi's
+ * runtime `agent.state.messages` and SessionManager's branch desync by
+ * even one entry — and we've observed off-by-one (around the agent_end
+ * boundary, likely a bash flush race) and much larger (288-entry) gaps
+ * in production. When that happens, every index past the divergence
+ * gets the wrong entry id, breaking compartment boundary lookup.
+ *
+ * Reference-based mapping is immune to count divergence. Pi's
+ * `appendMessage` (session-manager.js:580) stores `entry.message =
+ * sourceAgentMessage` by reference, and `buildSessionContext` emits
+ * those same references back as the message array. So `event.messages[i]
+ * === branchEntries[j].message` holds for every emit-eligible entry.
+ *
+ * Algorithm:
+ *   1. Walk `getBranch()` once, building `entryByMsgRef: Map<object, string>`
+ *      keyed by `entry.message` reference (for `type === "message"`),
+ *      `entry` itself for `custom_message` (Pi calls `createCustomMessage`
+ *      which returns a fresh object, so we key by the message we emit
+ *      using a synthesized reference table — see below), and similar for
+ *      `branch_summary`.
+ *   2. For each `event.messages[i]`, look up by reference. Hit → real
+ *      SessionEntry id. Miss → undefined (caller falls back to
+ *      synthesized id via `buildPiMessageIdByIndex`).
+ *
+ * For `custom_message` and `branch_summary` entries, Pi's
+ * `buildSessionContext` calls `createCustomMessage(...)` /
+ * `createBranchSummaryMessage(...)` which return NEW objects per
+ * `context` event. Reference matching cannot work for those — Pi makes
+ * fresh wrappers every call. Those entries fall through to undefined
+ * here, and the caller's `buildPiMessageIdByIndex` falls back to a
+ * synthesized `pi-msg-${index}-${ts}-${role}` id. That synthesized id
+ * has zero cross-pass stability, but compartment boundaries never
+ * target custom-message / branch-summary entries (historian only writes
+ * boundaries on plain `message` entries via `read-session-pi.ts`), so
+ * the fallback is harmless.
+ *
+ * Returns `null` only when the SessionManager API is unavailable. When
+ * we successfully traverse the branch, we always return an array of
+ * the same length as `messages` (with `undefined` slots for unmapped
+ * positions). Length mismatch is NEVER returned — that's the whole
+ * point of switching to reference-based matching.
+ */
+export function collectMessageEntryIdsByRef(
+	ctx: ExtensionContext,
+	messages: readonly PiAgentMessage[],
+	sessionId?: string,
+): readonly (string | undefined)[] | null {
+	const sm = ctx.sessionManager as
+		| {
+				getBranch?: (fromId?: string) => unknown[];
+		  }
+		| undefined;
+	if (typeof sm?.getBranch !== "function") return null;
+
+	let entries: unknown[];
+	try {
+		entries = sm.getBranch.call(sm);
+	} catch (error) {
+		sessionLog(
+			sessionId ?? "pi",
+			`collectMessageEntryIdsByRef getBranch failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
+	if (!Array.isArray(entries)) return null;
+
+	// Build a Map keyed by the AgentMessage reference stored on each
+	// `type === "message"` entry. Pi's SessionManager (session-manager.js:580)
+	// writes `entry.message = sourceAgentMessage` without cloning, so
+	// `event.messages[i] === entry.message` holds by reference identity
+	// for every emit-eligible `type === "message"` entry that came from
+	// the branch.
+	const entryIdByMsgRef = new Map<object, string>();
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as {
+			type?: unknown;
+			id?: unknown;
+			message?: unknown;
+		};
+		if (e.type !== "message") continue;
+		if (typeof e.id !== "string") continue;
+		if (!e.message || typeof e.message !== "object") continue;
+		entryIdByMsgRef.set(e.message as object, e.id);
+	}
+
+	const result: (string | undefined)[] = new Array(messages.length);
+	let resolved = 0;
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (!msg || typeof msg !== "object") {
+			result[i] = undefined;
+			continue;
+		}
+		const id = entryIdByMsgRef.get(msg as object);
+		if (typeof id === "string") {
+			result[i] = id;
+			resolved += 1;
+		} else {
+			result[i] = undefined;
+		}
+	}
+
+	// One-shot diagnostic: log a coverage summary so we can see how often
+	// the new resolver finds real ids vs. falls back. This replaces the
+	// "length mismatch" log line that `collectMessageEntryIds` used to
+	// emit — that log was misleading because the position-based walk
+	// reported divergence even when the underlying refs were fine.
+	if (resolved < messages.length) {
+		log(
+			`[magic-context][pi]${sessionId ? `[${sessionId}]` : ""} ` +
+				`collectMessageEntryIdsByRef: resolved=${resolved}/${messages.length} ` +
+				`(branchEntries=${entries.length}, messageEntries=${entryIdByMsgRef.size}) — ` +
+				`unmapped slots fall through to synthesized ids; boundary lookup still works ` +
+				`for any compartment whose start/end message is among the resolved set`,
+		);
+	}
+
+	return result;
+}
+
+/**
  * Register the Pi `context` event handler.
  *
  * The Tagger is created once per session boot — same lifecycle as the
@@ -995,9 +1123,20 @@ export function registerPiContextHandler(
 			);
 			rawMessageProviderUnregistersBySession.set(sessionId, unregisterRaw);
 			scheduleReconciliation(options.db, sessionId, readRawSessionMessages);
-			const strictEntryIds = collectMessageEntryIdsStrict(
+			// Reference-based entry-id resolution. Immune to the
+			// position-based count divergence that broke
+			// `collectMessageEntryIdsStrict` when Pi's `agent.state.messages`
+			// and `sessionManager.getBranch()` were out of sync (off-by-one
+			// near agent_end, or much larger gaps when condensed-milk-pi
+			// is active). Returns `null` only when getBranch is unavailable;
+			// otherwise returns an array indexed 1:1 with event.messages
+			// (with undefined for any message whose AgentMessage reference
+			// doesn't match a branch entry — typically synthetic compaction
+			// summaries and custom_message wrappers, which never carry
+			// compartment boundaries).
+			const strictEntryIds = collectMessageEntryIdsByRef(
 				ctx,
-				event.messages.length,
+				event.messages as readonly PiAgentMessage[],
 				sessionId,
 			);
 
@@ -1332,15 +1471,15 @@ export function registerPiContextHandler(
 
 			// Resolve SessionEntry IDs for each AgentMessage in event.messages
 			// so the boundary lookup in `<session-history>` injection uses
-			// the same id format historian persists. Pi's
-			// `buildSessionContext` walks `getBranch()` and emits
-			// `entry.message` for `type === "message"` entries — so the
-			// AgentMessage[] order maps 1:1 to those entry ids.
-			const entryIds = collectMessageEntryIds(
-				ctx,
-				event.messages.length,
-				sessionId,
-			);
+			// the same id format historian persists. Reference-based
+			// matching — see collectMessageEntryIdsByRef for why this is
+			// preferred over the position-based collectMessageEntryIds.
+			const entryIds =
+				collectMessageEntryIdsByRef(
+					ctx,
+					event.messages as readonly PiAgentMessage[],
+					sessionId,
+				) ?? undefined;
 
 			const result = await runPipeline({
 				db: options.db,

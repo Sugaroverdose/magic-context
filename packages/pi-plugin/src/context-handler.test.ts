@@ -24,6 +24,7 @@ import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner"
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
 import {
 	clearContextHandlerSession,
+	collectMessageEntryIdsByRef,
 	collectMessageEntryIdsStrict,
 	getPiToolUsageSinceUserTurnForTest,
 	recordPiCtxReduceExecution,
@@ -388,13 +389,25 @@ describe("registerPiContextHandler", () => {
 			});
 			onNoteTrigger(db, "ses-context", "historian_complete");
 
+			const triggerMsg = userMessage("trigger turn", 1);
+			const newMsg = userMessage("new turn", 2);
 			await handler(
-				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext("ses-context", process.cwd(), ["entry-trigger"]) as never,
+				{ messages: [triggerMsg] as never[] },
+				fakeContext(
+					"ses-context",
+					process.cwd(),
+					["entry-trigger"],
+					[triggerMsg],
+				) as never,
 			);
 			const result = await handler(
-				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext("ses-context", process.cwd(), ["entry-new"]) as never,
+				{ messages: [newMsg] as never[] },
+				fakeContext(
+					"ses-context",
+					process.cwd(),
+					["entry-new"],
+					[newMsg],
+				) as never,
 			);
 
 			expect(textOf(result.messages[0] as never)).toContain(
@@ -424,22 +437,34 @@ describe("registerPiContextHandler", () => {
 				content: "Sticky reminder.",
 			});
 			onNoteTrigger(db, sessionId, "historian_complete");
+			const triggerMsg = userMessage("trigger turn", 1);
+			const newMsg = userMessage("new turn", 2);
 			await handler(
-				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext(sessionId, process.cwd(), ["entry-trigger"]) as never,
+				{ messages: [triggerMsg] as never[] },
+				fakeContext(
+					sessionId,
+					process.cwd(),
+					["entry-trigger"],
+					[triggerMsg],
+				) as never,
 			);
 			await handler(
-				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
+				{ messages: [newMsg] as never[] },
+				fakeContext(sessionId, process.cwd(), ["entry-new"], [newMsg]) as never,
 			);
 
 			const result = await handler(
-				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
+				{ messages: [newMsg] as never[] },
+				fakeContext(sessionId, process.cwd(), ["entry-new"], [newMsg]) as never,
 			);
 			const onceMore = await handler(
 				{ messages: result.messages },
-				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
+				fakeContext(
+					sessionId,
+					process.cwd(),
+					["entry-new"],
+					[result.messages[0] as never],
+				) as never,
 			);
 
 			expect(
@@ -487,9 +512,10 @@ describe("registerPiContextHandler", () => {
 				ctx: never,
 			) => Promise<{ messages: never[] }>;
 
+			const msg = userMessage("explain pi search wiring", 1);
 			const result = await handler(
-				{ messages: [userMessage("explain pi search wiring", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: [msg] as never[] },
+				fakeContext("ses-context", process.cwd(), ["entry-1"], [msg]) as never,
 			);
 
 			expect(spy).toHaveBeenCalledTimes(1);
@@ -526,18 +552,19 @@ describe("registerPiContextHandler", () => {
 				ctx: never,
 			) => Promise<{ messages: never[] }>;
 
+			const msg = userMessage("explain pi search wiring", 1);
 			await handler(
-				{ messages: [userMessage("explain pi search wiring", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: [msg] as never[] },
+				fakeContext("ses-context", process.cwd(), ["entry-1"], [msg]) as never,
 			);
 			await handler(
-				{ messages: [userMessage("explain pi search wiring", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: [msg] as never[] },
+				fakeContext("ses-context", process.cwd(), ["entry-1"], [msg]) as never,
 			);
 			clearContextHandlerSession("ses-context");
 			await handler(
-				{ messages: [userMessage("explain pi search wiring", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: [msg] as never[] },
+				fakeContext("ses-context", process.cwd(), ["entry-1"], [msg]) as never,
 			);
 
 			expect(spy).toHaveBeenCalledTimes(1);
@@ -774,9 +801,15 @@ describe("registerPiContextHandler", () => {
 				recordPiToolExecution("ses-context");
 			}
 
+			const newTurnMsg = userMessage("new turn", 100);
 			await handler(
-				{ messages: [userMessage("new turn", 100)] as never[] },
-				fakeContext("ses-context") as never,
+				{ messages: [newTurnMsg] as never[] },
+				fakeContext(
+					"ses-context",
+					process.cwd(),
+					["entry-1"],
+					[newTurnMsg],
+				) as never,
 			);
 
 			const sticky = getPersistedStickyTurnReminder(db, "ses-context");
@@ -928,5 +961,125 @@ describe("collectMessageEntryIdsStrict", () => {
 				"ses-strict",
 			),
 		).toEqual([undefined, "entry-2"]);
+	});
+});
+
+describe("collectMessageEntryIdsByRef", () => {
+	it("returns null when SessionManager API is unavailable", () => {
+		expect(
+			collectMessageEntryIdsByRef(
+				{ sessionManager: {} } as never,
+				[userMessage("hi", 1)],
+				"ses-ref",
+			),
+		).toBeNull();
+	});
+
+	it("resolves entry ids by reference identity, not by position", () => {
+		// Same scenario as production: Pi's `agent.state.messages` and
+		// `sessionManager.getBranch()` are in sync. Each event message has
+		// a corresponding `type: "message"` branch entry whose `.message`
+		// field is the SAME object reference.
+		const m1 = userMessage("first", 1);
+		const m2 = userMessage("second", 2);
+		const m3 = userMessage("third", 3);
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "message", id: "entry-a", message: m1 },
+						{ type: "message", id: "entry-b", message: m2 },
+						{ type: "message", id: "entry-c", message: m3 },
+					],
+				},
+			} as never,
+			[m1, m2, m3],
+			"ses-ref",
+		);
+		expect(result).toEqual(["entry-a", "entry-b", "entry-c"]);
+	});
+
+	it("survives off-by-one length divergence (regression for log-observed bug)", () => {
+		// Production bug: Pi's `state.messages.length = N` while
+		// `getBranch()` emit-eligible count = N ± 1. The position-based
+		// walk in `collectMessageEntryIds` returned a slice with wrong
+		// alignment. Reference-based resolution returns the correct
+		// id for matched refs and undefined for unmatched, regardless
+		// of length divergence.
+		const m1 = userMessage("turn-1", 1);
+		const m2 = userMessage("turn-2", 2);
+		const m3 = userMessage("turn-3", 3);
+		// `event.messages` has 3 entries but `getBranch()` only has 2
+		// emit-eligible entries — Pi runtime hasn't appended turn-3
+		// yet at the moment the context event fires (race window).
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "message", id: "entry-1", message: m1 },
+						{ type: "message", id: "entry-2", message: m2 },
+					],
+				},
+			} as never,
+			[m1, m2, m3],
+			"ses-ref",
+		);
+		expect(result).toEqual(["entry-1", "entry-2", undefined]);
+	});
+
+	it("survives catastrophic length divergence (issue #81 scenario)", () => {
+		// Production bug: another Pi extension (e.g. condensed-milk-pi)
+		// mutates `event.messages` in its own context handler, so the
+		// messages we see have ZERO ref-identity overlap with the
+		// branch entries. Position-based walk would map every index
+		// to the wrong id; reference-based walk returns undefined for
+		// every slot, leaving the caller's synthesized fallback to
+		// handle them.
+		const mutated = [
+			userMessage("mutated-1", 1),
+			userMessage("mutated-2", 2),
+			userMessage("mutated-3", 3),
+		];
+		const branchOriginals = [
+			userMessage("original-1", 1),
+			userMessage("original-2", 2),
+		];
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "message", id: "entry-a", message: branchOriginals[0] },
+						{ type: "message", id: "entry-b", message: branchOriginals[1] },
+					],
+				},
+			} as never,
+			mutated,
+			"ses-ref",
+		);
+		// All slots unmapped because no ref identity overlaps.
+		expect(result).toEqual([undefined, undefined, undefined]);
+	});
+
+	it("skips non-message entry types and entries with missing fields", () => {
+		// `compaction` and `branch_summary` entries are NOT used for
+		// ref-mapping (Pi's `buildSessionContext` wraps them in fresh
+		// objects per call, so reference matching would fail anyway).
+		const m1 = userMessage("user-msg", 1);
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "model_change", id: "entry-mc" },
+						{ type: "thinking_level_change", id: "entry-tlc" },
+						{ type: "compaction", id: "entry-comp", firstKeptEntryId: "x" },
+						{ type: "branch_summary", id: "entry-bs", summary: "x" },
+						{ type: "message", id: "entry-msg", message: m1 },
+					],
+				},
+			} as never,
+			[m1],
+			"ses-ref",
+		);
+		expect(result).toEqual(["entry-msg"]);
 	});
 });
