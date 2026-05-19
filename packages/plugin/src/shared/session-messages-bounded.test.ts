@@ -1,23 +1,22 @@
 /// <reference types="bun-types" />
 
-/**
- * Regression guard: every `client.session.messages(...)` call in plugin code
- * must include `limit` in its `query`. Without `limit`, OpenCode's legacy
- * messages endpoint hydrates the ENTIRE session into RAM — catastrophic on
- * huge sessions (10k+ messages) which is exactly when Magic Context shines.
- *
- * Background: the plugin only ever needs the latest assistant message of a
- * helper subagent (historian / dreamer / sidekick / key-files / user-memory)
- * or a bounded tail of the active session (conflict-warning cleanup). Both
- * fit comfortably in `limit: 50` with massive headroom.
- *
- * If you add a new `session.messages(...)` call, this test fails until you
- * include a `limit` in the query. The test does a static source-text scan
- * so it catches the issue at lint-time without runtime mocking overhead.
- */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+// Regression guard: every `client.session.messages(...)` call in plugin code
+// must include `limit` in its `query`. Without `limit`, OpenCode's legacy
+// messages endpoint hydrates the ENTIRE session into RAM — catastrophic on
+// huge sessions (10k+ messages) which is exactly when Magic Context shines.
+//
+// Background: the plugin only ever needs the latest assistant message of a
+// helper subagent (historian / dreamer / sidekick / key-files / user-memory)
+// or a bounded tail of the active session (conflict-warning cleanup). Both
+// fit comfortably in `limit: 50` with massive headroom.
+//
+// If you add a new `session.messages(...)` call, this test fails until you
+// include a `limit` in the query. The test does a static source-text scan
+// so it catches the issue at lint-time without runtime mocking overhead.
+
 import { describe, expect, it } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 const PLUGIN_SRC = join(__dirname, "..", "..", "src");
 
