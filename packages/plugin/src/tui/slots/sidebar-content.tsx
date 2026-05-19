@@ -363,10 +363,9 @@ const SidebarContent = (props: {
             {s() && s()!.inputTokens > 0 && (
                 <box marginTop={1} flexDirection="column">
                     {(s()?.contextLimit ?? 0) > 0 && (
-                        <box width="100%" flexDirection="row" justifyContent="space-between">
-                            <text fg={props.theme.textMuted}>Context</text>
+                        <box width="100%" flexDirection="row" justifyContent="flex-end">
                             <text fg={contextSummaryColor()}>
-                                <b>{s()!.usagePercentage.toFixed(1)}%</b> · {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)} tokens
+                                <b>{s()!.usagePercentage.toFixed(1)}%</b> · {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
                             </text>
                         </box>
                     )}
