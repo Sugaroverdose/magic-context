@@ -211,10 +211,14 @@ export function deleteOrphanProjectKeyFiles(db: Database, now = Date.now()): num
     for (const row of rows) {
         if (existsSync(row.projectPath)) continue;
         try {
-            db.prepare("DELETE FROM project_key_files WHERE project_path = ?").run(row.projectPath);
-            db.prepare("DELETE FROM project_key_files_version WHERE project_path = ?").run(
-                row.projectPath,
-            );
+            db.transaction(() => {
+                db.prepare("DELETE FROM project_key_files WHERE project_path = ?").run(
+                    row.projectPath,
+                );
+                db.prepare("DELETE FROM project_key_files_version WHERE project_path = ?").run(
+                    row.projectPath,
+                );
+            })();
             deletedProjects++;
         } catch (error) {
             log(`[key-files] orphan GC failed for ${row.projectPath}:`, error);

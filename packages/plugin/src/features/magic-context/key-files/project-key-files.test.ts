@@ -154,6 +154,39 @@ describe("project-scoped key-files storage", () => {
             closeQuietly(db);
         }
     });
+
+    it("rolls back orphan key-file cleanup when version delete fails", () => {
+        const db = makeDb();
+        try {
+            const missingProject = join(tempDir("kf-orphans-rollback-root-"), "missing");
+            db.prepare(
+                `INSERT INTO project_key_files (project_path, path, content, content_hash, local_token_estimate, generated_at, generation_config_hash)
+                 VALUES (?, 'a.ts', 'content', 'hash', 1, ?, 'cfg')`,
+            ).run(missingProject, Date.now() - 8 * 24 * 60 * 60 * 1000);
+            db.prepare(
+                "INSERT INTO project_key_files_version (project_path, version) VALUES (?, 4)",
+            ).run(missingProject);
+            db.exec(`
+                CREATE TRIGGER fail_orphan_version_delete
+                BEFORE DELETE ON project_key_files_version
+                WHEN OLD.project_path = '${missingProject.replaceAll("'", "''")}'
+                BEGIN
+                    SELECT RAISE(ABORT, 'version delete failed');
+                END;
+            `);
+
+            expect(deleteOrphanProjectKeyFiles(db)).toBe(0);
+            expect(readCurrentKeyFiles(db, missingProject)).toHaveLength(1);
+            expect(getKeyFilesVersion(db, missingProject)).toBe(4);
+
+            db.exec("DROP TRIGGER fail_orphan_version_delete");
+            expect(deleteOrphanProjectKeyFiles(db)).toBe(1);
+            expect(readCurrentKeyFiles(db, missingProject)).toHaveLength(0);
+            expect(getKeyFilesVersion(db, missingProject)).toBe(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });
 
 describe("AFT availability detection", () => {
