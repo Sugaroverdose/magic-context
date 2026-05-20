@@ -45,12 +45,17 @@
  *     instructs the model to read that file. The model's only output
  *     channel is its text response (the `<output>...</output>` XML).
  *
- *   - **dreamer**: `read` (for the key-files identification task),
- *     plus the Magic Context MCP tools `ctx_memory`, `ctx_search`,
- *     `ctx_note`. Dreamer task prompts in
- *     `features/magic-context/dreamer/task-prompts.ts` explicitly
- *     call these tools to consolidate, verify, archive, merge, and
- *     update memories, plus evaluate smart notes.
+ *   - **dreamer**: `read`, `grep`, `glob`, `bash`, plus the Magic
+ *     Context MCP tools `ctx_memory`, `ctx_search`, `ctx_note`.
+ *     Dreamer task prompts in
+ *     `features/magic-context/dreamer/task-prompts.ts` explicitly tell
+ *     the model to grep schema files for defaults, read source to
+ *     confirm claims, run `git log` / `gh` / `curl` for verify and
+ *     smart-note evaluation, and use glob/find for directory
+ *     inventory. Live DB shows >100 bash invocations across all
+ *     dreamer task variants. `task` / `edit` / `write` / `webfetch` /
+ *     `websearch` remain denied — dreamer must not spawn subagents
+ *     or commit changes.
  *
  *   - **sidekick**: `ctx_search` and `ctx_memory` (read-only ops).
  *     Sidekick's job is augmenting user prompts via memory retrieval
@@ -88,13 +93,42 @@ export function buildAllowOnlyPermission(
 export const HISTORIAN_ALLOWED_TOOLS = ["read"] as const;
 
 /**
- * Tools the dreamer agent needs. Memory consolidation/verification/
- * archive/merge/update flows go through `ctx_memory`; smart-note
- * evaluation uses `ctx_search` and `ctx_note`; the key-files
- * identification task uses `read` to inspect candidate files before
- * picking which ones to pin.
+ * Tools the dreamer agent needs. This is the broadest hidden-agent
+ * surface because dreamer's tasks legitimately require local-repo
+ * exploration plus external command execution:
+ *
+ *   - `ctx_memory` / `ctx_search` / `ctx_note` — the canonical memory
+ *     CRUD and retrieval path for consolidate / verify / archive /
+ *     improve and smart-note dismissal.
+ *   - `read` / `grep` / `glob` — the verify task prompt
+ *     (`task-prompts.ts`) explicitly tells the model to grep schema
+ *     files for default values, read source to confirm claimed
+ *     behavior, and use glob for project structure inventory.
+ *   - `bash` — required for smart-note condition evaluation (the
+ *     prompt explicitly mentions `gh` / `git` / `curl` / file reads),
+ *     for the verify task's `git log --oneline --since=...` step, and
+ *     for the improve task's `find` / `grep` directory inventory. The
+ *     live OpenCode DB shows over 100 `bash` invocations across
+ *     consolidate / verify / improve / archive-stale / smart-notes
+ *     dreamer child sessions, so removing it would regress real,
+ *     documented dreamer behavior.
+ *
+ * Deliberately NOT allowed:
+ *   - `task` — no subagent fanout from dreamer
+ *   - `edit` / `write` — dreamer must not modify project files;
+ *     `task-prompts.ts` explicitly states "Do not commit changes"
+ *   - `webfetch` / `websearch` — out of scope; smart-note URL fetches
+ *     go through `bash` + `curl` instead
  */
-export const DREAMER_ALLOWED_TOOLS = ["read", "ctx_memory", "ctx_search", "ctx_note"] as const;
+export const DREAMER_ALLOWED_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "bash",
+    "ctx_memory",
+    "ctx_search",
+    "ctx_note",
+] as const;
 
 /**
  * Tools the sidekick agent needs. Sidekick is a read-only memory

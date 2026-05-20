@@ -68,21 +68,45 @@ describe("HISTORIAN_ALLOWED_TOOLS", () => {
 });
 
 describe("DREAMER_ALLOWED_TOOLS", () => {
-    it("includes read + ctx_memory + ctx_search + ctx_note", () => {
-        // Dreamer needs: `read` (key-files identification), `ctx_memory`
-        // (consolidate/verify/archive/merge/update), `ctx_search`
-        // (smart-note evaluation, retrieval-count checks), `ctx_note`
-        // (smart-note dismiss/update).
+    it("includes read + grep + glob + bash for local-repo exploration", () => {
+        // Verify task prompt explicitly tells the model to grep schema
+        // files, read source, glob/find for project structure inventory,
+        // and run `git log --oneline --since=...`. Smart-note evaluation
+        // routinely needs `gh` / `git` / `curl` via bash. Live DB shows
+        // >100 bash invocations across dreamer task variants.
         expect(DREAMER_ALLOWED_TOOLS).toContain("read");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("grep");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("glob");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("bash");
+    });
+
+    it("includes ctx_memory + ctx_search + ctx_note for memory operations", () => {
+        // Dreamer's canonical job: consolidate / verify / archive /
+        // improve memories (`ctx_memory`), and dismiss / surface smart
+        // notes (`ctx_note`). `ctx_search` for retrieval-count and
+        // smart-note evidence lookup.
         expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_memory");
         expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_search");
         expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_note");
     });
 
-    it("does NOT include `task` or edit/bash/web tools", () => {
-        for (const denied of ["task", "bash", "edit", "write", "webfetch", "websearch"]) {
-            expect(DREAMER_ALLOWED_TOOLS).not.toContain(denied);
-        }
+    it("does NOT include `task` (no subagent fanout from dreamer)", () => {
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("task");
+    });
+
+    it("does NOT include `edit` or `write` (no project-file mutations)", () => {
+        // Dreamer task prompt explicitly says "Do not commit changes" —
+        // memory consolidation must not alter project source files.
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("edit");
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("write");
+    });
+
+    it("does NOT include `webfetch` or `websearch` (use bash + curl instead)", () => {
+        // External URL fetches in smart-note conditions go through
+        // `bash` + `curl` so dreamer has one consistent shell surface
+        // instead of two redundant network tools.
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("webfetch");
+        expect(DREAMER_ALLOWED_TOOLS).not.toContain("websearch");
     });
 });
 
@@ -113,11 +137,14 @@ describe("integration: full hidden-agent permission shape", () => {
         });
     });
 
-    it("dreamer permission object: `*` denied + read + ctx_* allowed", () => {
+    it("dreamer permission object: `*` denied + read + grep + glob + bash + ctx_* allowed", () => {
         const perm = buildAllowOnlyPermission(DREAMER_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             read: "allow",
+            grep: "allow",
+            glob: "allow",
+            bash: "allow",
             ctx_memory: "allow",
             ctx_search: "allow",
             ctx_note: "allow",
