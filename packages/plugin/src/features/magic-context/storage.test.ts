@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { promoteRecompStaging, saveRecompStagingPass } from "./compartment-storage";
 import { runMigrations } from "./migrations";
 import {
     addNote,
@@ -194,6 +195,45 @@ describe("magic-context storage", () => {
         closeQuietly(db);
     });
 
+    it("clears recomp promotion memory cache and visible memory ids", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        const sessionId = "ses-recomp-cache";
+        getOrCreateSessionMeta(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = ?, memory_block_ids = ?, memory_block_count = ? WHERE session_id = ?",
+        ).run("<memory>stale</memory>", "mem-1,mem-2", 2, sessionId);
+        saveRecompStagingPass(
+            db,
+            sessionId,
+            1,
+            [
+                {
+                    sequence: 0,
+                    startMessage: 0,
+                    endMessage: 1,
+                    startMessageId: "m-0",
+                    endMessageId: "m-1",
+                    title: "fresh",
+                    content: "fresh compartment",
+                },
+            ],
+            [{ category: "Fact", content: "fresh fact" }],
+        );
+
+        //#when
+        const promoted = promoteRecompStaging(db, sessionId);
+
+        //#then
+        expect(promoted?.compartments).toHaveLength(1);
+        const row = db
+            .prepare(
+                "SELECT memory_block_cache AS cache, memory_block_ids AS ids, memory_block_count AS count FROM session_meta WHERE session_id = ?",
+            )
+            .get(sessionId) as { cache: string; ids: string; count: number };
+        expect(row).toEqual({ cache: "", ids: "", count: 2 });
+        closeQuietly(db);
+    });
     it("stores and replaces session notes by session", () => {
         //#given
         const db = makeMemoryDatabase();

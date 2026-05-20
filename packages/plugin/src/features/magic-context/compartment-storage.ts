@@ -452,9 +452,9 @@ export function promoteRecompStaging(
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
         // Clear cached injection block — preserve memory_block_count (memories didn't change)
-        db.prepare("UPDATE session_meta SET memory_block_cache = '' WHERE session_id = ?").run(
-            sessionId,
-        );
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
 
         return { compartments: staging.compartments, facts: staging.facts };
     })();
