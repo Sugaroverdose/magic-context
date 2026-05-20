@@ -399,12 +399,6 @@ export async function runPostTransformPhase(
                 t5,
                 `droppedTools=${cleanup.droppedTools} deduplicatedTools=${cleanup.deduplicatedTools} droppedInjections=${cleanup.droppedInjections} compressedTextTags=${cleanup.compressedTextTags}`,
             );
-            if (args.watermark > 0) {
-                const t6 = performance.now();
-                truncateErroredTools(args.messages, args.watermark, args.messageTagNumbers);
-                stripProcessedImages(args.messages, args.watermark, args.messageTagNumbers);
-                logTransformTiming(args.sessionId, "watermarkCleanup", t6);
-            }
             const t7 = performance.now();
             const clearedReasoning = clearOldReasoning(
                 args.messages,
@@ -471,6 +465,12 @@ export async function runPostTransformPhase(
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
             heuristicsRanSuccessfully = true;
+        }
+        if (args.watermark > 0) {
+            const tWatermarkCleanup = performance.now();
+            truncateErroredTools(args.messages, args.watermark, args.messageTagNumbers);
+            stripProcessedImages(args.messages, args.watermark, args.messageTagNumbers);
+            logTransformTiming(args.sessionId, "watermarkCleanup", tWatermarkCleanup);
         }
         if (shouldApplyPendingOps) {
             pendingOpsRanSuccessfully = true;

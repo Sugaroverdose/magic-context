@@ -242,6 +242,62 @@ describe("createTransform index staleness regressions", () => {
         expect(secondPass[2].parts.some((part) => part.type === "file")).toBe(true);
     });
 
+    it("replays errored-tool truncation and processed-image stripping on defer passes", async () => {
+        useTempDataHome("context-transform-defer-watermark-replay-");
+        const sessionId = "ses-defer-watermark-replay";
+        const { transform } = createTestTransform(sessionId);
+        const longDataUrl = `data:image/png;base64,${"A".repeat(300)}`;
+        const longError = "E".repeat(180);
+
+        const buildMessages = (): TestMessage[] => [
+            {
+                info: { id: "m-user-image", role: "user", sessionID: sessionId },
+                parts: [
+                    { type: "text", text: "please inspect this image" },
+                    { type: "file", mime: "image/png", url: longDataUrl, filename: "img.png" },
+                ],
+            },
+            {
+                info: { id: "m-assistant-image", role: "assistant" },
+                parts: [{ type: "text", text: "processed the image" }],
+            },
+            {
+                info: { id: "m-tool-error", role: "tool" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-error",
+                        state: { output: "", status: "error", error: longError },
+                    },
+                ],
+            },
+            {
+                info: { id: "m-tail", role: "assistant" },
+                parts: [{ type: "text", text: "tail marker" }],
+            },
+        ];
+
+        await transform({}, { messages: buildMessages() });
+
+        const db = openDatabase();
+        const tags = getTagsBySession(db, sessionId);
+        const watermarkTag = Math.max(...tags.map((tag) => tag.tagNumber));
+        updateTagStatus(db, sessionId, watermarkTag, "dropped");
+
+        const firstDeferPass = buildMessages();
+        await transform({}, { messages: firstDeferPass });
+        const firstBytes = JSON.stringify(firstDeferPass);
+
+        const filePartAfterReplay = firstDeferPass[0].parts[1];
+        const toolPartAfterReplay = firstDeferPass[2].parts[0] as ToolPart;
+        expect(filePartAfterReplay).toEqual({ type: "text", text: "" });
+        expect(toolPartAfterReplay.state.error).toBe(`${longError.slice(0, 100)}... [truncated]`);
+
+        const secondDeferPass = buildMessages();
+        await transform({}, { messages: secondDeferPass });
+        expect(JSON.stringify(secondDeferPass)).toBe(firstBytes);
+    });
+
     it("clears reasoning before dropped messages correctly after tool-drop pruning", async () => {
         useTempDataHome("context-transform-stale-reasoning-");
         const sessionId = "ses-stale-reasoning";

@@ -374,6 +374,29 @@ describe("strip-content", () => {
             });
         });
 
+        describe("#given an already truncated long error", () => {
+            describe("#when truncating errored tools again", () => {
+                it("#then it is byte-identical after the second pass", () => {
+                    const tool = message("m-1", "assistant", [
+                        {
+                            type: "tool",
+                            state: {
+                                status: "error",
+                                error: "e".repeat(200),
+                            },
+                        },
+                    ]);
+                    const tags = new Map<MessageLike, number>([[tool, 1]]);
+
+                    truncateErroredTools([tool], 5, tags);
+                    const firstPass = JSON.stringify(tool);
+                    truncateErroredTools([tool], 5, tags);
+
+                    expect(JSON.stringify(tool)).toBe(firstPass);
+                });
+            });
+        });
+
         describe("#given empty messages", () => {
             describe("#when truncating errored tools", () => {
                 it("#then it returns zero", () => {
@@ -471,6 +494,33 @@ describe("strip-content", () => {
                     expect(user1.parts[0]).toEqual(SENTINEL);
                     // Recent user's image survives
                     expect((recentUser.parts[0] as { type: string }).type).toBe("file");
+                });
+            });
+        });
+
+        describe("#given an already sentineled processed image", () => {
+            describe("#when stripping processed images again", () => {
+                it("#then it is byte-identical after the second pass", () => {
+                    const user = message("m-1", "user", [
+                        {
+                            type: "file",
+                            mime: "image/png",
+                            url: buildDataUrl(2000),
+                        },
+                    ]);
+                    const assistant = message("m-2", "assistant", [
+                        { type: "text", text: "processed" },
+                    ]);
+                    const tags = new Map<MessageLike, number>([
+                        [user, 1],
+                        [assistant, 2],
+                    ]);
+
+                    stripProcessedImages([user, assistant], 5, tags);
+                    const firstPass = JSON.stringify([user, assistant]);
+                    stripProcessedImages([user, assistant], 5, tags);
+
+                    expect(JSON.stringify([user, assistant])).toBe(firstPass);
                 });
             });
         });
