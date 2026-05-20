@@ -196,11 +196,22 @@ export function checkCompartmentTrigger(
     preloadedActiveTags?: readonly TagEntry[],
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
+        sessionLog(
+            sessionId,
+            `compartment trigger: skipped — historian already in progress (usage=${usage.percentage.toFixed(1)}%)`,
+        );
         return { shouldFire: false };
     }
 
     const tailInfo = getUnsummarizedTailInfo(db, sessionId, triggerBudget);
     if (!tailInfo.hasNewRawHistory) {
+        const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
+        const rawMessageCount = getRawSessionMessageCount(sessionId);
+        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
+        sessionLog(
+            sessionId,
+            `compartment trigger: skipped — no new raw history (usage=${usage.percentage.toFixed(1)}% nextStartOrdinal=${tailInfo.nextStartOrdinal} lastCompartmentEnd=${lastCompartmentEnd} rawMessageCount=${rawMessageCount} protectedTailStart=${protectedTailStart})`,
+        );
         return { shouldFire: false };
     }
 
@@ -267,6 +278,10 @@ export function checkCompartmentTrigger(
         executeThresholdPercentage,
     );
     if (usage.percentage < proactiveTriggerPercentage) {
+        sessionLog(
+            sessionId,
+            `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% — below proactive floor (${proactiveTriggerPercentage}%)`,
+        );
         return { shouldFire: false };
     }
 
