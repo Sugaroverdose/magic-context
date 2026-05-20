@@ -26,6 +26,11 @@ export interface GetNotesOptions {
     status?: NoteStatus | NoteStatus[];
 }
 
+export interface NoteMutationScope {
+    sessionId: string;
+    projectPath: string;
+}
+
 export interface UpdateNoteOptions {
     content?: string;
     sessionId?: string | null;
@@ -117,6 +122,14 @@ function toNote(row: NoteRow): Note {
 function getNoteById(db: Database, noteId: number): Note | null {
     const row = db.prepare("SELECT * FROM notes WHERE id = ?").get(noteId);
     return isNoteRow(row) ? toNote(row) : null;
+}
+
+function noteBelongsToScope(note: Note, scope: NoteMutationScope): boolean {
+    if (note.type === "session") {
+        return note.sessionId === scope.sessionId;
+    }
+
+    return note.projectPath === scope.projectPath;
 }
 
 function buildStatusClause(status: GetNotesOptions["status"]): {
@@ -232,9 +245,14 @@ export function getReadySmartNotes(db: Database, projectPath: string): Note[] {
     return getSmartNotes(db, projectPath, "ready");
 }
 
-export function updateNote(db: Database, noteId: number, updates: UpdateNoteOptions): Note | null {
+export function updateNote(
+    db: Database,
+    noteId: number,
+    updates: UpdateNoteOptions,
+    scope: NoteMutationScope,
+): Note | null {
     const existing = getNoteById(db, noteId);
-    if (!existing) {
+    if (!existing || !noteBelongsToScope(existing, scope)) {
         return null;
     }
 
@@ -289,10 +307,12 @@ export function updateNote(db: Database, noteId: number, updates: UpdateNoteOpti
     return isNoteRow(result) ? toNote(result) : null;
 }
 
-// Intentional: dismiss/update operate by note ID without session/project scope checks.
-// Session notes are only discoverable via `ctx_note read` which filters by current sessionId;
-// smart notes are filtered by project_path. No cross-session discovery path exists for the agent.
-export function dismissNote(db: Database, noteId: number): boolean {
+export function dismissNote(db: Database, noteId: number, scope: NoteMutationScope): boolean {
+    const existing = getNoteById(db, noteId);
+    if (!existing || !noteBelongsToScope(existing, scope)) {
+        return false;
+    }
+
     const result = db
         .prepare(
             "UPDATE notes SET status = 'dismissed', updated_at = ? WHERE id = ? AND status != 'dismissed'",

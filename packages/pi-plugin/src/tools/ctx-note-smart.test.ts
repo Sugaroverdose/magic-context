@@ -25,6 +25,7 @@ async function callNote(args: {
 	db: ReturnType<typeof createTestDb>;
 	dreamerEnabled?: boolean;
 	sessionId?: string;
+	cwd?: string;
 	params: Record<string, unknown>;
 }) {
 	const tool = createCtxNoteTool({
@@ -36,7 +37,10 @@ async function callNote(args: {
 		args.params,
 		new AbortController().signal,
 		undefined,
-		fakeContext(args.sessionId ?? "ses-note-1") as never,
+		fakeContext(
+			args.sessionId ?? "ses-note-1",
+			args.cwd ?? process.cwd(),
+		) as never,
 	);
 	const text = (result.content[0] as { text: string }).text;
 	return { result, text, isError: result.isError === true };
@@ -263,6 +267,52 @@ describe("Pi ctx_note smart notes", () => {
 		expect(updated[0].surfaceCondition).toBe("Some condition");
 	});
 
+	it("rejects dismissing another session's session note", async () => {
+		const db = createTestDb();
+		const created = addNote(db, "session", {
+			content: "Other session note",
+			sessionId: "ses-other",
+		});
+
+		const { isError, text } = await callNote({
+			db,
+			sessionId: "ses-note-1",
+			params: { action: "dismiss", note_id: created.id },
+		});
+
+		expect(isError).toBe(true);
+		expect(text).toContain("not found in your session/project");
+		expect(
+			getNotes(db, { sessionId: "ses-other", type: "session" })[0].status,
+		).toBe("active");
+	});
+
+	it("rejects updating another project's smart note", async () => {
+		const db = createTestDb();
+		const otherProject = resolveProjectIdentity("/tmp");
+		const created = addNote(db, "smart", {
+			content: "Other project smart note",
+			projectPath: otherProject,
+			surfaceCondition: "When /tmp is ready",
+		});
+
+		const { isError, text } = await callNote({
+			db,
+			dreamerEnabled: true,
+			params: {
+				action: "update",
+				note_id: created.id,
+				content: "Hijacked smart note",
+			},
+		});
+
+		expect(isError).toBe(true);
+		expect(text).toContain("not found in your session/project");
+		expect(
+			getNotes(db, { projectPath: otherProject, type: "smart" })[0].content,
+		).toBe("Other project smart note");
+	});
+
 	it("read default (no filter) shows ready smart notes alongside session notes", async () => {
 		const db = createTestDb();
 		const projectIdentity = resolveProjectIdentity(process.cwd());
@@ -272,10 +322,15 @@ describe("Pi ctx_note smart notes", () => {
 			surfaceCondition: "Always",
 		});
 		// Manually mark ready (mimicking what dreamer would do).
-		updateNote(db, smart.id, {
-			status: "ready",
-			readyReason: "Condition satisfied at test time",
-		});
+		updateNote(
+			db,
+			smart.id,
+			{
+				status: "ready",
+				readyReason: "Condition satisfied at test time",
+			},
+			{ sessionId: "ses-note-1", projectPath: projectIdentity },
+		);
 		addNote(db, "session", {
 			content: "Active session note",
 			sessionId: "ses-note-1",

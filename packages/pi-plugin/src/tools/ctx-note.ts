@@ -184,12 +184,21 @@ export function createCtxNoteTool(
 				if (typeof params.note_id !== "number") {
 					return err("Error: 'note_id' is required when action is 'dismiss'.");
 				}
-				const dismissed = dismissNote(deps.db, params.note_id);
-				return ok(
-					dismissed
-						? `Note #${params.note_id} dismissed.`
-						: `Note #${params.note_id} not found or already dismissed.`,
-				);
+				const projectIdentity = resolveProjectIdentity(ctx.cwd);
+				if (!projectIdentity) {
+					return err(
+						"Error: Could not resolve project identity for note dismiss.",
+					);
+				}
+				const dismissed = dismissNote(deps.db, params.note_id, {
+					projectPath: projectIdentity,
+					sessionId,
+				});
+				return dismissed
+					? ok(`Note #${params.note_id} dismissed.`)
+					: err(
+							`Error: Note #${params.note_id} not found in your session/project or already dismissed.`,
+						);
 			}
 
 			if (action === "update") {
@@ -205,9 +214,20 @@ export function createCtxNoteTool(
 						"Error: Provide 'content' and/or 'surface_condition' to update.",
 					);
 				}
-				const updated = updateNote(deps.db, params.note_id, updates);
+				const projectIdentity = resolveProjectIdentity(ctx.cwd);
+				if (!projectIdentity) {
+					return err(
+						"Error: Could not resolve project identity for note update.",
+					);
+				}
+				const updated = updateNote(deps.db, params.note_id, updates, {
+					projectPath: projectIdentity,
+					sessionId,
+				});
 				if (!updated) {
-					return err(`Note #${params.note_id} not found.`);
+					return err(
+						`Error: Note #${params.note_id} not found in your session/project.`,
+					);
 				}
 				const parts: string[] = [];
 				if (updates.content) parts.push(`content: ${updates.content}`);

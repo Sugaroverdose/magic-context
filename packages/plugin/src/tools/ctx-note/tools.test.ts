@@ -24,7 +24,8 @@ function createTestDb(): Database {
     return db;
 }
 
-const toolContext = (sessionID = "ses-note") => ({ sessionID }) as never;
+const toolContext = (sessionID = "ses-note", directory = "/workspace/project-a") =>
+    ({ sessionID, directory }) as never;
 
 describe("createCtxNoteTools", () => {
     let db: Database;
@@ -32,7 +33,11 @@ describe("createCtxNoteTools", () => {
 
     beforeEach(() => {
         db = createTestDb();
-        tools = createCtxNoteTools({ db });
+        tools = createCtxNoteTools({
+            db,
+            resolveProjectPath: (directory) =>
+                directory.includes("project-b") ? "git:project-b" : "git:project-a",
+        });
     });
 
     it("writes and reads session notes", async () => {
@@ -71,6 +76,112 @@ describe("createCtxNoteTools", () => {
         expect(readResult).toContain("No session notes or smart notes");
         expect(readAllResult).toContain("dismissed");
         expect(readAllResult).toContain("First note");
+    });
+
+    it("rejects dismissing another session's session note", async () => {
+        await tools.ctx_note.execute(
+            { action: "write", content: "Other session note" },
+            toolContext("ses-b"),
+        );
+
+        const dismissResult = await tools.ctx_note.execute(
+            { action: "dismiss", note_id: 1 },
+            toolContext("ses-a"),
+        );
+        const readOtherResult = await tools.ctx_note.execute(
+            { action: "read", filter: "all" },
+            toolContext("ses-b"),
+        );
+
+        expect(dismissResult).toContain("not found in your session/project");
+        expect(readOtherResult).toContain("Other session note");
+        expect(readOtherResult).not.toContain("dismissed");
+    });
+
+    it("updates own session notes but rejects another session's session note", async () => {
+        await tools.ctx_note.execute(
+            { action: "write", content: "Original session note" },
+            toolContext("ses-a"),
+        );
+
+        const ownUpdate = await tools.ctx_note.execute(
+            { action: "update", note_id: 1, content: "Updated session note" },
+            toolContext("ses-a"),
+        );
+        const otherUpdate = await tools.ctx_note.execute(
+            { action: "update", note_id: 1, content: "Hijacked session note" },
+            toolContext("ses-b"),
+        );
+        const readResult = await tools.ctx_note.execute(
+            { action: "read", filter: "all" },
+            toolContext("ses-a"),
+        );
+
+        expect(ownUpdate).toContain("Updated note #1");
+        expect(otherUpdate).toContain("not found in your session/project");
+        expect(readResult).toContain("Updated session note");
+        expect(readResult).not.toContain("Hijacked session note");
+    });
+
+    it("dismisses own project smart notes but rejects another project's smart note", async () => {
+        tools = createCtxNoteTools({
+            db,
+            dreamerEnabled: true,
+            resolveProjectPath: (directory) =>
+                directory.includes("project-b") ? "git:project-b" : "git:project-a",
+        });
+
+        await tools.ctx_note.execute(
+            {
+                action: "write",
+                content: "Project B smart note",
+                surface_condition: "When project B is ready",
+            },
+            toolContext("ses-b", "/workspace/project-b"),
+        );
+
+        const wrongProjectDismiss = await tools.ctx_note.execute(
+            { action: "dismiss", note_id: 1 },
+            toolContext("ses-a", "/workspace/project-a"),
+        );
+        const ownProjectDismiss = await tools.ctx_note.execute(
+            { action: "dismiss", note_id: 1 },
+            toolContext("ses-a", "/workspace/project-b"),
+        );
+
+        expect(wrongProjectDismiss).toContain("not found in your session/project");
+        expect(ownProjectDismiss).toContain("Note #1 dismissed");
+    });
+
+    it("rejects updating another project's smart note", async () => {
+        tools = createCtxNoteTools({
+            db,
+            dreamerEnabled: true,
+            resolveProjectPath: (directory) =>
+                directory.includes("project-b") ? "git:project-b" : "git:project-a",
+        });
+
+        await tools.ctx_note.execute(
+            {
+                action: "write",
+                content: "Project B smart note",
+                surface_condition: "When project B is ready",
+            },
+            toolContext("ses-b", "/workspace/project-b"),
+        );
+
+        const wrongProjectUpdate = await tools.ctx_note.execute(
+            { action: "update", note_id: 1, content: "Project A hijack" },
+            toolContext("ses-a", "/workspace/project-a"),
+        );
+        const readProjectB = await tools.ctx_note.execute(
+            { action: "read", filter: "all" },
+            toolContext("ses-b", "/workspace/project-b"),
+        );
+
+        expect(wrongProjectUpdate).toContain("not found in your session/project");
+        expect(readProjectB).toContain("Project B smart note");
+        expect(readProjectB).not.toContain("Project A hijack");
     });
 
     it("updates smart notes", async () => {
