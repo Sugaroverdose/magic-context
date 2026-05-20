@@ -1,0 +1,11 @@
+# Supply-chain protection: refuse Bun-installed packages published within the
+# last 3 days. Honored by Bun 1.2+ (the `minimumReleaseAge` setting introduced
+# alongside the npm v11 equivalent in response to recent supply-chain attacks).
+#
+# Older Bun versions silently ignore unknown settings. CI is on Bun 1.3+, so CI
+# does enforce. Local dev should run `bun upgrade` to pick this up.
+#
+# 3 days = 259200 seconds. Adjust upward if you want a wider safety net.
+
+[install]
+minimumReleaseAge = 259200
