@@ -224,6 +224,7 @@ const deferredMaterializationSessions = new Set<string>();
 const sessionsByProject = new Map<string, Set<string>>();
 const lastSeenProjectIdentityBySession = new Map<string, string>();
 const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
+const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
 const firstContextPassSeenBySession = new Set<string>();
 const recentReduceBySession = new Map<string, number>();
@@ -316,12 +317,17 @@ export function trackSessionForProject(
 	projectIdentity: string,
 	sessionId: string,
 ): void {
+	activeContextHandlerSessions.add(sessionId);
 	let sessions = sessionsByProject.get(projectIdentity);
 	if (!sessions) {
 		sessions = new Set();
 		sessionsByProject.set(projectIdentity, sessions);
 	}
 	sessions.add(sessionId);
+}
+
+function isContextHandlerSessionActive(sessionId: string): boolean {
+	return activeContextHandlerSessions.has(sessionId);
 }
 
 function updateSessionProjectTracking(
@@ -1826,6 +1832,13 @@ function maybeFireCompressor(args: {
 		maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
 		graceCompartments: compressor.graceCompartments,
 		onPublished: () => {
+			if (!isContextHandlerSessionActive(sessionId)) {
+				sessionLog(
+					sessionId,
+					"compressor publication ignored: session was cleared",
+				);
+				return;
+			}
 			// Compressor publication invalidates the injection cache AND
 			// queues drops for the merged compartments. Mirrors OpenCode's
 			// onInjectionCacheCleared callback in transform.ts:502-505:
@@ -1860,7 +1873,9 @@ function maybeFireCompressor(args: {
 		})
 		.finally(() => {
 			inFlightCompressor.delete(sessionId);
-			historian.onStatusChange?.(ctx, sessionId);
+			if (isContextHandlerSessionActive(sessionId)) {
+				historian.onStatusChange?.(ctx, sessionId);
+			}
 		});
 	inFlightCompressor.set(sessionId, runPromise);
 }
@@ -1930,6 +1945,13 @@ function spawnPiHistorianRun(args: {
 		memoryEnabled: historian.memoryEnabled,
 		autoPromote: historian.autoPromote,
 		onPublished: () => {
+			if (!isContextHandlerSessionActive(sessionId)) {
+				sessionLog(
+					sessionId,
+					"historian publication ignored: session was cleared",
+				);
+				return;
+			}
 			try {
 				clearEmergencyRecovery(db, sessionId);
 			} catch (err) {
@@ -1962,7 +1984,9 @@ function spawnPiHistorianRun(args: {
 	}).finally(() => {
 		inFlightHistorian.delete(sessionId);
 		unregister();
-		historian.onStatusChange?.(ctx, sessionId);
+		if (isContextHandlerSessionActive(sessionId)) {
+			historian.onStatusChange?.(ctx, sessionId);
+		}
 	});
 	inFlightHistorian.set(sessionId, runPromise);
 	historian.onStatusChange?.(ctx, sessionId);
@@ -3232,6 +3256,7 @@ function appendReminderToPiUserMessage(
  *     called from where they live.
  */
 export function clearContextHandlerSession(sessionId: string): void {
+	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);
 	historyRefreshSessions.delete(sessionId);

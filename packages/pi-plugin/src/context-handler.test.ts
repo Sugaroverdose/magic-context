@@ -25,9 +25,12 @@ import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
 import {
+	awaitInFlightHistorians,
 	clearContextHandlerSession,
 	collectMessageEntryIdsByRef,
 	collectMessageEntryIdsStrict,
+	consumeDeferredHistoryRefresh,
+	consumeDeferredMaterialization,
 	getPiToolUsageSinceUserTurnForTest,
 	recordPiCtxReduceExecution,
 	recordPiLiveModel,
@@ -919,6 +922,209 @@ describe("registerPiContextHandler", () => {
 				expect.stringContaining("Historian recovery"),
 			);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("skips deferred publication signals when an in-flight historian publishes after session clear", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-cleared-historian-publish";
+		let release!: () => void;
+		try {
+			incrementHistorianFailure(db, sessionId, "previous failure");
+			const runner = {
+				harness: "pi",
+				run: mock(async () => {
+					await new Promise<void>((resolve) => {
+						release = resolve;
+					});
+					return {
+						ok: true as const,
+						assistantText:
+							'<compartment start="1" end="2" title="Cleared">Cleared session publication.</compartment>',
+						durationMs: 1,
+					};
+				}),
+			} as unknown as SubagentRunner;
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				historian: {
+					runner,
+					model: "test/model",
+					historianChunkTokens: 20_000,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = Array.from({ length: 12 }, (_, index) =>
+				index % 2 === 0
+					? userMessage(`user ${index}`, index + 1)
+					: assistantMessage(`assistant ${index}`, index + 1),
+			) as never[];
+
+			await handler(
+				{ messages },
+				fakeContext(
+					sessionId,
+					process.cwd(),
+					messages.map((_, index) => `entry-${index + 1}`),
+					messages as never,
+				) as never,
+			);
+			expect(runner.run).toHaveBeenCalledTimes(1);
+
+			clearContextHandlerSession(sessionId);
+			release();
+			await awaitInFlightHistorians();
+
+			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(false);
+			expect(consumeDeferredMaterialization(sessionId)).toBe(false);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps deferred publication signals when an in-flight historian publishes for an active session", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-active-historian-publish";
+		let release!: () => void;
+		try {
+			incrementHistorianFailure(db, sessionId, "previous failure");
+			const runner = {
+				harness: "pi",
+				run: mock(async () => {
+					await new Promise<void>((resolve) => {
+						release = resolve;
+					});
+					return {
+						ok: true as const,
+						assistantText:
+							'<compartment start="1" end="2" title="Active">Active session publication.</compartment>',
+						durationMs: 1,
+					};
+				}),
+			} as unknown as SubagentRunner;
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				historian: {
+					runner,
+					model: "test/model",
+					historianChunkTokens: 20_000,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = Array.from({ length: 12 }, (_, index) =>
+				index % 2 === 0
+					? userMessage(`user ${index}`, index + 1)
+					: assistantMessage(`assistant ${index}`, index + 1),
+			) as never[];
+
+			await handler(
+				{ messages },
+				fakeContext(
+					sessionId,
+					process.cwd(),
+					messages.map((_, index) => `entry-${index + 1}`),
+					messages as never,
+				) as never,
+			);
+			release();
+			await awaitInFlightHistorians();
+
+			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
+			expect(consumeDeferredMaterialization(sessionId)).toBe(true);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("isolates deferred publication signals across multiple in-flight sessions when one is cleared", async () => {
+		const db = createTestDb();
+		const clearedSessionId = "ses-pi-cleared-multi-historian";
+		const activeSessionId = "ses-pi-active-multi-historian";
+		const releases: Array<() => void> = [];
+		try {
+			incrementHistorianFailure(db, clearedSessionId, "previous failure");
+			incrementHistorianFailure(db, activeSessionId, "previous failure");
+			const runner = {
+				harness: "pi",
+				run: mock(async () => {
+					const callIndex = releases.length;
+					await new Promise<void>((resolve) => {
+						releases.push(resolve);
+					});
+					return {
+						ok: true as const,
+						assistantText: `<compartment start="1" end="2" title="Multi ${callIndex}">Multi-session publication.</compartment>`,
+						durationMs: 1,
+					};
+				}),
+			} as unknown as SubagentRunner;
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				historian: {
+					runner,
+					model: "test/model",
+					historianChunkTokens: 20_000,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const buildMessages = () =>
+				Array.from({ length: 12 }, (_, index) =>
+					index % 2 === 0
+						? userMessage(`user ${index}`, index + 1)
+						: assistantMessage(`assistant ${index}`, index + 1),
+				) as never[];
+			const clearedMessages = buildMessages();
+			const activeMessages = buildMessages();
+
+			await handler(
+				{ messages: clearedMessages },
+				fakeContext(
+					clearedSessionId,
+					process.cwd(),
+					clearedMessages.map((_, index) => `cleared-entry-${index + 1}`),
+					clearedMessages as never,
+				) as never,
+			);
+			await handler(
+				{ messages: activeMessages },
+				fakeContext(
+					activeSessionId,
+					process.cwd(),
+					activeMessages.map((_, index) => `active-entry-${index + 1}`),
+					activeMessages as never,
+				) as never,
+			);
+			expect(runner.run).toHaveBeenCalledTimes(2);
+
+			clearContextHandlerSession(clearedSessionId);
+			for (const release of releases) release();
+			await awaitInFlightHistorians();
+
+			expect(consumeDeferredHistoryRefresh(clearedSessionId)).toBe(false);
+			expect(consumeDeferredMaterialization(clearedSessionId)).toBe(false);
+			expect(consumeDeferredHistoryRefresh(activeSessionId)).toBe(true);
+			expect(consumeDeferredMaterialization(activeSessionId)).toBe(true);
+		} finally {
+			clearContextHandlerSession(clearedSessionId);
+			clearContextHandlerSession(activeSessionId);
 			closeQuietly(db);
 		}
 	});
