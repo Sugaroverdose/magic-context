@@ -660,7 +660,7 @@ function getCurrentVersion(db: Database): number {
  * swallowed. Any other failure (CREATE TABLE, ALTER TABLE, data heal,
  * etc.) surfaces normally and fail-closes per contract.
  */
-function isSiblingMigrationConflict(error: unknown, version: number): boolean {
+export function isSiblingMigrationConflict(db: Database, error: unknown, version: number): boolean {
     if (!(error instanceof Error)) return false;
     const code = (error as { code?: unknown }).code;
     if (code !== "SQLITE_CONSTRAINT_PRIMARYKEY" && code !== "SQLITE_CONSTRAINT_UNIQUE") {
@@ -676,8 +676,8 @@ function isSiblingMigrationConflict(error: unknown, version: number): boolean {
     // Final guard: confirm the row is actually present now. If something
     // else somehow produced this error shape without the row landing, we
     // want to fall through to fail-closed.
-    void version; // version is implicit from the row check above
-    return true;
+    const confirmed = db.prepare("SELECT 1 FROM schema_migrations WHERE version = ?").get(version);
+    return confirmed != null;
 }
 
 /**
@@ -719,7 +719,7 @@ export function runMigrations(db: Database): void {
             log(`[migrations] applied v${migration.version}: ${migration.description}`);
             migrationIndex += 1;
         } catch (error) {
-            if (isSiblingMigrationConflict(error, migration.version)) {
+            if (isSiblingMigrationConflict(db, error, migration.version)) {
                 // Sibling process committed this version between our
                 // MAX(version) read and our INSERT. Re-read the version
                 // and rebuild the pending list — the sibling may have

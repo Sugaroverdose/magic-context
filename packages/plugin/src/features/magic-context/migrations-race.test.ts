@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { runMigrations } from "./migrations";
+import { isSiblingMigrationConflict, runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 
 /**
@@ -109,6 +109,25 @@ describe("migration race tolerance", () => {
         closeQuietly(db);
     });
 
+    test("sibling conflict guard requires the confirmed migration row", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
+        const version = (
+            db.prepare("SELECT MAX(version) as v FROM schema_migrations").get() as { v: number }
+        ).v;
+        const conflict = new Error(
+            "UNIQUE constraint failed: schema_migrations.version",
+        ) as Error & { code: string };
+        conflict.code = "SQLITE_CONSTRAINT_PRIMARYKEY";
+
+        expect(isSiblingMigrationConflict(db, conflict, version)).toBe(true);
+
+        db.prepare("DELETE FROM schema_migrations WHERE version = ?").run(version);
+        expect(isSiblingMigrationConflict(db, conflict, version)).toBe(false);
+
+        closeQuietly(db);
+    });
     test("non-schema_migrations UNIQUE conflicts still fail closed", () => {
         // Verify the race-tolerance fix is shape-specific: a UNIQUE
         // constraint failure on a DIFFERENT table during a migration
