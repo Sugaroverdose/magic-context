@@ -39,13 +39,16 @@
  *
  * # What each agent needs
  *
- *   - **historian / historian-editor / compressor**: just `read`. The
- *     runner offloads large existing-state XML to a temp file under
- *     `<project>/.opencode/magic-context/historian/` and the prompt
- *     instructs the model to read that file. The model's only output
- *     channel is its text response (the `<output>...</output>` XML).
+ *   - **historian / historian-editor / compressor**: `read` plus the
+ *     read-only AFT navigation tools `aft_outline` and `aft_zoom`.
+ *     The runner offloads large existing-state XML to a temp file
+ *     under `<project>/.opencode/magic-context/historian/` and the
+ *     prompt instructs the model to read that file. AFT navigation
+ *     is allowed so historian can verify a symbol or file structure
+ *     when writing accurate compartment summaries.
  *
- *   - **dreamer**: `read`, `grep`, `glob`, `bash`, plus the Magic
+ *   - **dreamer**: `read`, `grep`, `glob`, `bash`, the read-only AFT
+ *     navigation tools `aft_outline` and `aft_zoom`, plus the Magic
  *     Context MCP tools `ctx_memory`, `ctx_search`, `ctx_note`.
  *     Dreamer task prompts in
  *     `features/magic-context/dreamer/task-prompts.ts` explicitly tell
@@ -57,9 +60,12 @@
  *     `websearch` remain denied — dreamer must not spawn subagents
  *     or commit changes.
  *
- *   - **sidekick**: `ctx_search` and `ctx_memory` (read-only ops).
- *     Sidekick's job is augmenting user prompts via memory retrieval
- *     — see `features/magic-context/sidekick/agent.ts`.
+ *   - **sidekick**: `ctx_search`, `ctx_memory`, plus the read-only AFT
+ *     navigation tools `aft_outline` and `aft_zoom`. Sidekick's job
+ *     is augmenting user prompts via memory retrieval — see
+ *     `features/magic-context/sidekick/agent.ts`. AFT navigation lets
+ *     it pull symbol-scoped structural context for prompts that
+ *     reference a specific file or symbol.
  */
 
 /**
@@ -86,11 +92,20 @@ export function buildAllowOnlyPermission(
 
 /**
  * Tools the historian + historian-editor + compressor agents need.
+ *
  * Historian runners offload large `<existing_state>` XML to disk and
- * tell the model to `read` it before emitting the summary XML. Nothing
- * else is needed — no bash, no edits, no other subagents.
+ * tell the model to `read` it before emitting the summary XML. The
+ * core need is `read`; we also allow the read-only AFT navigation
+ * tools `aft_outline` and `aft_zoom` so that if a historian/compressor
+ * ever needs to verify a symbol or skim a file's structure to write
+ * an accurate compartment summary, it can do so token-efficiently
+ * instead of pulling whole files via `read`.
+ *
+ * Still denied: bash, edit, write, task, grep/glob, webfetch/
+ * websearch. Historian's job is summarizing the input it was given,
+ * not exploring the repo.
  */
-export const HISTORIAN_ALLOWED_TOOLS = ["read"] as const;
+export const HISTORIAN_ALLOWED_TOOLS = ["read", "aft_outline", "aft_zoom"] as const;
 
 /**
  * Tools the dreamer agent needs. This is the broadest hidden-agent
@@ -125,6 +140,8 @@ export const DREAMER_ALLOWED_TOOLS = [
     "grep",
     "glob",
     "bash",
+    "aft_outline",
+    "aft_zoom",
     "ctx_memory",
     "ctx_search",
     "ctx_note",
@@ -134,7 +151,18 @@ export const DREAMER_ALLOWED_TOOLS = [
  * Tools the sidekick agent needs. Sidekick is a read-only memory
  * retriever for `/ctx-aug` — it queries the project's memory store
  * via `ctx_search` and (rarely) reads specific memories with
- * `ctx_memory(action="list")`. It must NOT spawn subagents, edit
- * files, or run bash.
+ * `ctx_memory(action="list")`.
+ *
+ * Also allow `aft_outline` and `aft_zoom` so sidekick can pull
+ * lightweight structural context about a file or symbol when the
+ * user's prompt references it directly — token-efficient navigation
+ * without dragging in whole files.
+ *
+ * Still denied: spawning subagents, edits, bash, web fetches.
  */
-export const SIDEKICK_ALLOWED_TOOLS = ["ctx_search", "ctx_memory"] as const;
+export const SIDEKICK_ALLOWED_TOOLS = [
+    "ctx_search",
+    "ctx_memory",
+    "aft_outline",
+    "aft_zoom",
+] as const;

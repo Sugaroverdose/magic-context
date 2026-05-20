@@ -50,10 +50,18 @@ describe("buildAllowOnlyPermission", () => {
 });
 
 describe("HISTORIAN_ALLOWED_TOOLS", () => {
-    it("includes only `read` (for state-file offload)", () => {
-        // Historian's only tool need is reading the offloaded existing-state
-        // XML the runner writes to a temp file. Nothing else.
-        expect(HISTORIAN_ALLOWED_TOOLS).toEqual(["read"]);
+    it("includes `read` (for state-file offload)", () => {
+        // Historian's primary tool need is reading the offloaded
+        // existing-state XML the runner writes to a temp file.
+        expect(HISTORIAN_ALLOWED_TOOLS).toContain("read");
+    });
+
+    it("includes `aft_outline` and `aft_zoom` for token-efficient repo navigation", () => {
+        // Read-only AFT navigation tools let historian/compressor verify
+        // a symbol or skim file structure when writing accurate
+        // compartment summaries without dragging in whole files.
+        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_outline");
+        expect(HISTORIAN_ALLOWED_TOOLS).toContain("aft_zoom");
     });
 
     it("does NOT include `task` (the bug we're fixing — preventing subagent fanout)", () => {
@@ -64,6 +72,13 @@ describe("HISTORIAN_ALLOWED_TOOLS", () => {
         for (const dangerous of ["bash", "edit", "write", "webfetch", "websearch"]) {
             expect(HISTORIAN_ALLOWED_TOOLS).not.toContain(dangerous);
         }
+    });
+
+    it("does NOT include `grep` or `glob` (historian summarizes, not explores)", () => {
+        // Historian's job is summarizing the input it was given.
+        // Repo-wide exploration belongs to dreamer / primary agents.
+        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("grep");
+        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("glob");
     });
 });
 
@@ -111,13 +126,25 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
 });
 
 describe("SIDEKICK_ALLOWED_TOOLS", () => {
-    it("includes only ctx_search + ctx_memory (read-only memory retrieval)", () => {
+    it("includes ctx_search + ctx_memory for memory retrieval", () => {
         // Sidekick is the /ctx-aug memory retriever. It augments the user
-        // prompt with relevant memories — no edits, no subagents, no bash.
-        expect(SIDEKICK_ALLOWED_TOOLS).toEqual(["ctx_search", "ctx_memory"]);
+        // prompt with relevant memories.
+        expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_search");
+        expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_memory");
     });
 
-    it("does NOT include `read` (sidekick doesn't touch the filesystem)", () => {
+    it("includes `aft_outline` and `aft_zoom` for lightweight structural context", () => {
+        // Sidekick can pull file outline / symbol body when the user's
+        // prompt references a specific file or symbol, without dragging
+        // in whole files.
+        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_outline");
+        expect(SIDEKICK_ALLOWED_TOOLS).toContain("aft_zoom");
+    });
+
+    it("does NOT include `read` (use aft_outline/aft_zoom for navigation instead)", () => {
+        // Sidekick should pull symbol-scoped views, not arbitrary file
+        // contents. If it needs full source it can use aft_zoom on a
+        // specific symbol.
         expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("read");
     });
 
@@ -129,15 +156,17 @@ describe("SIDEKICK_ALLOWED_TOOLS", () => {
 });
 
 describe("integration: full hidden-agent permission shape", () => {
-    it("historian permission object: `*` denied, only `read` allowed", () => {
+    it("historian permission object: `*` denied + read + aft_outline + aft_zoom allowed", () => {
         const perm = buildAllowOnlyPermission(HISTORIAN_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             read: "allow",
+            aft_outline: "allow",
+            aft_zoom: "allow",
         });
     });
 
-    it("dreamer permission object: `*` denied + read + grep + glob + bash + ctx_* allowed", () => {
+    it("dreamer permission object: `*` denied + repo-exploration + ctx_* + aft_* allowed", () => {
         const perm = buildAllowOnlyPermission(DREAMER_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
@@ -145,18 +174,22 @@ describe("integration: full hidden-agent permission shape", () => {
             grep: "allow",
             glob: "allow",
             bash: "allow",
+            aft_outline: "allow",
+            aft_zoom: "allow",
             ctx_memory: "allow",
             ctx_search: "allow",
             ctx_note: "allow",
         });
     });
 
-    it("sidekick permission object: `*` denied + ctx_search + ctx_memory allowed", () => {
+    it("sidekick permission object: `*` denied + ctx_* + aft_* allowed", () => {
         const perm = buildAllowOnlyPermission(SIDEKICK_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             ctx_search: "allow",
             ctx_memory: "allow",
+            aft_outline: "allow",
+            aft_zoom: "allow",
         });
     });
 });
