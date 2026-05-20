@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
+import { appendAutoSearchHintDecision } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	clearAutoSearchForPiSession,
@@ -66,6 +67,48 @@ describe("runAutoSearchHintForPi", () => {
 
 			expect(spy).toHaveBeenCalledTimes(1);
 			expect(textOf(replayMessages[0])).toContain("<ctx-search-hint>");
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("replays persisted hints but skips fresh decisions when strict entry ids fail", async () => {
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			async () => [memoryResult()],
+		);
+		try {
+			appendAutoSearchHintDecision(db, "ses-auto", {
+				messageId: "entry-replay",
+				decision: "hint",
+				text: "\n\n<ctx-search-hint>stored hint</ctx-search-hint>",
+			});
+			const replay = [
+				{ ...userMessage("explain cached hint", 1), id: "entry-replay" },
+			];
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: replay as never,
+				entryIds: null,
+				options: baseOptions,
+			});
+			expect(textOf(replay[0] as never)).toContain("stored hint");
+
+			const fresh = [
+				{ ...userMessage("explain new hint", 2), id: "entry-fresh" },
+			];
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: fresh as never,
+				entryIds: null,
+				options: baseOptions,
+			});
+
+			expect(spy).not.toHaveBeenCalled();
+			expect(textOf(fresh[0] as never)).not.toContain("<ctx-search-hint>");
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

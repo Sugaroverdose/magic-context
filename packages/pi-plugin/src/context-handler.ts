@@ -1009,13 +1009,13 @@ export function collectMessageEntryIdsByRef(
 	}
 	if (!Array.isArray(entries)) return null;
 
-	// Build a Map keyed by the AgentMessage reference stored on each
-	// `type === "message"` entry. Pi's SessionManager (session-manager.js:580)
-	// writes `entry.message = sourceAgentMessage` without cloning, so
-	// `event.messages[i] === entry.message` holds by reference identity
-	// for every emit-eligible `type === "message"` entry that came from
-	// the branch.
+	// Build lookup tables keyed first by AgentMessage reference and then by
+	// a content fingerprint. Reference identity is the fast, lossless path for
+	// native Pi messages. The fingerprint fallback covers full message-clone
+	// paths introduced by other Pi extensions that re-wrap ordinary messages
+	// while preserving stable fields and first text content.
 	const entryIdByMsgRef = new Map<object, string>();
+	const entryIdsByFingerprint = new Map<string, string[]>();
 	for (const entry of entries) {
 		if (!entry || typeof entry !== "object") continue;
 		const e = entry as {
@@ -1026,11 +1026,20 @@ export function collectMessageEntryIdsByRef(
 		if (e.type !== "message") continue;
 		if (typeof e.id !== "string") continue;
 		if (!e.message || typeof e.message !== "object") continue;
-		entryIdByMsgRef.set(e.message as object, e.id);
+		const message = e.message as object;
+		entryIdByMsgRef.set(message, e.id);
+		const fingerprint = piMessageEntryFingerprint(e.message);
+		if (fingerprint) {
+			const bucket = entryIdsByFingerprint.get(fingerprint);
+			if (bucket) bucket.push(e.id);
+			else entryIdsByFingerprint.set(fingerprint, [e.id]);
+		}
 	}
 
 	const result: (string | undefined)[] = new Array(messages.length);
 	let resolved = 0;
+	let fingerprintResolved = 0;
+	const consumedFingerprintIds = new Set<string>();
 	for (let i = 0; i < messages.length; i++) {
 		const msg = messages[i];
 		if (!msg || typeof msg !== "object") {
@@ -1041,6 +1050,19 @@ export function collectMessageEntryIdsByRef(
 		if (typeof id === "string") {
 			result[i] = id;
 			resolved += 1;
+			continue;
+		}
+		const fingerprint = piMessageEntryFingerprint(msg);
+		const fingerprintId = fingerprint
+			? entryIdsByFingerprint
+					.get(fingerprint)
+					?.find((candidate) => !consumedFingerprintIds.has(candidate))
+			: undefined;
+		if (typeof fingerprintId === "string") {
+			consumedFingerprintIds.add(fingerprintId);
+			result[i] = fingerprintId;
+			resolved += 1;
+			fingerprintResolved += 1;
 		} else {
 			result[i] = undefined;
 		}
@@ -1055,13 +1077,53 @@ export function collectMessageEntryIdsByRef(
 		log(
 			`[magic-context][pi]${sessionId ? `[${sessionId}]` : ""} ` +
 				`collectMessageEntryIdsByRef: resolved=${resolved}/${messages.length} ` +
-				`(branchEntries=${entries.length}, messageEntries=${entryIdByMsgRef.size}) — ` +
+				`(fingerprint=${fingerprintResolved}, branchEntries=${entries.length}, messageEntries=${entryIdByMsgRef.size}) — ` +
 				`unmapped slots fall through to synthesized ids; boundary lookup still works ` +
 				`for any compartment whose start/end message is among the resolved set`,
 		);
 	}
 
 	return result;
+}
+
+function piMessageEntryFingerprint(message: unknown): string | null {
+	if (!message || typeof message !== "object") return null;
+	const record = message as {
+		responseId?: unknown;
+		timestamp?: unknown;
+		role?: unknown;
+		toolCallId?: unknown;
+		content?: unknown;
+	};
+	if (typeof record.role !== "string") return null;
+	const firstText = firstPiTextContent(record.content);
+	const firstTextHash = crypto
+		.createHash("sha256")
+		.update(firstText ?? "")
+		.digest("hex")
+		.slice(0, 16);
+	return JSON.stringify([
+		typeof record.responseId === "string" ? record.responseId : null,
+		typeof record.timestamp === "number" || typeof record.timestamp === "string"
+			? record.timestamp
+			: null,
+		record.role,
+		typeof record.toolCallId === "string" ? record.toolCallId : null,
+		firstTextHash,
+	]);
+}
+
+function firstPiTextContent(content: unknown): string | null {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return null;
+	for (const part of content) {
+		if (!part || typeof part !== "object") continue;
+		const record = part as { type?: unknown; text?: unknown };
+		if (record.type === "text" && typeof record.text === "string") {
+			return record.text;
+		}
+	}
+	return null;
 }
 
 /**
@@ -3037,9 +3099,17 @@ function applyStickyTurnReminder(args: {
 			reminder.messageId,
 			reminder.text,
 		);
-		if (!reinjected && args.isCacheBustingPass) {
+		if (!reinjected && args.isCacheBustingPass && args.entryIds !== null) {
 			clearPersistedStickyTurnReminder(args.db, args.sessionId);
 		}
+		return args.messages;
+	}
+
+	if (args.entryIds === null) {
+		sessionLog(
+			args.sessionId,
+			"Pi sticky turn reminder: strict resolution failed; replay-only until next pass",
+		);
 		return args.messages;
 	}
 
@@ -3217,11 +3287,6 @@ function buildPiMessageIdByIndex(
 		const messageId = (messages[index] as { id?: unknown } | undefined)?.id;
 		if (typeof messageId === "string") {
 			ids.set(index, messageId);
-		} else if (entryIds === null) {
-			ids.set(
-				index,
-				`pi:${index}:${readTimestamp(messages[index] as PiAgentMessage)}`,
-			);
 		}
 	}
 	return ids;
@@ -3262,16 +3327,6 @@ function appendReminderToUserMessageByIdPi(
 		return true;
 	}
 	return false;
-}
-
-/**
- * Read the optional `timestamp` property from any message role without
- * tripping the structural type checker on roles that don't carry one.
- * Falls back to `"no-ts"` so synthetic ids stay stable across passes.
- */
-function readTimestamp(message: PiAgentMessage): string {
-	const ts = (message as { timestamp?: unknown }).timestamp;
-	return typeof ts === "number" && Number.isFinite(ts) ? String(ts) : "no-ts";
 }
 
 /**

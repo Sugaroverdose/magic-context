@@ -268,15 +268,15 @@ export async function runAutoSearchHintForPi(args: {
 				})
 			: args.entryIds;
 	if (!options.enabled) return messages;
-	if (entryIds === null) {
-		sessionLog(
-			sessionId,
-			"Pi auto-search: strict entry-id resolution failed; skipping fresh decision",
-		);
-		return messages;
-	}
+	const strictResolutionFailed = entryIds === null;
+	const effectiveEntryIds = strictResolutionFailed
+		? messages.map((message) => {
+				const id = (message as { id?: unknown }).id;
+				return typeof id === "string" ? id : undefined;
+			})
+		: entryIds;
 
-	const found = findLatestMeaningfulUserMessage(messages, entryIds);
+	const found = findLatestMeaningfulUserMessage(messages, effectiveEntryIds);
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;
@@ -288,6 +288,13 @@ export async function runAutoSearchHintForPi(args: {
 		if (existingForMessage.decision === "hint") {
 			appendHintToUserMessage(userMsg, existingForMessage.text);
 		}
+		return messages;
+	}
+	if (strictResolutionFailed) {
+		sessionLog(
+			sessionId,
+			"Pi auto-search: strict entry-id resolution failed; replayed persisted decisions only",
+		);
 		return messages;
 	}
 

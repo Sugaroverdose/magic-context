@@ -8,6 +8,8 @@ import {
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import {
 	addNote,
+	appendNoteNudgeAnchor,
+	getNoteNudgeAnchors,
 	getOrCreateSessionMeta,
 	getPendingOps,
 	getPersistedStickyTurnReminder,
@@ -15,6 +17,7 @@ import {
 	incrementHistorianFailure,
 	insertTag,
 	queuePendingOp,
+	setPersistedStickyTurnReminder,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
@@ -580,6 +583,84 @@ describe("registerPiContextHandler", () => {
 			expect(spy).toHaveBeenCalledTimes(1);
 		} finally {
 			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("preserves sticky anchors and avoids synthetic re-anchoring when branch resolution fails", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-sticky-ref-fail";
+			clearContextHandlerSession(sessionId);
+			setPersistedStickyTurnReminder(
+				db,
+				sessionId,
+				'\n\n<instruction name="ctx_reduce_turn_cleanup">persisted</instruction>',
+				"entry-old",
+			);
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				scheduler: { executeThresholdPercentage: 0 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const msg = userMessage("new turn", 1);
+			await handler({ messages: [msg] as never[] }, {
+				...fakeContext(sessionId),
+				sessionManager: { getSessionId: () => sessionId },
+				getContextUsage: () => ({
+					tokens: 90_000,
+					percent: 90,
+					contextWindow: 100_000,
+				}),
+			} as never);
+
+			expect(getPersistedStickyTurnReminder(db, sessionId)).toEqual({
+				text: '\n\n<instruction name="ctx_reduce_turn_cleanup">persisted</instruction>',
+				messageId: "entry-old",
+			});
+		} finally {
+			clearContextHandlerSession("ses-sticky-ref-fail");
+			closeQuietly(db);
+		}
+	});
+
+	it("replays note anchors by message id but skips new note persistence on ref failure", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-note-ref-fail";
+			clearContextHandlerSession(sessionId);
+			appendNoteNudgeAnchor(
+				db,
+				sessionId,
+				"entry-existing",
+				'\n\n<instruction name="deferred_notes">existing</instruction>',
+			);
+			addNote(db, "session", { sessionId, content: "Fresh note should wait." });
+			onNoteTrigger(db, sessionId, "historian_complete");
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const msg = { ...userMessage("new turn", 1), id: "entry-existing" };
+			const result = await handler({ messages: [msg] as never[] }, {
+				...fakeContext(sessionId),
+				sessionManager: { getSessionId: () => sessionId },
+			} as never);
+
+			expect(textOf(result.messages[0] as never)).toContain("existing");
+			expect(getNoteNudgeAnchors(db, sessionId)).toHaveLength(1);
+		} finally {
+			clearContextHandlerSession("ses-note-ref-fail");
 			closeQuietly(db);
 		}
 	});
@@ -1446,6 +1527,31 @@ describe("collectMessageEntryIdsByRef", () => {
 		);
 		// All slots unmapped because no ref identity overlaps.
 		expect(result).toEqual([undefined, undefined, undefined]);
+	});
+
+	it("resolves cloned message wrappers with fingerprint fallback", () => {
+		const original = {
+			...userMessage("same text", 10),
+			responseId: "resp-1",
+		};
+		const clone = {
+			...userMessage("same text", 10),
+			responseId: "resp-1",
+		};
+
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "message", id: "entry-clone", message: original },
+					],
+				},
+			} as never,
+			[clone as never],
+			"ses-ref",
+		);
+
+		expect(result).toEqual(["entry-clone"]);
 	});
 
 	it("skips non-message entry types and entries with missing fields", () => {
