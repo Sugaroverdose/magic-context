@@ -47,7 +47,11 @@ function loadWithUserConfig(configText: string, extraEnv: Record<string, string>
     }
 }
 
-function loadWithUserAndProjectConfig(userConfigText: string, projectConfigText: string) {
+function loadWithUserAndProjectConfig(
+    userConfigText: string,
+    projectConfigText: string,
+    extraEnv: Record<string, string> = {},
+) {
     const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
     const projectDir = mkdtempSync(join(tmpdir(), "mc-config-proj-"));
     const fs = require("node:fs") as typeof import("node:fs");
@@ -58,6 +62,11 @@ function loadWithUserAndProjectConfig(userConfigText: string, projectConfigText:
     writeFileSync(join(projectDir, ".opencode", "magic-context.jsonc"), projectConfigText, "utf-8");
 
     const origXdg = process.env.XDG_CONFIG_HOME;
+    const savedEnv: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(extraEnv)) {
+        savedEnv[k] = process.env[k];
+        process.env[k] = v;
+    }
     process.env.XDG_CONFIG_HOME = xdg;
 
     try {
@@ -67,6 +76,10 @@ function loadWithUserAndProjectConfig(userConfigText: string, projectConfigText:
             delete process.env.XDG_CONFIG_HOME;
         } else {
             process.env.XDG_CONFIG_HOME = origXdg;
+        }
+        for (const [k, v] of Object.entries(savedEnv)) {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
         }
         rmSync(xdg, { recursive: true, force: true });
         rmSync(projectDir, { recursive: true, force: true });
@@ -225,6 +238,92 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         const result = loadWithUserConfig(config);
         // No warning, no disruption.
         expect(result.configWarnings).toBeUndefined();
+    });
+});
+
+describe("loadPluginConfig — variable expansion scope", () => {
+    it("keeps {env:} and {file:} expansion enabled for user config", () => {
+        const secretFile = join(mkdtempSync(join(tmpdir(), "mc-config-secret-")), "secret.txt");
+        writeFileSync(secretFile, "file-secret", "utf-8");
+
+        try {
+            const result = loadWithUserConfig(
+                JSON.stringify({
+                    embedding: {
+                        provider: "openai-compatible",
+                        model: `{file:${secretFile}}`,
+                        endpoint: "{env:MC_USER_ENDPOINT}",
+                    },
+                }),
+                { MC_USER_ENDPOINT: "http://user-env.test/v1" },
+            );
+
+            expect(result.embedding.provider).toBe("openai-compatible");
+            if (result.embedding.provider === "openai-compatible") {
+                expect(result.embedding.model).toBe("file-secret");
+                expect(result.embedding.endpoint).toBe("http://user-env.test/v1");
+            }
+            expect(result.configWarnings).toBeUndefined();
+        } finally {
+            rmSync(secretFile, { force: true });
+        }
+    });
+
+    it("leaves {env:} and {file:} tokens literal in project config and warns", () => {
+        const secretFile = join(mkdtempSync(join(tmpdir(), "mc-config-secret-")), "secret.txt");
+        writeFileSync(secretFile, "project-file-secret", "utf-8");
+
+        try {
+            const result = loadWithUserAndProjectConfig(
+                JSON.stringify({ enabled: true }),
+                JSON.stringify({
+                    embedding: {
+                        provider: "openai-compatible",
+                        model: `{file:${secretFile}}`,
+                        endpoint: "{env:MC_PROJECT_ENDPOINT}",
+                    },
+                }),
+                { MC_PROJECT_ENDPOINT: "http://project-env.test/v1" },
+            );
+
+            expect(result.embedding.provider).toBe("openai-compatible");
+            if (result.embedding.provider === "openai-compatible") {
+                expect(result.embedding.model).toBe(`{file:${secretFile}}`);
+                expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_ENDPOINT}");
+            }
+            const warnings = result.configWarnings?.join("\n") ?? "";
+            expect(warnings).toContain("Project-level config no longer supports");
+            expect(warnings).toContain("security reasons");
+        } finally {
+            rmSync(secretFile, { force: true });
+        }
+    });
+
+    it("lets project literal token text override user-expanded secret values", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({
+                embedding: {
+                    provider: "openai-compatible",
+                    model: "user-model",
+                    endpoint: "{env:MC_USER_ENDPOINT}",
+                },
+            }),
+            JSON.stringify({
+                embedding: {
+                    endpoint: "{env:MC_PROJECT_LITERAL}",
+                },
+            }),
+            {
+                MC_USER_ENDPOINT: "http://user-expanded.test/v1",
+                MC_PROJECT_LITERAL: "http://should-not-expand.test/v1",
+            },
+        );
+
+        expect(result.embedding.provider).toBe("openai-compatible");
+        if (result.embedding.provider === "openai-compatible") {
+            expect(result.embedding.model).toBe("user-model");
+            expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_LITERAL}");
+        }
     });
 });
 

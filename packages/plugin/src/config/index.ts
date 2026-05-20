@@ -60,7 +60,7 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
     source: "user" | "project";
 }
 
-function loadConfigFile(configPath: string): LoadedConfigFile | null {
+function loadConfigFile(configPath: string, isProjectConfig = false): LoadedConfigFile | null {
     try {
         if (!existsSync(configPath)) {
             return null;
@@ -70,7 +70,11 @@ function loadConfigFile(configPath: string): LoadedConfigFile | null {
         // parsing so users can reference env vars (API keys) and external files
         // without leaking secrets into the config file itself. Matches OpenCode's
         // ConfigVariable.substitute semantics exactly.
-        const substituted = substituteConfigVariables({ text: rawText, configPath });
+        const substituted = substituteConfigVariables({
+            text: rawText,
+            configPath,
+            isProjectConfig,
+        });
         return {
             config: parseJsonc<Record<string, unknown>>(substituted.text),
             warnings: substituted.warnings.map((w) => `${configPath}: ${w}`),
@@ -107,7 +111,11 @@ function loadConfigFileDetailed(
     }
 
     try {
-        const substituted = substituteConfigVariables({ text: rawText, configPath });
+        const substituted = substituteConfigVariables({
+            text: rawText,
+            configPath,
+            isProjectConfig: source === "project",
+        });
         return {
             config: parseJsonc<Record<string, unknown>>(substituted.text),
             warnings: substituted.warnings.map((w) => `${configPath}: ${w}`),
@@ -410,7 +418,7 @@ export function loadPluginConfig(
 
     const userLoaded = userDetected.format === "none" ? null : loadConfigFile(userDetected.path);
     const projectLoaded =
-        projectDetected.format === "none" ? null : loadConfigFile(projectDetected.path);
+        projectDetected.format === "none" ? null : loadConfigFile(projectDetected.path, true);
 
     const allWarnings: string[] = [];
     let mergedRaw: Record<string, unknown> = {};

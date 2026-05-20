@@ -13,6 +13,11 @@ export interface SubstituteInput {
      * so callers should prefer passing a real path when one exists.
      */
     configPath?: string;
+    /**
+     * Project-level config files are untrusted repository input. Do not expand
+     * secret-bearing tokens there; leave them literal and warn instead.
+     */
+    isProjectConfig?: boolean;
 }
 
 export interface SubstituteResult {
@@ -51,6 +56,25 @@ const FILE_PATTERN = /\{file:([^}]+)\}/g;
 export function substituteConfigVariables(input: SubstituteInput): SubstituteResult {
     const warnings: string[] = [];
     let text = input.text;
+
+    if (input.isProjectConfig) {
+        const hasEnvTokens = ENV_PATTERN.test(text);
+        const hasFileTokens = FILE_PATTERN.test(text);
+        ENV_PATTERN.lastIndex = 0;
+        FILE_PATTERN.lastIndex = 0;
+        if (hasEnvTokens || hasFileTokens) {
+            const tokenTypes = [
+                hasEnvTokens ? "{env:}" : undefined,
+                hasFileTokens ? "{file:}" : undefined,
+            ]
+                .filter(Boolean)
+                .join(" and ");
+            warnings.push(
+                `Project-level config no longer supports ${tokenTypes} tokens for security reasons; leaving tokens literal. Move secret expansion to user-level config.`,
+            );
+        }
+        return { text, warnings };
+    }
 
     text = text.replace(ENV_PATTERN, (_, rawName: string) => {
         const varName = rawName.trim();
