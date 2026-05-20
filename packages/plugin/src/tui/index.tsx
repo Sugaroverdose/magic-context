@@ -290,11 +290,16 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 <text fg={t().textMuted}>v{packageJson.version}</text>
             </box>
 
-            {/* Context summary line */}
+            {/* Context summary line. Mirrors the sidebar header layout
+                ("47.5% / 65%   475K / 1.0M") so users can recognize the
+                same shape in the status dialog. The execute threshold tells
+                them how close they are to compaction triggering. */}
             <box flexDirection="row" justifyContent="space-between" width="100%">
-                <text fg={t().text}>Context</text>
                 <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
-                    <b>{s().usagePercentage.toFixed(1)}%</b> · {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} tokens
+                    <b>{s().usagePercentage.toFixed(1)}%</b> / {s().executeThreshold}%
+                </text>
+                <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
+                    {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} tokens
                 </text>
             </box>
 

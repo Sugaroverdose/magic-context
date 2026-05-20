@@ -363,9 +363,21 @@ const SidebarContent = (props: {
             {s() && s()!.inputTokens > 0 && (
                 <box marginTop={1} flexDirection="column">
                     {(s()?.contextLimit ?? 0) > 0 && (
-                        <box width="100%" flexDirection="row" justifyContent="flex-end">
+                        <box width="100%" flexDirection="row" justifyContent="space-between">
+                            {/* Left: current usage vs the per-model execute
+                                threshold (the value Magic Context compares
+                                against when scheduling historian / drops).
+                                "47.5% / 65%" tells the user how close they
+                                are to the next compaction trigger. */}
                             <text fg={contextSummaryColor()}>
-                                <b>{s()!.usagePercentage.toFixed(1)}%</b> · {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
+                                <b>{s()!.usagePercentage.toFixed(1)}%</b> / {s()!.executeThreshold}%
+                            </text>
+                            {/* Right: absolute token usage vs the model's
+                                full context window (separate from the
+                                execute threshold so users still know how
+                                much headroom remains beyond compaction). */}
+                            <text fg={contextSummaryColor()}>
+                                {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
                             </text>
                         </box>
                     )}

@@ -45,6 +45,16 @@ export interface SidebarSnapshot {
      * shows this as "Tool Definitions".
      */
     toolDefinitionTokens: number;
+    /**
+     * Effective execute-threshold percentage for this session's active model,
+     * after per-model resolution and the tokens→percentage conversion (when
+     * `execute_threshold_tokens` applies). Surfaces in the sidebar / status
+     * dialog header alongside `usagePercentage` so users can see how close
+     * the session is to triggering compaction. Defaults to `65` when no live
+     * model is known yet — matches the runtime fallback used by the
+     * scheduler and transform paths.
+     */
+    executeThreshold: number;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

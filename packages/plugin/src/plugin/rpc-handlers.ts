@@ -83,6 +83,11 @@ export function buildSidebarSnapshot(
     directory: string,
     liveSessionState?: LiveSessionState,
     injectionBudgetTokens?: number,
+    // Optional config so the sidebar can show the effective execute threshold
+    // alongside `usagePercentage` (e.g. "47.5% / 65%"). Resolved per-model from
+    // `liveSessionState.liveModelBySession`. When omitted (e.g. legacy test
+    // callers), the snapshot falls back to the runtime default of 65%.
+    config?: Record<string, unknown>,
 ): SidebarSnapshot {
     const empty: SidebarSnapshot = {
         sessionId,
@@ -108,6 +113,7 @@ export function buildSidebarSnapshot(
         conversationTokens: 0,
         toolCallTokens: 0,
         toolDefinitionTokens: 0,
+        executeThreshold: 65,
     };
 
     try {
@@ -340,6 +346,33 @@ export function buildSidebarSnapshot(
                 ? resolveContextLimit(activeProviderID, activeModelID, { db, sessionID: sessionId })
                 : 0;
 
+        // Resolve the effective execute-threshold percentage for this
+        // session's active model so the sidebar header can show
+        // "47.5% / 65%" alongside the absolute "475K / 1.0M". Falls back
+        // to 65% (the runtime default) when no live model is known yet
+        // or when no config was passed in. Mirrors the resolution flow
+        // used by `buildStatusDetail` so the dialog and sidebar agree.
+        let executeThreshold = 65;
+        if (config) {
+            const modelKey =
+                activeProviderID && activeModelID
+                    ? `${activeProviderID}/${activeModelID}`
+                    : undefined;
+            const pctCfg = config.execute_threshold_percentage as
+                | number
+                | { default: number; [k: string]: number }
+                | undefined;
+            const tokensCfg = config.execute_threshold_tokens as
+                | { default?: number; [k: string]: number | undefined }
+                | undefined;
+            const thresholdDetail = resolveExecuteThresholdDetail(pctCfg ?? 65, modelKey, 65, {
+                tokensConfig: tokensCfg,
+                contextLimit: contextLimit || undefined,
+                sessionId,
+            });
+            executeThreshold = thresholdDetail.percentage;
+        }
+
         const calibration = resolveModelCalibration(activeProviderID, activeModelID);
         const calibrated = calibrateBuckets({
             inputTokens,
@@ -377,6 +410,7 @@ export function buildSidebarSnapshot(
             conversationTokens: calibrated.conversationTokens,
             toolCallTokens: calibrated.toolCallTokens,
             toolDefinitionTokens: calibrated.toolDefinitionTokens,
+            executeThreshold,
         };
         // Defensive sticky cache: if `inputTokens` briefly drops to 0 mid-turn
         // (intermittent — possibly streaming events with empty token shape, or
@@ -404,6 +438,7 @@ export function buildStatusDetail(
         directory,
         liveSessionState,
         injectionBudgetTokens,
+        config,
     );
     const detail: StatusDetail = {
         ...base,
@@ -602,6 +637,7 @@ export function registerRpcHandlers(
             dir,
             liveSessionState,
             injectionBudgetTokens,
+            rawConfig,
         ) as unknown as Record<string, unknown>;
     });
 

@@ -35,6 +35,7 @@ function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot
         conversationTokens: 0,
         toolCallTokens: 0,
         toolDefinitionTokens: 0,
+        executeThreshold: 65,
         ...overrides,
     };
 }
