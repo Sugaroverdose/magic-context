@@ -1,0 +1,135 @@
+import { describe, expect, it } from "bun:test";
+import {
+    buildAllowOnlyPermission,
+    DREAMER_ALLOWED_TOOLS,
+    HISTORIAN_ALLOWED_TOOLS,
+    SIDEKICK_ALLOWED_TOOLS,
+} from "./permissions";
+
+describe("buildAllowOnlyPermission", () => {
+    it("starts with wildcard deny so nothing is allowed by default", () => {
+        const perm = buildAllowOnlyPermission([]);
+        expect(perm["*"]).toBe("deny");
+    });
+
+    it("layers the allow-list on top of the wildcard deny", () => {
+        const perm = buildAllowOnlyPermission(["read", "ctx_search"]);
+        expect(perm["*"]).toBe("deny");
+        expect(perm.read).toBe("allow");
+        expect(perm.ctx_search).toBe("allow");
+    });
+
+    it("places named allows AFTER the wildcard deny so findLast-semantics make them win", () => {
+        // OpenCode's Permission.evaluate uses `findLast` over the ruleset
+        // built from this object's insertion order. If "*" appeared after a
+        // named tool, the deny would clobber it — guard against accidental
+        // regressions in the helper's ordering.
+        const perm = buildAllowOnlyPermission(["read"]);
+        const keys = Object.keys(perm);
+        const wildcardIdx = keys.indexOf("*");
+        const readIdx = keys.indexOf("read");
+        expect(wildcardIdx).toBeLessThan(readIdx);
+    });
+
+    it("never accidentally allows `task`, `bash`, or `edit` unless explicitly listed", () => {
+        // The whole point of this helper is preventing historian / dreamer /
+        // sidekick from inheriting the primary-agent surface. Lock that in.
+        const perm = buildAllowOnlyPermission(["read"]);
+        expect(perm.task).toBeUndefined();
+        expect(perm.bash).toBeUndefined();
+        expect(perm.edit).toBeUndefined();
+        expect(perm.webfetch).toBeUndefined();
+        expect(perm.websearch).toBeUndefined();
+        // The wildcard deny covers them via findLast — verified above.
+    });
+
+    it("returns an empty allow-list as just the wildcard deny", () => {
+        const perm = buildAllowOnlyPermission([]);
+        expect(Object.keys(perm)).toEqual(["*"]);
+    });
+});
+
+describe("HISTORIAN_ALLOWED_TOOLS", () => {
+    it("includes only `read` (for state-file offload)", () => {
+        // Historian's only tool need is reading the offloaded existing-state
+        // XML the runner writes to a temp file. Nothing else.
+        expect(HISTORIAN_ALLOWED_TOOLS).toEqual(["read"]);
+    });
+
+    it("does NOT include `task` (the bug we're fixing — preventing subagent fanout)", () => {
+        expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("task");
+    });
+
+    it("does NOT include any edit / bash / web tools", () => {
+        for (const dangerous of ["bash", "edit", "write", "webfetch", "websearch"]) {
+            expect(HISTORIAN_ALLOWED_TOOLS).not.toContain(dangerous);
+        }
+    });
+});
+
+describe("DREAMER_ALLOWED_TOOLS", () => {
+    it("includes read + ctx_memory + ctx_search + ctx_note", () => {
+        // Dreamer needs: `read` (key-files identification), `ctx_memory`
+        // (consolidate/verify/archive/merge/update), `ctx_search`
+        // (smart-note evaluation, retrieval-count checks), `ctx_note`
+        // (smart-note dismiss/update).
+        expect(DREAMER_ALLOWED_TOOLS).toContain("read");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_memory");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_search");
+        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_note");
+    });
+
+    it("does NOT include `task` or edit/bash/web tools", () => {
+        for (const denied of ["task", "bash", "edit", "write", "webfetch", "websearch"]) {
+            expect(DREAMER_ALLOWED_TOOLS).not.toContain(denied);
+        }
+    });
+});
+
+describe("SIDEKICK_ALLOWED_TOOLS", () => {
+    it("includes only ctx_search + ctx_memory (read-only memory retrieval)", () => {
+        // Sidekick is the /ctx-aug memory retriever. It augments the user
+        // prompt with relevant memories — no edits, no subagents, no bash.
+        expect(SIDEKICK_ALLOWED_TOOLS).toEqual(["ctx_search", "ctx_memory"]);
+    });
+
+    it("does NOT include `read` (sidekick doesn't touch the filesystem)", () => {
+        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("read");
+    });
+
+    it("does NOT include `task` or any edit / bash / web tool", () => {
+        for (const denied of ["task", "bash", "edit", "write", "webfetch", "websearch"]) {
+            expect(SIDEKICK_ALLOWED_TOOLS).not.toContain(denied);
+        }
+    });
+});
+
+describe("integration: full hidden-agent permission shape", () => {
+    it("historian permission object: `*` denied, only `read` allowed", () => {
+        const perm = buildAllowOnlyPermission(HISTORIAN_ALLOWED_TOOLS);
+        expect(perm).toEqual({
+            "*": "deny",
+            read: "allow",
+        });
+    });
+
+    it("dreamer permission object: `*` denied + read + ctx_* allowed", () => {
+        const perm = buildAllowOnlyPermission(DREAMER_ALLOWED_TOOLS);
+        expect(perm).toEqual({
+            "*": "deny",
+            read: "allow",
+            ctx_memory: "allow",
+            ctx_search: "allow",
+            ctx_note: "allow",
+        });
+    });
+
+    it("sidekick permission object: `*` denied + ctx_search + ctx_memory allowed", () => {
+        const perm = buildAllowOnlyPermission(SIDEKICK_ALLOWED_TOOLS);
+        expect(perm).toEqual({
+            "*": "deny",
+            ctx_search: "allow",
+            ctx_memory: "allow",
+        });
+    });
+});

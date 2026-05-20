@@ -1,6 +1,12 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "./agents/dreamer";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
+import {
+    buildAllowOnlyPermission,
+    DREAMER_ALLOWED_TOOLS,
+    HISTORIAN_ALLOWED_TOOLS,
+    SIDEKICK_ALLOWED_TOOLS,
+} from "./agents/permissions";
 import { SIDEKICK_AGENT } from "./agents/sidekick";
 import { loadPluginConfig } from "./config";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
@@ -299,19 +305,58 @@ const plugin: Plugin = async (ctx) => {
             await hooks.magicContext?.["experimental.text.complete"]?.(input, output);
         },
         config: async (config) => {
+            /**
+             * Build a hidden-agent config with a deny-everything-by-default
+             * permission baseline plus an explicit allow-list of tool ids the
+             * agent actually needs. See `agents/permissions.ts` for the
+             * rationale — without this, registered subagents inherit the full
+             * primary-agent tool surface (`task`, `bash`, `edit`, `webfetch`,
+             * etc.) because the auto-`task`-deny in
+             * `deriveSubagentSessionPermission` only applies to subagents
+             * INVOKED via the parent's `task()` tool, not to subagents spawned
+             * directly via `client.session.prompt(...)` from plugin runtime.
+             *
+             * Permission precedence:
+             *   1. `buildAllowOnlyPermission(allowedTools)` → wildcard deny +
+             *      our named allows (insertion order; `findLast` makes later
+             *      named allows defeat the wildcard deny).
+             *   2. User-supplied `overrides.permission` is merged on top via
+             *      object-spread, so users CAN extend the allow-list in
+             *      `magic-context.jsonc` if they really need to grant more
+             *      tools to a hidden agent.
+             *   3. OpenCode then merges the runtime defaults (`Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))` in
+             *      `packages/opencode/src/agent/agent.ts:306`) so OpenCode
+             *      user-config-level agent overrides win last.
+             */
             const buildHiddenAgentConfig = (
                 agentId: string,
                 prompt: string,
+                allowedTools: readonly string[],
                 overrides?: Record<string, unknown>,
-            ) => ({
-                prompt,
-                ...(getAgentFallbackModels(agentId)
-                    ? { fallback_models: getAgentFallbackModels(agentId) }
-                    : {}),
-                ...(overrides ?? {}),
-                mode: "subagent" as const,
-                hidden: true,
-            });
+            ) => {
+                const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
+                    permission?: Record<string, unknown>;
+                    [key: string]: unknown;
+                };
+                const basePermission = buildAllowOnlyPermission(allowedTools);
+                return {
+                    prompt,
+                    ...(getAgentFallbackModels(agentId)
+                        ? { fallback_models: getAgentFallbackModels(agentId) }
+                        : {}),
+                    ...restOverrides,
+                    // Permission baseline goes after `restOverrides` so that
+                    // accidental `permission` keys in user overrides we DIDN'T
+                    // explicitly destructure can't bypass the deny. The explicit
+                    // override (destructured above) is then layered on top.
+                    permission: {
+                        ...basePermission,
+                        ...(overridePermission ?? {}),
+                    },
+                    mode: "subagent" as const,
+                    hidden: true,
+                };
+            };
 
             const commandConfig = {
                 ...(config.command ?? {}),
@@ -360,6 +405,7 @@ const plugin: Plugin = async (ctx) => {
                 [DREAMER_AGENT]: buildHiddenAgentConfig(
                     DREAMER_AGENT,
                     DREAMER_SYSTEM_PROMPT,
+                    DREAMER_ALLOWED_TOOLS,
                     dreamerAgentOverrides,
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
@@ -367,16 +413,19 @@ const plugin: Plugin = async (ctx) => {
                     pluginConfig.dreamer?.user_memories?.enabled
                         ? COMPARTMENT_AGENT_SYSTEM_PROMPT + USER_OBSERVATIONS_APPENDIX
                         : COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                    HISTORIAN_ALLOWED_TOOLS,
                     historianAgentOverrides,
                 ),
                 [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_EDITOR_AGENT,
                     HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                    HISTORIAN_ALLOWED_TOOLS,
                     historianAgentOverrides,
                 ),
                 [SIDEKICK_AGENT]: buildHiddenAgentConfig(
                     SIDEKICK_AGENT,
                     SIDEKICK_SYSTEM_PROMPT,
+                    SIDEKICK_ALLOWED_TOOLS,
                     sidekickAgentOverrides,
                 ),
             };
