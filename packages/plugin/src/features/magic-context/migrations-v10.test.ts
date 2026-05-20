@@ -7,6 +7,7 @@ import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import {
     adoptNullOwnerToolTag,
+    deleteTagsByMessageId,
     deleteToolTagsByOwner,
     getNullOwnerToolTag,
     getTagsBySession,
@@ -339,6 +340,33 @@ describe("storage-tags v10 helpers", () => {
         expect(removed.sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
         const remaining = getTagsBySession(db, "ses-1");
         expect(remaining.map((t) => t.tagNumber).sort((a, b) => a - b)).toEqual([5, 6]);
+
+        closeQuietly(db);
+    });
+
+    test("deleteTagsByMessageId rolls back if owner-scoped tool delete fails", () => {
+        const db = freshDb();
+        insertTag(db, "ses-1", "m-asst-removed:p0", "message", 32, 1);
+        insertTag(db, "ses-1", "read:32", "tool", 100, 2, 0, "read", 0, "m-asst-removed");
+        db.exec(`
+            CREATE TRIGGER fail_owned_tool_tag_delete
+            BEFORE DELETE ON tags
+            WHEN OLD.session_id = 'ses-1'
+              AND OLD.type = 'tool'
+              AND OLD.tool_owner_message_id = 'm-asst-removed'
+            BEGIN
+                SELECT RAISE(ABORT, 'owned tool delete failed');
+            END;
+        `);
+
+        expect(() => deleteTagsByMessageId(db, "ses-1", "m-asst-removed")).toThrow(
+            "owned tool delete failed",
+        );
+        expect(getTagsBySession(db, "ses-1").map((t) => t.tagNumber)).toEqual([1, 2]);
+
+        db.exec("DROP TRIGGER fail_owned_tool_tag_delete");
+        expect(deleteTagsByMessageId(db, "ses-1", "m-asst-removed")).toEqual([1, 2]);
+        expect(getTagsBySession(db, "ses-1")).toEqual([]);
 
         closeQuietly(db);
     });

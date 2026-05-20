@@ -333,39 +333,41 @@ export function deleteTagsByMessageId(
     sessionId: string,
     messageId: string,
 ): number[] {
-    const escapedMessageId = escapeLikePattern(messageId);
-    const textPartPattern = `${escapedMessageId}:p%`;
-    const filePartPattern = `${escapedMessageId}:file%`;
-    const messageScopedTags = getTagNumbersByMessageIdStatement(db)
-        .all(sessionId, messageId, textPartPattern, filePartPattern)
-        .filter(isTagNumberRow)
-        .map((row) => row.tag_number);
+    return db.transaction(() => {
+        const escapedMessageId = escapeLikePattern(messageId);
+        const textPartPattern = `${escapedMessageId}:p%`;
+        const filePartPattern = `${escapedMessageId}:file%`;
+        const messageScopedTags = getTagNumbersByMessageIdStatement(db)
+            .all(sessionId, messageId, textPartPattern, filePartPattern)
+            .filter(isTagNumberRow)
+            .map((row) => row.tag_number);
 
-    // Tool tags owned by the removed message — `tool_owner_message_id`
-    // can match independent of `messageId` (which is the callId). Pull
-    // these tag numbers BEFORE running the delete so the caller sees
-    // the union.
-    const ownerScopedTagNumbers = getOwnerScopedToolTagNumbers(db, sessionId, messageId);
+        // Tool tags owned by the removed message — `tool_owner_message_id`
+        // can match independent of `messageId` (which is the callId). Pull
+        // these tag numbers BEFORE running the delete so the caller sees
+        // the union.
+        const ownerScopedTagNumbers = getOwnerScopedToolTagNumbers(db, sessionId, messageId);
 
-    if (messageScopedTags.length === 0 && ownerScopedTagNumbers.length === 0) {
-        return [];
-    }
+        if (messageScopedTags.length === 0 && ownerScopedTagNumbers.length === 0) {
+            return [];
+        }
 
-    if (messageScopedTags.length > 0) {
-        getDeleteTagsByMessageIdStatement(db).run(
-            sessionId,
-            messageId,
-            textPartPattern,
-            filePartPattern,
-        );
-    }
-    if (ownerScopedTagNumbers.length > 0) {
-        deleteToolTagsByOwner(db, sessionId, messageId);
-    }
+        if (messageScopedTags.length > 0) {
+            getDeleteTagsByMessageIdStatement(db).run(
+                sessionId,
+                messageId,
+                textPartPattern,
+                filePartPattern,
+            );
+        }
+        if (ownerScopedTagNumbers.length > 0) {
+            deleteToolTagsByOwner(db, sessionId, messageId);
+        }
 
-    // De-duplicate — a tag could in theory match both predicates.
-    const merged = new Set<number>([...messageScopedTags, ...ownerScopedTagNumbers]);
-    return Array.from(merged).sort((a, b) => a - b);
+        // De-duplicate — a tag could in theory match both predicates.
+        const merged = new Set<number>([...messageScopedTags, ...ownerScopedTagNumbers]);
+        return Array.from(merged).sort((a, b) => a - b);
+    })();
 }
 
 const getOwnerScopedToolTagNumbersStatements = new WeakMap<Database, PreparedStatement>();
