@@ -172,14 +172,14 @@ function writeConfigs(
  * Wait until the opencode server responds to GET /doc (an endpoint that exists in
  * OpenCode's server). Polls for up to `timeoutMs`.
  *
- * Diagnostic design:
- *   - Primary probe is Bun's `fetch()` (what production SDK clients use).
- *   - Every 30s of consecutive fetch failures we fall back to `curl --max-time 2`
- *     as a sanity check. If curl succeeds where fetch keeps failing, the issue
- *     is Bun's HTTP client (not opencode), and we proceed treating the server
- *     as ready — logging a one-line diagnostic so failures are attributable.
- *   - If both fetch and curl fail for the full deadline, we throw with the
- *     captured probe state so the error message is actionable.
+ * Implementation note — Bun fetch timeout flake:
+ *   Bun's default `fetch()` has a hardcoded ~5 minute timeout that ignores
+ *   AbortSignal.timeout values longer than the limit
+ *   (https://github.com/oven-sh/bun/issues/16682). If we don't bound each
+ *   fetch attempt explicitly, a single hung request can hold the loop for
+ *   the entire ~5 minute window, blowing past our overall deadline before
+ *   we get any chance to retry. Pass a short AbortSignal.timeout on every
+ *   attempt so one bad fetch can't starve the deadline.
  */
 // Default bumped from 30s → 300s. GitHub-hosted runners can take much longer
 // than 30s for `opencode serve` to bind its port + finish plugin init + complete
@@ -189,13 +189,17 @@ function writeConfigs(
 // genuine readiness failures — 5 minutes is still far above any realistic boot.
 async function waitForReady(url: string, timeoutMs = 300_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    const FETCH_TIMEOUT_MS = 2_000;
     let lastFetchErr: unknown = null;
-    let lastCurlErr: unknown = null;
-    let attemptsSinceCurl = 0;
-    let curlSucceededOnce = false;
+    let fetchAttempts = 0;
+
     while (Date.now() < deadline) {
         try {
-            const res = await fetch(`${url}/doc`, { method: "GET" });
+            fetchAttempts++;
+            const res = await fetch(`${url}/doc`, {
+                method: "GET",
+                signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+            });
             if (res.ok || res.status === 404 || res.status === 401) {
                 // Server is responding — any HTTP response means it booted.
                 return;
@@ -203,39 +207,13 @@ async function waitForReady(url: string, timeoutMs = 300_000): Promise<void> {
         } catch (err) {
             lastFetchErr = err;
         }
-        attemptsSinceCurl++;
-        // Every ~150 fetch attempts (≈30s at 200ms cadence) try curl as
-        // a Bun-fetch-independent probe.
-        if (attemptsSinceCurl >= 150) {
-            attemptsSinceCurl = 0;
-            try {
-                const probe = Bun.spawnSync({
-                    cmd: ["curl", "-fsS", "--max-time", "2", `${url}/doc`],
-                    stdout: "pipe",
-                    stderr: "pipe",
-                });
-                if (probe.exitCode === 0) {
-                    curlSucceededOnce = true;
-                    console.warn(
-                        `[waitForReady] curl reached ${url}/doc but Bun fetch is still failing — proceeding (Bun fetch issue, not opencode).`,
-                    );
-                    return;
-                }
-                lastCurlErr = new Error(
-                    `curl exit=${probe.exitCode}: ${probe.stderr.toString().trim() || "(no stderr)"}`,
-                );
-            } catch (err) {
-                lastCurlErr = err;
-            }
-        }
         await Bun.sleep(200);
     }
     throw new Error(
         `opencode serve did not become ready in ${timeoutMs}ms.\n` +
             `  url=${url}/doc\n` +
-            `  fetchLastErr=${String(lastFetchErr)}\n` +
-            `  curlLastErr=${String(lastCurlErr)}\n` +
-            `  curlEverSucceeded=${curlSucceededOnce}`,
+            `  fetchAttempts=${fetchAttempts}\n` +
+            `  fetchLastErr=${String(lastFetchErr)}`,
     );
 }
 
