@@ -557,6 +557,25 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(child.killSignals).toEqual(["SIGTERM"]);
 	});
 
+	it("returns abort without spawning when caller signal is already aborted", async () => {
+		const child = createMockChild();
+		const { runner, spawnImpl } = runnerWith(child);
+		const controller = new AbortController();
+		controller.abort();
+
+		const result = await runner.run({
+			...baseOptions,
+			signal: controller.signal,
+		});
+
+		expect(spawnImpl).not.toHaveBeenCalled();
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.reason).toBe("abort");
+		}
+		expect(child.kill).not.toHaveBeenCalled();
+	});
+
 	it("returns abort and terminates the child when the caller signal aborts", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child);

@@ -213,6 +213,14 @@ export class PiSubagentRunner implements SubagentRunner {
 
 	async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
 		const startTime = Date.now();
+		if (options.signal?.aborted) {
+			return {
+				ok: false,
+				reason: "abort",
+				error: "pi subagent aborted by caller",
+				durationMs: Date.now() - startTime,
+			};
+		}
 		const args = buildArgs(options);
 
 		// The model spec is `provider/model` — Pi accepts that directly via
@@ -265,6 +273,17 @@ export class PiSubagentRunner implements SubagentRunner {
 					ok: false,
 					reason: "spawn_failed",
 					error: error instanceof Error ? error.message : String(error),
+					durationMs: Date.now() - startTime,
+				});
+				return;
+			}
+
+			if (options.signal?.aborted) {
+				terminateChild(child);
+				settle({
+					ok: false,
+					reason: "abort",
+					error: "pi subagent aborted by caller",
 					durationMs: Date.now() - startTime,
 				});
 				return;
