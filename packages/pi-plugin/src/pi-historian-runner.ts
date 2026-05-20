@@ -69,10 +69,7 @@ import {
 	cleanupHistorianStateFile,
 	maybeWriteHistorianStateFile,
 } from "@magic-context/core/hooks/magic-context/historian-state-file";
-import {
-	clearInjectionCache,
-	renderMemoryBlock,
-} from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
 	getProtectedTailStartOrdinal,
@@ -556,9 +553,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				tokensBefore: chunk.tokenEstimate,
 				summary: buildPiCompactionSummary(newCompartments),
 			});
-
-			// Cache invalidation so the next transform rebuilds <session-history>.
-			clearInjectionCache(sessionId);
 
 			// Note-nudge trigger #1 (of 3): historian publication is a natural
 			// work boundary, so signal that deferred notes should surface on

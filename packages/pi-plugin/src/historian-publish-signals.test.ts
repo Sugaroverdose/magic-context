@@ -27,6 +27,10 @@ import { join } from "node:path";
 
 const HANDLER_PATH = join(import.meta.dir, "context-handler.ts");
 const HANDLER_SRC = readFileSync(HANDLER_PATH, "utf8");
+const RUNNER_SRC = readFileSync(
+	join(import.meta.dir, "pi-historian-runner.ts"),
+	"utf8",
+);
 
 function extractOnPublishedBodies(src: string): string[] {
 	// Find every `onPublished: () => { ... },` callback in the file.
@@ -90,5 +94,12 @@ describe("historian + compressor onPublished signals", () => {
 		for (const body of bodies) {
 			expect(body).not.toContain("signalPiSystemPromptRefresh");
 		}
+	});
+	test("Pi historian publish path does not eagerly clear the injection cache", () => {
+		// Background historian publication should only set deferred refresh
+		// signals via context-handler onPublished. Defer/mid-turn passes then
+		// replay cached <session-history> bytes until a materializing pass
+		// consumes those deferred signals.
+		expect(RUNNER_SRC).not.toContain("clearInjectionCache");
 	});
 });
