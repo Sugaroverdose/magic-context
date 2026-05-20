@@ -1371,11 +1371,42 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
          WHERE status = 'active'
          ORDER BY project_path",
     )?;
-    let project_paths: HashSet<String> = stmt
+    let memory_project_values: HashSet<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<HashSet<_>, _>>()?;
 
-    Ok(enumerate_projects_filtered(Some(&project_paths)))
+    // Each memory `project_path` is canonically one of:
+    //   - a resolved project identity (`git:<hash>` or `dir:<sha256>`) for
+    //     memories written by the post-#87 plugin where storage stamps the
+    //     identity directly, or
+    //   - a raw filesystem path for legacy memories written before identity
+    //     normalization landed on the plugin side.
+    //
+    // Normalize every value to its identity. For identity-shaped strings the
+    // value is itself the identity. For real paths we resolve through git +
+    // SHA256 fallback. This is the SAME normalization the v0.21.5 plugin-side
+    // fix to issue #87 performs on the query side — keeping the dashboard
+    // aligned with it so the project picker matches the memory pool by
+    // identity, not by raw path.
+    let memory_identities: HashSet<String> = memory_project_values
+        .iter()
+        .map(|value| {
+            if value.starts_with("git:") || value.starts_with("dir:") {
+                value.clone()
+            } else {
+                resolve_project_identity(value)
+            }
+        })
+        .collect();
+
+    // Build the full project list from OpenCode + Pi DBs (which gives us the
+    // real `display_name` and `primary_path` for each project), then filter
+    // down to projects whose identity has at least one memory in the pool.
+    let all = enumerate_projects_filtered(None);
+    Ok(all
+        .into_iter()
+        .filter(|row| memory_identities.contains(&row.identity))
+        .collect())
 }
 
 fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -> Vec<ProjectRow> {
@@ -4188,5 +4219,66 @@ mod memory_project_filter_tests {
         assert_eq!(stats.active, 1);
         assert_eq!(stats.permanent, 1);
         assert_eq!(stats.archived, 1);
+    }
+
+    /// Regression: `enumerate_memory_projects` returned rows whose
+    /// `display_name` was the raw identity (e.g. `git:abc…`, `dir:abc…`)
+    /// because it passed memory `project_path` values as a paths filter into
+    /// `enumerate_projects_filtered`. When the plugin started stamping
+    /// identities directly into memories.project_path (post-issue-#87 plugin
+    /// fix), those values never matched any `worktree`/`cwd` path, so the
+    /// OpenCode/Pi DB enrichment step was skipped and the fallback path
+    /// seeded ProjectRow with `primary_path = "git:HASH"`, then
+    /// `display_name = basename("git:HASH") = "git:HASH"`.
+    ///
+    /// Fix: filter the full enumerated project list by identity instead of
+    /// filtering by path string. These tests pin both arms:
+    ///   - identity-shaped memory values map to themselves
+    ///   - raw filesystem paths get resolved through `resolve_project_identity`
+    /// In both cases the returned ProjectRow display_name MUST NOT start
+    /// with `git:` or `dir:`. With no OpenCode/Pi DB in the test sandbox the
+    /// list is empty rather than poisoned with identity-named rows; that's
+    /// the correct safe failure mode.
+    #[test]
+    fn enumerate_memory_projects_with_identity_memories_does_not_leak_identity_as_name() {
+        // Simulate the post-#87 plugin storing the resolved identity directly
+        // as project_path. Pre-fix this produced ProjectRow rows with
+        // `display_name = "git:abc123…"`. Post-fix the list is empty because
+        // no real OpenCode/Pi DB is attached in the test sandbox — that's
+        // the correct safe state; the previous behavior was an active bug.
+        let conn = make_memory_db();
+        insert_memory(&conn, "git:abc1234567890abcdef", "CONSTRAINTS", "active");
+        insert_memory(&conn, "git:abc1234567890abcdef", "ARCHITECTURE_DECISIONS", "active");
+        insert_memory(&conn, "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321", "USER_DIRECTIVES", "active");
+
+        let rows = enumerate_memory_projects(&conn).expect("enumerate");
+        for row in &rows {
+            assert!(
+                !row.display_name.starts_with("git:") && !row.display_name.starts_with("dir:"),
+                "display_name leaked identity: {} (identity={})",
+                row.display_name,
+                row.identity,
+            );
+        }
+    }
+
+    #[test]
+    fn enumerate_memory_projects_with_only_archived_memories_returns_empty() {
+        // `enumerate_memory_projects` filters memories by `status = 'active'`.
+        // A project whose only memories are archived should not appear in the
+        // picker at all. (This was already the behavior before the fix; we
+        // pin it so the new identity-filtering path doesn't accidentally
+        // surface archived-only projects.)
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/archived-only", "X", "archived");
+        let rows = enumerate_memory_projects(&conn).expect("enumerate");
+        assert!(rows.is_empty(), "archived-only project leaked: {rows:?}");
+    }
+
+    #[test]
+    fn enumerate_memory_projects_empty_db_returns_empty() {
+        let conn = make_memory_db();
+        let rows = enumerate_memory_projects(&conn).expect("enumerate");
+        assert!(rows.is_empty(), "empty db should produce empty picker, got {rows:?}");
     }
 }
