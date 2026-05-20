@@ -1,6 +1,6 @@
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
-import { getPendingOps, getTagsBySession } from "../../features/magic-context/storage";
-import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
+import { getActiveTagsBySession, getPendingOps } from "../../features/magic-context/storage";
+import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
@@ -42,13 +42,13 @@ function estimateProjectedPostDropPercentage(
     db: Database,
     sessionId: string,
     usage: ContextUsage,
+    activeTags: readonly TagEntry[],
     autoDropToolAge?: number,
     protectedTags?: number,
     clearReasoningAge?: number,
     clearedReasoningThroughTag?: number,
     dropToolStructure = true,
 ): number | null {
-    const activeTags = getTagsBySession(db, sessionId).filter((tag) => tag.status === "active");
     // Denominator must include both text/tool bytes and reasoning bytes to match the numerator
     const totalActiveBytes = activeTags.reduce(
         (sum, tag) => sum + tag.byteSize + tag.reasoningByteSize,
@@ -193,6 +193,7 @@ export function checkCompartmentTrigger(
     clearReasoningAge?: number,
     dropToolStructure = true,
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
+    preloadedActiveTags?: readonly TagEntry[],
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         return { shouldFire: false };
@@ -207,6 +208,7 @@ export function checkCompartmentTrigger(
         db,
         sessionId,
         usage,
+        preloadedActiveTags ?? getActiveTagsBySession(db, sessionId),
         autoDropToolAge,
         protectedTagCount,
         clearReasoningAge,

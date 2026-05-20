@@ -1123,6 +1123,56 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("walks the Pi branch only once per context event with historian enabled", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-branch-once";
+			clearContextHandlerSession(sessionId);
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				historian: {
+					runner: {} as SubagentRunner,
+					model: "test/historian",
+					historianChunkTokens: 8000,
+					executeThresholdPercentage: 65,
+					triggerBudget: 8000,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [userMessage("hello", 1), assistantMessage("answer", 2)];
+			let getBranchCalls = 0;
+			await handler({ messages: messages as never[] }, {
+				...fakeContext(sessionId),
+				sessionManager: {
+					getSessionId: () => sessionId,
+					getBranch: () => {
+						getBranchCalls += 1;
+						return messages.map((message, index) => ({
+							type: "message",
+							id: `entry-${index + 1}`,
+							message,
+						}));
+					},
+				},
+				getContextUsage: () => ({
+					tokens: 100,
+					percent: 1,
+					contextWindow: 100_000,
+				}),
+			} as never);
+
+			expect(getBranchCalls).toBe(1);
+		} finally {
+			clearContextHandlerSession("ses-pi-branch-once");
+			closeQuietly(db);
+		}
+	});
+
 	it("fires a recovery historian on the first pass after persisted failure", async () => {
 		const db = createTestDb();
 		try {

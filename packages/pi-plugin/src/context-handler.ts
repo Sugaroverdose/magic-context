@@ -134,7 +134,11 @@ import {
 } from "./pi-compressor-runner";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
-import { isMidTurnPi, readPiSessionMessages } from "./read-session-pi";
+import {
+	convertEntriesToRawMessages,
+	isMidTurnPi,
+	readPiSessionMessages,
+} from "./read-session-pi";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
@@ -989,25 +993,31 @@ export function collectMessageEntryIdsByRef(
 	ctx: ExtensionContext,
 	messages: readonly PiAgentMessage[],
 	sessionId?: string,
+	preloadedBranchEntries?: readonly unknown[],
 ): readonly (string | undefined)[] | null {
-	const sm = ctx.sessionManager as
-		| {
-				getBranch?: (fromId?: string) => unknown[];
-		  }
-		| undefined;
-	if (typeof sm?.getBranch !== "function") return null;
+	let entries: readonly unknown[];
+	if (preloadedBranchEntries !== undefined) {
+		entries = preloadedBranchEntries;
+	} else {
+		const sm = ctx.sessionManager as
+			| {
+					getBranch?: (fromId?: string) => unknown[];
+			  }
+			| undefined;
+		if (typeof sm?.getBranch !== "function") return null;
 
-	let entries: unknown[];
-	try {
-		entries = sm.getBranch.call(sm);
-	} catch (error) {
-		sessionLog(
-			sessionId ?? "pi",
-			`collectMessageEntryIdsByRef getBranch failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
-		return null;
+		try {
+			const branch = sm.getBranch.call(sm);
+			if (!Array.isArray(branch)) return null;
+			entries = branch;
+		} catch (error) {
+			sessionLog(
+				sessionId ?? "pi",
+				`collectMessageEntryIdsByRef getBranch failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return null;
+		}
 	}
-	if (!Array.isArray(entries)) return null;
 
 	// Build lookup tables keyed first by AgentMessage reference and then by
 	// a content fingerprint. Reference identity is the fast, lossless path for
@@ -1084,6 +1094,26 @@ export function collectMessageEntryIdsByRef(
 	}
 
 	return result;
+}
+
+function readPiBranchEntriesForContext(
+	ctx: ExtensionContext,
+	sessionId: string,
+): readonly unknown[] | null {
+	const sm = ctx.sessionManager as
+		| { getBranch?: (fromId?: string) => unknown[] }
+		| undefined;
+	if (typeof sm?.getBranch !== "function") return null;
+	try {
+		const entries = sm.getBranch.call(sm);
+		return Array.isArray(entries) ? entries : null;
+	} catch (error) {
+		sessionLog(
+			sessionId,
+			`Pi branch pre-read failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
 }
 
 function piMessageEntryFingerprint(message: unknown): string | null {
@@ -1190,8 +1220,12 @@ export function registerPiContextHandler(
 				`messages=${event.messages.length}`,
 			);
 
+			const branchEntries = readPiBranchEntriesForContext(ctx, sessionId);
 			const rawMessageProvider = {
-				readMessages: () => readPiSessionMessages(ctx),
+				readMessages: () =>
+					branchEntries !== null
+						? convertEntriesToRawMessages([...branchEntries])
+						: readPiSessionMessages(ctx),
 				readMessageById: (messageId: string) =>
 					readPiSessionMessageById(ctx, messageId),
 			};
@@ -1213,11 +1247,15 @@ export function registerPiContextHandler(
 			// doesn't match a branch entry — typically synthetic compaction
 			// summaries and custom_message wrappers, which never carry
 			// compartment boundaries).
-			const strictEntryIds = collectMessageEntryIdsByRef(
-				ctx,
-				event.messages as readonly PiAgentMessage[],
-				sessionId,
-			);
+			const strictEntryIds =
+				branchEntries === null
+					? null
+					: collectMessageEntryIdsByRef(
+							ctx,
+							event.messages as readonly PiAgentMessage[],
+							sessionId,
+							branchEntries,
+						);
 
 			const tLastUser = performance.now();
 			const latestUser = findLatestUserMessageIdPi(
@@ -1550,12 +1588,7 @@ export function registerPiContextHandler(
 			// the same id format historian persists. Reference-based
 			// matching — see collectMessageEntryIdsByRef for why this is
 			// preferred over the position-based collectMessageEntryIds.
-			const entryIds =
-				collectMessageEntryIdsByRef(
-					ctx,
-					event.messages as readonly PiAgentMessage[],
-					sessionId,
-				) ?? undefined;
+			const entryIds = strictEntryIds ?? undefined;
 
 			const result = await runPipeline({
 				db: options.db,
@@ -1597,6 +1630,8 @@ export function registerPiContextHandler(
 					db: options.db,
 					historian: options.historian,
 					isFirstContextPassForSession,
+					activeTags: result.activeTags,
+					rawMessageProvider,
 				});
 				maybeFireCompressor({
 					ctx,
@@ -2183,6 +2218,10 @@ function maybeFireHistorian(args: {
 	db: ContextDatabase;
 	historian: PiHistorianOptions;
 	isFirstContextPassForSession?: boolean;
+	activeTags?: ReturnType<typeof getActiveTagsBySession>;
+	rawMessageProvider?: {
+		readMessages: () => ReturnType<typeof readPiSessionMessages>;
+	};
 }): void {
 	const { ctx, sessionId, db, historian, isFirstContextPassForSession } = args;
 
@@ -2259,7 +2298,7 @@ function maybeFireHistorian(args: {
 	// via the standard `readRawSessionMessages` etc. helpers. The
 	// provider stays registered while the historian runs and
 	// unregisters in finally.
-	const provider = {
+	const provider = args.rawMessageProvider ?? {
 		readMessages: () => readPiSessionMessages(ctx),
 	};
 	const unregister = setRawMessageProvider(sessionId, provider);
@@ -2327,6 +2366,7 @@ function maybeFireHistorian(args: {
 			triggerInputs.clearReasoningAge,
 			triggerInputs.dropToolStructure,
 			triggerInputs.commitClusterTrigger,
+			args.activeTags,
 		);
 
 		if (!trigger.shouldFire) {
@@ -2455,6 +2495,7 @@ interface RunPipelineResult {
 	injectionResult: PiInjectionResult | null;
 	targetCount: number;
 	reasoningWatermark: number;
+	activeTags: ReturnType<typeof getActiveTagsBySession>;
 }
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
@@ -3004,6 +3045,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		reasoningWatermark:
 			getOrCreateSessionMeta(args.db, args.sessionId)
 				.clearedReasoningThroughTag ?? 0,
+		activeTags,
 	};
 }
 
