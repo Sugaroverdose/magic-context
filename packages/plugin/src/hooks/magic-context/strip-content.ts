@@ -58,6 +58,10 @@ export function stripSystemInjectedMessages(
         const msg = messages[i];
         if (msg.parts.length === 0) continue;
 
+        // Never neutralize user-role messages — they anchor turn boundaries
+        // that AI SDK depends on to avoid merging consecutive assistants.
+        if (msg.info.role === "user") continue;
+
         // Skip messages already reduced to a lone sentinel — idempotent on replay
         if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
 

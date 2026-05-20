@@ -8,6 +8,7 @@ import {
     stripInlineThinking,
     stripProcessedImages,
     stripReasoningFromMergedAssistants,
+    stripSystemInjectedMessages,
     truncateErroredTools,
 } from "./strip-content";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -531,6 +532,44 @@ describe("strip-content", () => {
                     const tags = new Map<MessageLike, number>();
                     expect(stripProcessedImages([], 5, tags)).toBe(0);
                 });
+            });
+        });
+    });
+
+    describe("stripSystemInjectedMessages (sentinel-based)", () => {
+        describe("#given a user message matching a system-injection pattern", () => {
+            it("#then it keeps the user message shell unchanged (turn boundary preserved)", () => {
+                const user = message("m-user", "user", [
+                    {
+                        type: "text",
+                        text: "<system-reminder>do not strip user turns</system-reminder>",
+                    },
+                ]);
+
+                const result = stripSystemInjectedMessages([user], 1);
+
+                expect(result.stripped).toBe(0);
+                expect(result.sentineledIds).toEqual([]);
+                expect(user.parts).toEqual([
+                    {
+                        type: "text",
+                        text: "<system-reminder>do not strip user turns</system-reminder>",
+                    },
+                ]);
+            });
+        });
+
+        describe("#given an assistant message matching a system-injection pattern", () => {
+            it("#then it neutralizes the assistant message with a sentinel", () => {
+                const assistant = message("m-assistant", "assistant", [
+                    { type: "text", text: "[SYSTEM DIRECTIVE: internal-only]" },
+                ]);
+
+                const result = stripSystemInjectedMessages([assistant], 1);
+
+                expect(result.stripped).toBe(1);
+                expect(result.sentineledIds).toEqual(["m-assistant"]);
+                expect(assistant.parts).toEqual([WHOLE_MESSAGE_SENTINEL]);
             });
         });
     });
