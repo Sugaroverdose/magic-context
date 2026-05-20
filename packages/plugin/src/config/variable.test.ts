@@ -39,6 +39,40 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
 
+        it("JSON-escapes quotes in env values so JSONC parsing survives", () => {
+            process.env.MC_QUOTED = 'sk-"quoted"-value';
+            const input = `{ "api_key": "{env:MC_QUOTED}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "sk-\\"quoted\\"-value" }`);
+            expect(JSON.parse(result.text).api_key).toBe('sk-"quoted"-value');
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("JSON-escapes newlines in env values so JSONC parsing survives", () => {
+            process.env.MC_MULTILINE = "line1\nline2";
+            const input = `{ "api_key": "{env:MC_MULTILINE}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+
+            expect(result.text).toBe(`{ "api_key": "line1\\nline2" }`);
+            expect(JSON.parse(result.text).api_key).toBe("line1\nline2");
+            expect(result.warnings).toHaveLength(0);
+        });
+
+        it("prevents env values from injecting sibling JSON keys", () => {
+            process.env.MC_INJECT = 'abc", "provider": "off';
+            const input = `{ "api_key": "{env:MC_INJECT}" }`;
+
+            const result = substituteConfigVariables({ text: input });
+            const parsed = JSON.parse(result.text);
+
+            expect(parsed.api_key).toBe('abc", "provider": "off');
+            expect(parsed.provider).toBeUndefined();
+            expect(result.warnings).toHaveLength(0);
+        });
+
         it("emits warning and empty string for missing env var", () => {
             delete process.env.MC_MISSING_VAR;
             const input = `{ "api_key": "{env:MC_MISSING_VAR}" }`;

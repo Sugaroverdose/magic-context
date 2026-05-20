@@ -34,7 +34,7 @@ const FILE_PATTERN = /\{file:([^}]+)\}/g;
  *
  * Mirrors OpenCode's `ConfigVariable.substitute` semantics so users can share
  * the same patterns across `opencode.json(c)` and `magic-context.jsonc`:
- *   - `{env:VAR}` → `process.env.VAR` (trimmed key), empty string when missing
+ *   - `{env:VAR}` → `process.env.VAR` (trimmed key), JSON-escaped for safe inlining, empty string when missing
  *   - `{file:~/path}` → contents of `~/path`, JSON-escaped for safe inlining
  *   - `{file:./rel}` or `{file:rel}` → resolved against the config file's dir
  *   - `{file:/abs}` → resolved as absolute
@@ -44,12 +44,9 @@ const FILE_PATTERN = /\{file:([^}]+)\}/g;
  * typo in an optional embedding key should not prevent the plugin from loading
  * with other (valid) settings.
  *
- * File content substitution is JSON-escaped (wrapped then unwrapped through
- * `JSON.stringify`) so line breaks, quotes, and backslashes in file contents
- * survive the subsequent JSONC parse. Env value substitution is NOT escaped,
- * matching OpenCode — env values are typically API keys without JSON-special
- * characters. Users who need to embed a value with quotes or newlines should
- * use `{file:...}`.
+ * File and env value substitution is JSON-escaped (wrapped then unwrapped
+ * through `JSON.stringify`) so line breaks, quotes, and backslashes survive
+ * the subsequent JSONC parse.
  */
 export function substituteConfigVariables(input: SubstituteInput): SubstituteResult {
     const warnings: string[] = [];
@@ -65,7 +62,7 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             return "";
         }
 
-        return value;
+        return JSON.stringify(value).slice(1, -1);
     });
 
     const fileMatches = Array.from(text.matchAll(FILE_PATTERN));
