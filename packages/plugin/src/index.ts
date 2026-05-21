@@ -232,6 +232,46 @@ const plugin: Plugin = async (ctx) => {
         }
     }
 
+    // Desktop-only startup announcement: post a one-shot ignored message
+    // describing what's new in this release.
+    //
+    // TUI delivery is handled by the TUI plugin via the `get-announcement` /
+    // `mark-announced` RPC handlers (registered above). Both surfaces share
+    // the same `last_announced_version` persistence file so dismissal in
+    // either harness suppresses the dialog/message in the other.
+    //
+    // Deferred 8s so the active session has stabilized; runs fire-and-forget
+    // so a failure here can never block plugin startup.
+    if (pluginConfig.enabled && !conflictResult?.hasConflict) {
+        try {
+            const {
+                shouldShowAnnouncement,
+                ANNOUNCEMENT_VERSION,
+                ANNOUNCEMENT_FEATURES,
+                markAnnouncementSeen,
+            } = await import("./shared/announcement");
+            if (shouldShowAnnouncement()) {
+                setTimeout(() => {
+                    void import("./plugin/conflict-warning-hook")
+                        .then(({ sendStartupAnnouncement }) =>
+                            sendStartupAnnouncement(
+                                ctx.client as unknown as Record<string, unknown>,
+                                ctx.directory,
+                                ANNOUNCEMENT_VERSION,
+                                ANNOUNCEMENT_FEATURES,
+                                markAnnouncementSeen,
+                            ),
+                        )
+                        .catch(() => {
+                            // Best-effort — don't block startup
+                        });
+                }, 8000);
+            }
+        } catch {
+            // Best-effort — never block startup on announcement delivery
+        }
+    }
+
     // Latch: remembers the {providerID, modelID, agentName} from the most
     // recent `chat.message` so we can attribute `tool.definition` hook fires
     // to a key. The hook input only carries `toolID`, and `registry.tools()`

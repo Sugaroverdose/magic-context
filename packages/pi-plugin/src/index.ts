@@ -52,6 +52,12 @@ import {
 	onNoteTrigger,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
+import {
+	ANNOUNCEMENT_FEATURES,
+	ANNOUNCEMENT_VERSION,
+	markAnnouncementSeen,
+	shouldShowAnnouncement,
+} from "@magic-context/core/shared/announcement";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
@@ -729,6 +735,33 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// `experimental.chat.system.transform` handler in
 	// `system-prompt-hash.ts`.
 	pi.on("before_agent_start", async (event, ctx) => {
+		// Startup release announcement (Pi parity with OpenCode TUI dialog +
+		// Desktop ignored message). Fires once per ANNOUNCEMENT_VERSION across
+		// the whole machine — persistence file is shared with the OpenCode
+		// plugin via `getMagicContextStorageDir()/last_announced_version`.
+		//
+		// Skipped silently when:
+		//   - announcement constants are empty (bugfix-only release)
+		//   - the current ANNOUNCEMENT_VERSION was already dismissed (here or
+		//     in OpenCode TUI/Desktop)
+		//   - ctx.hasUI is false (print/rpc subagent — no point notifying)
+		//
+		// Fire-and-forget: storage write happens inside markAnnouncementSeen,
+		// any failure is swallowed. Worst case is a duplicate notification
+		// the next time the user starts an interactive Pi session.
+		try {
+			if (ctx.hasUI && shouldShowAnnouncement()) {
+				const featureText = ANNOUNCEMENT_FEATURES.map(
+					(line) => `  • ${line}`,
+				).join("\n");
+				const message = `✨ Magic Context v${ANNOUNCEMENT_VERSION} — what's new:\n\n${featureText}`;
+				ctx.ui.notify(message, "info");
+				markAnnouncementSeen(ANNOUNCEMENT_VERSION);
+			}
+		} catch {
+			// Never block agent start on announcement delivery.
+		}
+
 		try {
 			const currentProject = resolveCurrentProject(ctx);
 			seenDreamerProjectIdentities.add(currentProject.projectIdentity);

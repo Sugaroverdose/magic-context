@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, getCompartmentCount, initRpcClient, loadStatusDetail, requestRecomp, type StatusDetail } from "./data/context-db"
+import { closeRpc, consumeTuiMessages, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, requestRecomp, type StatusDetail } from "./data/context-db"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
 import { readJsoncFile } from "../shared/jsonc-parser"
@@ -563,6 +563,46 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
     // via RPC.
 }
 
+/**
+ * Show the one-shot "What's new" dialog on TUI startup if the server tells us
+ * to. The server is the source of truth: it has the version + features
+ * constants AND owns the persistence file. We just render and report back.
+ *
+ * Failure-tolerant by design — if the server isn't ready or the RPC fails,
+ * we silently skip (the next TUI launch will retry).
+ */
+async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
+    try {
+        const ann = await getAnnouncement()
+        if (!ann.show || !ann.version || !ann.features || ann.features.length === 0) return
+
+        const featureText = ann.features.map((f) => `  • ${f}`).join("\n")
+        const message = `What's new:\n\n${featureText}`
+        const title = `Magic Context v${ann.version}`
+
+        api.ui.dialog.replace(
+            () => (
+                <api.ui.DialogAlert
+                    title={title}
+                    message={message}
+                    onConfirm={() => {
+                        // Mark dismissed so this version doesn't re-show.
+                        void markAnnounced()
+                    }}
+                />
+            ),
+            () => {
+                // User dismissed via Escape rather than confirming. Mark
+                // dismissed anyway — they saw the dialog, that's the contract.
+                void markAnnounced()
+            },
+        )
+    } catch {
+        // RPC not ready yet (port file missing or transient HTTP failure) —
+        // silently skip. The next TUI start re-checks.
+    }
+}
+
 const tui: TuiPlugin = async (api, _options, meta) => {
     // Initialize RPC client for server communication
     const directory = api.state.path.directory ?? ""
@@ -622,6 +662,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts)
         return
     }
+
+    // Show one-shot release announcement after conflict gate.
+    // Fire-and-forget: if the server isn't ready or RPC fails, the next TUI
+    // launch will retry. Dialog only appears once per ANNOUNCEMENT_VERSION
+    // (persisted via mark-announced RPC writing last_announced_version).
+    void showStartupAnnouncement(api)
 
     // Note: if TUI plugin is loaded, tui.json already has our entry.
     // But if the user added it manually and later removes it, or if they

@@ -233,6 +233,46 @@ export interface TuiMessage {
     sessionId?: string;
 }
 
+/**
+ * Fetch the current startup announcement from the server, if any.
+ * Returns `{show: false}` when there's nothing to announce or when the
+ * configured ANNOUNCEMENT_VERSION has already been dismissed.
+ */
+export interface AnnouncementResponse {
+    show: boolean;
+    version?: string;
+    features?: string[];
+}
+
+export async function getAnnouncement(): Promise<AnnouncementResponse> {
+    if (!rpcClient) return { show: false };
+    try {
+        const result = await rpcClient.call<{
+            show?: boolean;
+            version?: string;
+            features?: string[];
+        }>("get-announcement", {});
+        return {
+            show: result.show === true,
+            version: result.version,
+            features: Array.isArray(result.features) ? result.features : undefined,
+        };
+    } catch {
+        return { show: false };
+    }
+}
+
+/** Mark the current ANNOUNCEMENT_VERSION as dismissed on the server. */
+export async function markAnnounced(): Promise<boolean> {
+    if (!rpcClient) return false;
+    try {
+        const result = await rpcClient.call<{ ok?: boolean }>("mark-announced", {});
+        return result.ok === true;
+    } catch {
+        return false;
+    }
+}
+
 /** Poll for pending server→TUI notifications via RPC. */
 export async function consumeTuiMessages(): Promise<TuiMessage[]> {
     if (!rpcClient) return [];

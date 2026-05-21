@@ -23,6 +23,12 @@ import {
     calibrateBuckets,
     resolveModelCalibration,
 } from "../hooks/magic-context/tokenizer-calibration";
+import {
+    ANNOUNCEMENT_FEATURES,
+    ANNOUNCEMENT_VERSION,
+    markAnnouncementSeen,
+    shouldShowAnnouncement,
+} from "../shared/announcement";
 import { log } from "../shared/logger";
 import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
@@ -746,5 +752,30 @@ export function registerRpcHandlers(
             Number.isFinite(lastReceivedId) ? lastReceivedId : 0,
         );
         return { messages: notifications } as unknown as Record<string, unknown>;
+    });
+
+    // Startup announcement — called by the TUI plugin once per session to decide
+    // whether to show the "What's new" dialog. We deliberately read state via
+    // the file in getMagicContextStorageDir() (not an SQLite table) so that
+    // both OpenCode and Pi share one source of truth and a dismissal in either
+    // harness suppresses the dialog in the other for the same announcement.
+    rpcServer.handle("get-announcement", async () => {
+        // shouldShowAnnouncement already covers the empty-version / empty-features
+        // case as "nothing to show", so this is the single gate.
+        if (!shouldShowAnnouncement()) {
+            return { show: false } as unknown as Record<string, unknown>;
+        }
+        return {
+            show: true,
+            version: ANNOUNCEMENT_VERSION,
+            features: [...ANNOUNCEMENT_FEATURES],
+        } as unknown as Record<string, unknown>;
+    });
+
+    rpcServer.handle("mark-announced", async () => {
+        if (ANNOUNCEMENT_VERSION) {
+            markAnnouncementSeen(ANNOUNCEMENT_VERSION);
+        }
+        return { ok: true } as unknown as Record<string, unknown>;
     });
 }

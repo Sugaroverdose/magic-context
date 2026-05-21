@@ -17,6 +17,7 @@ import { log } from "../shared/logger";
 const CONFLICT_WARNING_MARKER = "⚠️ Magic Context is disabled due to conflicting configuration:";
 const ENABLED_MARKER = "✨ Magic Context is now enabled";
 const TUI_SETUP_MARKER = "📊 Magic Context sidebar configured";
+const ANNOUNCEMENT_MARKER = "✨ Magic Context — what's new in";
 
 // --- Desktop state file resolution ---
 
@@ -478,4 +479,71 @@ export async function sendTuiSetupNotification(
             // best-effort
         }
     }, 1000);
+}
+
+/**
+ * Desktop startup announcement: post a one-shot ignored message describing
+ * what's new in this release. Mirrors the TUI's RPC-driven dialog path so both
+ * surfaces deliver the same announcement once per ANNOUNCEMENT_VERSION.
+ *
+ * Persistence lives in `getMagicContextStorageDir()/last_announced_version`,
+ * shared with the TUI handlers and the Pi plugin so a dismissal in any harness
+ * suppresses the others for the same announcement.
+ */
+export async function sendStartupAnnouncement(
+    client: unknown,
+    directory: string,
+    version: string,
+    features: ReadonlyArray<string>,
+    markSeen: (version: string) => void,
+): Promise<void> {
+    if (!version || features.length === 0) return;
+
+    const { sessionId } = getDesktopState(directory);
+    if (!sessionId) {
+        // No active Desktop session — TUI will pick it up next time it loads.
+        // The persistence file is the same across surfaces, so this is correct.
+        return;
+    }
+
+    const bullets = features.map((line) => `  • ${line}`).join("\n");
+    const text = [`${ANNOUNCEMENT_MARKER} v${version}:`, "", bullets].join("\n");
+
+    log(`[magic-context] sending startup announcement for v${version} to session ${sessionId}`);
+
+    try {
+        const c = client as {
+            session?: {
+                prompt?: (input: unknown) => unknown;
+                promptAsync?: (input: unknown) => unknown;
+            };
+        };
+
+        const promptInput = {
+            path: { id: sessionId },
+            body: {
+                noReply: true,
+                parts: [{ type: "text", text, ignored: true }],
+            },
+        };
+
+        if (typeof c.session?.prompt === "function") {
+            await Promise.resolve(c.session.prompt(promptInput));
+        } else if (typeof c.session?.promptAsync === "function") {
+            await c.session.promptAsync(promptInput);
+        } else {
+            log("[magic-context] announcement: session prompt API unavailable");
+            return;
+        }
+    } catch (error: unknown) {
+        log(
+            `[magic-context] announcement: failed to send: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+    }
+
+    // Persist the dismissal AFTER successful delivery so we never silently
+    // suppress an announcement that the user never saw due to a transient
+    // delivery error.
+    markSeen(version);
 }
