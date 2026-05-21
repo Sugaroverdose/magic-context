@@ -1,55 +1,58 @@
 # Changelog
 
-All notable changes to `opencode-magic-context` are documented here.
-This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Magic Context ships three npm packages from this repo (`@cortexkit/magic-context`, `@cortexkit/opencode-magic-context`, `@cortexkit/pi-magic-context`) and a Tauri dashboard. All three plugin packages share a single version line and ship together. The dashboard tracks its own `dashboard-vX.Y.Z` tag line.
 
-## [Unreleased] — v3.3.1: Tag-Owner Identity Fix
+## Source of truth
 
-### Fixed
+Full per-release notes live in GitHub Releases — that's the canonical, user-facing changelog:
 
-- **Tool-call collision bug**: when two assistant turns within a single session reused the same OpenCode-generated tool callID (e.g. both invoked `read:32`), the runtime keyed both invocations to the SAME tag row by `messageId == callId`. Dropping the first turn's tag silently propagated to the second turn's content, corrupting the conversation. The fix adds **composite identity** for tool tags: each row is now uniquely identified by `(session_id, message_id, tool_owner_message_id)` where `tool_owner_message_id` is the assistant message hosting the invocation.
+- **Plugin/CLI releases:** https://github.com/cortexkit/magic-context/releases (filtered to `v0.*` tags)
+- **Dashboard releases:** same page, filtered to `dashboard-v0.*` tags
 
-  This was the bug class behind several user-visible symptoms:
-  - "My recent search results just disappeared after I edited a file."
-  - Reasoning preservation reverting on a fresh assistant turn even though no `ctx_reduce` was issued.
-  - Heuristic dedup silently merging two semantically distinct tool invocations.
+This file exists as a quick navigation map. Working drafts that became those release notes are kept under `.alfonso/release-notes/` for reference.
 
-- **Drop queue cross-compartment matching**: `compartment-runner-drop-queue` no longer queues drops for tool tags whose owner lies outside the compartment range. Pre-fix it matched by bare callId, so a callId reused outside the compartment matched an in-compartment tag by string equality and got wrongly dropped.
+## Versioning
 
-- **Heuristic dedup cross-owner false positives**: `applyHeuristicCleanup` now keys both the tag-side index AND the fingerprint-side map by composite `(ownerMsgId, callId)`, with the fingerprint VALUE also including ownerMsgId. Cross-owner pairs with same `(toolName, args)` now produce DISTINCT fingerprints and are NOT merged. Within-same-owner duplicates (Pi parallel-tool-calls shape) still group correctly.
+This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the public surface is pre-1.0:
 
-- **`message.removed` cleanup cascade**: `deleteTagsByMessageId` now also deletes tool tags whose `tool_owner_message_id` matches the removed message id. Pre-fix, removing an assistant message left its tool tag rows orphaned in the DB.
+- `MINOR` bumps (`0.21.0` → `0.22.0`) carry user-visible feature additions or breaking config migrations.
+- `PATCH` bumps (`0.21.6` → `0.21.7`) carry bug fixes and small enhancements that don't change config shape or break existing setups.
+- Migrations that change config shape always ship with an in-memory shim so existing configs keep working until you run `doctor` to rewrite them on disk.
 
-### Added
+## Highlights by release line
 
-- **Schema migration v10** (`migrations.ts`): adds `tool_owner_message_id` (`TEXT NULL`) column, partial UNIQUE index `idx_tags_tool_composite`, and partial lookup index `idx_tags_tool_null_owner` to back lazy adoption.
+### 0.21.x (current)
 
-- **Layer B backfill** (`tool-owner-backfill.ts`): one-shot lease-based backfill that reads OpenCode's session DB and populates `tool_owner_message_id` on legacy NULL-owner rows. Validated against the user's real 370MB DB (17.86s for 3,284 sessions).
+The most recent release line. Notable themes:
 
-- **Tagger composite identity API** (`tagger.ts`):
-  - `assignToolTag(sessionId, callId, ownerMsgId, ...)` — allocate or reuse a tool tag scoped by composite identity.
-  - `getToolTag(sessionId, callId, ownerMsgId)` — composite-identity lookup.
-  - `bindToolTag(sessionId, callId, ownerMsgId, tagNumber)` — recovery binding.
-  - `assignTag` / `getTag` are narrowed to non-tool types (`message` / `file`) — TS forbids passing `"tool"` to them.
+- **0.21.7** — Compressor cross-process safety (fixes GH #91), unified agent disable semantics, startup release announcements, auto-search ignores plugin-internal messages.
+- **0.21.6** — Hidden subagent permission lock-down, TUI execute-threshold display, `doctor --issue` 64KB cap.
+- **0.21.5** — Pi audit fixes wave 1.
+- **0.21.4** — Issue #85 emergency-recovery loop fix, compaction markers graduated from experimental.
+- **0.21.2** — Pi reference-identity boundary resolution, Pi subagent spawning.
+- **0.21.1** — Pi parity sweep (44 audit findings), Pi multi-turn RPC harness, key-files plan v6 implementation.
+- **0.21.0** — Sticky-injection multi-anchor persistence, per-project embedding resolution, project-local historian artifacts.
 
-- **Lazy adoption fallback**: when a transform pass observes a tool call whose composite key has no match in the in-memory map, the tagger queries `getNullOwnerToolTag` for legacy orphans and atomically claims one via `adoptNullOwnerToolTag` (NULL guard ensures first claim wins). This handles unbackfilled NULL-owner rows incrementally.
+### 0.20.x
 
-- **End-to-end collision-repro test** (`packages/e2e-tests/tests/tag-owner-collision.test.ts`): drives a real OpenCode + magic-context plugin pair through the bug-class scenario and verifies the schema, indexes, and DB-level invariants hold.
+- Boundary-execution v8 (defer execute decisions out of mid-turn passes), short-context overflow recovery, Pi audit fixes batch.
 
-- **Microbenchmark for nearest-prior owner derivation** (`packages/plugin/scripts/benchmark-nearest-prior.ts`): documents plan Test #45's exit criterion (0.0455 ms avg on a 30k-tag session — 10× under the 0.5 ms budget).
+### 0.19.x
 
-### Changed
+- Deferred compaction-marker movement, JSONC parser resilience, doctor migration framework.
 
-- **Tag-transcript Pi pipeline** (`tag-transcript.ts`): removed the outer `db.transaction()` wrapper. Per-tag SAVEPOINTs inside `assignToolTag` / `assignTag` already provide the atomicity needed; the outer wrapper was a cache-bust amplifier that rolled back ALL tag inserts in a pass on a single late UNIQUE collision while leaving in-memory message mutations and `§N§` prefixes already applied.
+### 0.18.x
 
-- **Drop queue API** (`read-session-chunk.ts: getRawSessionTagKeysThrough`): now returns `RawSessionTagKeys` with `messageFileKeys: Set<string>` and `toolObservations: Map<string, Set<string>>` instead of one collapsed `Set<string>`. The split allows tool tags to be matched by composite identity while message/file tags continue using globally-unique content ids.
+- OpenCode fallback-chain support, dreamer circuit breaker, structured failure reporting.
 
-### Compatibility
+### 0.17.x
 
-- **Pre-v3.3.1 sessions**: rows written before this version have `tool_owner_message_id = NULL`. The Layer B backfill populates them from OpenCode's session DB on plugin upgrade. Sessions for which OpenCode's DB is unavailable (foreign-harness sessions, deleted DB) fall back to lazy adoption — orphans are converted to non-NULL on the next observation. Drop queue and heuristic cleanup gracefully degrade to bare-callId match for unbackfilled rows (plan §Risk #20).
+- Tag-owner composite identity overhaul (fixed cross-turn callID collisions corrupting conversation tags), schema migration v10, runtime-detected SQLite backend selector.
 
-- **Cache stability**: composite-key migration deterministically produces the same `§N§` prefix across passes for the same observation. Anthropic prompt-cache prefix stability is preserved on defer passes (verified via existing `cache-stability.test.ts` and the new collision-repro tests).
+### 0.16.x
 
----
+- Unified `@cortexkit/magic-context` CLI replacing per-plugin bins, harness adapters for OpenCode and Pi, doctor/setup/migrate flows, Electron `nativeBinding` for OpenCode Desktop.
 
-For prior versions, see git history.
+### 0.15.x and earlier
+
+See GitHub Releases. Older lines are kept for archival reference but should not be used — upgrade with `npx @cortexkit/magic-context@latest doctor --force` to refresh OpenCode's cached plugin.
