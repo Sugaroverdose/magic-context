@@ -31,7 +31,7 @@ export interface RegisterCtxStatusDeps {
 		default?: number;
 		[modelKey: string]: number | undefined;
 	};
-	dreamer?: { enabled?: boolean; schedule?: string };
+	dreamer?: { runnable?: boolean; schedule?: string };
 }
 
 export interface CtxStatusDetails {
@@ -153,7 +153,7 @@ function buildStatusDetails(
 				status: ["pending", "ready"],
 			}).length,
 		dreamer: {
-			enabled: deps.dreamer?.enabled === true,
+			enabled: deps.dreamer?.runnable === true,
 			schedule: deps.dreamer?.schedule ?? null,
 			lastRunAt: readNumberState(
 				deps.db,
@@ -211,7 +211,7 @@ export function formatCtxStatusSummary(details: CtxStatusDetails): string {
 		`**Compartments:** ${details.compartmentCount}${details.lastCompartmentRange ? ` (last ${details.lastCompartmentRange})` : ""}`,
 		`**Memories:** ${details.memoryCount}`,
 		`**Notes:** ${details.noteCount}`,
-		`**Dreamer:** ${details.dreamer.enabled ? `enabled (${details.dreamer.schedule ?? "unscheduled"})` : "disabled"}`,
+		`**Dreamer:** ${details.dreamer.enabled ? `enabled (${details.dreamer.schedule?.trim() ? details.dreamer.schedule : "manual-only"})` : "disabled"}`,
 		`**Historian:** ${details.historian.inProgress ? "running" : "idle"}, failures=${details.historian.failureCount}`,
 	].join("\n");
 }

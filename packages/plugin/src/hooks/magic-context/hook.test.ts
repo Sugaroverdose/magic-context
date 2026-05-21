@@ -445,7 +445,6 @@ describe("magic-context hook", () => {
         deps.config = {
             ...deps.config,
             dreamer: {
-                enabled: true,
                 schedule: "02:00-06:00",
                 max_runtime_minutes: 60,
                 tasks: ["consolidate"],
@@ -529,7 +528,6 @@ describe("magic-context hook", () => {
         deps.config = {
             ...deps.config,
             sidekick: {
-                enabled: true,
                 timeout_ms: 5_000,
             },
         };
@@ -610,7 +608,6 @@ describe("magic-context hook", () => {
         deps.config = {
             ...deps.config,
             dreamer: {
-                enabled: true,
                 schedule: `${formatHm(scheduleStart)}-${formatHm(scheduleEnd)}`,
                 max_runtime_minutes: 60,
                 tasks: ["consolidate"],

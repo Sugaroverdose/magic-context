@@ -49,6 +49,8 @@ export interface CompressorDeps {
     maxCompartmentsPerPass?: number;
     /** Newest compartments always excluded from compression. Default 10. */
     graceCompartments?: number;
+    /** False when historian.disable=true; compressor prompts use the historian agent. */
+    historianRunnable?: boolean;
 }
 
 /** Depth → caveman level mapping. Depth 1 = merge only (no caveman post-process).
@@ -75,6 +77,10 @@ interface ScoredCompartment {
  */
 export async function runCompressionPassIfNeeded(deps: CompressorDeps): Promise<boolean> {
     const { db, sessionId, historyBudgetTokens } = deps;
+    if (deps.historianRunnable === false) {
+        sessionLog(sessionId, "compressor: skipped because historian.disable=true");
+        return false;
+    }
     const minCompartmentRatio =
         deps.minCompartmentRatio ?? DEFAULT_COMPRESSOR_MIN_COMPARTMENT_RATIO;
     const maxMergeDepth = deps.maxMergeDepth ?? DEFAULT_COMPRESSOR_MAX_MERGE_DEPTH;

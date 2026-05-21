@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { detectConfigFile, parseJsonc } from "../shared/jsonc-parser";
+import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import { type MagicContextConfig, MagicContextConfigSchema } from "./schema/magic-context";
 import { substituteConfigVariables } from "./variable";
 
@@ -325,7 +326,8 @@ function parsePluginConfig(
     // Pre-Zod shim: reshape legacy experimental.* graduated keys so the user's
     // opt-in/out state survives upgrades even when they never run `doctor`.
     const preMigrationWarnings: string[] = [];
-    const migrated = migrateLegacyExperimental(rawConfig, preMigrationWarnings);
+    const migratedExperimental = migrateLegacyExperimental(rawConfig, preMigrationWarnings);
+    const migrated = migrateLegacyAgentEnabledInMemory(migratedExperimental, preMigrationWarnings);
     const parsed = MagicContextConfigSchema.safeParse(migrated);
     const disabledHooks = Array.isArray(rawConfig.disabled_hooks)
         ? rawConfig.disabled_hooks.filter((value): value is string => typeof value === "string")

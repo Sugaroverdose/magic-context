@@ -227,7 +227,7 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         });
 
         const result = loadWithUserConfig(config);
-        // dreamer.enabled wins.
+        // dreamer.user_memories wins.
         expect(result.dreamer?.user_memories?.enabled).toBe(true);
         // Missing sub-field fills in from old block.
         expect(result.dreamer?.user_memories?.promotion_threshold).toBe(10);
@@ -238,6 +238,56 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         const result = loadWithUserConfig(config);
         // No warning, no disruption.
         expect(result.configWarnings).toBeUndefined();
+    });
+});
+
+describe("loadPluginConfig — legacy agent enabled migration", () => {
+    it("migrates dreamer.enabled=false to disable=true with manual-dream warning", () => {
+        const result = loadWithUserConfig(JSON.stringify({ dreamer: { enabled: false } }));
+
+        expect(result.dreamer?.disable).toBe(true);
+        expect(result.configWarnings?.join("\n")).toContain(
+            'Migrated "dreamer.enabled=false" → "dreamer.disable=true" in-memory (run doctor to persist). This now also disables manual /ctx-dream; for manual-only remove disable and set schedule="".',
+        );
+    });
+
+    it("removes dreamer.enabled=true without adding disable=false", () => {
+        const result = loadWithUserConfig(JSON.stringify({ dreamer: { enabled: true } }));
+
+        expect(result.dreamer?.disable).toBeUndefined();
+        expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
+        expect(result.configWarnings?.join("\n")).toContain(
+            'Ignored deprecated "dreamer.enabled=true" in-memory (run doctor to remove).',
+        );
+    });
+
+    it("migrates sidekick.enabled=false and removes sidekick.enabled=true", () => {
+        const disabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: false } }));
+        expect(disabled.sidekick?.disable).toBe(true);
+        expect(disabled.configWarnings?.join("\n")).toContain(
+            'Migrated "sidekick.enabled=false" → "sidekick.disable=true" in-memory (run doctor to persist).',
+        );
+
+        const enabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: true } }));
+        expect(enabled.sidekick?.disable).toBeUndefined();
+        expect("enabled" in (enabled.sidekick as Record<string, unknown>)).toBe(false);
+    });
+
+    it("removes invalid historian.enabled and applies conflict rules", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({
+                historian: { enabled: false },
+                dreamer: { enabled: false, disable: false },
+                sidekick: { enabled: true, disable: true },
+            }),
+        );
+
+        expect(result.historian).toEqual({ two_pass: false });
+        expect(result.dreamer?.disable).toBe(true);
+        expect(result.sidekick?.disable).toBe(true);
+        expect(result.configWarnings?.join("\n")).toContain(
+            'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
+        );
     });
 });
 

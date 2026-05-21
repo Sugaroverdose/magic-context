@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import {
 	type MagicContextConfig,
 	MagicContextConfigSchema,
@@ -145,9 +146,14 @@ function parsePiConfig(
 	config: MagicContextConfig;
 	warnings: string[];
 } {
-	const parsed = MagicContextConfigSchema.safeParse(rawConfig);
+	const preMigrationWarnings: string[] = [];
+	const migrated = migrateLegacyAgentEnabledInMemory(
+		rawConfig,
+		preMigrationWarnings,
+	);
+	const parsed = MagicContextConfigSchema.safeParse(migrated);
 	if (parsed.success) {
-		return { config: parsed.data, warnings: [] };
+		return { config: parsed.data, warnings: preMigrationWarnings };
 	}
 
 	const defaults = MagicContextConfigSchema.parse({});
@@ -159,8 +165,8 @@ function parsePiConfig(
 		}
 	}
 
-	const patched: Record<string, unknown> = { ...rawConfig };
-	const warnings: string[] = [];
+	const patched: Record<string, unknown> = { ...migrated };
+	const warnings: string[] = [...preMigrationWarnings];
 
 	for (const key of errorPaths) {
 		recoveredTopLevelKeys.push(key);

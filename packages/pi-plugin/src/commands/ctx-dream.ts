@@ -32,7 +32,7 @@ export function registerCtxDreamCommand(
 					pi,
 					{
 						title: "/ctx-dream",
-						text: "## /ctx-dream\n\nDreamer is not configured for this project (`dreamer.enabled=false`).",
+						text: "## /ctx-dream\n\nDreamer is disabled for this project (`dreamer.disable=true`).",
 						level: "info",
 					},
 					{

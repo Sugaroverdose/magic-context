@@ -92,8 +92,8 @@ beforeAll(async () => {
 		modelContextLimit: 100_000,
 		magicContextConfig: {
 			execute_threshold_percentage: 20,
-			dreamer: { enabled: false },
-			sidekick: { enabled: false },
+			dreamer: { disable: true },
+			sidekick: { disable: true },
 		},
 	});
 });

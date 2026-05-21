@@ -245,8 +245,8 @@ describe("long-running Pi Magic Context session", () => {
                     auto_search: { enabled: true, score_threshold: 0.1, min_prompt_chars: 12 },
                     git_commit_indexing: { enabled: false },
                 },
-                dreamer: { enabled: false },
-                sidekick: { enabled: false },
+                dreamer: { disable: true },
+                sidekick: { disable: true },
                 compressor: { enabled: false },
             },
         });

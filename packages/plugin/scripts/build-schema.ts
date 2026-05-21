@@ -394,11 +394,6 @@ function buildSchema(): Record<string, unknown> {
                 type: "object",
                 properties: {
                     ...agentOverrideSchema.properties,
-                    enabled: {
-                        type: "boolean",
-                        default: false,
-                        description: "Enable scheduled dreaming",
-                    },
                     schedule: {
                         type: "string",
                         default: "02:00-06:00",
@@ -556,11 +551,6 @@ function buildSchema(): Record<string, unknown> {
                 type: "object",
                 properties: {
                     ...agentOverrideSchema.properties,
-                    enabled: {
-                        type: "boolean",
-                        default: false,
-                        description: "Enable sidekick agent for /ctx-aug augmentation",
-                    },
                     timeout_ms: {
                         type: "number",
                         default: 30000,

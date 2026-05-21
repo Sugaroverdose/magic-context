@@ -104,7 +104,7 @@ describe("MagicContextConfigSchema", () => {
                     retrieval_count_promotion_threshold: 3,
                 },
                 sidekick: {
-                    enabled: true,
+                    disable: false,
                     model: "qwen-test",
                     fallback_models: ["qwen-fallback"],
                     temperature: 0.1,
@@ -127,10 +127,30 @@ describe("MagicContextConfigSchema", () => {
             });
 
             expect(result.sidekick).toEqual({
-                enabled: false,
                 model: "github-copilot/gpt-5.4",
                 timeout_ms: 30000,
             });
+        });
+
+        it("accepts disable on hidden agents and strips deprecated top-level enabled", () => {
+            const result = MagicContextConfigSchema.parse({
+                historian: { disable: true },
+                dreamer: {
+                    disable: true,
+                    enabled: true,
+                    user_memories: { enabled: false },
+                    pin_key_files: { enabled: true },
+                },
+                sidekick: { disable: true, enabled: true },
+            });
+
+            expect(result.historian?.disable).toBe(true);
+            expect(result.dreamer?.disable).toBe(true);
+            expect(result.sidekick?.disable).toBe(true);
+            expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
+            expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
+            expect(result.dreamer?.user_memories.enabled).toBe(false);
+            expect(result.dreamer?.pin_key_files.enabled).toBe(true);
         });
 
         it("accepts optional auto_update user preference", () => {

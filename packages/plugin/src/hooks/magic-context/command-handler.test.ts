@@ -444,7 +444,6 @@ describe("createMagicContextCommandHandler", () => {
                 sendNotification,
                 dreamer: {
                     config: {
-                        enabled: true,
                         schedule: "02:00-06:00",
                         max_runtime_minutes: 60,
                         tasks: ["consolidate"],
@@ -491,7 +490,6 @@ describe("createMagicContextCommandHandler", () => {
                 sendNotification,
                 dreamer: {
                     config: {
-                        enabled: true,
                         schedule: "02:00-06:00",
                         max_runtime_minutes: 60,
                         tasks: ["consolidate"],
@@ -558,7 +556,6 @@ describe("createMagicContextCommandHandler", () => {
                 sendNotification,
                 sidekick: {
                     config: {
-                        enabled: true,
                         timeout_ms: 5_000,
                     },
                     projectPath: "/repo/project",

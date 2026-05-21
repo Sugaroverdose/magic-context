@@ -40,7 +40,6 @@ function createDb(): Database {
 
 function enabledConfig() {
 	return DreamerConfigSchema.parse({
-		enabled: true,
 		schedule: "00:00-23:59",
 		model: "test/model",
 		tasks: ["consolidate"],
@@ -48,7 +47,7 @@ function enabledConfig() {
 }
 
 function disabledConfig() {
-	return DreamerConfigSchema.parse({ enabled: false });
+	return DreamerConfigSchema.parse({ disable: true });
 }
 
 function dreamerOptions(args: {
@@ -96,7 +95,7 @@ afterEach(() => {
 });
 
 describe("Pi dreamer wiring", () => {
-	test("disabled config is a no-op", () => {
+	test("disable=true config is a no-op", () => {
 		db = createDb();
 
 		registerPiDreamerProject(
@@ -111,7 +110,7 @@ describe("Pi dreamer wiring", () => {
 		expect(__test.registeredProjectCount()).toBe(0);
 	});
 
-	test("enabled config registers once for the same project", () => {
+	test("runnable config registers once for the same project", () => {
 		db = createDb();
 		const config = enabledConfig();
 		const opts = dreamerOptions({

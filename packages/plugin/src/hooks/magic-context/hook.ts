@@ -1,6 +1,11 @@
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import { HISTORIAN_AGENT } from "../../agents/historian";
 import {
+    isDreamerRunnable,
+    isHistorianRunnable,
+    isSidekickRunnable,
+} from "../../config/agent-disable";
+import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
     type DreamerConfig,
@@ -282,6 +287,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         return undefined;
     };
     const ctxReduceEnabled = deps.config.ctx_reduce_enabled !== false;
+    const dreamerRunnable = isDreamerRunnable(deps.config);
+    const dreamerConfig = dreamerRunnable ? deps.config.dreamer : undefined;
+    const historianRunnable = isHistorianRunnable(deps.config);
+    const sidekickRunnable = isSidekickRunnable(deps.config);
+    const sidekickConfig = sidekickRunnable ? deps.config.sidekick : undefined;
     const nudgerWithRecentReduce = ctxReduceEnabled
         ? createNudger({
               protected_tags: deps.config.protected_tags,
@@ -345,7 +355,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             return model ? `${model.providerID}/${model.modelID}` : undefined;
         },
         projectPath,
-        experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
+        historianRunnable,
+        experimentalUserMemories: dreamerConfig?.user_memories?.enabled,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         compressorMinCompartmentRatio:
@@ -413,7 +424,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const runDreamQueueInBackground = (): void => {
         const dreaming = deps.config.dreamer;
-        if (!dreaming?.enabled || !dreaming.schedule?.trim()) {
+        if (!dreaming || dreaming.disable === true || !dreaming.schedule?.trim()) {
             return;
         }
 
@@ -436,23 +447,20 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             tasks: dreaming.tasks,
             taskTimeoutMinutes: dreaming.task_timeout_minutes,
             maxRuntimeMinutes: dreaming.max_runtime_minutes,
-            experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled
+            experimentalUserMemories: dreaming.user_memories?.enabled
                 ? {
                       enabled: true,
-                      promotionThreshold: deps.config.dreamer.user_memories.promotion_threshold,
+                      promotionThreshold: dreaming.user_memories.promotion_threshold,
                   }
                 : undefined,
-            experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled
+            experimentalPinKeyFiles: dreaming.pin_key_files?.enabled
                 ? {
                       enabled: true,
-                      token_budget: deps.config.dreamer.pin_key_files.token_budget,
-                      min_reads: deps.config.dreamer.pin_key_files.min_reads,
+                      token_budget: dreaming.pin_key_files.token_budget,
+                      min_reads: dreaming.pin_key_files.min_reads,
                   }
                 : undefined,
-            fallbackModels: resolveFallbackChain(
-                DREAMER_AGENT,
-                deps.config.dreamer?.fallback_models,
-            ),
+            fallbackModels: resolveFallbackChain(DREAMER_AGENT, dreaming.fallback_models),
             projectIdentity: projectPath,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled queue processing failed:", error);
@@ -489,54 +497,56 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             systemPromptRefreshSessions.add(sessionId);
             pendingMaterializationSessions.add(sessionId);
         },
-        executeRecomp: async (sessionId, options) =>
-            executeContextRecomp(
-                {
-                    client: deps.client,
-                    db,
-                    sessionId,
-                    historianChunkTokens: getHistorianChunkTokens(),
-                    historianTimeoutMs:
-                        deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
-                    fallbackModels: historianFallbackModels,
-                    directory: deps.directory,
-                    fallbackModelId: (() => {
-                        // DB fallback so /ctx-recomp's last-resort fallback model
-                        // is known even when invoked before the first transform.
-                        const model = resolveLiveModel(sessionId);
-                        return model ? `${model.providerID}/${model.modelID}` : undefined;
-                    })(),
-                    getNotificationParams: () =>
-                        getLiveNotificationParams(
-                            sessionId,
-                            liveModelBySession,
-                            variantBySession,
-                            agentBySession,
-                        ),
-                    historianTwoPass: deps.config.historian?.two_pass === true,
-                    // Issue #44: respect memory feature gates from /ctx-recomp too.
-                    memoryEnabled: deps.config.memory?.enabled,
-                    autoPromote: deps.config.memory?.auto_promote ?? true,
-                    ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-                    // Recomp invalidates injection cache and queues drop ops
-                    // via queueDropsForCompartmentalizedMessages. Signal both
-                    // history-rebuild (one-shot for the next transform) and
-                    // pending-materialization (persistent until heuristics
-                    // succeed). NOT systemPromptRefresh — recomp doesn't
-                    // touch disk-backed adjuncts. See council Finding #9.
-                    onCompartmentStatePublished: (sid) => {
-                        historyRefreshSessions.add(sid);
-                        pendingMaterializationSessions.add(sid);
-                    },
-                    // Plan v6 §4 + §7: signal deferred-marker drain on incremental
-                    // publish. Recomp is explicit so this is a no-op there, but
-                    // the runner type is shared and the callback is always optional.
-                    onDeferredMarkerPending: (sid) => {
-                        deferredHistoryRefreshSessions.add(sid);
-                    },
-                },
-                options,
-            ),
+        executeRecomp: historianRunnable
+            ? async (sessionId, options) =>
+                  executeContextRecomp(
+                      {
+                          client: deps.client,
+                          db,
+                          sessionId,
+                          historianChunkTokens: getHistorianChunkTokens(),
+                          historianTimeoutMs:
+                              deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
+                          fallbackModels: historianFallbackModels,
+                          directory: deps.directory,
+                          fallbackModelId: (() => {
+                              // DB fallback so /ctx-recomp's last-resort fallback model
+                              // is known even when invoked before the first transform.
+                              const model = resolveLiveModel(sessionId);
+                              return model ? `${model.providerID}/${model.modelID}` : undefined;
+                          })(),
+                          getNotificationParams: () =>
+                              getLiveNotificationParams(
+                                  sessionId,
+                                  liveModelBySession,
+                                  variantBySession,
+                                  agentBySession,
+                              ),
+                          historianTwoPass: deps.config.historian?.two_pass === true,
+                          // Issue #44: respect memory feature gates from /ctx-recomp too.
+                          memoryEnabled: deps.config.memory?.enabled,
+                          autoPromote: deps.config.memory?.auto_promote ?? true,
+                          ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+                          // Recomp invalidates injection cache and queues drop ops
+                          // via queueDropsForCompartmentalizedMessages. Signal both
+                          // history-rebuild (one-shot for the next transform) and
+                          // pending-materialization (persistent until heuristics
+                          // succeed). NOT systemPromptRefresh — recomp doesn't
+                          // touch disk-backed adjuncts. See council Finding #9.
+                          onCompartmentStatePublished: (sid) => {
+                              historyRefreshSessions.add(sid);
+                              pendingMaterializationSessions.add(sid);
+                          },
+                          // Plan v6 §4 + §7: signal deferred-marker drain on incremental
+                          // publish. Recomp is explicit so this is a no-op there, but
+                          // the runner type is shared and the callback is always optional.
+                          onDeferredMarkerPending: (sid) => {
+                              deferredHistoryRefreshSessions.add(sid);
+                          },
+                      },
+                      options,
+                  )
+            : undefined,
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {
                 ...getLiveNotificationParams(
@@ -548,37 +558,36 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 ...params,
             });
         },
-        sidekick: deps.config.sidekick?.enabled
+        sidekick: sidekickConfig
             ? {
-                  config: deps.config.sidekick,
+                  config: sidekickConfig,
                   projectPath,
                   sessionDirectory: deps.directory,
                   client: deps.client,
               }
             : undefined,
-        dreamer: deps.config.dreamer
+        dreamer: dreamerConfig
             ? {
-                  config: deps.config.dreamer,
+                  config: dreamerConfig,
                   projectPath,
                   client: deps.client,
                   directory: deps.directory,
-                  experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled
+                  experimentalUserMemories: dreamerConfig.user_memories?.enabled
                       ? {
                             enabled: true,
-                            promotionThreshold:
-                                deps.config.dreamer.user_memories.promotion_threshold,
+                            promotionThreshold: dreamerConfig.user_memories.promotion_threshold,
                         }
                       : undefined,
-                  experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled
+                  experimentalPinKeyFiles: dreamerConfig.pin_key_files?.enabled
                       ? {
                             enabled: true,
-                            token_budget: deps.config.dreamer.pin_key_files.token_budget,
-                            min_reads: deps.config.dreamer.pin_key_files.min_reads,
+                            token_budget: dreamerConfig.pin_key_files.token_budget,
+                            min_reads: dreamerConfig.pin_key_files.min_reads,
                         }
                       : undefined,
                   fallbackModels: resolveFallbackChain(
                       DREAMER_AGENT,
-                      deps.config.dreamer.fallback_models,
+                      dreamerConfig.fallback_models,
                   ),
               }
             : undefined,
@@ -589,7 +598,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
         dropToolStructure: deps.config.drop_tool_structure ?? true,
-        dreamerEnabled: deps.config.dreamer?.enabled === true,
+        dreamerEnabled: dreamerRunnable,
         injectDocs: deps.config.dreamer?.inject_docs !== false,
         directory: deps.directory,
         // System-prompt-hash handler reads systemPromptRefreshSessions to

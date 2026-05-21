@@ -16,7 +16,7 @@ export interface PiDreamerOptions {
 	db: ContextDatabase;
 	projectDir: string;
 	projectIdentity: string;
-	/** Resolved DreamerConfig from loadPiConfig(). When .enabled is false, the function is a no-op. */
+	/** Resolved runnable DreamerConfig from loadPiConfig(). When disable=true, the caller does not register. */
 	config: DreamerConfig;
 	/**
 	 * Council finding #7: dreamer needs the real embedding config so it can
@@ -99,7 +99,7 @@ let startDreamScheduleTimerFn: typeof defaultStartDreamScheduleTimer =
 /** Initialize the Pi-side dreamer integration: register this project with
  *  the singleton timer, ensure PiSubagentRunner is the active runner. */
 export function registerPiDreamerProject(opts: PiDreamerOptions): void {
-	if (!opts.config.enabled) {
+	if (opts.config.disable === true) {
 		return;
 	}
 

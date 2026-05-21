@@ -158,18 +158,19 @@ describe("runSetup", () => {
 
         const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
             historian?: { model?: string; thinking_level?: string };
-            dreamer?: { enabled?: boolean; model?: string };
-            sidekick?: { enabled?: boolean };
+            dreamer?: { enabled?: boolean; model?: string; disable?: boolean };
+            sidekick?: { enabled?: boolean; disable?: boolean };
             embedding?: { provider?: string; model?: string };
         };
         // anthropic model — no thinking_level needed
         expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
         expect(config.historian?.thinking_level).toBeUndefined();
         expect(config.dreamer).toEqual({
-            enabled: true,
             model: "anthropic/claude-sonnet-4-6",
         });
-        expect(config.sidekick?.enabled).toBe(false);
+        expect(config.dreamer).not.toHaveProperty("enabled");
+        expect(config.sidekick?.disable).toBe(true);
+        expect(config.sidekick).not.toHaveProperty("enabled");
         expect(config.embedding).toEqual({
             provider: "local",
             model: "Xenova/all-MiniLM-L6-v2",

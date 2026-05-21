@@ -1173,22 +1173,21 @@ function ConfigForm(props: {
               <div class="config-card-content">
                 <div class="config-field">
                   <div class="config-field-header">
-                    <span class="config-field-label">Enabled</span>
+                    <span class="config-field-label">Dreamer agent enabled</span>
                   </div>
-                  <span class="config-field-desc">Enable dreamer background processing</span>
+                  <span class="config-field-desc">Controls whether the Dreamer hidden agent is registered. To keep manual /ctx-dream but disable automatic runs, leave enabled and set Schedule to empty.</span>
                   <label class="toggle-switch">
                     <input
                       type="checkbox"
-                      checked={(getNestedValue(formData(), "dreamer.enabled") as boolean) ?? false}
-                      onChange={(e) =>
-                        handleFieldChange("dreamer.enabled", e.currentTarget.checked)
-                      }
+                      checked={getNestedValue(formData(), "dreamer.disable") !== true}
+                      onChange={(e) => {
+                        handleFieldChange("dreamer.disable", !e.currentTarget.checked);
+                        handleFieldChange("dreamer.enabled", undefined);
+                      }}
                     />
                     <span class="toggle-slider" />
                     <span class="toggle-label">
-                      {((getNestedValue(formData(), "dreamer.enabled") as boolean) ?? false)
-                        ? "Enabled"
-                        : "Disabled"}
+                      {getNestedValue(formData(), "dreamer.disable") !== true ? "Enabled" : "Disabled"}
                     </span>
                   </label>
                 </div>
@@ -1198,7 +1197,7 @@ function ConfigForm(props: {
                     <span class="config-field-label">Schedule</span>
                   </div>
                   <span class="config-field-desc">
-                    Time window for dreamer runs (e.g., 02:00-06:00)
+                    Time window for automatic dreamer runs (e.g., 02:00-06:00). Empty disables automatic runs while keeping manual /ctx-dream available.
                   </span>
                   <input
                     class="config-input"
@@ -1206,7 +1205,7 @@ function ConfigForm(props: {
                     value={String(getNestedValue(formData(), "dreamer.schedule") ?? "")}
                     placeholder="02:00-06:00"
                     onInput={(e) =>
-                      handleFieldChange("dreamer.schedule", e.currentTarget.value || undefined)
+                      handleFieldChange("dreamer.schedule", e.currentTarget.value)
                     }
                   />
                 </div>
@@ -1518,20 +1517,21 @@ function ConfigForm(props: {
               {/* Enabled Toggle */}
               <div class="config-field">
                 <div class="config-field-header">
-                  <span class="config-field-label">Enabled</span>
+                  <span class="config-field-label">Sidekick agent enabled</span>
                 </div>
-                <span class="config-field-desc">Enable sidekick augmentation</span>
+                <span class="config-field-desc">Controls whether the Sidekick hidden agent is registered for /ctx-aug.</span>
                 <label class="toggle-switch">
                   <input
                     type="checkbox"
-                    checked={(getNestedValue(formData(), "sidekick.enabled") as boolean) ?? false}
-                    onChange={(e) => handleFieldChange("sidekick.enabled", e.currentTarget.checked)}
+                    checked={getNestedValue(formData(), "sidekick.disable") !== true}
+                    onChange={(e) => {
+                      handleFieldChange("sidekick.disable", !e.currentTarget.checked);
+                      handleFieldChange("sidekick.enabled", undefined);
+                    }}
                   />
                   <span class="toggle-slider" />
                   <span class="toggle-label">
-                    {((getNestedValue(formData(), "sidekick.enabled") as boolean) ?? false)
-                      ? "Enabled"
-                      : "Disabled"}
+                    {getNestedValue(formData(), "sidekick.disable") !== true ? "Enabled" : "Disabled"}
                   </span>
                 </label>
               </div>

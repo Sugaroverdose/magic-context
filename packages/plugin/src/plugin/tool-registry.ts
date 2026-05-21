@@ -1,5 +1,6 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
 import type { MagicContextPluginConfig } from "../config";
+import { isDreamerRunnable } from "../config/agent-disable";
 import { DEFAULT_PROTECTED_TAGS } from "../features/magic-context/defaults";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import {
@@ -69,7 +70,7 @@ export function createToolRegistry(args: {
         ...createCtxExpandTools(),
         ...createCtxNoteTools({
             db,
-            dreamerEnabled: pluginConfig.dreamer?.enabled === true,
+            dreamerEnabled: isDreamerRunnable(pluginConfig),
             resolveProjectPath,
         }),
         ...createCtxSearchTools({

@@ -30,6 +30,66 @@ const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
+export interface DoctorMigrationLogSink {
+    success(message: string): void;
+    warn(message: string): void;
+}
+
+export function migrateLegacyAgentEnabledConfigForDoctor(
+    mcConfig: Record<string, unknown>,
+    logs: DoctorMigrationLogSink,
+): { changed: boolean; fixes: number } {
+    let changed = false;
+    let fixes = 0;
+
+    const migrateLegacyAgentEnabled = (agentName: "dreamer" | "sidekick" | "historian"): void => {
+        const agent = mcConfig[agentName] as Record<string, unknown> | undefined;
+        if (!agent || typeof agent !== "object" || !("enabled" in agent)) return;
+
+        const enabled = agent.enabled;
+        const disable = agent.disable;
+        delete agent.enabled;
+        changed = true;
+        fixes++;
+
+        if (agentName === "historian") {
+            logs.success(
+                "Removed invalid historian.enabled (historian uses disable=true to turn off).",
+            );
+            return;
+        }
+
+        if (agentName === "dreamer") {
+            if (disable !== true && enabled === false) {
+                agent.disable = true;
+                logs.warn(
+                    "Migrated dreamer.enabled=false → dreamer.disable=true. This now also disables manual /ctx-dream. To keep manual dreaming, remove disable=true and set schedule to empty string.",
+                );
+            } else {
+                logs.success(
+                    'Removed deprecated dreamer.enabled (use dreamer.disable=true to turn off the Dreamer agent; use schedule="" for manual-only dreaming).',
+                );
+            }
+            return;
+        }
+
+        if (disable !== true && enabled === false) {
+            agent.disable = true;
+            logs.success("Migrated sidekick.enabled=false → sidekick.disable=true.");
+        } else {
+            logs.success(
+                "Removed deprecated sidekick.enabled (use sidekick.disable=true to turn off Sidekick).",
+            );
+        }
+    };
+
+    migrateLegacyAgentEnabled("dreamer");
+    migrateLegacyAgentEnabled("sidekick");
+    migrateLegacyAgentEnabled("historian");
+
+    return { changed, fixes };
+}
+
 /**
  * Fetch the latest version of an npm package from the registry. Returns null
  * on any error so the doctor can report "check unavailable" rather than fail.
@@ -603,6 +663,12 @@ export async function runDoctor(
                 fixed++;
             }
 
+            const agentEnabledMigration = migrateLegacyAgentEnabledConfigForDoctor(mcConfig, log);
+            if (agentEnabledMigration.changed) {
+                mcChanged = true;
+                fixed += agentEnabledMigration.fixes;
+            }
+
             // Migrate experimental.user_memories → dreamer.user_memories.
             // The feature is now stable and lives under dreamer config (since
             // dreamer owns candidate review and promotion). We preserve the
@@ -915,13 +981,13 @@ export async function runDoctor(
             const mcRaw = readFileSync(paths.magicContextConfig, "utf-8");
             const mcConfig = parse(mcRaw) as Record<string, unknown>;
             const dreamerObj = mcConfig?.dreamer as Record<string, unknown> | undefined;
-            const dreamerEnabled = dreamerObj?.enabled === true;
+            const dreamerDisabled = dreamerObj?.disable === true;
             const userMemObj = dreamerObj?.user_memories as Record<string, unknown> | undefined;
             // user_memories defaults to enabled, so treat `undefined` as true.
             const userMemEnabled = userMemObj?.enabled !== false;
-            if (userMemEnabled && !dreamerEnabled) {
+            if (userMemEnabled && dreamerDisabled) {
                 log.warn(
-                    "dreamer.user_memories is enabled (default) but dreamer itself is disabled — user memory candidates will be collected but never promoted to stable memories. Enable `dreamer.enabled: true` or set `dreamer.user_memories.enabled: false` to silence this.",
+                    "dreamer.user_memories is enabled but dreamer.disable=true, so new promotions will not run. Remove dreamer.disable or set dreamer.user_memories.enabled=false.",
                 );
                 issues++;
             }

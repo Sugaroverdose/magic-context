@@ -58,8 +58,6 @@ export type PiThinkingLevel = z.infer<typeof PiThinkingLevelSchema>;
 /** Combined dreamer agent + scheduling configuration */
 export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
     z.object({
-        /** Enable scheduled dreaming (default: false) */
-        enabled: z.boolean().default(false),
         /** Scheduled window for overnight dreaming (e.g. "02:00-06:00") */
         schedule: z.string().default("02:00-06:00"),
         /** Maximum runtime per dream session in minutes (default: 120) */
@@ -73,7 +71,7 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
         /** User memory pipeline: historian extracts behavior observations from each
          *  compartment run; dreamer reviews recurring patterns and promotes them to
          *  stable user memories injected into all sessions as `<user-profile>`.
-         *  Requires dreamer to be enabled for promotion to actually happen.
+         *  Requires dreamer to not be disabled for promotion to actually happen.
          *  Graduated from experimental in v0.14. Default: enabled. */
         user_memories: z
             .object({
@@ -86,7 +84,7 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
         /** Pin frequently-read key files into the system prompt so the agent
          *  doesn't need to re-read them after context drops. Dreamer identifies
          *  key files per session based on read patterns. Requires dreamer to be
-         *  enabled for selection to happen. Graduated from experimental in v0.14.
+         *  not be disabled for selection to happen. Graduated from experimental in v0.14.
          *  Default: disabled. */
         pin_key_files: z
             .object({
@@ -105,7 +103,6 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
 export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
 
 export const SidekickConfigSchema = AgentOverrideConfigSchema.extend({
-    enabled: z.boolean().default(false),
     timeout_ms: z.number().default(30000),
     system_prompt: z.string().optional(),
     /** Pi only: explicit thinking level for sidekick subagent. See HistorianConfigSchema. */
@@ -305,7 +302,7 @@ export const MagicContextConfigSchema = z
         ctx_reduce_enabled: z.boolean().default(true),
         /** Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.) */
         historian: HistorianConfigSchema,
-        /** Dreamer agent + scheduling configuration (model, fallback_models, enabled, schedule, tasks, etc.) */
+        /** Dreamer agent + scheduling configuration (model, fallback_models, disable, schedule, tasks, etc.) */
         dreamer: DreamerConfigSchema.optional(),
         /** Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" }) */
         cache_ttl: z

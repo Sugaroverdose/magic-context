@@ -144,8 +144,8 @@ function writeConfigs(
             "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json",
         execute_threshold_percentage: 40,
         history_budget_percentage: 0.15,
-        dreamer: { enabled: false },
-        sidekick: { enabled: false },
+        dreamer: { disable: true },
+        sidekick: { disable: true },
         ...(opts.magicContextConfig ?? {}),
     };
 

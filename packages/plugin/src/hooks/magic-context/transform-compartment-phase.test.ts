@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
@@ -182,5 +183,53 @@ describe("runCompartmentPhase - 95% emergency notification idempotency", () => {
             .find((text) => text.includes("compacting history"));
         expect(notifText).toBeDefined();
         expect(notifText).toContain("Context at 97%");
+    });
+    it("does not start independent compressor when historian is disabled", async () => {
+        const sessionId = "ses-compressor-disabled";
+        const db = openDatabase();
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 10,
+                startMessageId: "m1",
+                endMessageId: "m10",
+                title: "one",
+                content: "large content ".repeat(200),
+            },
+            {
+                sequence: 2,
+                startMessage: 11,
+                endMessage: 20,
+                startMessageId: "m11",
+                endMessageId: "m20",
+                title: "two",
+                content: "large content ".repeat(200),
+            },
+        ]);
+        const promptMock = mock(async () => ({ data: {} }));
+        const client = { session: { prompt: promptMock } } as unknown as PluginContext["client"];
+
+        await runCompartmentPhase({
+            canRunCompartments: false,
+            fullFeatureMode: true,
+            historianRunnable: false,
+            sessionMeta: { compartmentInProgress: false },
+            contextUsage: { percentage: 20 },
+            client,
+            db,
+            sessionId,
+            resolvedSessionId: sessionId,
+            historianChunkTokens: 25_000,
+            historyBudgetTokens: 1,
+            compartmentDirectory: "/tmp",
+            messages: [],
+            pendingCompartmentInjection: null,
+            deferredHistoryRefreshSessions: new Set<string>(),
+            safeForBackgroundCompression: true,
+        });
+
+        expect(getActiveCompartmentRun(sessionId)).toBeUndefined();
+        expect(promptMock).not.toHaveBeenCalled();
     });
 });

@@ -159,8 +159,8 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     memory: { enabled: true, auto_promote: false },
     embedding: { provider: "off" },
     historian: { model: "" },
-    dreamer: { enabled: false },
-    sidekick: { enabled: false },
+    dreamer: { disable: true },
+    sidekick: { disable: true },
     experimental: {
       auto_search: { enabled: false },
       git_commit_indexing: { enabled: false },

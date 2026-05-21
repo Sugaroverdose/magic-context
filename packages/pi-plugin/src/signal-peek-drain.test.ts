@@ -313,8 +313,8 @@ describe("source contract: peek-then-drain in before_agent_start (system prompt)
 		expect(code).not.toContain("^todo.*write");
 	});
 
-	test("project-docs injection is gated on dreamer.enabled", () => {
-		expect(code).toContain("(config.dreamer?.enabled ?? false) &&");
+	test("project-docs injection is gated on dreamer.disable", () => {
+		expect(code).toContain("isDreamerRunnable(config) &&");
 		expect(code).toContain("(config.dreamer?.inject_docs ?? true)");
 	});
 

@@ -175,25 +175,28 @@ function writeMagicContextConfig(
         config.historian = historian;
     }
 
+    const dreamer = (config.dreamer as Record<string, unknown>) ?? {};
+    delete dreamer.enabled;
     if (options.dreamerEnabled) {
-        const dreamer = (config.dreamer as Record<string, unknown>) ?? {};
-        dreamer.enabled = true;
+        delete dreamer.disable;
         if (options.dreamerModel) {
             dreamer.model = options.dreamerModel;
         }
-        config.dreamer = dreamer;
     } else {
-        const dreamer = (config.dreamer as Record<string, unknown>) ?? {};
-        dreamer.enabled = false;
-        config.dreamer = dreamer;
+        dreamer.disable = true;
     }
+    config.dreamer = dreamer;
 
+    const sidekick = (config.sidekick as Record<string, unknown>) ?? {};
+    delete sidekick.enabled;
     if (options.sidekickEnabled) {
-        const sidekick = (config.sidekick as Record<string, unknown>) ?? {};
-        sidekick.enabled = true;
+        delete sidekick.disable;
         if (options.sidekickModel) {
             sidekick.model = options.sidekickModel;
         }
+        config.sidekick = sidekick;
+    } else {
+        sidekick.disable = true;
         config.sidekick = sidekick;
     }
 

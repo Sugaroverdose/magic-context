@@ -22,6 +22,7 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isDreamerRunnable } from "@magic-context/core/config/agent-disable";
 import type {
 	DreamerConfig,
 	HistorianConfig,
@@ -323,11 +324,11 @@ setHarness("pi");
 // in config, so the registration helpers can short-circuit cleanly.
 // ---------------------------------------------------------------------------
 
-function resolveSidekickFromConfig(
+export function resolveSidekickFromConfig(
 	config: MagicContextConfig,
 ): PiSidekickConfig | undefined {
 	const sidekick = config.sidekick as SidekickConfig | undefined;
-	if (!sidekick?.enabled) return undefined;
+	if (!sidekick || sidekick.disable === true) return undefined;
 	const model = sidekick.model?.trim();
 	if (!model || model.length === 0) return undefined;
 	return {
@@ -339,13 +340,14 @@ function resolveSidekickFromConfig(
 	};
 }
 
-function resolveHistorianFromConfig(
+export function resolveHistorianFromConfig(
 	config: MagicContextConfig,
 ): PiHistorianOptions | undefined {
 	// Defensive: schema declares `historian` required with default {}, but the
 	// runtime config can come from a malformed JSONC merge that drops the
 	// field. Fall back to undefined-safe access so plugin load never crashes.
 	const historian = config.historian as HistorianConfig | undefined;
+	if (historian?.disable === true) return undefined;
 	const model = historian?.model?.trim();
 	if (!model || model.length === 0) return undefined;
 
@@ -425,10 +427,10 @@ function resolveAutoSearchFromConfig(
 	};
 }
 
-function resolveDreamerFromConfig(
+export function resolveDreamerFromConfig(
 	config: MagicContextConfig,
 ): DreamerConfig | undefined {
-	return config.dreamer;
+	return config.dreamer?.disable === true ? undefined : config.dreamer;
 }
 
 /**
@@ -537,7 +539,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Smart notes (surface_condition) only work when dreamer is
 		// running — otherwise the note sits `pending` forever with no
 		// path to surface. Match the user's dreamer config flag.
-		dreamerEnabled: config.dreamer?.enabled === true,
+		dreamerEnabled: isDreamerRunnable(config),
 	});
 	info(
 		`registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand${
@@ -633,7 +635,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	info(
 		sidekickConfig
 			? `registered /ctx-aug (sidekick model=${sidekickConfig.model})`
-			: "registered /ctx-aug (sidekick disabled — set sidekick.enabled=true and sidekick.model in config)",
+			: "registered /ctx-aug (sidekick disabled — set sidekick.disable=false and sidekick.model in config)",
 	);
 
 	// Step 5c: register the four diagnostic/admin slash commands so Pi
@@ -654,7 +656,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		commitClusterTrigger: config.commit_cluster_trigger,
 		executeThresholdTokens: config.execute_threshold_tokens,
 		dreamer: {
-			enabled: config.dreamer?.enabled ?? false,
+			runnable: isDreamerRunnable(config),
 			schedule: config.dreamer?.schedule,
 		},
 	});
@@ -688,7 +690,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		projectDir,
 		projectIdentity,
 		resolveProject: resolveCurrentProject,
-		dreamerEnabled: config.dreamer?.enabled ?? false,
+		dreamerEnabled: isDreamerRunnable(config),
 		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
 	});
 	info("registered /ctx-dream");
@@ -714,12 +716,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 		info(
-			dreamerConfig.enabled
-				? `registered dreamer (schedule=${dreamerConfig.schedule}, tasks=[${dreamerConfig.tasks.join(",")}])`
-				: "registered dreamer: DISABLED (dreamer.enabled=false)",
+			`registered dreamer (schedule=${dreamerConfig.schedule || "manual-only"}, tasks=[${dreamerConfig.tasks.join(",")}])`,
 		);
 	} else {
-		info("registered dreamer: DISABLED (no dreamer config)");
+		info(
+			isDreamerRunnable(config)
+				? "registered dreamer: DISABLED (no dreamer config)"
+				: "registered dreamer: DISABLED (dreamer.disable=true or no dreamer config)",
+		);
 	}
 
 	// Inject the magic-context block (guidance + project-docs +
@@ -838,12 +842,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				sessionId,
 				memoryEnabled: config.memory.enabled,
 				injectDocs:
-					(config.dreamer?.enabled ?? false) &&
-					(config.dreamer?.inject_docs ?? true),
+					isDreamerRunnable(config) && (config.dreamer?.inject_docs ?? true),
 				includeGuidance: true,
 				protectedTags: config.protected_tags,
 				ctxReduceEnabled: config.ctx_reduce_enabled,
-				dreamerEnabled: config.dreamer?.enabled ?? false,
+				dreamerEnabled: isDreamerRunnable(config),
 				dropToolStructure: config.drop_tool_structure,
 				temporalAwarenessEnabled:
 					config.experimental?.temporal_awareness ?? false,
@@ -854,15 +857,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// promotes recurring observations into this set, then the
 				// system prompt surfaces them across all sessions in the
 				// project. Gated on dreamer.user_memories.enabled.
-				userMemoriesEnabled:
-					(config.dreamer?.enabled ?? false) &&
-					(config.dreamer?.user_memories?.enabled ?? false),
+				userMemoriesEnabled: config.dreamer?.user_memories?.enabled ?? false,
 				// Pinned key files rendered as <key-files> — dreamer selects
 				// frequently-read files per session, then we read them off
 				// disk with path-traversal + token-budget guards.
-				pinKeyFilesEnabled:
-					(config.dreamer?.enabled ?? false) &&
-					(config.dreamer?.pin_key_files?.enabled ?? false),
+				pinKeyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
 				pinKeyFilesTokenBudget:
 					config.dreamer?.pin_key_files?.token_budget ?? 10_000,
 				isCacheBusting,

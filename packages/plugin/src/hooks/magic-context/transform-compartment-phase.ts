@@ -40,6 +40,8 @@ export function clearCompressorCooldown(sessionId: string): void {
 interface RunCompartmentPhaseArgs {
     canRunCompartments: boolean;
     fullFeatureMode: boolean;
+    /** False when historian.disable=true, blocking historian-backed child agents. */
+    historianRunnable?: boolean;
     sessionMeta: { compartmentInProgress: boolean };
     contextUsage: { percentage: number };
     client?: PluginContext["client"];
@@ -98,12 +100,13 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     let published = false;
     let justAwaitedPublication = false;
     let rebuiltHistoryThisPass = false;
+    const historianRunnable = args.historianRunnable !== false;
     let lastCompartmentEnd: number | null = null;
     let rawMessageCount: number | null = null;
     let cachedProtectedTailStart: number | null = null;
 
     function hasNewRawHistoryForCompartment(): boolean {
-        if (!args.fullFeatureMode) return false;
+        if (!args.fullFeatureMode || !historianRunnable) return false;
         if (lastCompartmentEnd === null) {
             lastCompartmentEnd = getLastCompartmentEndMessage(args.db, args.resolvedSessionId);
         }
@@ -162,7 +165,17 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         return "completed";
     }
 
+    if (!historianRunnable && args.sessionMeta.compartmentInProgress) {
+        sessionLog(
+            args.sessionId,
+            "transform: historian disabled; clearing stale compartmentInProgress flag",
+        );
+        updateSessionMeta(args.db, args.sessionId, { compartmentInProgress: false });
+        compartmentInProgress = false;
+    }
+
     if (
+        historianRunnable &&
         args.canRunCompartments &&
         args.sessionMeta.compartmentInProgress &&
         !getActiveCompartmentRun(args.sessionId)
@@ -213,6 +226,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     // Only 95% (BLOCK_UNTIL_DONE_PERCENTAGE) should block.
 
     if (
+        historianRunnable &&
         args.canRunCompartments &&
         !args.skipAwaitForThisPass &&
         args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE
@@ -313,6 +327,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     //   - no historian ran this pass (compressor already fires post-historian)
     //   - cooldown: at least 10 minutes since last independent compressor run
     if (
+        historianRunnable &&
         args.safeForBackgroundCompression &&
         !args.suppressBackgroundCompressionThisPass &&
         args.historyBudgetTokens &&
@@ -341,6 +356,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
             fallbackModels: args.fallbackModels,
             minCompartmentRatio: args.compressorMinCompartmentRatio,
             maxMergeDepth: args.compressorMaxMergeDepth,
+            historianRunnable,
         })
             .then((compressed) => {
                 if (compressed) {

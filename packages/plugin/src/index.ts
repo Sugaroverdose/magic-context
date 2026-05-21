@@ -9,6 +9,7 @@ import {
 } from "./agents/permissions";
 import { SIDEKICK_AGENT } from "./agents/sidekick";
 import { loadPluginConfig } from "./config";
+import { isDreamerRunnable } from "./config/agent-disable";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
@@ -127,26 +128,30 @@ const plugin: Plugin = async (ctx) => {
     // Start independent dream schedule timer at plugin level (not inside hooks)
     // so overnight dreaming works even when the user isn't chatting.
     if (pluginConfig.enabled) {
+        const dreamerRunnable = isDreamerRunnable(pluginConfig);
         const timerRegistration = {
             directory: ctx.directory,
             projectIdentity: resolveProjectIdentity(ctx.directory),
             client: ctx.client,
-            dreamerConfig: pluginConfig.dreamer,
+            dreamerConfig: dreamerRunnable ? pluginConfig.dreamer : undefined,
             embeddingConfig: pluginConfig.embedding,
             memoryEnabled: pluginConfig.memory?.enabled === true,
-            experimentalUserMemories: pluginConfig.dreamer?.user_memories?.enabled
-                ? {
-                      enabled: true,
-                      promotionThreshold: pluginConfig.dreamer.user_memories.promotion_threshold,
-                  }
-                : undefined,
-            experimentalPinKeyFiles: pluginConfig.dreamer?.pin_key_files?.enabled
-                ? {
-                      enabled: true,
-                      token_budget: pluginConfig.dreamer.pin_key_files.token_budget,
-                      min_reads: pluginConfig.dreamer.pin_key_files.min_reads,
-                  }
-                : undefined,
+            experimentalUserMemories:
+                dreamerRunnable && pluginConfig.dreamer?.user_memories?.enabled
+                    ? {
+                          enabled: true,
+                          promotionThreshold:
+                              pluginConfig.dreamer.user_memories.promotion_threshold,
+                      }
+                    : undefined,
+            experimentalPinKeyFiles:
+                dreamerRunnable && pluginConfig.dreamer?.pin_key_files?.enabled
+                    ? {
+                          enabled: true,
+                          token_budget: pluginConfig.dreamer.pin_key_files.token_budget,
+                          min_reads: pluginConfig.dreamer.pin_key_files.min_reads,
+                      }
+                    : undefined,
             gitCommitIndexing: pluginConfig.experimental?.git_commit_indexing?.enabled
                 ? {
                       enabled: true,
@@ -411,7 +416,6 @@ const plugin: Plugin = async (ctx) => {
             const dreamerAgentOverrides = pluginConfig.dreamer
                 ? (() => {
                       const {
-                          enabled: _enabled,
                           schedule: _schedule,
                           max_runtime_minutes: _max,
                           tasks: _tasks,
@@ -424,7 +428,6 @@ const plugin: Plugin = async (ctx) => {
             const sidekickAgentOverrides = pluginConfig.sidekick
                 ? (() => {
                       const {
-                          enabled: _enabled,
                           timeout_ms: _timeoutMs,
                           system_prompt: _systemPrompt,
                           ...agentOverrides
@@ -452,7 +455,7 @@ const plugin: Plugin = async (ctx) => {
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_AGENT,
-                    pluginConfig.dreamer?.user_memories?.enabled
+                    isDreamerRunnable(pluginConfig) && pluginConfig.dreamer?.user_memories?.enabled
                         ? COMPARTMENT_AGENT_SYSTEM_PROMPT + USER_OBSERVATIONS_APPENDIX
                         : COMPARTMENT_AGENT_SYSTEM_PROMPT,
                     HISTORIAN_ALLOWED_TOOLS,

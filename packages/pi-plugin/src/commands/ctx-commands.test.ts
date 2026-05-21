@@ -188,7 +188,7 @@ describe("Pi Magic Context commands", () => {
 		});
 		await handlers.get("ctx-dream")?.("", createCtx());
 
-		expect(sent[0]?.message.content).toContain("Dreamer is not configured");
+		expect(sent[0]?.message.content).toContain("Dreamer is disabled");
 		expect(enqueueDream(db, "/tmp/project", "manual")).not.toBeNull();
 	});
 
@@ -218,7 +218,7 @@ describe("Pi Magic Context commands", () => {
 		registerCtxStatusCommand(pi as never, {
 			db,
 			projectIdentity: "/tmp/project",
-			dreamer: { enabled: true, schedule: "daily" },
+			dreamer: { runnable: true, schedule: "daily" },
 		});
 
 		await handlers.get("ctx-status")?.("", createCtx());

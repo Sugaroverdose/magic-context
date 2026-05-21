@@ -188,4 +188,29 @@ describe("loadPiConfig", () => {
 		expect(result.config.sidekick?.prompt).toBe(`home=${home}`);
 		expect(result.warnings).toEqual([]);
 	});
+	it("migrates legacy agent enabled keys before schema parsing", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeProjectConfig(
+			cwd,
+			JSON.stringify({
+				dreamer: { enabled: false, disable: false },
+				sidekick: { enabled: true, disable: true },
+				historian: { enabled: true },
+			}),
+		);
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.dreamer?.disable).toBe(true);
+		expect(result.config.sidekick?.disable).toBe(true);
+		expect(result.config.historian).toEqual({ two_pass: false });
+		expect(result.warnings.join("\n")).toContain(
+			'Migrated "dreamer.enabled=false" → "dreamer.disable=true" in-memory (run doctor to persist). This now also disables manual /ctx-dream; for manual-only remove disable and set schedule="".',
+		);
+		expect(result.warnings.join("\n")).toContain(
+			'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
+		);
+	});
 });

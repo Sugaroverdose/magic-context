@@ -67,7 +67,9 @@ export async function startDreamScheduleTimer(
     await args.ensureRegistered(args.directory, db);
     const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
     const dreamingEnabled = Boolean(
-        args.dreamerConfig?.enabled && args.dreamerConfig.schedule?.trim(),
+        args.dreamerConfig &&
+            args.dreamerConfig.disable !== true &&
+            args.dreamerConfig.schedule?.trim(),
     );
     const embeddingSweepEnabled = snapshot?.enabled ?? false;
     const commitIndexingEnabled = snapshot?.gitCommitEnabled ?? false;
@@ -175,7 +177,9 @@ async function sweepProject(
     gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
 ): Promise<void> {
     const dreamingEnabled = Boolean(
-        reg.dreamerConfig?.enabled && reg.dreamerConfig.schedule?.trim(),
+        reg.dreamerConfig &&
+            reg.dreamerConfig.disable !== true &&
+            reg.dreamerConfig.schedule?.trim(),
     );
     if (gitCommitEnabled && reg.gitCommitIndexing) {
         await sweepGitCommits({

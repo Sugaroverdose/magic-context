@@ -142,24 +142,21 @@ export function writeMagicContextConfig(
         model: options.historianModel,
         thinking_level: options.historianThinkingLevel,
     });
-    config.dreamer = {
+    const dreamer = {
         ...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-        enabled: options.dreamerEnabled,
         model: options.dreamerModel,
+        disable: options.dreamerEnabled ? undefined : true,
+        enabled: undefined,
     };
+    config.dreamer = compactObject(dreamer);
 
-    if (options.sidekickEnabled) {
-        config.sidekick = compactObject({
-            ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
-            enabled: true,
-            model: options.sidekickModel,
-        });
-    } else {
-        config.sidekick = {
-            ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
-            enabled: false,
-        };
-    }
+    const sidekick = {
+        ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
+        model: options.sidekickEnabled ? options.sidekickModel : undefined,
+        disable: options.sidekickEnabled ? undefined : true,
+        enabled: undefined,
+    };
+    config.sidekick = compactObject(sidekick);
 
     config.embedding = options.embedding;
     writeFileSync(configPath, `${stringifyJsonc(config, null, 2)}\n`);

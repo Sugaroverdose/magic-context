@@ -217,6 +217,8 @@ export interface TransformDeps {
     historianTimeoutMs?: number;
     /** Resolved fallback chain for historian-family calls. */
     fallbackModels?: readonly string[];
+    /** False when historian.disable=true, blocking historian-backed child agents. */
+    historianRunnable?: boolean;
     getNotificationParams?: (
         sessionId: string,
     ) => import("./send-session-notification").NotificationParams;
@@ -368,8 +370,12 @@ export function createTransform(deps: TransformDeps) {
             }
         }
         const compartmentDirectory = sessionDirectory;
+        const historianRunnable = deps.historianRunnable !== false;
         const canRunCompartments =
-            fullFeatureMode && deps.client !== undefined && compartmentDirectory.length > 0;
+            fullFeatureMode &&
+            historianRunnable &&
+            deps.client !== undefined &&
+            compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
 
         const tModelDetect = performance.now();
@@ -1033,6 +1039,7 @@ export function createTransform(deps: TransformDeps) {
         const compartmentPhase = await runCompartmentPhase({
             canRunCompartments,
             fullFeatureMode,
+            historianRunnable,
             sessionMeta,
             contextUsage,
             client: deps.client,
@@ -1057,7 +1064,8 @@ export function createTransform(deps: TransformDeps) {
             // via pending ops), but standalone compression is suppressed when
             // this pass itself is consuming a history refresh.
             safeForBackgroundCompression:
-                isCacheBusting || midTurnAdjustedSchedulerDecision === "execute",
+                historianRunnable &&
+                (isCacheBusting || midTurnAdjustedSchedulerDecision === "execute"),
             suppressBackgroundCompressionThisPass: historyBustThisPass,
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
