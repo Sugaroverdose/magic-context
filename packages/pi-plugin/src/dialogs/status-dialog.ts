@@ -22,6 +22,7 @@ import { getTagsBySession } from "@magic-context/core/features/magic-context/sto
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { formatThresholdPercent } from "@magic-context/core/shared/format-threshold";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 
@@ -299,7 +300,7 @@ function renderInner(
 	// Rolling nudges / context
 	lines.push(theme.fg("muted", "Rolling Nudges / Context"));
 	lines.push(
-		`Execute threshold ${s.executeThreshold}% · Anchor ${fmt(s.lastNudgeTokens)} tok · Interval ${fmt(s.nudgeInterval)} tok · Next ${fmt(s.nextNudgeAfter)} tok`,
+		`Execute threshold ${formatThresholdPercent(s.executeThreshold)}% · Anchor ${fmt(s.lastNudgeTokens)} tok · Interval ${fmt(s.nudgeInterval)} tok · Next ${fmt(s.nextNudgeAfter)} tok`,
 	);
 	lines.push(
 		`Protected tags ${s.protectedTagCount} · Subagent ${s.isSubagent ? "yes" : "no"} · History block ~${fmt(s.historyBlockTokens)} tok${

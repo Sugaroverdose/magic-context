@@ -3,6 +3,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
+import { formatThresholdPercent } from "../../shared/format-threshold"
 
 const SINGLE_BORDER = { type: "single" } as any
 const REFRESH_DEBOUNCE_MS = 150
@@ -47,7 +48,15 @@ const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
     snapshot: SidebarSnapshot
 }) => {
-    const barWidth = 36
+    // Bar width is hardcoded because the @opencode-ai/plugin/tui slot API does
+    // not expose the rendered sidebar width to plugins. 24 chars is the safe
+    // floor that fits every realistic sidebar configuration we've observed —
+    // OpenCode TUI's sidebar narrows with the terminal, and 36 (the previous
+    // value) overflowed users' actual layouts (issue #90), wrapping the bar
+    // onto a second line. If/when the slot API surfaces a real width, this
+    // should become Math.max(20, providedWidth) like the Pi status dialog
+    // already does (`Math.max(20, innerWidth)`).
+    const barWidth = 24
 
     const segments = createMemo<TokenSegment[]>(() => {
         const s = props.snapshot
@@ -370,7 +379,7 @@ const SidebarContent = (props: {
                                 "47.5% / 65%" tells the user how close they
                                 are to the next compaction trigger. */}
                             <text fg={contextSummaryColor()}>
-                                <b>{s()!.usagePercentage.toFixed(1)}%</b> / {s()!.executeThreshold}%
+                                <b>{s()!.usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s()!.executeThreshold)}%
                             </text>
                             {/* Right: absolute token usage vs the model's
                                 full context window (separate from the

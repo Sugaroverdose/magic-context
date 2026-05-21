@@ -7,6 +7,7 @@ import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plug
 import { createSidebarContentSlot } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
 import { closeRpc, consumeTuiMessages, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, requestRecomp, type StatusDetail } from "./data/context-db"
+import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
 import { readJsoncFile } from "../shared/jsonc-parser"
@@ -296,7 +297,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 them how close they are to compaction triggering. */}
             <box flexDirection="row" justifyContent="space-between" width="100%">
                 <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
-                    <b>{s().usagePercentage.toFixed(1)}%</b> / {s().executeThreshold}%
+                    <b>{s().usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s().executeThreshold)}%
                 </text>
                 <text fg={s().usagePercentage >= 80 ? t().error : s().usagePercentage >= 65 ? t().warning : t().accent}>
                     {fmt(s().inputTokens)} / {contextLimit() > 0 ? fmt(contextLimit()) : "?"} tokens
@@ -341,7 +342,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <R t={t()} l="Configured" v={s().cacheTtl} />
                     <R t={t()} l="Last response" v={s().lastResponseTime > 0 ? `${Math.round(elapsed() / 1000)}s ago` : "never"} />
                     <R t={t()} l="Remaining" v={s().cacheExpired ? "expired" : `${Math.round(s().cacheRemainingMs / 1000)}s`} fg={s().cacheExpired ? t().warning : t().textMuted} />
-                    <R t={t()} l="Auto-execute" v={s().cacheExpired ? "yes (expired)" : `at TTL or ≥${s().executeThreshold}%`} fg={t().textMuted} />
+                    <R t={t()} l="Auto-execute" v={s().cacheExpired ? "yes (expired)" : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`} fg={t().textMuted} />
                     <box marginTop={1}>
                         <text fg={t().text}><b>Memory</b></text>
                     </box>
@@ -351,7 +352,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 {/* Right column */}
                 <box flexDirection="column" flexGrow={1} flexBasis={0}>
                     <text fg={t().text}><b>Rolling Nudges</b></text>
-                    <R t={t()} l="Execute threshold" v={`${s().executeThreshold}%`} />
+                    <R t={t()} l="Execute threshold" v={`${formatThresholdPercent(s().executeThreshold)}%`} />
                     <R t={t()} l="Nudge anchor" v={`${fmt(s().lastNudgeTokens)} tok`} />
                     <R t={t()} l="Interval" v={`${fmt(s().nudgeInterval)} tok`} fg={t().textMuted} />
                     <R t={t()} l="Next nudge after" v={`${fmt(s().nextNudgeAfter)} tok`} />
