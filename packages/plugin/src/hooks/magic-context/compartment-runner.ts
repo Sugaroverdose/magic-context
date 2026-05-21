@@ -121,13 +121,22 @@ export interface ExecuteContextRecompOptions {
     range?: PartialRecompRange;
 }
 
-export async function executeContextRecomp(
+export interface ExecuteContextRecompResult {
+    message: string;
+    published: boolean;
+}
+
+export async function executeContextRecompWithResult(
     deps: CompartmentRunnerDeps,
     options: ExecuteContextRecompOptions = {},
-): Promise<string> {
+): Promise<ExecuteContextRecompResult> {
     const { sessionId } = deps;
     if (activeRuns.has(sessionId)) {
-        return "## Magic Recomp\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.";
+        return {
+            message:
+                "## Magic Recomp\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.",
+            published: false,
+        };
     }
 
     const runnerDeps = withPublishedCallback(deps);
@@ -141,12 +150,23 @@ export async function executeContextRecomp(
         });
     activeRuns.set(sessionId, { promise: wrappedPromise, published: false });
     try {
-        return await promise;
+        const message = await promise;
+        return {
+            message,
+            published: activeRuns.get(sessionId)?.published === true,
+        };
     } finally {
         if (activeRuns.get(sessionId)?.promise === wrappedPromise) {
             activeRuns.delete(sessionId);
         }
     }
+}
+
+export async function executeContextRecomp(
+    deps: CompartmentRunnerDeps,
+    options: ExecuteContextRecompOptions = {},
+): Promise<string> {
+    return (await executeContextRecompWithResult(deps, options)).message;
 }
 
 export { runCompartmentAgent } from "./compartment-runner-incremental";

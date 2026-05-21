@@ -12,9 +12,13 @@
  * builders, but invokes the model through `SubagentRunner` (normally
  * `PiSubagentRunner`) rather than OpenCode's child-session SDK. The
  * publication side only rewrites compartment rows and depth counters;
- * it deliberately does NOT touch Pi compaction-marker state. The caller
- * signals `historyRefreshSessions` so compressed output becomes visible
- * on a later natural cache-busting transform pass.
+ * it deliberately does NOT touch Pi compaction-marker state. Compressor
+ * merges do not change the raw Pi branch boundary that native compaction
+ * markers represent; marker advancement is owned by historian/recomp
+ * publication after their queued drops have materialized. The caller
+ * signals deferred history/materialization so compressed output becomes
+ * visible on a later transform pass without staging a misleading native
+ * Pi compaction marker.
  */
 
 import {

@@ -6,7 +6,7 @@ import {
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
-import { executeContextRecomp } from "@magic-context/core/hooks/magic-context/compartment-runner";
+import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import {
 	type PartialRecompRange,
 	snapRangeToCompartments,
@@ -128,7 +128,7 @@ export function registerCtxRecompCommand(
 				projectIdentity: ctx.cwd,
 			});
 			try {
-				const result = await executeContextRecomp(
+				const result = await executeContextRecompWithResult(
 					{
 						client: createPiRecompClient({
 							runner: deps.runner,
@@ -157,9 +157,12 @@ export function registerCtxRecompCommand(
 				);
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",
-					text: result,
-					level: inferLevel(result),
+					text: result.message,
+					level: inferLevel(result.message),
 				});
+				if (!result.published) {
+					return;
+				}
 				// Mirrors OpenCode `hook.ts:477-480`: recomp publishes
 				// fresh compartments + queues drops for the rebuilt
 				// range. Without these signals the next pass would

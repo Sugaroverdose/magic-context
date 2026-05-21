@@ -245,6 +245,15 @@ const recentReduceBySession = new Map<string, number>();
 const liveModelBySession = new Map<string, string>();
 const toolUsageSinceUserTurn = new Map<string, number>();
 const latestUserMessageBySession = new Map<string, string>();
+const RECENT_REDUCE_TTL_MS = 5 * 60 * 1000;
+
+function hasRecentPiCtxReduceExecution(sessionId: string): boolean {
+	const recordedAt = recentReduceBySession.get(sessionId);
+	if (recordedAt === undefined) return false;
+	if (Date.now() - recordedAt <= RECENT_REDUCE_TTL_MS) return true;
+	recentReduceBySession.delete(sessionId);
+	return false;
+}
 
 function logTransformTiming(
 	sessionId: string,
@@ -394,7 +403,7 @@ function onPiNewUserMessage(args: {
 }): void {
 	const sessionMeta = getOrCreateSessionMeta(args.db, args.sessionId);
 	const turnUsage = toolUsageSinceUserTurn.get(args.sessionId);
-	const agentAlreadyReduced = recentReduceBySession.has(args.sessionId);
+	const agentAlreadyReduced = hasRecentPiCtxReduceExecution(args.sessionId);
 	if (
 		!sessionMeta.isSubagent &&
 		!agentAlreadyReduced &&
@@ -1347,8 +1356,10 @@ export function registerPiContextHandler(
 				});
 				clearHistorianFailureState(options.db, sessionId);
 				clearPersistedReasoningWatermark(options.db, sessionId);
-				clearDetectedContextLimit(options.db, sessionId);
-				clearEmergencyRecovery(options.db, sessionId);
+				if (modelChanged) {
+					clearDetectedContextLimit(options.db, sessionId);
+					clearEmergencyRecovery(options.db, sessionId);
+				}
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
 				sessionMetaForUsage.observedSafeInputTokens = 0;
@@ -1494,6 +1505,17 @@ export function registerPiContextHandler(
 			}
 
 			schedulerDecision = midTurnAdjustedSchedulerDecision;
+			const deferredExecutePending = peekDeferredExecutePending(
+				options.db,
+				sessionId,
+			);
+			if (
+				deferredExecutePending !== null &&
+				schedulerDecision === "defer" &&
+				!midTurn
+			) {
+				schedulerDecision = "execute";
+			}
 			sessionLog(
 				sessionId,
 				`[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
@@ -1669,7 +1691,7 @@ export function registerPiContextHandler(
 					db: options.db,
 					messages: outputMessages,
 					entryIds: entryIds ?? null,
-					hasRecentReduceCall: recentReduceBySession.has(sessionId),
+					hasRecentReduceCall: hasRecentPiCtxReduceExecution(sessionId),
 					isCacheBustingPass: cacheBustingPass,
 				});
 			} catch (err) {
@@ -2017,13 +2039,7 @@ function maybeFireCompressor(args: {
 		maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
 		graceCompartments: compressor.graceCompartments,
 		onPublished: () => {
-			if (!isContextHandlerSessionActive(sessionId)) {
-				sessionLog(
-					sessionId,
-					"compressor publication ignored: session was cleared",
-				);
-				return;
-			}
+			const sessionStillActive = isContextHandlerSessionActive(sessionId);
 			// Compressor publication invalidates the injection cache AND
 			// queues drops for the merged compartments. Mirrors OpenCode's
 			// onInjectionCacheCleared callback in transform.ts:502-505:
@@ -2042,7 +2058,14 @@ function maybeFireCompressor(args: {
 			// key-files), so re-reading them would burn IO for nothing.
 			signalPiDeferredHistoryRefresh(sessionId);
 			signalPiDeferredMaterialization(sessionId);
-			historian.onStatusChange?.(ctx, sessionId);
+			if (sessionStillActive) {
+				historian.onStatusChange?.(ctx, sessionId);
+			} else {
+				sessionLog(
+					sessionId,
+					"compressor publication recorded after session clear; status callback skipped",
+				);
+			}
 		},
 	})
 		.then((didPublish) => {
@@ -2130,13 +2153,7 @@ function spawnPiHistorianRun(args: {
 		memoryEnabled: historian.memoryEnabled,
 		autoPromote: historian.autoPromote,
 		onPublished: () => {
-			if (!isContextHandlerSessionActive(sessionId)) {
-				sessionLog(
-					sessionId,
-					"historian publication ignored: session was cleared",
-				);
-				return;
-			}
+			const sessionStillActive = isContextHandlerSessionActive(sessionId);
 			try {
 				clearEmergencyRecovery(db, sessionId);
 			} catch (err) {
@@ -2164,7 +2181,14 @@ function spawnPiHistorianRun(args: {
 			// so re-reading them would burn IO for nothing.
 			signalPiDeferredHistoryRefresh(sessionId);
 			signalPiDeferredMaterialization(sessionId);
-			historian.onStatusChange?.(ctx, sessionId);
+			if (sessionStillActive) {
+				historian.onStatusChange?.(ctx, sessionId);
+			} else {
+				sessionLog(
+					sessionId,
+					"historian publication recorded after session clear; status callback skipped",
+				);
+			}
 		},
 	}).finally(() => {
 		inFlightHistorian.delete(sessionId);
@@ -2201,12 +2225,11 @@ function resolvePiReadBranchEntries(
 	const sm = ctx.sessionManager as { getBranch?: () => unknown[] } | undefined;
 	if (typeof sm?.getBranch !== "function") return undefined;
 	return () => {
-		try {
-			const entries = sm.getBranch?.call(sm);
-			return Array.isArray(entries) ? entries : [];
-		} catch {
-			return [];
+		const entries = sm.getBranch?.call(sm);
+		if (!Array.isArray(entries)) {
+			throw new Error("Pi sessionManager.getBranch() did not return an array");
 		}
+		return entries;
 	};
 }
 
@@ -2511,6 +2534,7 @@ interface RunPipelineResult {
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let executedWorkThisPass = false;
 	let historyWasConsumedThisPass = false;
+	let materializationSatisfiedThisPass = false;
 	let suppressDeferredHistoryDrain = false;
 	let casLost = false;
 	const deferredHistoryWasPendingAtPassStart =
@@ -2561,6 +2585,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		(args.forceMaterialization === true ||
+			hasPendingMaterialization(args.sessionId) ||
+			deferredMaterializationSessions.has(args.sessionId) ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
@@ -2627,11 +2653,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.sessionId,
 	);
 	const deferredHistoryRefreshWasPending = deferredHistoryWasPendingAtPassStart;
+	const deferredExecuteWasPending =
+		peekDeferredExecutePending(args.db, args.sessionId) !== null;
 	const pendingOps = getPendingOps(args.db, args.sessionId);
 	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
-		hasPendingMaterializeSignal;
+		hasPendingMaterializeSignal ||
+		deferredExecuteWasPending;
 	const canConsumeDeferredLate =
 		baseShouldApplyPendingOps || shouldRunHeuristics;
 	const deferredMaterialize =
@@ -2643,7 +2672,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (shouldApplyPendingOps) {
 		const applyReason = hasPendingMaterializeSignal
 			? "explicit_flush"
-			: deferredMaterialize
+			: deferredExecuteWasPending
+				? "deferred_boundary_execute"
+				: deferredMaterialize
 				? "deferred_publication"
 				: args.forceMaterialization
 					? "force_materialization"
@@ -2670,8 +2701,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			executedWorkThisPass = true;
 			// Drain only after success — if applyPendingOperations throws
 			// the flag stays set so the next pass retries.
+			materializationSatisfiedThisPass = true;
 			if (hasPendingMaterializeSignal) {
-				consumePendingMaterialization(args.sessionId);
+				if (args.heuristics === undefined) {
+					consumePendingMaterialization(args.sessionId);
+				}
 			}
 			if (deferredMaterialize) {
 				consumeDeferredMaterialization(args.sessionId);
@@ -2875,6 +2909,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			);
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
+			if (hasPendingMaterializeSignal) {
+				consumePendingMaterialization(args.sessionId);
+			}
 			if (currentTurnId !== null) {
 				lastHeuristicsTurnIdBySession.set(args.sessionId, currentTurnId);
 			}
@@ -2936,7 +2973,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 			logTransformTiming(args.sessionId, "clearOldReasoning", tClearReasoning);
 			logTransformTiming(args.sessionId, "watermarkCleanup", tClearReasoning);
-			executedWorkThisPass = true;
+			if (
+				combinedWatermark > prevWatermark ||
+				clearOutcome.cleared > 0 ||
+				stripOutcome.stripped > 0
+			) {
+				executedWorkThisPass = true;
+			}
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
@@ -3009,7 +3052,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const deferredHistoryDrainEligible =
 		historyWasConsumedThisPass &&
-		deferredHistoryWasPendingAtPassStart &&
+		materializationSatisfiedThisPass &&
+		(deferredHistoryWasPendingAtPassStart || hasPendingMaterializeSignal) &&
 		!suppressDeferredHistoryDrain &&
 		!casLost;
 	if (deferredHistoryDrainEligible) {

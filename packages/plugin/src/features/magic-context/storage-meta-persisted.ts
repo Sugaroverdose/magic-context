@@ -1179,9 +1179,11 @@ export function getPendingPiCompactionMarkerState(
             return parsed;
         }
     } catch {
-        // Intentional: corrupt JSON → treat as absent. Next publish will
-        // overwrite cleanly; next consuming pass will read the new value.
+        // Fall through to clear malformed durable state below.
     }
+    db.prepare(
+        "UPDATE session_meta SET pending_pi_compaction_marker_state = NULL WHERE session_id = ? AND pending_pi_compaction_marker_state = ?",
+    ).run(sessionId, raw);
     return null;
 }
 

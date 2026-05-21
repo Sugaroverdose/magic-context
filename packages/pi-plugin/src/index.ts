@@ -467,6 +467,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		const pendingPiMarkerSessions = getSessionsWithPendingPiMarker(db);
 		for (const sid of pendingPiMarkerSessions) {
 			signalPiDeferredHistoryRefresh(sid);
+			signalPiPendingMaterialization(sid);
 		}
 		if (pendingPiMarkerSessions.length > 0) {
 			log(

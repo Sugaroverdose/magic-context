@@ -1243,7 +1243,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("skips deferred publication signals when an in-flight historian publishes after session clear", async () => {
+	it("keeps durable deferred publication signals when an in-flight historian publishes after session clear", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-cleared-historian-publish";
 		let release!: () => void;
@@ -1298,8 +1298,8 @@ describe("registerPiContextHandler", () => {
 			release();
 			await awaitInFlightHistorians();
 
-			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(false);
-			expect(consumeDeferredMaterialization(sessionId)).toBe(false);
+			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
+			expect(consumeDeferredMaterialization(sessionId)).toBe(true);
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -1435,8 +1435,8 @@ describe("registerPiContextHandler", () => {
 			for (const release of releases) release();
 			await awaitInFlightHistorians();
 
-			expect(consumeDeferredHistoryRefresh(clearedSessionId)).toBe(false);
-			expect(consumeDeferredMaterialization(clearedSessionId)).toBe(false);
+			expect(consumeDeferredHistoryRefresh(clearedSessionId)).toBe(true);
+			expect(consumeDeferredMaterialization(clearedSessionId)).toBe(true);
 			expect(consumeDeferredHistoryRefresh(activeSessionId)).toBe(true);
 			expect(consumeDeferredMaterialization(activeSessionId)).toBe(true);
 		} finally {
@@ -1565,7 +1565,7 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
-		it("does not drain a manually seeded blob on a flush/materialization pass without deferred-start snapshot", async () => {
+		it("drains a manually seeded blob on an explicit flush/materialization pass", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-marker-flush-no-drain";
 			const blob = {
@@ -1585,8 +1585,8 @@ describe("registerPiContextHandler", () => {
 
 				await runDrainPass({ db, sessionId, appendCompaction });
 
-				expect(appendCompaction).not.toHaveBeenCalled();
-				expect(getPendingPiCompactionMarkerState(db, sessionId)).toEqual(blob);
+				expect(appendCompaction).toHaveBeenCalledTimes(1);
+				expect(getPendingPiCompactionMarkerState(db, sessionId)).toBeNull();
 			} finally {
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);

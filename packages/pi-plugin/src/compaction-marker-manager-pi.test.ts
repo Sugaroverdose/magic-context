@@ -261,4 +261,68 @@ describe("Pi deferred compaction marker manager", () => {
 			closeQuietly(db);
 		}
 	});
+	it("treats a newer branch-order compaction as already current", () => {
+		const db = createTestDb();
+		try {
+			appendCompartments(db, "ses", [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "m1",
+					endMessageId: "m2",
+					title: "A",
+					content: "B",
+				},
+			]);
+			const appendCompaction = mock(() => "compact-1");
+			const outcome = applyDeferredPiCompactionMarker(
+				{
+					db,
+					readBranchEntries: () =>
+						branch([
+							{ type: "message", id: "entry-4" },
+							{ type: "compaction", firstKeptEntryId: "entry-4" },
+						]),
+					appendCompaction,
+				},
+				"ses",
+				pending(),
+			);
+			expect(outcome.kind).toBe("already-current");
+			expect(appendCompaction).not.toHaveBeenCalled();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("retries when appendCompaction returns no id", () => {
+		const db = createTestDb();
+		try {
+			appendCompartments(db, "ses", [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					startMessageId: "m1",
+					endMessageId: "m2",
+					title: "A",
+					content: "B",
+				},
+			]);
+			const outcome = applyDeferredPiCompactionMarker(
+				{
+					db,
+					readBranchEntries: () => branch(),
+					appendCompaction: mock(() => undefined),
+				},
+				"ses",
+				pending(),
+			);
+			expect(outcome.kind).toBe("retryable-failure");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 });

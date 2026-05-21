@@ -49,20 +49,23 @@ export function applyDeferredPiCompactionMarker(
 		}
 
 		const branchEntries = deps.readBranchEntries();
-		if (
-			!branchEntries.some(
-				(entry) => getEntryId(entry) === pending.firstKeptEntryId,
-			)
-		) {
+		const pendingFirstKeptIndex = findEntryIndex(
+			branchEntries,
+			pending.firstKeptEntryId,
+		);
+		if (pendingFirstKeptIndex < 0) {
 			return { kind: "stale-skip", reason: "entry-removed" };
 		}
 
 		const latestFirstKept = findLatestCompactionFirstKept(branchEntries);
-		if (latestFirstKept === pending.firstKeptEntryId) {
-			return { kind: "already-current" };
+		if (latestFirstKept !== null) {
+			const latestFirstKeptIndex = findEntryIndex(branchEntries, latestFirstKept);
+			if (latestFirstKeptIndex >= pendingFirstKeptIndex) {
+				return { kind: "already-current" };
+			}
 		}
 
-		deps.appendCompaction(
+		const compactionId = deps.appendCompaction(
 			pending.summary,
 			pending.firstKeptEntryId,
 			pending.tokensBefore,
@@ -72,9 +75,15 @@ export function applyDeferredPiCompactionMarker(
 			},
 			true,
 		);
+		if (typeof compactionId !== "string" || compactionId.length === 0) {
+			return {
+				kind: "retryable-failure",
+				error: new Error("Pi appendCompaction returned no compaction id"),
+			};
+		}
 		sessionLog(
 			sessionId,
-			`Pi compaction-marker drain: applied firstKept=${pending.firstKeptEntryId} tokensBefore=${pending.tokensBefore}`,
+			`Pi compaction-marker drain: applied compactionId=${compactionId} firstKept=${pending.firstKeptEntryId} endMessageId=${pending.endMessageId} ordinal=${pending.ordinal} tokensBefore=${pending.tokensBefore}`,
 		);
 		return { kind: "applied", firstKeptEntryId: pending.firstKeptEntryId };
 	} catch (err) {
@@ -109,4 +118,8 @@ function getEntryId(entry: unknown): string | null {
 	if (entry === null || typeof entry !== "object") return null;
 	const id = (entry as { id?: unknown }).id;
 	return typeof id === "string" ? id : null;
+}
+
+function findEntryIndex(branchEntries: unknown[], entryId: string): number {
+	return branchEntries.findIndex((entry) => getEntryId(entry) === entryId);
 }

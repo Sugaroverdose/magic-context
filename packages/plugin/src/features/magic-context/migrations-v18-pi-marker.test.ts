@@ -89,6 +89,7 @@ describe("migration v18 — pending_pi_compaction_marker_state schema", () => {
         expect(getPendingPiCompactionMarkerState(db, "ses-empty")).toBeNull();
         expect(getPendingPiCompactionMarkerState(db, "ses-corrupt")).toBeNull();
         expect(getPendingPiCompactionMarkerState(db, "ses-bad")).toBeNull();
+        expect(getSessionsWithPendingPiMarker(db)).toEqual([]);
     });
 
     test("CAS clear and pending-session list use the canonical blob", () => {
