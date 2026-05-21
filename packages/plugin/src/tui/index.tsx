@@ -628,20 +628,23 @@ function AnnouncementDialog(props: {
             </box>
             <box flexDirection="column" marginTop={1}>
                 {props.features.map((line) => (
-                    <box flexDirection="row" marginBottom={0}>
-                        <text fg={theme().textMuted}>{"  • "}</text>
-                        <box flexDirection="row" flexWrap="wrap">
-                            {splitUrlSegments(line).map((seg) =>
-                                seg.kind === "url" ? (
-                                    <a href={seg.url} fg={theme().accent}>
-                                        <u>{seg.url}</u>
-                                    </a>
-                                ) : (
-                                    <text fg={theme().text}>{seg.text}</text>
-                                ),
-                            )}
-                        </box>
-                    </box>
+                    // opentui constraint: <a> and <span> are inline elements
+                    // that MUST have a <text> parent. Putting <a> directly
+                    // inside <box> triggers "Orphan text error". Render each
+                    // bullet as a single <text> with inline <span> + <a>
+                    // children so the URL flows inline with the bullet text.
+                    <text fg={theme().text}>
+                        <span fg={theme().textMuted}>{"  • "}</span>
+                        {splitUrlSegments(line).map((seg) =>
+                            seg.kind === "url" ? (
+                                <a href={seg.url} fg={theme().accent}>
+                                    <u>{seg.url}</u>
+                                </a>
+                            ) : (
+                                <span>{seg.text}</span>
+                            ),
+                        )}
+                    </text>
                 ))}
             </box>
             <box marginTop={1}>
