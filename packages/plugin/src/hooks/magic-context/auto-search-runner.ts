@@ -36,6 +36,7 @@ import {
 import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { buildAutoSearchHint } from "./auto-search-hint";
+import { hasMeaningfulUserText } from "./read-session-formatting";
 import { appendReminderToUserMessageById } from "./transform-message-helpers";
 import type { MessageLike } from "./transform-operations";
 
@@ -99,10 +100,13 @@ export interface AutoSearchRunnerOptions {
 function collectUserPromptParts(message: MessageLike): string {
     let collected = "";
     for (const part of message.parts) {
-        const p = part as { type?: string; text?: string };
-        if (p.type === "text" && typeof p.text === "string") {
-            collected += (collected.length > 0 ? "\n" : "") + p.text;
-        }
+        const p = part as { type?: string; text?: string; ignored?: boolean };
+        if (p.type !== "text" || typeof p.text !== "string") continue;
+        // Skip plugin-internal ignored notifications (conflict warnings, TUI setup
+        // notices, startup announcements, etc.). They're persisted as ordinary
+        // user-role messages but should never reach embeddings or hint detection.
+        if (p.ignored === true) continue;
+        collected += (collected.length > 0 ? "\n" : "") + p.text;
     }
     return collected;
 }
@@ -214,13 +218,15 @@ function findLatestMeaningfulUserMessage(messages: MessageLike[]): MessageLike |
         const msg = messages[i];
         if (msg.info.role !== "user") continue;
         if (typeof msg.info.id !== "string") continue;
-        // Skip messages that are entirely synthetic (e.g. ignored notifications).
-        // hasMeaningfulUserText would be ideal but re-importing here is fine.
-        for (const part of msg.parts) {
-            const p = part as { type?: string; text?: string };
-            if (p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) {
-                return msg;
-            }
+        // hasMeaningfulUserText filters parts that should never reach embeddings:
+        //   - ignored: true notifications (announcement, conflict warning, TUI setup)
+        //   - system reminders, OMO internal initiator markers
+        //   - system-directive-only stubs
+        // The previous inline check accepted any non-empty text part, which let
+        // ignored plugin-internal messages (e.g. the v0.21.7 startup announcement)
+        // reach the embedding endpoint as if they were real user prompts.
+        if (hasMeaningfulUserText(msg.parts)) {
+            return msg;
         }
     }
     return null;

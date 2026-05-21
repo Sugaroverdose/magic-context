@@ -471,4 +471,84 @@ describe("auto-search-runner", () => {
             spy.mockRestore();
         }
     });
+
+    test("skips ignored plugin-internal messages — does not embed announcements/warnings", async () => {
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async () => []);
+        try {
+            // Mimic the startup announcement (or any sendIgnoredMessage payload) —
+            // text part with `ignored: true`. These are persisted as ordinary
+            // user-role messages but must NEVER reach the embedding endpoint.
+            const announcement = {
+                info: { id: "u_announcement", role: "user" },
+                parts: [
+                    {
+                        type: "text",
+                        text: "✨ Magic Context — what's new in v0.21.7:\n\n  • Pi parity sweep: 44 audit findings fixed, …",
+                        ignored: true,
+                    },
+                ],
+            } as unknown as MessageLike;
+            const messages: MessageLike[] = [announcement];
+
+            await runAutoSearchHint({
+                sessionId: "s1",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            // No meaningful user message → no search call → no embedding hit.
+            expect(spy).toHaveBeenCalledTimes(0);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("ignored part next to a real user message: real prompt embedded, ignored text excluded", async () => {
+        let capturedQuery: string | undefined;
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+            async (_db, _sessionId, _projectPath, query) => {
+                capturedQuery = query as string;
+                return [];
+            },
+        );
+        try {
+            // Realistic shape: an OpenCode user message can carry MULTIPLE parts.
+            // If an upstream extension ever attaches an ignored notification part
+            // alongside the real prompt, the embedded query must contain only the
+            // real prompt — the ignored part must be excluded from `collectUserPromptParts`.
+            const mixed = {
+                info: { id: "u_mixed", role: "user" },
+                parts: [
+                    {
+                        type: "text",
+                        text: "✨ Magic Context — what's new: announcement bullet here",
+                        ignored: true,
+                    },
+                    {
+                        type: "text",
+                        text: "please explain how the historian decides when to run",
+                    },
+                ],
+            } as unknown as MessageLike;
+            const messages: MessageLike[] = [mixed];
+
+            await runAutoSearchHint({
+                sessionId: "s1",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(capturedQuery).toBeDefined();
+            // The real prompt is in the embedded query…
+            expect(capturedQuery ?? "").toContain("historian decides when to run");
+            // …and the ignored announcement is NOT.
+            expect(capturedQuery ?? "").not.toContain("Magic Context");
+            expect(capturedQuery ?? "").not.toContain("announcement bullet");
+        } finally {
+            spy.mockRestore();
+        }
+    });
 });
