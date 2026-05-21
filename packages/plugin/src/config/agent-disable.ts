@@ -53,11 +53,8 @@ function migrateLegacyEnabledForAgent(args: {
             args.warnings.push(
                 'Migrated "dreamer.enabled=false" → "dreamer.disable=true" in-memory (run doctor to persist). This now also disables manual /ctx-dream; for manual-only remove disable and set schedule="".',
             );
-        } else {
-            args.warnings.push(
-                'Ignored deprecated "dreamer.enabled=true" in-memory (run doctor to remove).',
-            );
         }
+        // enabled=true is a no-op alias for the new default (disable=false); strip silently.
         args.patched.dreamer = agent;
         return;
     }
@@ -67,11 +64,8 @@ function migrateLegacyEnabledForAgent(args: {
         args.warnings.push(
             'Migrated "sidekick.enabled=false" → "sidekick.disable=true" in-memory (run doctor to persist).',
         );
-    } else {
-        args.warnings.push(
-            'Ignored deprecated "sidekick.enabled=true" in-memory (run doctor to remove).',
-        );
     }
+    // enabled=true is a no-op alias for the new default; strip silently.
     args.patched.sidekick = agent;
 }
 

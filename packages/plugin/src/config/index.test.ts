@@ -251,17 +251,18 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
         );
     });
 
-    it("removes dreamer.enabled=true without adding disable=false", () => {
+    it("removes dreamer.enabled=true silently (no warning, no disable mutation)", () => {
         const result = loadWithUserConfig(JSON.stringify({ dreamer: { enabled: true } }));
 
         expect(result.dreamer?.disable).toBeUndefined();
         expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
-        expect(result.configWarnings?.join("\n")).toContain(
-            'Ignored deprecated "dreamer.enabled=true" in-memory (run doctor to remove).',
-        );
+        // enabled=true is a no-op alias for the new default; no warning should be emitted.
+        const warnings = result.configWarnings?.join("\n") ?? "";
+        expect(warnings).not.toContain("dreamer.enabled=true");
+        expect(warnings).not.toContain("dreamer.enabled");
     });
 
-    it("migrates sidekick.enabled=false and removes sidekick.enabled=true", () => {
+    it("migrates sidekick.enabled=false (loud) and removes sidekick.enabled=true (silent)", () => {
         const disabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: false } }));
         expect(disabled.sidekick?.disable).toBe(true);
         expect(disabled.configWarnings?.join("\n")).toContain(
@@ -271,6 +272,8 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
         const enabled = loadWithUserConfig(JSON.stringify({ sidekick: { enabled: true } }));
         expect(enabled.sidekick?.disable).toBeUndefined();
         expect("enabled" in (enabled.sidekick as Record<string, unknown>)).toBe(false);
+        const enabledWarnings = enabled.configWarnings?.join("\n") ?? "";
+        expect(enabledWarnings).not.toContain("sidekick.enabled");
     });
 
     it("removes invalid historian.enabled and applies conflict rules", () => {
