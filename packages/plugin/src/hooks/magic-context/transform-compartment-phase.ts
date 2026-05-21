@@ -1,4 +1,10 @@
 import { DEFAULT_COMPRESSOR_COOLDOWN_MS } from "../../config/schema/magic-context";
+import {
+    acquireCompartmentLease,
+    COMPARTMENT_LEASE_RENEWAL_MS,
+    releaseCompartmentLease,
+    renewCompartmentLease,
+} from "../../features/magic-context/compartment-lease";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
@@ -62,8 +68,6 @@ interface RunCompartmentPhaseArgs {
     getNotificationParams?: () => import("./send-session-notification").NotificationParams;
     /** True when this pass is already safe for background compression to run. */
     safeForBackgroundCompression?: boolean;
-    /** True when this pass is already rebuilding history; suppress standalone compressor. */
-    suppressBackgroundCompressionThisPass?: boolean;
     deferredHistoryRefreshSessions: Set<string>;
     /** True when transform already triggered recovery/emergency historian work this pass. */
     skipAwaitForThisPass?: boolean;
@@ -329,7 +333,6 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     if (
         historianRunnable &&
         args.safeForBackgroundCompression &&
-        !args.suppressBackgroundCompressionThisPass &&
         args.historyBudgetTokens &&
         args.historyBudgetTokens > 0 &&
         args.client &&
@@ -345,19 +348,46 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         // pass that wants to start a historian sees it via
         // getActiveCompartmentRun() and skips starting, preventing concurrent
         // writes to compartments/session_facts tables.
-        markCompressorRun(args.sessionId);
-        const compressorPromise = runCompressionPassIfNeeded({
-            client: args.client,
-            db: args.db,
-            sessionId: args.sessionId,
-            directory: args.compartmentDirectory,
-            historyBudgetTokens: args.historyBudgetTokens,
-            historianTimeoutMs: args.historianTimeoutMs,
-            fallbackModels: args.fallbackModels,
-            minCompartmentRatio: args.compressorMinCompartmentRatio,
-            maxMergeDepth: args.compressorMaxMergeDepth,
-            historianRunnable,
-        })
+        const client = args.client;
+        const historyBudgetTokens = args.historyBudgetTokens;
+        const holderId = crypto.randomUUID();
+        const compressorPromise = (async () => {
+            const lease = acquireCompartmentLease(args.db, args.sessionId, holderId);
+            if (!lease) {
+                sessionLog(
+                    args.sessionId,
+                    "independent compressor skipped: compartment lease held by another process",
+                );
+                return false;
+            }
+            markCompressorRun(args.sessionId);
+            const renewal = setInterval(() => {
+                if (!renewCompartmentLease(args.db, args.sessionId, holderId)) {
+                    sessionLog(
+                        args.sessionId,
+                        "independent compressor lease renewal failed; publish will be skipped if holder is stale",
+                    );
+                }
+            }, COMPARTMENT_LEASE_RENEWAL_MS);
+            try {
+                return await runCompressionPassIfNeeded({
+                    client,
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    directory: args.compartmentDirectory,
+                    historyBudgetTokens,
+                    historianTimeoutMs: args.historianTimeoutMs,
+                    fallbackModels: args.fallbackModels,
+                    minCompartmentRatio: args.compressorMinCompartmentRatio,
+                    maxMergeDepth: args.compressorMaxMergeDepth,
+                    historianRunnable,
+                    compartmentLeaseHolderId: holderId,
+                });
+            } finally {
+                clearInterval(renewal);
+                releaseCompartmentLease(args.db, args.sessionId, holderId);
+            }
+        })()
             .then((compressed) => {
                 if (compressed) {
                     markActiveCompartmentRunPublished(args.sessionId);

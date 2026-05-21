@@ -30,6 +30,7 @@ import {
 	DEFAULT_HISTORIAN_TIMEOUT_MS,
 } from "@magic-context/core/config/schema/magic-context";
 import type { Compartment } from "@magic-context/core/features/magic-context/compartment-storage";
+import { replaceAllCompartmentStateAndBumpDepth } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	getAverageCompressionDepth,
@@ -68,6 +69,8 @@ export interface PiCompressorDeps {
 	maxCompartmentsPerPass?: number;
 	graceCompartments?: number;
 	onPublished?: () => void;
+	/** Holder id for the DB-backed compartment-state lease guarding publish paths. */
+	compartmentLeaseHolderId?: string;
 }
 
 interface ScoredCompartment {
@@ -294,6 +297,7 @@ export async function runPiCompressionPassIfNeeded(
 				selectedCompartments[selectedCompartments.length - 1]?.endMessage ?? 0,
 			facts,
 			logLabel: `depth-5 title-only collapse (${selectedCompartments.length} → ${compressed.length})`,
+			holderId: deps.compartmentLeaseHolderId,
 		});
 		if (ok) onPublished?.();
 		return ok;
@@ -328,6 +332,7 @@ export async function runPiCompressionPassIfNeeded(
 			selectedCompartments[selectedCompartments.length - 1]?.endMessage ?? 0,
 		facts,
 		logLabel: `depth-${outputDepth} (${selectedCompartments.length} → ${finalCompressed.length})`,
+		holderId: deps.compartmentLeaseHolderId,
 	});
 	if (ok) onPublished?.();
 	return ok;
@@ -474,6 +479,7 @@ function finalizeCompression(args: {
 	originalEnd: number;
 	facts: Array<{ category: string; content: string }>;
 	logLabel: string;
+	holderId?: string;
 }): boolean {
 	const {
 		db,
@@ -513,8 +519,28 @@ function finalizeCompression(args: {
 		})),
 	];
 
-	replaceAllCompartmentState(db, sessionId, allCompartments, args.facts);
-	incrementCompressionDepth(db, sessionId, originalStart, originalEnd);
+	const published = args.holderId
+		? replaceAllCompartmentStateAndBumpDepth(
+				db,
+				args.holderId,
+				sessionId,
+				allCompartments,
+				args.facts,
+				originalStart,
+				originalEnd,
+			)
+		: (() => {
+				replaceAllCompartmentState(db, sessionId, allCompartments, args.facts);
+				incrementCompressionDepth(db, sessionId, originalStart, originalEnd);
+				return true;
+			})();
+	if (!published) {
+		sessionLog(
+			sessionId,
+			"compressor: publish skipped because compartment lease is no longer held",
+		);
+		return false;
+	}
 	sessionLog(sessionId, `compressor: completed ${args.logLabel}`);
 	return true;
 }

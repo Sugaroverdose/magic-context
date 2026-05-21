@@ -5,6 +5,10 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+    acquireCompartmentLease,
+    releaseCompartmentLease,
+} from "../../features/magic-context/compartment-lease";
+import {
     getCompartments,
     getSessionFacts,
     replaceAllCompartmentState,
@@ -33,6 +37,18 @@ import { tagMessages } from "./tag-messages";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+
+async function runCompartmentAgentWithLease(
+    deps: Parameters<typeof runCompartmentAgent>[0],
+): Promise<void> {
+    const holderId = `test-holder-${Math.random()}`;
+    expect(acquireCompartmentLease(deps.db, deps.sessionId, holderId)).not.toBeNull();
+    try {
+        await runCompartmentAgent({ ...deps, compartmentLeaseHolderId: holderId });
+    } finally {
+        releaseCompartmentLease(deps.db, deps.sessionId, holderId);
+    }
+}
 
 afterEach(() => {
     closeDatabase();
@@ -944,7 +960,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-1",
@@ -1015,7 +1031,7 @@ describe("runCompartmentAgent", () => {
 
         try {
             await withImmediateTimeouts(async () => {
-                await runCompartmentAgent({
+                await runCompartmentAgentWithLease({
                     client,
                     db,
                     sessionId: "ses-retry",
@@ -1092,7 +1108,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-fallback",
@@ -1201,7 +1217,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-2",
@@ -1306,7 +1322,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-tag-drops",
@@ -1349,7 +1365,7 @@ describe("runCompartmentAgent", () => {
         } as unknown as PluginContext["client"];
 
         //#when
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-protected-only",
@@ -1406,7 +1422,7 @@ describe("runCompartmentAgent", () => {
         } as unknown as PluginContext["client"];
 
         //#when
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-eligible-prefix",
@@ -1469,7 +1485,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-invalid-existing",
@@ -1526,7 +1542,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-invalid-output",
@@ -1572,7 +1588,7 @@ describe("runCompartmentAgent", () => {
             },
         } as unknown as PluginContext["client"];
 
-        await runCompartmentAgent({
+        await runCompartmentAgentWithLease({
             client,
             db,
             sessionId: "ses-model-failure",

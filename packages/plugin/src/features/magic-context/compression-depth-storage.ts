@@ -14,7 +14,7 @@ interface MaxDepthRow {
     max_depth: number;
 }
 
-function getIncrementDepthStatement(db: Database): PreparedStatement {
+export function getIncrementDepthStatement(db: Database): PreparedStatement {
     let stmt = incrementDepthStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(

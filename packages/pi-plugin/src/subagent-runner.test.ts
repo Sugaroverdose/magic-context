@@ -147,7 +147,6 @@ describe("subagent-runner pure helpers", () => {
 			// so Pi's own resolution handles it (correct for Anthropic).
 			// Users on providers like GitHub Copilot should set
 			// historian.thinking_level in their Pi magic-context.jsonc.
-			"--",
 			"summarize this session",
 		]);
 	});
@@ -180,19 +179,18 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--models");
 		expect(args).toContain("anthropic/primary");
 		expect(args).not.toContain("openai/fallback");
-		expect(args.at(-2)).toBe("--");
 		expect(args.at(-1)).toBe("summarize this session");
 	});
 
-	it("inserts -- before prompts that look like flags", () => {
+	it("passes prompt last without a -- sentinel", () => {
 		const args = __test.buildArgs({
 			...baseOptions,
 			model: "anthropic/claude-sonnet",
-			userMessage: "--not-a-pi-flag",
+			userMessage: "ordinary prompt",
 		});
 
-		expect(args.at(-2)).toBe("--");
-		expect(args.at(-1)).toBe("--not-a-pi-flag");
+		expect(args.at(-1)).toBe("ordinary prompt");
+		expect(args).not.toContain("--");
 	});
 
 	it("parses JSON event lines and normalizes parse errors", () => {
@@ -550,10 +548,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				"--model",
 				"anthropic/primary",
 				// No --thinking: thinkingLevel not set in options above.
-				"--",
 				"summarize this session",
 			],
-			expect.objectContaining({ cwd: "/workspace/project" }),
+			expect.objectContaining({ cwd: "/workspace/project", env: process.env }),
 		);
 	});
 

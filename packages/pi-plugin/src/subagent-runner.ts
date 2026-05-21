@@ -780,7 +780,16 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 	// avoid clashes with extension-registered flags. Older Pi versions
 	// also exposed `-x`, but that alias was removed in 0.71+ — newer
 	// versions hard-fail with "Unknown option: -x".
-	if (SUBAGENT_ENTRY_PATH) {
+	// Do not load the lean Magic Context extension for historian/compressor
+	// style subagents. In e2e/prod the parent Pi process can run under Bun while
+	// the spawned Pi CLI resolves to Node; loading our extension there pulls in
+	// better-sqlite3's Bun-built native module and hard-fails before the model
+	// call. Historian/compressor do not need ctx_* tools, so keep them extension-
+	// free. Tool-using agents (sidekick/dreamer) still receive the lean entry.
+	const shouldLoadSubagentExtension =
+		SUBAGENT_ENTRY_PATH &&
+		(options.agent === "sidekick" || DREAMER_ACTION_AGENTS.has(options.agent));
+	if (shouldLoadSubagentExtension) {
 		args.push("--extension", SUBAGENT_ENTRY_PATH);
 
 		// Only the dreamer subagent gets the elevated ctx_memory action
@@ -817,9 +826,11 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		args.push("--thinking", options.thinkingLevel);
 	}
 
-	// Positional message argument MUST come last in print-mode argv. Use -- so
-	// prompts beginning with a dash are never parsed as Pi flags.
-	args.push("--", options.userMessage);
+	// Positional message argument MUST come last in print-mode argv.
+	// Pi 0.7x parses print-mode prompts after all known flags without needing
+	// a `--` sentinel; newer builds hard-fail on that sentinel as an unknown
+	// option, so pass the prompt directly.
+	args.push(options.userMessage);
 
 	return args;
 }

@@ -62,6 +62,8 @@ export interface CompartmentRunnerDeps {
      * postprocess pass drains the pending blob and applies the marker.
      */
     onDeferredMarkerPending?: (sessionId: string) => void;
+    /** Holder id for the DB-backed compartment-state lease guarding publish paths. */
+    compartmentLeaseHolderId?: string;
 }
 
 export interface CandidateCompartment {

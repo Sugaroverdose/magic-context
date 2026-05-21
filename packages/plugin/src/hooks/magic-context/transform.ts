@@ -556,6 +556,7 @@ export function createTransform(deps: TransformDeps) {
         // overwrite each other's explicit/deferred attribution.
         //
         const historyRefreshExplicitBeforePrepare = deps.historyRefreshSessions.has(sessionId);
+        const deferredHistoryWasPendingAtPassStart = deferredHistoryRefreshSessions.has(sessionId);
         const earlyActiveRunBlocksMaterialization =
             (getActiveCompartmentRun(sessionId) !== undefined ||
                 sessionMeta.compartmentInProgress) &&
@@ -567,9 +568,8 @@ export function createTransform(deps: TransformDeps) {
             activeRunBlocksMaterialization: earlyActiveRunBlocksMaterialization,
         });
         const consumingDeferredEarly =
-            canConsumeDeferredEarly && deferredHistoryRefreshSessions.has(sessionId);
+            canConsumeDeferredEarly && deferredHistoryWasPendingAtPassStart;
         const isCacheBusting = historyRefreshExplicitBeforePrepare || consumingDeferredEarly;
-        const historyBustThisPass = isCacheBusting;
         if (historianFailureState.failureCount === 0) {
             lastEmergencyNotificationCount.delete(sessionId);
         }
@@ -1061,12 +1061,10 @@ export function createTransform(deps: TransformDeps) {
                 : undefined,
             // The compressor needs to know if this is a safe pass to run on.
             // Scheduler "execute" passes are safe for compressor (they already bust cache
-            // via pending ops), but standalone compression is suppressed when
-            // this pass itself is consuming a history refresh.
+            // via pending ops); snapshot-drain keeps same-pass compressor signals safe.
             safeForBackgroundCompression:
                 historianRunnable &&
                 (isCacheBusting || midTurnAdjustedSchedulerDecision === "execute"),
-            suppressBackgroundCompressionThisPass: historyBustThisPass,
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
             experimentalUserMemories: deps.experimentalUserMemories,
@@ -1138,6 +1136,7 @@ export function createTransform(deps: TransformDeps) {
             phaseJustAwaitedPublication: compartmentPhase.justAwaitedPublication,
             compartmentInProgress,
             historyRefreshExplicitBeforePrepare,
+            deferredHistoryWasPendingAtPassStart,
             compartmentInjectionRebuiltFromDb: pendingCompartmentInjection?.rebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare,
             historyRebuiltThisPass,

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { promoteRecompStaging, saveRecompStagingPass } from "./compartment-storage";
+import { acquireCompartmentLease, isCompartmentLeaseHeld } from "./compartment-lease";
+import {
+    getCompartments,
+    promoteRecompStaging,
+    replaceAllCompartmentStateAndBumpDepth,
+    saveRecompStagingPass,
+} from "./compartment-storage";
 import { runMigrations } from "./migrations";
 import {
     addNote,
@@ -189,8 +195,10 @@ describe("magic-context storage", () => {
         expect(updatedMeta.isSubagent).toBe(true);
         updateSessionMeta(db, sessionId, { lastNudgeBand: null });
         expect(getOrCreateSessionMeta(db, sessionId).lastNudgeBand).toBeNull();
+        expect(acquireCompartmentLease(db, sessionId, "holder-before-delete")).not.toBeNull();
         clearSession(db, sessionId);
         expect(getTagsBySession(db, sessionId)).toEqual([]);
+        expect(isCompartmentLeaseHeld(db, sessionId, "holder-before-delete")).toBe(false);
         expect(getSessionNotes(db, sessionId)).toEqual([]);
         closeQuietly(db);
     });
@@ -606,6 +614,40 @@ describe("magic-context storage", () => {
         expect(top).toHaveLength(1);
         expect(top[0].tagNumber).toBe(activeTag);
         expect(top[0].status).toBe("active");
+        closeQuietly(db);
+    });
+    it("prevents stale holders from republishing after clearSession deletes the lease", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        const sessionId = "ses-stale-after-delete";
+        const holderId = "holder-before-delete";
+        expect(acquireCompartmentLease(db, sessionId, holderId)).not.toBeNull();
+
+        //#when
+        clearSession(db, sessionId);
+        const published = replaceAllCompartmentStateAndBumpDepth(
+            db,
+            holderId,
+            sessionId,
+            [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 2,
+                    startMessageId: "m-1",
+                    endMessageId: "m-2",
+                    title: "ghost",
+                    content: "should not publish",
+                },
+            ],
+            [{ category: "Fact", content: "ghost fact" }],
+            1,
+            2,
+        );
+
+        //#then
+        expect(published).toBe(false);
+        expect(getCompartments(db, sessionId)).toEqual([]);
         closeQuietly(db);
     });
 });

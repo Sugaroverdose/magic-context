@@ -1,5 +1,7 @@
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { isCompartmentLeaseHeld } from "./compartment-lease";
+import { getIncrementDepthStatement } from "./compression-depth-storage";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertFactStatements = new WeakMap<Database, PreparedStatement>();
@@ -296,6 +298,59 @@ export function replaceAllCompartmentState(
     })();
 }
 
+export function replaceAllCompartmentStateAndBumpDepth(
+    db: Database,
+    holderId: string,
+    sessionId: string,
+    compartments: CompartmentInput[],
+    facts: Array<{ category: string; content: string }>,
+    depthStartOrdinal: number,
+    depthEndOrdinal: number,
+): boolean {
+    const now = Date.now();
+    db.exec("BEGIN IMMEDIATE");
+    let finished = false;
+    try {
+        if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return false;
+        }
+
+        db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
+
+        insertCompartmentRows(db, sessionId, compartments, now);
+        insertFactRows(db, sessionId, facts, now);
+
+        // Clear cached injection block so next pass renders fresh — preserve memory_block_count
+        // because memories didn't change (only compartments/facts), and the dashboard reads count between busts.
+        // Clear memory_block_ids alongside so the visible-memory filter doesn't use stale IDs.
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
+
+        if (depthEndOrdinal >= depthStartOrdinal) {
+            const stmt = getIncrementDepthStatement(db);
+            for (let ordinal = depthStartOrdinal; ordinal <= depthEndOrdinal; ordinal += 1) {
+                stmt.run(sessionId, ordinal, getHarness());
+            }
+        }
+
+        db.exec("COMMIT");
+        finished = true;
+        return true;
+    } finally {
+        if (!finished) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // Transaction may already be closed by SQLite after an error.
+            }
+        }
+    }
+}
+
 export interface CompartmentDateRanges {
     /** Map compartment id → `{ start: "YYYY-MM-DD", end: "YYYY-MM-DD" }` */
     byId: Map<number, { start: string; end: string }>;
@@ -432,14 +487,45 @@ export function getRecompStaging(db: Database, sessionId: string): RecompStaging
 export function promoteRecompStaging(
     db: Database,
     sessionId: string,
+    holderId?: string,
 ): {
     compartments: CompartmentInput[];
     facts: Array<{ category: string; content: string }>;
 } | null {
     const now = Date.now();
-    return db.transaction(() => {
+    if (!holderId) {
+        return db.transaction(() => {
+            const staging = getRecompStaging(db, sessionId);
+            if (!staging || staging.compartments.length === 0) return null;
+
+            db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
+            db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
+            insertCompartmentRows(db, sessionId, staging.compartments, now);
+            insertFactRows(db, sessionId, staging.facts, now);
+            db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
+            db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
+            db.prepare(
+                "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+            ).run(sessionId);
+            return { compartments: staging.compartments, facts: staging.facts };
+        })();
+    }
+
+    db.exec("BEGIN IMMEDIATE");
+    let finished = false;
+    try {
+        if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return null;
+        }
+
         const staging = getRecompStaging(db, sessionId);
-        if (!staging || staging.compartments.length === 0) return null;
+        if (!staging || staging.compartments.length === 0) {
+            db.exec("ROLLBACK");
+            finished = true;
+            return null;
+        }
         // Replace real tables
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
@@ -456,8 +542,18 @@ export function promoteRecompStaging(
             "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
         ).run(sessionId);
 
+        db.exec("COMMIT");
+        finished = true;
         return { compartments: staging.compartments, facts: staging.facts };
-    })();
+    } finally {
+        if (!finished) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // Transaction may already be closed by SQLite after an error.
+            }
+        }
+    }
 }
 
 /**

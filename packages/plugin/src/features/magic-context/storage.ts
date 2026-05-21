@@ -5,6 +5,7 @@ export {
     getCompartments,
     getSessionFacts,
     replaceAllCompartmentState,
+    replaceAllCompartmentStateAndBumpDepth,
     type SessionFact,
 } from "./compartment-storage";
 export {

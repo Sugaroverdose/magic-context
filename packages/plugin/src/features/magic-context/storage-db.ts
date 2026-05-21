@@ -133,6 +133,15 @@ export function initializeDatabase(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_compartments_session ON compartments(session_id);
 
+    CREATE TABLE IF NOT EXISTS compartment_state_lease (
+      session_id TEXT PRIMARY KEY NOT NULL,
+      holder_id TEXT NOT NULL,
+      acquired_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_compartment_state_lease_expires
+      ON compartment_state_lease(expires_at);
+
     CREATE TABLE IF NOT EXISTS compression_depth (
       session_id TEXT NOT NULL,
       message_ordinal INTEGER NOT NULL,

@@ -16,6 +16,7 @@ export {
     maybeWriteHistorianStateFile,
 } from "./historian-state-file";
 
+import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
@@ -286,10 +287,25 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         const lastCompartmentEnd = lastNewEnd;
         const lastNewEndMessageId = newCompartments[newCompartments.length - 1]?.endMessageId;
 
-        // Append new compartments (existing stay untouched in DB) and replace facts atomically
-        // Intentional: nested transaction — appendCompartments/replaceSessionFacts have their own
-        // transactions for standalone safety. SQLite SAVEPOINTs handle nesting correctly in Bun.
-        db.transaction(() => {
+        // Append new compartments (existing stay untouched in DB) and replace facts atomically.
+        // BEGIN IMMEDIATE ensures the lease holder check and subsequent writes share one fresh
+        // write-locked snapshot across sibling processes.
+        const holderId = deps.compartmentLeaseHolderId;
+        if (!holderId) {
+            sessionLog(sessionId, "historian publish skipped: missing compartment lease holder");
+            return;
+        }
+        let published = false;
+        db.exec("BEGIN IMMEDIATE");
+        try {
+            if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
+                db.exec("ROLLBACK");
+                sessionLog(
+                    sessionId,
+                    "historian publish skipped: compartment lease no longer held",
+                );
+                return;
+            }
             appendCompartments(db, sessionId, newCompartments);
             replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
             clearHistorianFailureState(db, sessionId);
@@ -306,7 +322,17 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                     publishedAt: Date.now(),
                 });
             }
-        })();
+            db.exec("COMMIT");
+            published = true;
+        } finally {
+            if (!published) {
+                try {
+                    db.exec("ROLLBACK");
+                } catch {
+                    // Transaction may already be closed by an early rollback.
+                }
+            }
+        }
         // Background publication normally preserves the injection cache until
         // a materializing pass can rebuild history and apply queued drops
         // together. Explicit recomp paths leave preserve=false and invalidate

@@ -92,6 +92,7 @@ describe("pi emergency >=95%", () => {
 
             await h.waitFor(
                 () => {
+                    h.closeContextDb();
                     const meta = h
                         .contextDb()
                         .prepare("SELECT last_input_tokens FROM session_meta WHERE session_id = ?")
@@ -101,6 +102,7 @@ describe("pi emergency >=95%", () => {
                 { timeoutMs: 15_000, label: "pi last_input_tokens reflects 97% spike" },
             );
 
+            h.closeContextDb();
             const spikeMeta = h
                 .contextDb()
                 .prepare("SELECT last_input_tokens FROM session_meta WHERE session_id = ?")

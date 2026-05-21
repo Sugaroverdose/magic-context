@@ -37,6 +37,7 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
+import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
 	appendCompartments,
 	getCompartments,
@@ -143,6 +144,8 @@ export interface PiHistorianDeps {
 	autoPromote?: boolean;
 	/** Optional callback invoked on successful publication for cache-bust signaling. */
 	onPublished?: () => void;
+	/** Holder id for the DB-backed compartment-state lease guarding publish paths. */
+	compartmentLeaseHolderId?: string;
 	/** Optional Pi-native compaction append hook (`sessionManager.appendCompaction`). */
 	appendCompaction?: (
 		summary: string,
@@ -173,6 +176,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		memoryEnabled,
 		autoPromote,
 		onPublished,
+		compartmentLeaseHolderId,
 		readBranchEntries,
 		notifyIssue,
 	} = deps;
@@ -570,8 +574,26 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// Atomic publication: append + replace facts + clear failure state.
 			// The Pi-native compaction marker payload is staged in the same
 			// transaction so a crash cannot leave compartments without a queued
-			// marker for the deferred materializing drain.
-			db.transaction(() => {
+			// marker for the deferred materializing drain. BEGIN IMMEDIATE keeps the
+			// holder check and writes on one fresh write-locked snapshot.
+			if (!compartmentLeaseHolderId) {
+				sessionLog(
+					sessionId,
+					"historian publish skipped: missing compartment lease holder",
+				);
+				return;
+			}
+			let published = false;
+			db.exec("BEGIN IMMEDIATE");
+			try {
+				if (!isCompartmentLeaseHeld(db, sessionId, compartmentLeaseHolderId)) {
+					db.exec("ROLLBACK");
+					sessionLog(
+						sessionId,
+						"historian publish skipped: compartment lease no longer held",
+					);
+					return;
+				}
 				appendCompartments(db, sessionId, newCompartments);
 				replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
 				clearHistorianFailureState(db, sessionId);
@@ -597,7 +619,17 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						publishedAt: Date.now(),
 					});
 				}
-			})();
+				db.exec("COMMIT");
+				published = true;
+			} finally {
+				if (!published) {
+					try {
+						db.exec("ROLLBACK");
+					} catch {
+						// Transaction may already be closed by an early rollback.
+					}
+				}
+			}
 
 			// Note-nudge trigger #1 (of 3): historian publication is a natural
 			// work boundary, so signal that deferred notes should surface on

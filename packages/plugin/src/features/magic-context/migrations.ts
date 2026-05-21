@@ -642,6 +642,22 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 19,
+        description: "Add compartment state lease table",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS compartment_state_lease (
+                    session_id TEXT PRIMARY KEY NOT NULL,
+                    holder_id TEXT NOT NULL,
+                    acquired_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_compartment_state_lease_expires
+                    ON compartment_state_lease(expires_at);
+            `);
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

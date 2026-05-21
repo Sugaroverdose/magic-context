@@ -89,6 +89,7 @@ interface RunPostTransformPhaseArgs {
     phaseJustAwaitedPublication: boolean;
     compartmentInProgress: boolean;
     historyRefreshExplicitBeforePrepare: boolean;
+    deferredHistoryWasPendingAtPassStart: boolean;
     compartmentInjectionRebuiltFromDb: boolean;
     rebuiltHistoryFromInitialPrepare: boolean;
     historyRebuiltThisPass: boolean;
@@ -167,10 +168,14 @@ export async function runPostTransformPhase(
     // "user wants pending ops + heuristics to run" signal. Survives across
     // blocked defer passes (compartmentRunning) so /ctx-flush intent is not
     // lost when historian races the user's command.
-    const isExplicitFlush = args.pendingMaterializationSessions.has(args.sessionId);
-    const deferredMaterializationWasPending = args.deferredMaterializationSessions.has(
+    const pendingMaterializationAtPassStart = args.pendingMaterializationSessions.has(
         args.sessionId,
     );
+    const deferredMaterializationAtPassStart = args.deferredMaterializationSessions.has(
+        args.sessionId,
+    );
+    const isExplicitFlush = pendingMaterializationAtPassStart;
+    const deferredMaterializationWasPending = deferredMaterializationAtPassStart;
     const alreadyRanThisTurn =
         args.currentTurnId !== null &&
         args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
@@ -446,7 +451,9 @@ export async function runPostTransformPhase(
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
-            args.pendingMaterializationSessions.delete(args.sessionId);
+            if (pendingMaterializationAtPassStart) {
+                args.pendingMaterializationSessions.delete(args.sessionId);
+            }
             if (args.currentTurnId) {
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
             }
@@ -902,7 +909,7 @@ export async function runPostTransformPhase(
     // only conditionally suppress it when the marker apply returned
     // `retryable-failure`, so the next consuming pass retries.
     let suppressV12HistoryDrain = false;
-    if (historyWasConsumedThisPass && args.deferredHistoryRefreshSessions.has(args.sessionId)) {
+    if (historyWasConsumedThisPass && args.deferredHistoryWasPendingAtPassStart) {
         const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
         if (pending) {
             const outcome = applyDeferredCompactionMarker(
@@ -930,11 +937,17 @@ export async function runPostTransformPhase(
         }
     }
 
-    const deferredHistoryDrainEligible = historyWasConsumedThisPass && !suppressV12HistoryDrain;
+    const deferredHistoryDrainEligible =
+        historyWasConsumedThisPass &&
+        args.deferredHistoryWasPendingAtPassStart &&
+        !suppressV12HistoryDrain;
     if (deferredHistoryDrainEligible) {
         args.deferredHistoryRefreshSessions.delete(args.sessionId);
     }
-    if (explicitMaterializedSuccessfully || deferredMaterializedSuccessfully) {
+    if (
+        (explicitMaterializedSuccessfully || deferredMaterializedSuccessfully) &&
+        deferredMaterializationAtPassStart
+    ) {
         args.deferredMaterializationSessions.delete(args.sessionId);
     }
 

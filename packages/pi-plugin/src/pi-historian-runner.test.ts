@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { acquireCompartmentLease } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
 	appendCompartments,
 	getCompartments,
@@ -66,6 +67,8 @@ async function runHistorianWith(args: {
 }) {
 	const db = createTestDb();
 	const runner = runnerReturning([...args.outputs]);
+	const holderId = "test-holder";
+	expect(acquireCompartmentLease(db, "ses-historian", holderId)).not.toBeNull();
 	await runPiHistorian({
 		db,
 		sessionId: "ses-historian",
@@ -80,6 +83,7 @@ async function runHistorianWith(args: {
 		onPublished: args.onPublished,
 		appendCompaction: args.appendCompaction,
 		readBranchEntries: args.readBranchEntries,
+		compartmentLeaseHolderId: holderId,
 	});
 	return { db, runner };
 }

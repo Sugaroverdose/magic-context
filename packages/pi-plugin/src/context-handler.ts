@@ -40,6 +40,12 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import {
+	acquireCompartmentLease,
+	COMPARTMENT_LEASE_RENEWAL_MS,
+	releaseCompartmentLease,
+	renewCompartmentLease,
+} from "@magic-context/core/features/magic-context/compartment-lease";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -1993,6 +1999,21 @@ function resolveHistoryBudgetTokensForPi(args: {
 	);
 }
 
+function startPiCompartmentLeaseRenewal(
+	db: ContextDatabase,
+	sessionId: string,
+	holderId: string,
+): ReturnType<typeof setInterval> {
+	return setInterval(() => {
+		if (!renewCompartmentLease(db, sessionId, holderId)) {
+			sessionLog(
+				sessionId,
+				"compartment lease renewal failed; publish will be skipped if holder is stale",
+			);
+		}
+	}, COMPARTMENT_LEASE_RENEWAL_MS);
+}
+
 function maybeFireCompressor(args: {
 	ctx: ExtensionContext;
 	sessionId: string;
@@ -2030,50 +2051,68 @@ function maybeFireCompressor(args: {
 	});
 	if (!historyBudgetTokens || historyBudgetTokens <= 0) return;
 
-	const runPromise = runPiCompressionPassIfNeeded({
-		db,
-		sessionId,
-		directory: ctx.cwd,
-		runner: historian.runner,
-		historianModel: historian.model,
-		fallbackModels: historian.fallbackModels,
-		historyBudgetTokens,
-		historianTimeoutMs: historian.timeoutMs,
-		thinkingLevel: historian.thinkingLevel,
-		minCompartmentRatio: compressor.minCompartmentRatio,
-		maxMergeDepth: compressor.maxMergeDepth,
-		maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
-		graceCompartments: compressor.graceCompartments,
-		onPublished: () => {
-			const sessionStillActive = isContextHandlerSessionActive(sessionId);
-			// Compressor publication invalidates the injection cache AND
-			// queues drops for the merged compartments. Mirrors OpenCode's
-			// onInjectionCacheCleared callback in transform.ts:502-505:
-			//   - signalPiHistoryRefresh: triggers ONE rebuild on the next
-			//     transform pass (drained immediately after rebuild).
-			//   - signalPiPendingMaterialization: queues the drops the
-			//     compressor published; persists until the next pipeline
-			//     pass actually materializes them. Without this signal,
-			//     drops sit in pending_ops and context climbs until the
-			//     85% force-materialization threshold — exactly the
-			//     "context kept going up after historian/compressor ran"
-			//     symptom users observed in Pi.
-			//
-			// We deliberately do NOT signal systemPromptRefresh — historian
-			// /compressor don't change disk-backed adjuncts (docs/profile/
-			// key-files), so re-reading them would burn IO for nothing.
-			signalPiDeferredHistoryRefresh(sessionId);
-			signalPiDeferredMaterialization(sessionId);
-			if (sessionStillActive) {
-				historian.onStatusChange?.(ctx, sessionId);
-			} else {
-				sessionLog(
-					sessionId,
-					"compressor publication recorded after session clear; status callback skipped",
-				);
-			}
-		},
-	})
+	const holderId = crypto.randomUUID();
+	const runPromise = (async () => {
+		const lease = acquireCompartmentLease(db, sessionId, holderId);
+		if (!lease) {
+			sessionLog(
+				sessionId,
+				"compressor skipped: compartment lease held by another process",
+			);
+			return false;
+		}
+		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
+		try {
+			return await runPiCompressionPassIfNeeded({
+				db,
+				sessionId,
+				directory: ctx.cwd,
+				runner: historian.runner,
+				historianModel: historian.model,
+				fallbackModels: historian.fallbackModels,
+				historyBudgetTokens,
+				historianTimeoutMs: historian.timeoutMs,
+				thinkingLevel: historian.thinkingLevel,
+				minCompartmentRatio: compressor.minCompartmentRatio,
+				maxMergeDepth: compressor.maxMergeDepth,
+				maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
+				graceCompartments: compressor.graceCompartments,
+				compartmentLeaseHolderId: holderId,
+				onPublished: () => {
+					const sessionStillActive = isContextHandlerSessionActive(sessionId);
+					// Compressor publication invalidates the injection cache AND
+					// queues drops for the merged compartments. Mirrors OpenCode's
+					// onInjectionCacheCleared callback in transform.ts:502-505:
+					//   - signalPiHistoryRefresh: triggers ONE rebuild on the next
+					//     transform pass (drained immediately after rebuild).
+					//   - signalPiPendingMaterialization: queues the drops the
+					//     compressor published; persists until the next pipeline
+					//     pass actually materializes them. Without this signal,
+					//     drops sit in pending_ops and context climbs until the
+					//     85% force-materialization threshold — exactly the
+					//     "context kept going up after historian/compressor ran"
+					//     symptom users observed in Pi.
+					//
+					// We deliberately do NOT signal systemPromptRefresh — historian
+					// /compressor don't change disk-backed adjuncts (docs/profile/
+					// key-files), so re-reading them would burn IO for nothing.
+					signalPiDeferredHistoryRefresh(sessionId);
+					signalPiDeferredMaterialization(sessionId);
+					if (sessionStillActive) {
+						historian.onStatusChange?.(ctx, sessionId);
+					} else {
+						sessionLog(
+							sessionId,
+							"compressor publication recorded after session clear; status callback skipped",
+						);
+					}
+				},
+			});
+		} finally {
+			clearInterval(renewal);
+			releaseCompartmentLease(db, sessionId, holderId);
+		}
+	})()
 		.then((didPublish) => {
 			if (didPublish === true) {
 				markPiCompressorRun(sessionId);
@@ -2142,61 +2181,79 @@ function spawnPiHistorianRun(args: {
 	unregister: () => void;
 }): void {
 	const { ctx, sessionId, db, historian, provider, unregister } = args;
-	const runPromise = runPiHistorian({
-		db,
-		sessionId,
-		directory: ctx.cwd,
-		provider,
-		appendCompaction: resolvePiAppendCompaction(ctx),
-		readBranchEntries: resolvePiReadBranchEntries(ctx),
-		runner: historian.runner,
-		historianModel: historian.model,
-		fallbackModels: historian.fallbackModels,
-		historianChunkTokens: historian.historianChunkTokens,
-		historianTimeoutMs: historian.timeoutMs,
-		twoPass: historian.twoPass,
-		thinkingLevel: historian.thinkingLevel,
-		memoryEnabled: historian.memoryEnabled,
-		autoPromote: historian.autoPromote,
-		onPublished: () => {
-			const sessionStillActive = isContextHandlerSessionActive(sessionId);
-			try {
-				clearEmergencyRecovery(db, sessionId);
-			} catch (err) {
-				sessionLog(
-					sessionId,
-					`historian: clearEmergencyRecovery failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-			// Historian publication invalidates the injection cache AND
-			// queues drops for the messages now covered by new
-			// compartments. Mirrors OpenCode's onInjectionCacheCleared
-			// callback in transform.ts:502-505:
-			//   - signalPiHistoryRefresh: triggers ONE rebuild on the next
-			//     transform pass (drained immediately after rebuild).
-			//   - signalPiPendingMaterialization: queues the drops the
-			//     historian published; persists until the next pipeline
-			//     pass actually materializes them. Without this signal,
-			//     drops sit in pending_ops and context climbs until the
-			//     85% force-materialization threshold — exactly the
-			//     "context kept going up after historian ran" symptom
-			//     users observed at 64% → 69%+ on Pi.
-			//
-			// We deliberately do NOT signal systemPromptRefresh — historian
-			// doesn't change disk-backed adjuncts (docs/profile/key-files),
-			// so re-reading them would burn IO for nothing.
-			signalPiDeferredHistoryRefresh(sessionId);
-			signalPiDeferredMaterialization(sessionId);
-			if (sessionStillActive) {
-				historian.onStatusChange?.(ctx, sessionId);
-			} else {
-				sessionLog(
-					sessionId,
-					"historian publication recorded after session clear; status callback skipped",
-				);
-			}
-		},
-	}).finally(() => {
+	const holderId = crypto.randomUUID();
+	const runPromise = (async () => {
+		const lease = acquireCompartmentLease(db, sessionId, holderId);
+		if (!lease) {
+			sessionLog(
+				sessionId,
+				"historian skipped: compartment lease held by another process",
+			);
+			return;
+		}
+		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
+		try {
+			await runPiHistorian({
+				db,
+				sessionId,
+				directory: ctx.cwd,
+				provider,
+				appendCompaction: resolvePiAppendCompaction(ctx),
+				readBranchEntries: resolvePiReadBranchEntries(ctx),
+				runner: historian.runner,
+				historianModel: historian.model,
+				fallbackModels: historian.fallbackModels,
+				historianChunkTokens: historian.historianChunkTokens,
+				historianTimeoutMs: historian.timeoutMs,
+				twoPass: historian.twoPass,
+				thinkingLevel: historian.thinkingLevel,
+				memoryEnabled: historian.memoryEnabled,
+				autoPromote: historian.autoPromote,
+				compartmentLeaseHolderId: holderId,
+				onPublished: () => {
+					const sessionStillActive = isContextHandlerSessionActive(sessionId);
+					try {
+						clearEmergencyRecovery(db, sessionId);
+					} catch (err) {
+						sessionLog(
+							sessionId,
+							`historian: clearEmergencyRecovery failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
+					// Historian publication invalidates the injection cache AND
+					// queues drops for the messages now covered by new
+					// compartments. Mirrors OpenCode's onInjectionCacheCleared
+					// callback in transform.ts:502-505:
+					//   - signalPiHistoryRefresh: triggers ONE rebuild on the next
+					//     transform pass (drained immediately after rebuild).
+					//   - signalPiPendingMaterialization: queues the drops the
+					//     historian published; persists until the next pipeline
+					//     pass actually materializes them. Without this signal,
+					//     drops sit in pending_ops and context climbs until the
+					//     85% force-materialization threshold — exactly the
+					//     "context kept going up after historian ran" symptom
+					//     users observed at 64% → 69%+ on Pi.
+					//
+					// We deliberately do NOT signal systemPromptRefresh — historian
+					// doesn't change disk-backed adjuncts (docs/profile/key-files),
+					// so re-reading them would burn IO for nothing.
+					signalPiDeferredHistoryRefresh(sessionId);
+					signalPiDeferredMaterialization(sessionId);
+					if (sessionStillActive) {
+						historian.onStatusChange?.(ctx, sessionId);
+					} else {
+						sessionLog(
+							sessionId,
+							"historian publication recorded after session clear; status callback skipped",
+						);
+					}
+				},
+			});
+		} finally {
+			clearInterval(renewal);
+			releaseCompartmentLease(db, sessionId, holderId);
+		}
+	})().finally(() => {
 		inFlightHistorian.delete(sessionId);
 		unregister();
 		if (isContextHandlerSessionActive(sessionId)) {

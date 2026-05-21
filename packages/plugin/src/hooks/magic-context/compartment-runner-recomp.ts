@@ -2,7 +2,6 @@ import {
     clearRecompStaging,
     getRecompStaging,
     promoteRecompStaging,
-    replaceAllCompartmentState,
     saveRecompStagingPass,
 } from "../../features/magic-context/compartment-storage";
 import { clearCompressionDepth } from "../../features/magic-context/compression-depth-storage";
@@ -16,6 +15,7 @@ import {
 } from "../../features/magic-context/storage-meta";
 import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
+import { sessionLog } from "../../shared/logger";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
@@ -51,6 +51,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         getNotificationParams,
     } = deps;
     const notifParams = () => getNotificationParams?.() ?? {};
+    const holderId = deps.compartmentLeaseHolderId;
+    if (!holderId) {
+        return "## Magic Recomp — Skipped\n\nCould not acquire the compartment-state lease for this session.";
+    }
     // State file for the current pass — hoisted to be accessible in finally{}
     let currentStateFilePath: string | undefined;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
@@ -111,7 +115,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // Ensure latest candidates are saved to staging before promoting
             saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
 
-            const promoted = promoteRecompStaging(db, sessionId);
+            const promoted = promoteRecompStaging(db, sessionId, holderId);
             if (!promoted) return null;
 
             // Full recomp rebuilds every compartment from message 1 onward, so
@@ -321,11 +325,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
         // Final success: promote staging → real tables
         saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
-        const promoted = promoteRecompStaging(db, sessionId);
+        const promoted = promoteRecompStaging(db, sessionId, holderId);
         if (!promoted) {
-            // Fallback: direct write if promotion somehow fails
-            replaceAllCompartmentState(db, sessionId, candidateCompartments, candidateFacts);
-            clearRecompStaging(db, sessionId);
+            sessionLog(sessionId, "recomp publish skipped: compartment lease no longer held");
+            return "## Magic Recomp — Skipped\n\nAnother process acquired the compartment-state lease before recomp could publish. No state was written.";
         }
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.

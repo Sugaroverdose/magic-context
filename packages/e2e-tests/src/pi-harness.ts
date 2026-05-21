@@ -175,6 +175,16 @@ export class PiTestHarness {
     return this.contextDbCached;
   }
 
+  closeContextDb(): void {
+    if (!this.contextDbCached) return;
+    try {
+      this.contextDbCached.close();
+    } catch {
+      // ignore close errors in test polling helpers
+    }
+    this.contextDbCached = null;
+  }
+
   hasContextDb(): boolean {
     return existsSync(this.contextDbPath());
   }
