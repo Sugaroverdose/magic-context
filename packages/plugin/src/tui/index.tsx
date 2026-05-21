@@ -573,112 +573,32 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
  * we silently skip (the next TUI launch will retry).
  */
 /**
- * Split a bullet string into text/url segments so the renderer can emit each
- * URL as its own `<a href>` element. opentui's text pipeline strips raw ANSI
- * escapes (so OSC 8 hyperlinks pasted into <text> get sanitized away), but
- * its `<a href="URL">` intrinsic IS the proper "Solid.js URL" — it renders an
- * OSC 8 hyperlink natively through opentui's internal renderer.
+ * URLs render as plain text. Modern terminals (iTerm2, kitty, WezTerm, Ghostty,
+ * recent macOS Terminal) auto-detect URLs and let users Cmd-click; older
+ * terminals require manual copy. We tried opentui's `<a href>` JSX intrinsic
+ * for application-level OSC 8 clickability, but it's a span-like element that
+ * forced text out of opentui's word-wrap mode, causing bullets to bleed past
+ * the dialog border. Pure-string children of `<text>` wrap correctly, so the
+ * AFT-style DialogAlert + plain string is the right surface here.
  */
-type BulletSegment = { kind: "text"; text: string } | { kind: "url"; url: string }
-
-function splitUrlSegments(text: string): BulletSegment[] {
-    const segments: BulletSegment[] = []
-    const re = /(https?:\/\/[^\s<>"')]+)/g
-    let lastIndex = 0
-    let match: RegExpExecArray | null = re.exec(text)
-    while (match !== null) {
-        if (match.index > lastIndex) {
-            segments.push({ kind: "text", text: text.slice(lastIndex, match.index) })
-        }
-        segments.push({ kind: "url", url: match[0] })
-        lastIndex = match.index + match[0].length
-        match = re.exec(text)
-    }
-    if (lastIndex < text.length) {
-        segments.push({ kind: "text", text: text.slice(lastIndex) })
-    }
-    return segments.length === 0 ? [{ kind: "text", text }] : segments
-}
-
-const SINGLE_BORDER_DIALOG = { type: "single" } as any
-
-function AnnouncementDialog(props: {
-    api: TuiPluginApi
-    title: string
-    features: ReadonlyArray<string>
-    onDismiss: () => void
-}) {
-    const theme = createMemo(() => props.api.theme.current)
-    return (
-        <box
-            flexDirection="column"
-            border={SINGLE_BORDER_DIALOG}
-            borderColor={theme().borderActive}
-            paddingTop={1}
-            paddingBottom={1}
-            paddingLeft={2}
-            paddingRight={2}
-            width={80}
-        >
-            <text fg={theme().accent}>
-                <b>{props.title}</b>
-            </text>
-            <box marginTop={1}>
-                <text fg={theme().text}>What's new:</text>
-            </box>
-            <box flexDirection="column" marginTop={1}>
-                {props.features.map((line) => {
-                    const segments = splitUrlSegments(line);
-                    const hasUrl = segments.some((s) => s.kind === "url");
-                    // opentui rule of thumb learned the hard way: <text> wraps
-                    // its content based on parent width ONLY when its children
-                    // are pure strings. If you nest <span>/<a> children inside
-                    // a single <text>, opentui treats each child as an inline
-                    // block and skips wrapping — bullets bleed past the dialog
-                    // border. So we render plain bullets as a single string
-                    // (auto-wraps) and the URL bullet as string + <a> + string
-                    // (clickable via OSC 8 from opentui's <a>, slight overflow
-                    // possible if URL is very long but Discord invite is short).
-                    if (!hasUrl) {
-                        return <text fg={theme().text}>{`  • ${line}`}</text>;
-                    }
-                    return (
-                        <text fg={theme().text}>
-                            {"  • "}
-                            {segments.map((seg) =>
-                                seg.kind === "url" ? (
-                                    <a href={seg.url} fg={theme().accent}>
-                                        {seg.url}
-                                    </a>
-                                ) : (
-                                    seg.text
-                                ),
-                            )}
-                        </text>
-                    );
-                })}
-            </box>
-            <box marginTop={1}>
-                <text fg={theme().textMuted}>Press Enter or Escape to dismiss</text>
-            </box>
-        </box>
-    )
-}
-
 async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
     try {
         const ann = await getAnnouncement()
         if (!ann.show || !ann.version || !ann.features || ann.features.length === 0) return
 
         const title = `Magic Context v${ann.version}`
+        const message = [
+            "What's new:",
+            "",
+            ...ann.features.map((line) => `  • ${line}`),
+        ].join("\n")
 
         api.ui.dialog.replace(
             () => (
-                <AnnouncementDialog
-                    api={api}
+                <api.ui.DialogAlert
                     title={title}
-                    features={ann.features}
-                    onDismiss={() => {
+                    message={message}
+                    onConfirm={() => {
                         void markAnnounced()
                     }}
                 />
