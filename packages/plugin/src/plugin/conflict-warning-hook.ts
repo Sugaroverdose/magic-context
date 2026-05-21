@@ -506,7 +506,12 @@ export async function sendStartupAnnouncement(
         return;
     }
 
-    const bullets = features.map((line) => `  • ${line}`).join("\n");
+    // OpenCode Desktop renders chat messages as Markdown, so wrap any bare
+    // https?:// URLs in `[url](url)` link syntax. That makes the Discord
+    // invite line clickable without changing the visible URL text.
+    const wrapMd = (line: string): string =>
+        line.replace(/(https?:\/\/[^\s<>"')]+)/g, (url) => `[${url}](${url})`);
+    const bullets = features.map((line) => `  • ${wrapMd(line)}`).join("\n");
     const text = [`${ANNOUNCEMENT_MARKER} v${version}:`, "", bullets].join("\n");
 
     log(`[magic-context] sending startup announcement for v${version} to session ${sessionId}`);

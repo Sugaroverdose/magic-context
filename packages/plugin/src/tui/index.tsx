@@ -572,12 +572,27 @@ function registerCommandPaletteEntries(api: TuiPluginApi): void {
  * Failure-tolerant by design — if the server isn't ready or the RPC fails,
  * we silently skip (the next TUI launch will retry).
  */
+/**
+ * Wrap any bare https?:// URLs in the OSC 8 hyperlink escape so terminals
+ * that support it (iTerm2, kitty, WezTerm, Alacritty, Ghostty, modern macOS
+ * Terminal, etc.) render them as clickable links. Terminals that don't
+ * support OSC 8 silently ignore the escape sequence and the original URL
+ * still shows in plain text, so this degrades gracefully.
+ *
+ * OSC 8 format: `\x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\`
+ */
+function makeUrlsClickable(text: string): string {
+    return text.replace(/(https?:\/\/[^\s<>"')]+)/g, (url) => {
+        return `\x1b]8;;${url}\x1b\\${url}\x1b]8;;\x1b\\`
+    })
+}
+
 async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
     try {
         const ann = await getAnnouncement()
         if (!ann.show || !ann.version || !ann.features || ann.features.length === 0) return
 
-        const featureText = ann.features.map((f) => `  • ${f}`).join("\n")
+        const featureText = ann.features.map((f) => `  • ${makeUrlsClickable(f)}`).join("\n")
         const message = `What's new:\n\n${featureText}`
         const title = `Magic Context v${ann.version}`
 

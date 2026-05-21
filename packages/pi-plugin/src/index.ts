@@ -751,8 +751,18 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// the next time the user starts an interactive Pi session.
 		try {
 			if (ctx.hasUI && shouldShowAnnouncement()) {
+				// Wrap any bare https?:// URLs in OSC 8 hyperlink escapes so
+				// terminals that support them (iTerm2, kitty, WezTerm,
+				// Alacritty, Ghostty, modern macOS Terminal) render them as
+				// clickable links. Terminals without OSC 8 support ignore
+				// the escape silently and the raw URL stays visible.
+				const makeClickable = (line: string): string =>
+					line.replace(
+						/(https?:\/\/[^\s<>"')]+)/g,
+						(url) => `\x1b]8;;${url}\x1b\\${url}\x1b]8;;\x1b\\`,
+					);
 				const featureText = ANNOUNCEMENT_FEATURES.map(
-					(line) => `  • ${line}`,
+					(line) => `  • ${makeClickable(line)}`,
 				).join("\n");
 				const message = `✨ Magic Context v${ANNOUNCEMENT_VERSION} — what's new:\n\n${featureText}`;
 				ctx.ui.notify(message, "info");
