@@ -495,6 +495,7 @@ export async function sendStartupAnnouncement(
     directory: string,
     version: string,
     features: ReadonlyArray<string>,
+    footer: string,
     markSeen: (version: string) => void,
 ): Promise<void> {
     if (!version || features.length === 0) return;
@@ -513,7 +514,13 @@ export async function sendStartupAnnouncement(
     // leave URLs as plain text so the user can copy them; clickable rendering
     // requires upstream OpenCode to add URL detection to HighlightedText.
     const bullets = features.map((line) => `  • ${line}`).join("\n");
-    const text = [`${ANNOUNCEMENT_MARKER} v${version}:`, "", bullets].join("\n");
+    const sections = [`${ANNOUNCEMENT_MARKER} v${version}:`, "", bullets];
+    if (footer && footer.trim().length > 0) {
+        // Blank-line separator distinguishes the persistent footer (Discord
+        // invite, etc.) from the version-specific bullets.
+        sections.push("", footer);
+    }
+    const text = sections.join("\n");
 
     log(`[magic-context] sending startup announcement for v${version} to session ${sessionId}`);
 

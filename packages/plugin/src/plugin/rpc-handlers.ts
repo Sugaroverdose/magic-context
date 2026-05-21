@@ -25,6 +25,7 @@ import {
 } from "../hooks/magic-context/tokenizer-calibration";
 import {
     ANNOUNCEMENT_FEATURES,
+    ANNOUNCEMENT_FOOTER,
     ANNOUNCEMENT_VERSION,
     markAnnouncementSeen,
     shouldShowAnnouncement,
@@ -769,6 +770,7 @@ export function registerRpcHandlers(
             show: true,
             version: ANNOUNCEMENT_VERSION,
             features: [...ANNOUNCEMENT_FEATURES],
+            footer: ANNOUNCEMENT_FOOTER,
         } as unknown as Record<string, unknown>;
     });
 

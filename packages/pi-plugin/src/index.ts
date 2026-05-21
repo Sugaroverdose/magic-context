@@ -54,6 +54,7 @@ import {
 import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
 import {
 	ANNOUNCEMENT_FEATURES,
+	ANNOUNCEMENT_FOOTER,
 	ANNOUNCEMENT_VERSION,
 	markAnnouncementSeen,
 	shouldShowAnnouncement,
@@ -760,8 +761,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				const featureText = ANNOUNCEMENT_FEATURES.map(
 					(line) => `  • ${line}`,
 				).join("\n");
-				const message = `✨ Magic Context v${ANNOUNCEMENT_VERSION} — what's new:\n\n${featureText}`;
-				ctx.ui.notify(message, "info");
+				const sections = [
+					`✨ Magic Context v${ANNOUNCEMENT_VERSION} — what's new:`,
+					"",
+					featureText,
+				];
+				if (ANNOUNCEMENT_FOOTER && ANNOUNCEMENT_FOOTER.trim().length > 0) {
+					// Blank-line separator distinguishes the persistent footer
+					// (Discord invite, etc.) from the version-specific bullets.
+					sections.push("", ANNOUNCEMENT_FOOTER);
+				}
+				ctx.ui.notify(sections.join("\n"), "info");
 				markAnnouncementSeen(ANNOUNCEMENT_VERSION);
 			}
 		} catch {

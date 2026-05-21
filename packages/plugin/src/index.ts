@@ -248,6 +248,7 @@ const plugin: Plugin = async (ctx) => {
                 shouldShowAnnouncement,
                 ANNOUNCEMENT_VERSION,
                 ANNOUNCEMENT_FEATURES,
+                ANNOUNCEMENT_FOOTER,
                 markAnnouncementSeen,
             } = await import("./shared/announcement");
             if (shouldShowAnnouncement()) {
@@ -259,6 +260,7 @@ const plugin: Plugin = async (ctx) => {
                                 ctx.directory,
                                 ANNOUNCEMENT_VERSION,
                                 ANNOUNCEMENT_FEATURES,
+                                ANNOUNCEMENT_FOOTER,
                                 markAnnouncementSeen,
                             ),
                         )

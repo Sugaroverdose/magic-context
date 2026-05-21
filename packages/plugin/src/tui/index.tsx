@@ -587,11 +587,17 @@ async function showStartupAnnouncement(api: TuiPluginApi): Promise<void> {
         if (!ann.show || !ann.version || !ann.features || ann.features.length === 0) return
 
         const title = `Magic Context v${ann.version}`
-        const message = [
+        const lines: string[] = [
             "What's new:",
             "",
             ...ann.features.map((line) => `  • ${line}`),
-        ].join("\n")
+        ]
+        if (ann.footer && ann.footer.trim().length > 0) {
+            // Blank-line separator keeps the persistent footer (Discord invite,
+            // etc.) visually distinct from the version-specific bullets.
+            lines.push("", ann.footer)
+        }
+        const message = lines.join("\n")
 
         api.ui.dialog.replace(
             () => (

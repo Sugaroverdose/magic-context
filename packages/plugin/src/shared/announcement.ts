@@ -36,8 +36,16 @@ export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
     "Hidden subagent tool isolation: historian, dreamer, and sidekick can no longer spawn subagents or run unsafe tools.",
     "TUI sidebar and /ctx-status header now show execute threshold inline: '47.5% / 65%' on the left, '475K / 1.0M' on the right.",
     "doctor --issue now caps GitHub issue bodies at ~60KB with a dedicated 'Recent errors' section so reports stay submittable.",
-    "Join us on Discord: https://discord.gg/F2uWxjGnU",
 ];
+
+/**
+ * Persistent footer rendered below the version-specific bullets in every
+ * announcement. Stays in place across releases so users always see the Discord
+ * invite without us needing to repeat it in `ANNOUNCEMENT_FEATURES` each time.
+ *
+ * Leave empty (`""`) to suppress the footer.
+ */
+export const ANNOUNCEMENT_FOOTER = "Join us on Discord: https://discord.gg/F2uWxjGnU";
 
 const STATE_FILENAME = "last_announced_version";
 

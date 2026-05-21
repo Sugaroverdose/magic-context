@@ -242,6 +242,7 @@ export interface AnnouncementResponse {
     show: boolean;
     version?: string;
     features?: string[];
+    footer?: string;
 }
 
 export async function getAnnouncement(): Promise<AnnouncementResponse> {
@@ -251,11 +252,13 @@ export async function getAnnouncement(): Promise<AnnouncementResponse> {
             show?: boolean;
             version?: string;
             features?: string[];
+            footer?: string;
         }>("get-announcement", {});
         return {
             show: result.show === true,
             version: result.version,
             features: Array.isArray(result.features) ? result.features : undefined,
+            footer: typeof result.footer === "string" ? result.footer : undefined,
         };
     } catch {
         return { show: false };
