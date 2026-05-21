@@ -55,11 +55,11 @@ import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import {
 	clearModelsDevCache,
 	getModelsDevContextLimit,
 } from "@magic-context/core/shared/models-dev-cache";
+import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,

@@ -564,7 +564,11 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const resultPromise = runner.run(baseOptions);
 		child.writeStdoutLine(
 			agentEnd([
-				{ role: "assistant", content: [{ type: "text", text: "looks done" }], stopReason: "stop" },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "looks done" }],
+					stopReason: "stop",
+				},
 			]),
 		);
 		child.writeStderr("process failed late");
@@ -574,7 +578,11 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
 			expect(result.reason).toBe("non_zero_exit");
-			expect(result.meta).toEqual({ stderr: "process failed late", exitCode: 9, signal: null });
+			expect(result.meta).toEqual({
+				stderr: "process failed late",
+				exitCode: 9,
+				signal: null,
+			});
 		}
 	});
 
@@ -586,23 +594,51 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			spawnCount += 1;
 			return (spawnCount === 1 ? first : second) as never;
 		});
-		const runner = new PiSubagentRunner({ piBinary: "pi-test", spawnImpl: spawnImpl as never });
+		const runner = new PiSubagentRunner({
+			piBinary: "pi-test",
+			spawnImpl: spawnImpl as never,
+		});
 
 		const resultPromise = runner.run({
 			...baseOptions,
 			model: "anthropic/primary",
 			fallbackModels: ["openai/fallback"],
 		});
-		first.writeStdoutLine(agentEnd([{ role: "assistant", content: [{ type: "text", text: "bad" }], stopReason: "error" }]));
+		first.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "bad" }],
+					stopReason: "error",
+				},
+			]),
+		);
 		first.emitClose(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		second.writeStdoutLine(agentEnd([{ role: "assistant", content: [{ type: "text", text: "good" }], stopReason: "stop" }]));
+		second.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "good" }],
+					stopReason: "stop",
+				},
+			]),
+		);
 		second.emitClose(0);
 
-		expect(await resultPromise).toEqual({ ok: true, assistantText: "good", durationMs: expect.any(Number), meta: { stderr: undefined } });
+		expect(await resultPromise).toEqual({
+			ok: true,
+			assistantText: "good",
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
 		expect(spawnImpl).toHaveBeenCalledTimes(2);
-		expect(spawnImpl.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--model", "anthropic/primary"]));
-		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(expect.arrayContaining(["--model", "openai/fallback"]));
+		expect(spawnImpl.mock.calls[0]?.[1]).toEqual(
+			expect.arrayContaining(["--model", "anthropic/primary"]),
+		);
+		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
+			expect.arrayContaining(["--model", "openai/fallback"]),
+		);
 	});
 
 	it("returns timeout and terminates a child that never closes", async () => {

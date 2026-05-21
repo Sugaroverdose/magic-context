@@ -45,7 +45,6 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import { promoteSessionFactsToMemory } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	clearEmergencyRecovery,
@@ -54,6 +53,7 @@ import {
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
+import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import {
 	buildCompartmentAgentPrompt,
 	buildHistorianEditorPrompt,

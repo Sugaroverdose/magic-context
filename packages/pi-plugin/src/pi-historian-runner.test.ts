@@ -10,8 +10,8 @@ import {
 	getHistorianFailureState,
 	getOverflowState,
 	getPendingPiCompactionMarkerState,
-	recordOverflowDetected,
 	getPersistedNoteNudge,
+	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage";
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";

@@ -231,10 +231,14 @@ export class PiSubagentRunner implements SubagentRunner {
 				return result;
 			}
 		}
-		return lastResult ?? this.runOnce({ ...options, fallbackModels: undefined });
+		return (
+			lastResult ?? this.runOnce({ ...options, fallbackModels: undefined })
+		);
 	}
 
-	private async runOnce(options: SubagentRunOptions): Promise<SubagentRunResult> {
+	private async runOnce(
+		options: SubagentRunOptions,
+	): Promise<SubagentRunResult> {
 		const startTime = Date.now();
 		if (options.signal?.aborted) {
 			return {
@@ -627,7 +631,11 @@ export class PiSubagentRunner implements SubagentRunner {
 							reason: "non_zero_exit",
 							error: `pi exited (code=${code}, signal=${signal}) after terminal assistant event. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
 							durationMs: Date.now() - startTime,
-							meta: { stderr: stderr.length > 0 ? stderr : undefined, exitCode: code, signal },
+							meta: {
+								stderr: stderr.length > 0 ? stderr : undefined,
+								exitCode: code,
+								signal,
+							},
 						});
 						return;
 					}

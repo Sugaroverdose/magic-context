@@ -1734,7 +1734,6 @@ export function registerPiContextHandler(
 					messages: outputMessages,
 					projectIdentity,
 					entryIds: strictEntryIds,
-					isCacheBusting,
 				});
 			} catch (err) {
 				sessionLog(
@@ -2682,10 +2681,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			: deferredExecuteWasPending
 				? "deferred_boundary_execute"
 				: deferredMaterialize
-				? "deferred_publication"
-				: args.forceMaterialization
-					? "force_materialization"
-					: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+					? "deferred_publication"
+					: args.forceMaterialization
+						? "force_materialization"
+						: `scheduler_execute (scheduler=${args.schedulerDecision})`;
 		sessionLog(
 			args.sessionId,
 			`pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
@@ -3322,13 +3321,15 @@ function applyNoteNudges(args: {
 	messages: PiAgentMessage[];
 	projectIdentity: string;
 	entryIds: readonly (string | undefined)[] | null;
-	isCacheBusting: boolean;
 }): PiAgentMessage[] {
-	const { sessionId, db, messages, projectIdentity, entryIds, isCacheBusting } =
-		args;
+	const { sessionId, db, messages, projectIdentity, entryIds } = args;
 
 	const messageIdByIndex = buildPiMessageIdByIndex(messages, entryIds);
-	const replayMessageIdByIndex = buildPiMessageIdByIndex(messages, entryIds, true);
+	const replayMessageIdByIndex = buildPiMessageIdByIndex(
+		messages,
+		entryIds,
+		true,
+	);
 
 	for (const anchor of getNoteNudgeAnchors(db, sessionId)) {
 		appendReminderToUserMessageByIdPi(

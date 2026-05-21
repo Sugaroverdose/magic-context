@@ -78,7 +78,9 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 		try {
 			const db = openDatabase();
 			if (!db) {
-				throw new Error("storage open failed; refusing to start without Magic Context tools");
+				throw new Error(
+					"storage open failed; refusing to start without Magic Context tools",
+				);
 			}
 			openedDb = db;
 

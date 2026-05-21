@@ -59,7 +59,10 @@ export function applyDeferredPiCompactionMarker(
 
 		const latestFirstKept = findLatestCompactionFirstKept(branchEntries);
 		if (latestFirstKept !== null) {
-			const latestFirstKeptIndex = findEntryIndex(branchEntries, latestFirstKept);
+			const latestFirstKeptIndex = findEntryIndex(
+				branchEntries,
+				latestFirstKept,
+			);
 			if (latestFirstKeptIndex >= pendingFirstKeptIndex) {
 				return { kind: "already-current" };
 			}

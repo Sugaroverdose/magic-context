@@ -7,7 +7,9 @@ describe("Pi startup rehydration signal contract", () => {
 		const source = readFileSync(join(import.meta.dir, "index.ts"), "utf8");
 		const block = source.slice(
 			source.indexOf("const pendingPiMarkerSessions"),
-			source.indexOf("Magic Context (pi) failed to rehydrate deferred Pi compaction markers"),
+			source.indexOf(
+				"Magic Context (pi) failed to rehydrate deferred Pi compaction markers",
+			),
 		);
 		expect(block).toContain("signalPiDeferredHistoryRefresh(sid)");
 		expect(block).toContain("signalPiPendingMaterialization(sid)");

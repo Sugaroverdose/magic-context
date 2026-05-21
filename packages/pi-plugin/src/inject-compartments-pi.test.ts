@@ -35,9 +35,18 @@ function result(toolCallId: string) {
 
 describe("trimPiMessagesToBoundary", () => {
 	it("sweeps non-contiguous toolResults whose assistant toolCall was trimmed", () => {
-		const messages = [assistant(["call-a"]), user("interleaved"), result("call-a"), user("keep")];
+		const messages = [
+			assistant(["call-a"]),
+			user("interleaved"),
+			result("call-a"),
+			user("keep"),
+		];
 
-		const removed = __test.trimPiMessagesToBoundary(messages, ["a", "u1", "r", "u2"], "a");
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["a", "u1", "r", "u2"],
+			"a",
+		);
 
 		expect(removed).toBe(2);
 		expect(messages.map((m) => m.role)).toEqual(["user", "user"]);
@@ -45,18 +54,37 @@ describe("trimPiMessagesToBoundary", () => {
 	});
 
 	it("sweeps split multi-toolCall results after an intervening user", () => {
-		const messages = [assistant(["call-a", "call-b"]), user("gap"), result("call-a"), result("call-b"), user("keep")];
+		const messages = [
+			assistant(["call-a", "call-b"]),
+			user("gap"),
+			result("call-a"),
+			result("call-b"),
+			user("keep"),
+		];
 
-		const removed = __test.trimPiMessagesToBoundary(messages, ["a", "gap", "ra", "rb", "keep"], "a");
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["a", "gap", "ra", "rb", "keep"],
+			"a",
+		);
 
 		expect(removed).toBe(3);
 		expect(messages.map((m) => m.role)).toEqual(["user", "user"]);
 	});
 
 	it("sweeps kept assistant toolCalls when their toolResult was trimmed", () => {
-		const messages = [user("old"), result("call-a"), assistant(["call-a"]), user("keep")];
+		const messages = [
+			user("old"),
+			result("call-a"),
+			assistant(["call-a"]),
+			user("keep"),
+		];
 
-		const removed = __test.trimPiMessagesToBoundary(messages, ["u", "r", "a", "keep"], "r");
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["u", "r", "a", "keep"],
+			"r",
+		);
 
 		expect(removed).toBe(3);
 		expect(messages).toEqual([user("keep")]);

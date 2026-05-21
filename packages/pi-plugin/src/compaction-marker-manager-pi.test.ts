@@ -324,5 +324,4 @@ describe("Pi deferred compaction marker manager", () => {
 			closeQuietly(db);
 		}
 	});
-
 });
