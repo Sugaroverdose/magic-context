@@ -627,25 +627,36 @@ function AnnouncementDialog(props: {
                 <text fg={theme().text}>What's new:</text>
             </box>
             <box flexDirection="column" marginTop={1}>
-                {props.features.map((line) => (
-                    // opentui constraint: <a> and <span> are inline elements
-                    // that MUST have a <text> parent. Putting <a> directly
-                    // inside <box> triggers "Orphan text error". Render each
-                    // bullet as a single <text> with inline <span> + <a>
-                    // children so the URL flows inline with the bullet text.
-                    <text fg={theme().text}>
-                        <span fg={theme().textMuted}>{"  • "}</span>
-                        {splitUrlSegments(line).map((seg) =>
-                            seg.kind === "url" ? (
-                                <a href={seg.url} fg={theme().accent}>
-                                    <u>{seg.url}</u>
-                                </a>
-                            ) : (
-                                <span>{seg.text}</span>
-                            ),
-                        )}
-                    </text>
-                ))}
+                {props.features.map((line) => {
+                    const segments = splitUrlSegments(line);
+                    const hasUrl = segments.some((s) => s.kind === "url");
+                    // opentui rule of thumb learned the hard way: <text> wraps
+                    // its content based on parent width ONLY when its children
+                    // are pure strings. If you nest <span>/<a> children inside
+                    // a single <text>, opentui treats each child as an inline
+                    // block and skips wrapping — bullets bleed past the dialog
+                    // border. So we render plain bullets as a single string
+                    // (auto-wraps) and the URL bullet as string + <a> + string
+                    // (clickable via OSC 8 from opentui's <a>, slight overflow
+                    // possible if URL is very long but Discord invite is short).
+                    if (!hasUrl) {
+                        return <text fg={theme().text}>{`  • ${line}`}</text>;
+                    }
+                    return (
+                        <text fg={theme().text}>
+                            {"  • "}
+                            {segments.map((seg) =>
+                                seg.kind === "url" ? (
+                                    <a href={seg.url} fg={theme().accent}>
+                                        {seg.url}
+                                    </a>
+                                ) : (
+                                    seg.text
+                                ),
+                            )}
+                        </text>
+                    );
+                })}
             </box>
             <box marginTop={1}>
                 <text fg={theme().textMuted}>Press Enter or Escape to dismiss</text>
