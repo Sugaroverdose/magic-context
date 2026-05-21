@@ -1758,6 +1758,27 @@ describe("collectMessageEntryIdsByRef", () => {
 		expect(result).toEqual(["entry-clone"]);
 	});
 
+	it("does not fingerprint-resolve ambiguous cloned repeated messages", () => {
+		const originalA = userMessage("same text", 10);
+		const originalB = userMessage("same text", 10);
+		const clone = userMessage("same text", 10);
+
+		const result = collectMessageEntryIdsByRef(
+			{
+				sessionManager: {
+					getBranch: () => [
+						{ type: "message", id: "entry-a", message: originalA },
+						{ type: "message", id: "entry-b", message: originalB },
+					],
+				},
+			} as never,
+			[clone],
+			"ses-ref",
+		);
+
+		expect(result).toEqual([undefined]);
+	});
+
 	it("skips non-message entry types and entries with missing fields", () => {
 		// `compaction` and `branch_summary` entries are NOT used for
 		// ref-mapping (Pi's `buildSessionContext` wraps them in fresh

@@ -151,52 +151,86 @@ function trimPiMessagesToBoundary(
 	}
 	if (cutoffIndex < 0) return 0;
 
-	// Collect all toolCall IDs from messages being trimmed. Any
-	// immediately-following toolResult messages that reference those IDs
-	// would become orphaned (their paired toolCall is gone), causing
-	// providers to reject the request. Advance the cutoff past them.
-	const removedCallIds = new Set<string>();
-	for (let i = 0; i <= cutoffIndex; i++) {
-		const msg = piMessages[i];
-		if (!msg || msg.role !== "assistant") continue;
-		const assistantMsg = msg as { role: "assistant"; content: unknown[] };
-		if (!Array.isArray(assistantMsg.content)) continue;
-		for (const part of assistantMsg.content) {
-			if (
-				part &&
-				typeof part === "object" &&
-				(part as Record<string, unknown>).type === "toolCall" &&
-				typeof (part as Record<string, unknown>).id === "string"
-			) {
-				removedCallIds.add((part as Record<string, unknown>).id as string);
+	// Start with the same prefix trim as the shared OpenCode projection, then
+	// repeatedly sweep both directions across Pi's split tool-call shape:
+	//   - removed assistant toolCall -> any kept toolResult is orphaned
+	//   - removed toolResult -> any kept assistant carrying that toolCall is unsafe
+	// Tool results are not guaranteed to be contiguous with their calls once Pi
+	// has injected user turns, custom messages, or other extension output, so a
+	// simple "advance while next message is toolResult" leaves non-contiguous
+	// provider-invalid orphans in the visible request.
+	const remove = new Set<number>();
+	for (let i = 0; i <= cutoffIndex; i++) remove.add(i);
+
+	let changed = true;
+	while (changed) {
+		changed = false;
+		const removedCallIds = new Set<string>();
+		const removedResultIds = new Set<string>();
+
+		for (const index of remove) {
+			const msg = piMessages[index];
+			if (!msg) continue;
+			if (msg.role === "assistant") {
+				for (const callId of getPiToolCallIds(msg)) removedCallIds.add(callId);
+			} else if (msg.role === "toolResult") {
+				const callId = getPiToolResultCallId(msg);
+				if (callId) removedResultIds.add(callId);
 			}
 		}
-	}
-	// Advance past any orphaned toolResult messages.
-	if (removedCallIds.size > 0) {
-		let i = cutoffIndex + 1;
-		while (i < piMessages.length) {
+
+		for (let i = 0; i < piMessages.length; i++) {
+			if (remove.has(i)) continue;
 			const msg = piMessages[i];
-			if (
-				msg &&
-				msg.role === "toolResult" &&
-				typeof (msg as Record<string, unknown>).toolCallId === "string" &&
-				removedCallIds.has(
-					(msg as Record<string, unknown>).toolCallId as string,
-				)
-			) {
-				cutoffIndex = i;
-				i++;
-			} else {
-				break;
+			if (!msg) continue;
+			if (msg.role === "toolResult") {
+				const callId = getPiToolResultCallId(msg);
+				if (callId && removedCallIds.has(callId)) {
+					remove.add(i);
+					changed = true;
+				}
+				continue;
+			}
+			if (msg.role === "assistant") {
+				const callIds = getPiToolCallIds(msg);
+				if (callIds.some((callId) => removedResultIds.has(callId))) {
+					remove.add(i);
+					changed = true;
+				}
 			}
 		}
 	}
 
-	const removed = cutoffIndex + 1;
-	piMessages.splice(0, removed);
+	const kept = piMessages.filter((_, index) => !remove.has(index));
+	const removed = piMessages.length - kept.length;
+	piMessages.splice(0, piMessages.length, ...kept);
 	return removed;
 }
+
+function getPiToolCallIds(message: PiAssistantMessage): string[] {
+	if (!Array.isArray(message.content)) return [];
+	const ids: string[] = [];
+	for (const part of message.content) {
+		if (
+			part &&
+			typeof part === "object" &&
+			(part as Record<string, unknown>).type === "toolCall" &&
+			typeof (part as Record<string, unknown>).id === "string"
+		) {
+			ids.push((part as Record<string, unknown>).id as string);
+		}
+	}
+	return ids;
+}
+
+function getPiToolResultCallId(message: PiToolResultMessage): string | null {
+	const callId = (message as Record<string, unknown>).toolCallId;
+	return typeof callId === "string" && callId.length > 0 ? callId : null;
+}
+
+export const __test = {
+	trimPiMessagesToBoundary,
+};
 
 /**
  * Find the first user message in the Pi AgentMessage[] and prepend the

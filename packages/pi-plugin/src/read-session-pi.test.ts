@@ -123,7 +123,7 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		).toEqual([
 			{ ordinal: 1, id: "user-1", role: "user" },
 			{ ordinal: 2, id: "asst-1", role: "assistant" },
-			{ ordinal: 3, id: "tr-1", role: "user" },
+			{ ordinal: 3, id: "synth-user-tr-1", role: "user" },
 			{ ordinal: 4, id: "asst-2", role: "assistant" },
 		]);
 	});
@@ -159,7 +159,7 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		expect(synthetic?.ordinal).toBe(3);
 		expect(synthetic?.role).toBe("user");
 		// First folded toolResult wins — never empty.
-		expect(synthetic?.id).toBe("tr-1");
+		expect(synthetic?.id).toBe("synth-user-tr-1");
 	});
 
 	it("assigns the first folded toolResult's id to a trailing-tail synthetic user", () => {
@@ -182,7 +182,7 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		const tail = raws[raws.length - 1];
 		expect(tail?.ordinal).toBe(3);
 		expect(tail?.role).toBe("user");
-		expect(tail?.id).toBe("tr-tail");
+		expect(tail?.id).toBe("synth-user-tr-tail");
 	});
 
 	it("clears pending state after a real user folds toolResults", () => {
@@ -227,7 +227,7 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 			{ ordinal: 1, id: "asst-1", role: "assistant" },
 			{ ordinal: 2, id: "real-user", role: "user" },
 			{ ordinal: 3, id: "asst-2", role: "assistant" },
-			{ ordinal: 4, id: "tr-2", role: "user" },
+			{ ordinal: 4, id: "synth-user-tr-2", role: "user" },
 			{ ordinal: 5, id: "asst-3", role: "assistant" },
 		]);
 	});
@@ -292,7 +292,7 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 				idx > 0 &&
 				raws[idx - 1] !== undefined &&
 				raws[idx - 1]?.role === "assistant" &&
-				r.id.startsWith("tr-"),
+				r.id.startsWith("synth-user-tr-"),
 		);
 		expect(syntheticUsers.length).toBe(50);
 	});

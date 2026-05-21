@@ -1078,11 +1078,18 @@ export function collectMessageEntryIdsByRef(
 			continue;
 		}
 		const fingerprint = piMessageEntryFingerprint(msg);
-		const fingerprintId = fingerprint
-			? entryIdsByFingerprint
-					.get(fingerprint)
-					?.find((candidate) => !consumedFingerprintIds.has(candidate))
+		const fingerprintBucket = fingerprint
+			? entryIdsByFingerprint.get(fingerprint)
 			: undefined;
+		// A fingerprint is only a safe fallback when it uniquely identifies a
+		// branch entry. Repeated/cloned messages can share timestamp/role/text;
+		// consuming the "next" bucket item would silently anchor to the wrong
+		// SessionEntry after one clone is dropped or reordered.
+		const fingerprintId =
+			fingerprintBucket?.length === 1 &&
+			!consumedFingerprintIds.has(fingerprintBucket[0] as string)
+				? fingerprintBucket[0]
+				: undefined;
 		if (typeof fingerprintId === "string") {
 			consumedFingerprintIds.add(fingerprintId);
 			result[i] = fingerprintId;
@@ -3259,7 +3266,13 @@ function applyStickyTurnReminder(args: {
 			reminder.messageId,
 			reminder.text,
 		);
-		if (!reinjected && args.isCacheBustingPass && args.entryIds !== null) {
+		if (
+			!reinjected &&
+			args.isCacheBustingPass &&
+			args.entryIds !== null &&
+			!args.entryIds.includes(undefined) &&
+			!args.entryIds.includes(reminder.messageId)
+		) {
 			clearPersistedStickyTurnReminder(args.db, args.sessionId);
 		}
 		return args.messages;
@@ -3315,11 +3328,12 @@ function applyNoteNudges(args: {
 		args;
 
 	const messageIdByIndex = buildPiMessageIdByIndex(messages, entryIds);
+	const replayMessageIdByIndex = buildPiMessageIdByIndex(messages, entryIds, true);
 
 	for (const anchor of getNoteNudgeAnchors(db, sessionId)) {
 		appendReminderToUserMessageByIdPi(
 			messages,
-			messageIdByIndex,
+			replayMessageIdByIndex,
 			anchor.messageId,
 			anchor.text,
 		);
@@ -3328,7 +3342,7 @@ function applyNoteNudges(args: {
 		if (decision.decision === "hint") {
 			appendReminderToUserMessageByIdPi(
 				messages,
-				messageIdByIndex,
+				replayMessageIdByIndex,
 				decision.messageId,
 				decision.text,
 			);
@@ -3365,18 +3379,25 @@ function applyNoteNudges(args: {
 		}
 		const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
 		const anchoredId = latestUser?.messageId ?? null;
+		if (!anchoredId) {
+			sessionLog(
+				sessionId,
+				"Pi note-nudge: latest user message has no resolved SessionEntry id; deferring delivery to next pass",
+			);
+			return messages;
+		}
 		const outcome = markNoteNudgeDelivered(
 			db,
 			sessionId,
 			noteInstruction,
 			anchoredId,
 		);
-		if (latestUser && anchoredId && outcome.ok) {
+		if (latestUser && outcome.ok) {
 			appendReminderToPiUserMessage(
 				messages[latestUser.index] as PiAgentMessage,
 				noteInstruction,
 			);
-		} else if (anchoredId && !outcome.ok) {
+		} else if (!outcome.ok) {
 			sessionLog(
 				sessionId,
 				`Pi note-nudge delivery skipped wire append: ${outcome.kind}`,
@@ -3384,7 +3405,7 @@ function applyNoteNudges(args: {
 		}
 	}
 
-	if (isCacheBusting && entryIds !== null) {
+	if (entryIds !== null && !entryIds.includes(undefined)) {
 		const visibleIds = new Set(
 			entryIds.filter((id): id is string => typeof id === "string"),
 		);
@@ -3436,6 +3457,7 @@ type PiMessageIdByIndex = Map<number, string>;
 function buildPiMessageIdByIndex(
 	messages: PiAgentMessage[],
 	entryIds: readonly (string | undefined)[] | null,
+	includeMessageIdFallback = false,
 ): PiMessageIdByIndex {
 	const ids = new Map<number, string>();
 	for (let index = 0; index < messages.length; index += 1) {
@@ -3444,10 +3466,16 @@ function buildPiMessageIdByIndex(
 			ids.set(index, entryId);
 			continue;
 		}
-		const messageId = (messages[index] as { id?: unknown } | undefined)?.id;
-		if (typeof messageId === "string") {
-			ids.set(index, messageId);
+		if (includeMessageIdFallback) {
+			const messageId = (messages[index] as { id?: unknown } | undefined)?.id;
+			if (typeof messageId === "string") {
+				ids.set(index, messageId);
+			}
 		}
+		// Fresh anchors deliberately do not use AgentMessage.id: Pi's context
+		// messages may carry transient wrapper ids that are not SessionEntry ids.
+		// Existing anchors may still replay through that fallback for backward
+		// compatibility when includeMessageIdFallback=true.
 	}
 	return ids;
 }

@@ -147,6 +147,7 @@ describe("subagent-runner pure helpers", () => {
 			// so Pi's own resolution handles it (correct for Anthropic).
 			// Users on providers like GitHub Copilot should set
 			// historian.thinking_level in their Pi magic-context.jsonc.
+			"--",
 			"summarize this session",
 		]);
 	});
@@ -168,17 +169,30 @@ describe("subagent-runner pure helpers", () => {
 		expect(noSessionIdx).toBeLessThan(modelIdx);
 	});
 
-	it("builds --models when fallback models are provided", () => {
+	it("builds a single --model; runner handles fallback with fresh children", () => {
 		const args = __test.buildArgs({
 			...baseOptions,
 			model: "anthropic/primary",
 			fallbackModels: ["openai/fallback", "google/last"],
 		});
 
-		expect(args).toContain("--models");
-		expect(args).not.toContain("--model");
-		expect(args).toContain("anthropic/primary,openai/fallback,google/last");
+		expect(args).toContain("--model");
+		expect(args).not.toContain("--models");
+		expect(args).toContain("anthropic/primary");
+		expect(args).not.toContain("openai/fallback");
+		expect(args.at(-2)).toBe("--");
 		expect(args.at(-1)).toBe("summarize this session");
+	});
+
+	it("inserts -- before prompts that look like flags", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			model: "anthropic/claude-sonnet",
+			userMessage: "--not-a-pi-flag",
+		});
+
+		expect(args.at(-2)).toBe("--");
+		expect(args.at(-1)).toBe("--not-a-pi-flag");
 	});
 
 	it("parses JSON event lines and normalizes parse errors", () => {
@@ -533,13 +547,62 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				"--no-prompt-templates",
 				"--system-prompt",
 				"system guidance",
-				"--models",
-				"anthropic/primary,openai/fallback",
+				"--model",
+				"anthropic/primary",
 				// No --thinking: thinkingLevel not set in options above.
+				"--",
 				"summarize this session",
 			],
 			expect.objectContaining({ cwd: "/workspace/project" }),
 		);
+	});
+
+	it("returns non_zero_exit even after a terminal agent_end", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine(
+			agentEnd([
+				{ role: "assistant", content: [{ type: "text", text: "looks done" }], stopReason: "stop" },
+			]),
+		);
+		child.writeStderr("process failed late");
+		child.emitClose(9);
+
+		const result = await resultPromise;
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.reason).toBe("non_zero_exit");
+			expect(result.meta).toEqual({ stderr: "process failed late", exitCode: 9, signal: null });
+		}
+	});
+
+	it("retries fallback models by spawning fresh children", async () => {
+		const first = createMockChild();
+		const second = createMockChild();
+		let spawnCount = 0;
+		const spawnImpl = mock(() => {
+			spawnCount += 1;
+			return (spawnCount === 1 ? first : second) as never;
+		});
+		const runner = new PiSubagentRunner({ piBinary: "pi-test", spawnImpl: spawnImpl as never });
+
+		const resultPromise = runner.run({
+			...baseOptions,
+			model: "anthropic/primary",
+			fallbackModels: ["openai/fallback"],
+		});
+		first.writeStdoutLine(agentEnd([{ role: "assistant", content: [{ type: "text", text: "bad" }], stopReason: "error" }]));
+		first.emitClose(0);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		second.writeStdoutLine(agentEnd([{ role: "assistant", content: [{ type: "text", text: "good" }], stopReason: "stop" }]));
+		second.emitClose(0);
+
+		expect(await resultPromise).toEqual({ ok: true, assistantText: "good", durationMs: expect.any(Number), meta: { stderr: undefined } });
+		expect(spawnImpl).toHaveBeenCalledTimes(2);
+		expect(spawnImpl.mock.calls[0]?.[1]).toEqual(expect.arrayContaining(["--model", "anthropic/primary"]));
+		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(expect.arrayContaining(["--model", "openai/fallback"]));
 	});
 
 	it("returns timeout and terminates a child that never closes", async () => {

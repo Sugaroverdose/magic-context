@@ -78,8 +78,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 		try {
 			const db = openDatabase();
 			if (!db) {
-				log("[pi-subagent] storage open failed; tools will not register");
-				return;
+				throw new Error("storage open failed; refusing to start without Magic Context tools");
 			}
 			openedDb = db;
 
@@ -108,11 +107,10 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 					` git_commits=${cfg.experimental.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
 			);
 		} catch (err) {
-			log(
-				`[pi-subagent] startup failed: ${
-					err instanceof Error ? err.message : String(err)
-				}`,
-			);
+			const message = err instanceof Error ? err.message : String(err);
+			log(`[pi-subagent] startup failed: ${message}`);
+			process.exitCode = 1;
+			throw err;
 		}
 	});
 

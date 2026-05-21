@@ -212,6 +212,29 @@ export class PiSubagentRunner implements SubagentRunner {
 	}
 
 	async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
+		const models = [options.model, ...(options.fallbackModels ?? [])].filter(
+			(model): model is string => typeof model === "string" && model.length > 0,
+		);
+		const attempts = models.length > 0 ? models : [undefined];
+		let lastResult: SubagentRunResult | null = null;
+		for (let index = 0; index < attempts.length; index += 1) {
+			const model = attempts[index];
+			const attemptOptions = {
+				...options,
+				model,
+				fallbackModels: undefined,
+			};
+			const result = await this.runOnce(attemptOptions);
+			if (result.ok) return result;
+			lastResult = result;
+			if (index >= attempts.length - 1 || !isFallbackEligible(result.reason)) {
+				return result;
+			}
+		}
+		return lastResult ?? this.runOnce({ ...options, fallbackModels: undefined });
+	}
+
+	private async runOnce(options: SubagentRunOptions): Promise<SubagentRunResult> {
 		const startTime = Date.now();
 		if (options.signal?.aborted) {
 			return {
@@ -463,7 +486,6 @@ export class PiSubagentRunner implements SubagentRunner {
 							typeof m.stopReason === "string" &&
 							(m.stopReason === "stop" ||
 								m.stopReason === "length" ||
-								m.stopReason === "error" ||
 								m.stopReason === "aborted");
 						if (isTerminalStopReason && !hasToolCall) {
 							sawAgentEnd = true;
@@ -501,6 +523,10 @@ export class PiSubagentRunner implements SubagentRunner {
 				// drain-after-stop pattern.
 				if (sawAgentEnd && !drainTimerStarted) {
 					drainTimerStarted = true;
+					if (timeoutHandle) {
+						clearTimeout(timeoutHandle);
+						timeoutHandle = undefined;
+					}
 					drainTimerHandle = setTimeout(() => {
 						if (settled) return;
 						terminateChild(child);
@@ -595,6 +621,17 @@ export class PiSubagentRunner implements SubagentRunner {
 						});
 						return;
 					}
+					if (code !== 0 || signal !== null) {
+						settle({
+							ok: false,
+							reason: "non_zero_exit",
+							error: `pi exited (code=${code}, signal=${signal}) after terminal assistant event. stderr: ${stderr.slice(0, 500) || "(empty)"}`,
+							durationMs: Date.now() - startTime,
+							meta: { stderr: stderr.length > 0 ? stderr : undefined, exitCode: code, signal },
+						});
+						return;
+					}
+
 					if (
 						finalStopReason === "error" ||
 						finalStopReason === "aborted" ||
@@ -668,6 +705,15 @@ export class PiSubagentRunner implements SubagentRunner {
 			});
 		});
 	}
+}
+
+function isFallbackEligible(reason: string): boolean {
+	return (
+		reason === "model_failed" ||
+		reason === "truncated" ||
+		reason === "non_zero_exit" ||
+		reason === "no_assistant"
+	);
 }
 
 /**
@@ -747,15 +793,11 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		args.push("--system-prompt", options.systemPrompt);
 	}
 
-	const models = [options.model, ...(options.fallbackModels ?? [])].filter(
-		(model): model is string => typeof model === "string" && model.length > 0,
-	);
-	if (models.length > 1) {
-		args.push("--models", models.join(","));
-	} else if (models.length === 1) {
-		// Pi accepts `provider/model` directly via --model. No need
-		// to split into separate --provider / --model flags.
-		args.push("--model", models[0]);
+	if (typeof options.model === "string" && options.model.length > 0) {
+		// Pi's --models flag scopes the model picker list; it is not an ordered
+		// fallback chain. The runner implements fallback by spawning a fresh child
+		// per model, so each invocation receives exactly one --model.
+		args.push("--model", options.model);
 	}
 
 	// Pass --thinking <level> only when explicitly configured.
@@ -767,8 +809,9 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		args.push("--thinking", options.thinkingLevel);
 	}
 
-	// Positional message argument MUST come last in print-mode argv.
-	args.push(options.userMessage);
+	// Positional message argument MUST come last in print-mode argv. Use -- so
+	// prompts beginning with a dash are never parsed as Pi flags.
+	args.push("--", options.userMessage);
 
 	return args;
 }

@@ -20,7 +20,11 @@ const INSTRUCTION_NAME_PATTERN = /<instruction\s+name="([^"]+)">/;
  *
  * Pi's `context` event receives a fresh `AgentMessage[]` for each LLM-bound
  * transform and the handler replaces it by returning `{ messages }`, so there is
- * no long-lived Anthropic prompt-cache anchor to preserve at this layer. Rather
+ * no long-lived Anthropic prompt-cache anchor to preserve at this layer. Verified
+ * against pi-coding-agent 0.74.0: `session-manager.buildSessionContext` builds a
+ * transient array from persisted SessionEntries, and context-handler return values
+ * are LLM-bound projections rather than appended SessionEntries. The synthetic
+ * nudge message below is therefore ephemeral and is not written to JSONL. Rather
  * than rewriting user text or mutating a signed/tool-bearing assistant message,
  * this function returns a shallow-copied array with one synthetic assistant text
  * message inserted immediately before the latest user message. That keeps the

@@ -231,7 +231,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 			if (pendingToolParts.length > 0) {
 				result.push({
 					ordinal: nextOrdinal++,
-					id: pendingFirstRealId,
+					id: `synth-user-${pendingFirstRealId}`,
 					role: "user",
 					parts: pendingToolParts,
 				});
@@ -266,7 +266,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 	if (pendingToolParts.length > 0) {
 		result.push({
 			ordinal: nextOrdinal,
-			id: pendingFirstRealId,
+			id: `synth-user-${pendingFirstRealId}`,
 			role: "user",
 			parts: pendingToolParts,
 		});
