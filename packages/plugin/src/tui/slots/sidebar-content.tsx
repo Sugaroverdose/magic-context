@@ -48,16 +48,13 @@ const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
     snapshot: SidebarSnapshot
 }) => {
-    // Bar width is hardcoded because the @opencode-ai/plugin/tui slot API does
-    // not expose the rendered sidebar width to plugins. 24 chars is the safe
-    // floor that fits every realistic sidebar configuration we've observed —
-    // OpenCode TUI's sidebar narrows with the terminal, and 36 (the previous
-    // value) overflowed users' actual layouts (issue #90), wrapping the bar
-    // onto a second line. If/when the slot API surfaces a real width, this
-    // should become Math.max(20, providedWidth) like the Pi status dialog
-    // already does (`Math.max(20, innerWidth)`).
-    const barWidth = 24
-
+    // The bar is rendered as a flex row of colored boxes, each with
+    // flexGrow=tokens and flexBasis=0. opentui distributes the parent
+    // container's full width proportionally, so the bar always fills the
+    // sidebar regardless of terminal size. No hardcoded width is needed —
+    // this fixes both the over-wide bar that wrapped onto a second line on
+    // narrow sidebars (issue #90) and the under-wide bar that left empty
+    // space on the right on wide sidebars.
     const segments = createMemo<TokenSegment[]>(() => {
         const s = props.snapshot
         const total = s.inputTokens || 1
@@ -151,66 +148,33 @@ const TokenBreakdown = (props: {
 
     const totalTokens = createMemo(() => props.snapshot.inputTokens || 1)
 
-    // Calculate proportional widths for each segment
-    const segmentWidths = createMemo(() => {
-        const total = totalTokens()
-        const segs = segments()
-        if (segs.length === 0) return []
-
-        // Calculate raw proportions
-        const proportions = segs.map((seg) => seg.tokens / total)
-
-        // Convert to character widths. Minimum 1 char ONLY when the segment
-        // has tokens > 0 — zero-token segments (e.g. Conversation when the
-        // calibrator rounded it to zero) must get width 0 so the bar stays
-        // proportional. The legend row still renders for zero-token segments
-        // to keep the row stable.
-        let widths = segs.map((seg, i) =>
-            seg.tokens > 0 ? Math.max(1, Math.round(proportions[i] * barWidth)) : 0,
-        )
-
-        // Adjust to exactly barWidth
-        const sum = widths.reduce((a, b) => a + b, 0)
-        if (sum > barWidth) {
-            // Shrink from the largest segments
-            let excess = sum - barWidth
-            while (excess > 0) {
-                const maxIdx = widths.indexOf(Math.max(...widths))
-                if (widths[maxIdx] > 1) {
-                    widths[maxIdx]--
-                    excess--
-                } else {
-                    break
-                }
-            }
-        } else if (sum < barWidth) {
-            // Expand the largest segments
-            let deficit = barWidth - sum
-            while (deficit > 0) {
-                const maxIdx = widths.indexOf(Math.max(...widths))
-                widths[maxIdx]++
-                deficit--
-            }
-        }
-
-        return widths
-    })
-
-    const barSegments = createMemo(() => {
-        const segs = segments()
-        const widths = segmentWidths()
-        return segs.map((seg, i) => ({
-            chars: "█".repeat(widths[i] || 0),
-            color: seg.color,
-        }))
-    })
+    // Render-time segments for the bar. Zero-token segments are filtered out
+    // entirely (no flex weight, no rendered box) so they don't claim any
+    // width. Non-zero segments still get a Math.max(1, ...) floor on
+    // flexGrow so very small contributions remain visible as a thin sliver.
+    // The legend rows below show every segment (including zeros) for table
+    // stability — only the bar prunes them.
+    const barSegments = createMemo(() =>
+        segments().filter((seg) => seg.tokens > 0),
+    )
 
     return (
         <box width="100%" flexDirection="column">
-            {/* Segmented bar */}
-            <box flexDirection="row">
-                {barSegments().map((seg, i) => (
-                    <text key={i} fg={seg.color}>{seg.chars}</text>
+            {/* Segmented bar: a width="100%" flex row of colored boxes,
+                each with flexGrow proportional to its token count and
+                flexBasis=0. opentui distributes the parent's full width
+                proportionally, so the bar always fills the sidebar
+                regardless of terminal size. Height is fixed at 1 row;
+                backgroundColor renders the colored bar. */}
+            <box width="100%" flexDirection="row" height={1}>
+                {barSegments().map((seg) => (
+                    <box
+                        key={seg.key}
+                        flexGrow={Math.max(1, seg.tokens)}
+                        flexBasis={0}
+                        height={1}
+                        backgroundColor={seg.color}
+                    />
                 ))}
             </box>
 

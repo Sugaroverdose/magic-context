@@ -261,27 +261,12 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
         return { segs, total }
     }
 
-    const barWidth = 56
-    const barSegments = () => {
-        const { segs, total } = breakdownSegments()
-        if (segs.length === 0) return []
-
-        let widths = segs.map((seg) => Math.max(1, Math.round((seg.tokens / total) * barWidth)))
-        let sum = widths.reduce((a, b) => a + b, 0)
-        while (sum > barWidth) {
-            const maxIdx = widths.indexOf(Math.max(...widths))
-            if (widths[maxIdx] > 1) { widths[maxIdx]--; sum-- } else break
-        }
-        while (sum < barWidth) {
-            const maxIdx = widths.indexOf(Math.max(...widths))
-            widths[maxIdx]++; sum++
-        }
-
-        return segs.map((seg, i) => ({
-            chars: "█".repeat(widths[i] || 0),
-            color: seg.color,
-        }))
-    }
+    // The status-dialog breakdown bar uses flex layout (same approach as the
+    // sidebar breakdown). Each segment becomes a colored box with
+    // flexGrow=tokens and flexBasis=0, parent has width="100%", so opentui
+    // distributes the dialog's full width proportionally regardless of the
+    // dialog's actual rendered width.
+    const barSegments = () => breakdownSegments().segs.filter((seg) => seg.tokens > 0)
 
     return (
         <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
@@ -304,10 +289,17 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 </text>
             </box>
 
-            {/* Segmented breakdown bar */}
-            <box flexDirection="row">
-                {barSegments().map((seg, i) => (
-                    <text key={i} fg={seg.color}>{seg.chars}</text>
+            {/* Segmented breakdown bar: flex row of colored boxes filling
+                the dialog width. See barSegments comment above. */}
+            <box width="100%" flexDirection="row" height={1}>
+                {barSegments().map((seg) => (
+                    <box
+                        key={seg.label}
+                        flexGrow={Math.max(1, seg.tokens)}
+                        flexBasis={0}
+                        height={1}
+                        backgroundColor={seg.color}
+                    />
                 ))}
             </box>
 
