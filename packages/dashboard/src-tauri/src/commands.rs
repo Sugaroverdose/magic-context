@@ -169,6 +169,27 @@ pub fn get_session_messages(
     db::get_session_messages(harness, &session_id).map_err(|e| e.to_string())
 }
 
+
+#[tauri::command]
+pub fn get_subagent_invocations(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<db::SubagentInvocation>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::get_subagent_invocations(&conn, &session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_subagent_totals_by_subagent(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<db::SubagentTotals>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::get_subagent_totals_by_subagent(&conn, &session_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_project_key_files(
     state: State<'_, AppState>,

@@ -223,6 +223,36 @@ export interface SessionMetaRow {
   compartment_in_progress: boolean;
   system_prompt_hash: string;
   memory_block_count: number;
+  new_work_tokens: number;
+  total_input_tokens: number;
+}
+
+export interface SubagentInvocation {
+  id: number;
+  session_id: string;
+  harness: string;
+  subagent: string;
+  task: string | null;
+  provider_id: string | null;
+  model_id: string | null;
+  started_at: number;
+  ended_at: number | null;
+  status: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  error: string | null;
+  parent_invocation_id: number | null;
+}
+
+export interface SubagentTotals {
+  subagent: string;
+  invocations: number;
+  total_input: number;
+  total_output: number;
+  total_cache_read: number;
+  total_cache_write: number;
 }
 
 export interface ContextTokenBreakdown {
@@ -256,6 +286,13 @@ export interface DreamRunTask {
   durationMs: number;
   resultChars: number;
   error?: string;
+  tokens?: {
+    total: number;
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_write: number;
+  };
 }
 
 export interface DreamRunMemoryChanges {

@@ -55,6 +55,8 @@ export interface SidebarSnapshot {
      * scheduler and transform paths.
      */
     executeThreshold: number;
+    newWorkTokens?: number | null;
+    totalInputTokens?: number | null;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

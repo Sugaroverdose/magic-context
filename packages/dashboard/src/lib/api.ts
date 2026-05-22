@@ -24,6 +24,8 @@ import type {
   SessionMetaRow,
   SessionRow,
   SessionSummary,
+  SubagentInvocation,
+  SubagentTotals,
   UserMemory,
   UserMemoryCandidate,
 } from "./types";
@@ -122,6 +124,14 @@ export async function getSessionDetail(
   sessionId: string,
 ): Promise<SessionDetail> {
   return invoke("get_session_detail", { harness, sessionId });
+}
+
+export async function getSubagentInvocations(sessionId: string): Promise<SubagentInvocation[]> {
+  return invoke("get_subagent_invocations", { sessionId });
+}
+
+export async function getSubagentTotalsBySubagent(sessionId: string): Promise<SubagentTotals[]> {
+  return invoke("get_subagent_totals_by_subagent", { sessionId });
 }
 
 export async function getSessionCacheEvents(

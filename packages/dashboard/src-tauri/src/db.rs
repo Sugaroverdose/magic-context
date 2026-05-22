@@ -305,6 +305,38 @@ pub struct SessionMetaRow {
     pub compartment_in_progress: bool,
     pub system_prompt_hash: String,
     pub memory_block_count: i64,
+    pub new_work_tokens: i64,
+    pub total_input_tokens: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SubagentInvocation {
+    pub id: i64,
+    pub session_id: String,
+    pub harness: String,
+    pub subagent: String,
+    pub task: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub status: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub error: Option<String>,
+    pub parent_invocation_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SubagentTotals {
+    pub subagent: String,
+    pub invocations: i64,
+    pub total_input: i64,
+    pub total_output: i64,
+    pub total_cache_read: i64,
+    pub total_cache_write: i64,
 }
 
 // ── Dreamer types ──────────────────────────────────────────────
@@ -2984,7 +3016,7 @@ pub fn get_session_meta(
         "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens,
                 last_nudge_band, is_subagent, last_context_percentage, last_input_tokens,
                 times_execute_threshold_reached, compartment_in_progress, system_prompt_hash,
-                memory_block_count
+                memory_block_count, COALESCE(new_work_tokens, 0), COALESCE(total_input_tokens, 0)
          FROM session_meta WHERE session_id = ?1",
     )?;
     let mut rows = stmt.query_map(rusqlite::params![session_id], |row| {
@@ -3002,6 +3034,8 @@ pub fn get_session_meta(
             compartment_in_progress: row.get::<_, i64>(10)? != 0,
             system_prompt_hash: row.get(11)?,
             memory_block_count: row.get(12)?,
+            new_work_tokens: row.get(13)?,
+            total_input_tokens: row.get(14)?,
         })
     })?;
     match rows.next() {
@@ -3009,6 +3043,69 @@ pub fn get_session_meta(
         Some(Err(e)) => Err(e),
         None => Ok(None),
     }
+}
+
+
+
+pub fn get_subagent_invocations(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SubagentInvocation>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, harness, subagent, task, provider_id, model_id,
+                started_at, ended_at, status, input_tokens, output_tokens,
+                cache_read_tokens, cache_write_tokens, error, parent_invocation_id
+         FROM subagent_invocations
+         WHERE session_id = ?1
+         ORDER BY started_at DESC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+        Ok(SubagentInvocation {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            harness: row.get(2)?,
+            subagent: row.get(3)?,
+            task: row.get(4)?,
+            provider_id: row.get(5)?,
+            model_id: row.get(6)?,
+            started_at: row.get(7)?,
+            ended_at: row.get(8)?,
+            status: row.get(9)?,
+            input_tokens: row.get(10)?,
+            output_tokens: row.get(11)?,
+            cache_read_tokens: row.get(12)?,
+            cache_write_tokens: row.get(13)?,
+            error: row.get(14)?,
+            parent_invocation_id: row.get(15)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_subagent_totals_by_subagent(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SubagentTotals>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT subagent, COUNT(*), COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_write_tokens), 0)
+         FROM subagent_invocations
+         WHERE session_id = ?1
+         GROUP BY subagent
+         ORDER BY subagent",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![session_id], |row| {
+        Ok(SubagentTotals {
+            subagent: row.get(0)?,
+            invocations: row.get(1)?,
+            total_input: row.get(2)?,
+            total_output: row.get(3)?,
+            total_cache_read: row.get(4)?,
+            total_cache_write: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ── Dreamer queries ─────────────────────────────────────────
@@ -3077,6 +3174,54 @@ fn map_dream_run_row(row: &rusqlite::Row<'_>) -> Result<DreamRun, rusqlite::Erro
     })
 }
 
+
+fn enrich_dream_run_tokens(conn: &Connection, run: &mut DreamRun) {
+    let Ok(mut tasks) = serde_json::from_value::<Vec<serde_json::Value>>(run.tasks_json.clone()) else {
+        return;
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT task, COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
+                COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0)
+         FROM subagent_invocations
+         WHERE subagent = 'dreamer' AND started_at >= ?1 AND started_at <= ?2
+         GROUP BY task",
+    ) else {
+        return;
+    };
+    let Ok(rows) = stmt.query_map(rusqlite::params![run.started_at, run.finished_at], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    }) else {
+        return;
+    };
+    let mut totals = std::collections::HashMap::new();
+    for row in rows.flatten() {
+        totals.insert(row.0.clone(), row);
+    }
+    for task in &mut tasks {
+        let Some(name) = task.get("name").and_then(|v| v.as_str()) else { continue; };
+        if let Some((_, total, input, output, cache_read, cache_write)) = totals.get(name) {
+            if let Some(obj) = task.as_object_mut() {
+                obj.insert("tokens".to_string(), serde_json::json!({
+                    "total": total,
+                    "input": input,
+                    "output": output,
+                    "cache_read": cache_read,
+                    "cache_write": cache_write,
+                }));
+            }
+        }
+    }
+    run.tasks_json = serde_json::Value::Array(tasks);
+}
+
 pub fn get_dream_runs(
     conn: &Connection,
     project_path: Option<&str>,
@@ -3120,6 +3265,9 @@ pub fn get_dream_runs(
         }
     }
 
+    for run in &mut runs {
+        enrich_dream_run_tokens(conn, run);
+    }
     Ok(runs)
 }
 

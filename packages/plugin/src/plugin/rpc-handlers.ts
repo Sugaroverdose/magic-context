@@ -121,6 +121,8 @@ export function buildSidebarSnapshot(
         toolCallTokens: 0,
         toolDefinitionTokens: 0,
         executeThreshold: 65,
+        newWorkTokens: null,
+        totalInputTokens: null,
     };
 
     try {
@@ -136,6 +138,8 @@ export function buildSidebarSnapshot(
             ? Number(meta.last_context_percentage ?? meta.last_usage_percentage ?? 0)
             : 0;
         const inputTokens = meta ? Number(meta.last_input_tokens ?? 0) : 0;
+        const newWorkTokens = meta ? Number(meta.new_work_tokens ?? 0) : 0;
+        const totalInputTokens = meta ? Number(meta.total_input_tokens ?? 0) : 0;
         const systemPromptTokens = meta ? Number(meta.system_prompt_tokens ?? 0) : 0;
         // messagesBlockTokens = token estimate of text/reasoning/image parts
         // in output.messages[] after transform, persisted by transform.ts.
@@ -418,6 +422,8 @@ export function buildSidebarSnapshot(
             toolCallTokens: calibrated.toolCallTokens,
             toolDefinitionTokens: calibrated.toolDefinitionTokens,
             executeThreshold,
+            newWorkTokens,
+            totalInputTokens,
         };
         // Defensive sticky cache: if `inputTokens` briefly drops to 0 mid-turn
         // (intermittent — possibly streaming events with empty token shape, or

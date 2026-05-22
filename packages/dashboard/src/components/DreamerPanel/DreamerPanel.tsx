@@ -38,6 +38,10 @@ function formatTaskLabel(name: string): string {
   return name === "smart-notes" ? "smart notes" : name;
 }
 
+function formatTaskTokens(task: DreamRunTask): string {
+  return task.tokens ? task.tokens.total.toLocaleString() : "—";
+}
+
 function formatTaskOutput(task: DreamRunTask, run: DreamRun): string {
   if (task.name === "smart-notes") {
     return `${run.smart_notes_surfaced} surfaced, ${run.smart_notes_pending} pending`;
@@ -330,6 +334,7 @@ export default function DreamerPanel() {
                                       <th>Task</th>
                                       <th>Duration</th>
                                       <th>Output</th>
+                                      <th>Tokens</th>
                                       <th>Status</th>
                                     </tr>
                                   </thead>
@@ -340,6 +345,12 @@ export default function DreamerPanel() {
                                           <td>{formatTaskLabel(task.name)}</td>
                                           <td class="mono">{formatDuration(task.durationMs)}</td>
                                           <td class="mono">{formatTaskOutput(task, run)}</td>
+                                          <td
+                                            class="mono"
+                                            title={task.tokens ? `input ${task.tokens.input.toLocaleString()} · output ${task.tokens.output.toLocaleString()} · cache ${task.tokens.cache_read.toLocaleString()}/${task.tokens.cache_write.toLocaleString()}` : undefined}
+                                          >
+                                            {formatTaskTokens(task)}
+                                          </td>
                                           <td>
                                             <span
                                               class={`dream-run-status ${task.error ? "error" : "success"}`}

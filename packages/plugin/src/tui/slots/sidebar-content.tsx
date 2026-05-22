@@ -441,6 +441,33 @@ const SidebarContent = (props: {
                     />
                 </>
             )}
+
+            {/* Stats */}
+            {s()?.newWorkTokens != null && (
+                <>
+                    <SectionHeader theme={props.theme} title="Stats" />
+                    <StatRow
+                        theme={props.theme}
+                        label="New work"
+                        value={compactTokens(s()!.newWorkTokens!)}
+                        dim
+                    />
+                    <StatRow
+                        theme={props.theme}
+                        label="Reprocessed"
+                        value={compactTokens(
+                            Math.max(0, (s()!.totalInputTokens ?? 0) - (s()!.newWorkTokens ?? 0)),
+                        )}
+                        dim
+                    />
+                    <StatRow
+                        theme={props.theme}
+                        label="Total input"
+                        value={compactTokens(s()!.totalInputTokens ?? 0)}
+                        dim
+                    />
+                </>
+            )}
         </box>
     )
 }

@@ -11,6 +11,8 @@ import {
   getSessionCacheEvents,
   getSessionDetail,
   getSessionMessages,
+  getSubagentInvocations,
+  getSubagentTotalsBySubagent,
   getSmartNotes,
   listSessionsPaged,
   truncate,
@@ -25,6 +27,7 @@ import type {
   SessionFilter,
   SessionMessageRow,
   SessionRow,
+  SubagentInvocation,
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
@@ -90,7 +93,7 @@ function compressionDepthInfo(
   }
 }
 
-type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "tokens" | "keyFiles" | "cache";
+type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" | "tokens" | "keyFiles" | "cache";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
@@ -301,6 +304,15 @@ export default function SessionViewer() {
     },
   );
 
+  const [subagentInvocations] = createResource(detailKey, async (selected) => {
+    if (!selected) return [];
+    return getSubagentInvocations(selected.sessionId);
+  });
+  const [subagentTotals] = createResource(detailKey, async (selected) => {
+    if (!selected) return [];
+    return getSubagentTotalsBySubagent(selected.sessionId);
+  });
+
   // Subagent filtering now lives in `sessionFilter` (server-side) so result
   // limits never silently drop primary sessions in favor of subagents.
   // Keep `filteredSessions` as a memo passthrough so any future client-only
@@ -333,6 +345,12 @@ export default function SessionViewer() {
   const notes = () => sessionDetail()?.notes ?? [];
   const meta = () => sessionDetail()?.meta ?? null;
   const tokenBreakdown = () => sessionDetail()?.token_breakdown ?? null;
+  const historianInvocations = () =>
+    (subagentInvocations() ?? []).filter((row) =>
+      row.subagent === "historian" || row.subagent === "historian_editor" || row.subagent === "recomp",
+    );
+  const totalInvocationTokens = (row: SubagentInvocation) =>
+    row.input_tokens + row.output_tokens + row.cache_read_tokens + row.cache_write_tokens;
   const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
   const [keyFiles] = createResource(
     () => sessionDetail()?.project_path ?? null,
@@ -804,6 +822,13 @@ export default function SessionViewer() {
             onClick={() => setActiveTab("notes")}
           >
             Notes ({notes().length + (smartNotes()?.length ?? 0)})
+          </button>
+          <button
+            type="button"
+            class={`tab-pill ${activeTab() === "historian" ? "active" : ""}`}
+            onClick={() => setActiveTab("historian")}
+          >
+            Historian ({historianInvocations().length})
           </button>
           <button
             type="button"
@@ -1560,6 +1585,41 @@ export default function SessionViewer() {
             </div>
           </Show>
 
+          <Show when={activeTab() === "historian"}>
+            <Show when={historianInvocations().length > 0} fallback={<div class="empty-state">No historian invocations recorded</div>}>
+              <table class="kv-table">
+                <thead>
+                  <tr>
+                    <th>Started</th>
+                    <th>Subagent</th>
+                    <th>Model</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Tokens</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={historianInvocations()}>
+                    {(row) => (
+                      <tr style={{ "padding-left": row.parent_invocation_id ? "16px" : undefined }}>
+                        <td>{formatDateTime(row.started_at)}</td>
+                        <td>{row.parent_invocation_id ? `↳ ${row.subagent}` : row.subagent}</td>
+                        <td>{row.model_id ?? row.provider_id ?? "—"}</td>
+                        <td>{row.status}</td>
+                        <td>{row.ended_at ? `${Math.max(0, row.ended_at - row.started_at).toLocaleString()}ms` : "—"}</td>
+                        <td title={`in ${row.input_tokens.toLocaleString()} · out ${row.output_tokens.toLocaleString()} · cache ${row.cache_read_tokens.toLocaleString()}/${row.cache_write_tokens.toLocaleString()}`}>
+                          {totalInvocationTokens(row).toLocaleString()}
+                        </td>
+                        <td>{row.error ?? "—"}</td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </Show>
+          </Show>
+
           {/* OpenCode meta table shown inside Meta tab */}
           <Show when={activeTab() === "tokens" && meta()}>
             <Show when={meta()} fallback={<div class="empty-state">No meta data</div>}>
@@ -1581,6 +1641,18 @@ export default function SessionViewer() {
                     <tr>
                       <td>Input tokens</td>
                       <td>{metaData().last_input_tokens.toLocaleString()}</td>
+                    </tr>
+                    <tr>
+                      <td>New work</td>
+                      <td>{metaData().new_work_tokens.toLocaleString()}</td>
+                    </tr>
+                    <tr>
+                      <td>Reprocessed</td>
+                      <td>{Math.max(0, metaData().total_input_tokens - metaData().new_work_tokens).toLocaleString()}</td>
+                    </tr>
+                    <tr>
+                      <td>Total input</td>
+                      <td>{metaData().total_input_tokens.toLocaleString()}</td>
                     </tr>
                     <tr>
                       <td>Cache TTL</td>
@@ -1620,6 +1692,27 @@ export default function SessionViewer() {
                 </table>
               )}
             </Show>
+          </Show>
+
+          <Show when={activeTab() === "tokens" && (subagentTotals()?.length ?? 0) > 0}>
+            <div style={{ height: "16px" }} />
+            <div class="card">
+              <div class="card-title">Magic Context overhead</div>
+              <table class="kv-table">
+                <tbody>
+                  <For each={subagentTotals() ?? []}>
+                    {(row) => (
+                      <tr>
+                        <td>{row.subagent}</td>
+                        <td>
+                          {(row.total_input + row.total_output + row.total_cache_read + row.total_cache_write).toLocaleString()} tokens · {row.invocations} calls
+                        </td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
           </Show>
 
           {/* Spacer between Meta key-value table and the Context Token Breakdown card. */}

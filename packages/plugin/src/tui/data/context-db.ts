@@ -59,6 +59,8 @@ const EMPTY_SNAPSHOT: SidebarSnapshot = {
     toolCallTokens: 0,
     toolDefinitionTokens: 0,
     executeThreshold: 65,
+    newWorkTokens: null,
+    totalInputTokens: null,
 };
 
 /**
