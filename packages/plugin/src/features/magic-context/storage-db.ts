@@ -338,11 +338,36 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- is a valid JSON blob written via setPendingPiCompactionMarkerState.
       -- Excluded from healNullTextColumns.
       pending_pi_compaction_marker_state TEXT,
+      new_work_tokens INTEGER NOT NULL DEFAULT 0,
+      total_input_tokens INTEGER NOT NULL DEFAULT 0,
       -- deferred_execute_state: intentionally NULLABLE without a default.
       -- Absence is SQL NULL; presence is a JSON blob written via
       -- setDeferredExecutePendingIfAbsent. Excluded from healNullTextColumns.
       deferred_execute_state TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS subagent_invocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      harness TEXT NOT NULL,
+      subagent TEXT NOT NULL,
+      task TEXT,
+      provider_id TEXT,
+      model_id TEXT,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      status TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      parent_invocation_id INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_sai_session_started
+      ON subagent_invocations(session_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sai_subagent
+      ON subagent_invocations(subagent, started_at DESC);
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
     CREATE INDEX IF NOT EXISTS idx_tags_session_message_id ON tags(session_id, message_id);
@@ -483,6 +508,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // NULL is the load-bearing absence sentinel and this column MUST NOT be
     // added to healNullTextColumns.
     ensureColumn(db, "session_meta", "pending_pi_compaction_marker_state", "TEXT");
+    ensureColumn(db, "session_meta", "new_work_tokens", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "session_meta", "total_input_tokens", "INTEGER NOT NULL DEFAULT 0");
     // Boundary-execution deferred intent (plan v8). Intentionally NO DEFAULT
     // clause — absence is SQL NULL, presence is a JSON blob. This column MUST
     // NOT be added to `healNullTextColumns`.
@@ -628,6 +655,8 @@ function healNullIntegerColumns(db: Database): void {
         ["note_nudge_trigger_pending", 0],
         ["observed_safe_input_tokens", 0],
         ["cache_alert_sent", 0],
+        ["new_work_tokens", 0],
+        ["total_input_tokens", 0],
     ];
     for (const [column, fallback] of columns) {
         try {

@@ -1295,3 +1295,39 @@ export function getSessionsWithPendingMarker(db: Database): string[] {
         .all() as Array<{ session_id: string }>;
     return rows.map((r) => r.session_id);
 }
+
+export function setSessionWorkMetrics(
+    db: Database,
+    sessionId: string,
+    newWorkTokens: number,
+    totalInputTokens: number,
+): void {
+    ensureSessionMetaRow(db, sessionId);
+    db.prepare(
+        `UPDATE session_meta
+         SET new_work_tokens = ?, total_input_tokens = ?
+         WHERE session_id = ?`,
+    ).run(
+        Math.max(0, Math.floor(newWorkTokens)),
+        Math.max(0, Math.floor(totalInputTokens)),
+        sessionId,
+    );
+}
+
+export function getSessionWorkMetrics(
+    db: Database,
+    sessionId: string,
+): { newWorkTokens: number; totalInputTokens: number } {
+    const row = db
+        .prepare(
+            "SELECT new_work_tokens, total_input_tokens FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as {
+        new_work_tokens?: number | null;
+        total_input_tokens?: number | null;
+    } | null;
+    return {
+        newWorkTokens: typeof row?.new_work_tokens === "number" ? row.new_work_tokens : 0,
+        totalInputTokens: typeof row?.total_input_tokens === "number" ? row.total_input_tokens : 0,
+    };
+}

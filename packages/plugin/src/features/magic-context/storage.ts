@@ -59,6 +59,7 @@ export {
     getPersistedTodoSyntheticAnchor,
     getSessionsWithPendingMarker,
     getSessionsWithPendingPiMarker,
+    getSessionWorkMetrics,
     getStrippedPlaceholderIds,
     incrementHistorianFailure,
     loadPersistedUsage,
@@ -82,6 +83,7 @@ export {
     setPersistedReasoningWatermark,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
+    setSessionWorkMetrics,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "./storage-meta";
@@ -113,6 +115,15 @@ export {
     replaceSourceContent,
     saveSourceContent,
 } from "./storage-source";
+export {
+    getSubagentInvocations,
+    getSubagentTotalsBySubagent,
+    recordSubagentInvocation,
+    type SubagentInvocationInput,
+    type SubagentInvocationRow,
+    type SubagentKind,
+    type SubagentTotals,
+} from "./storage-subagent-invocations";
 export {
     deleteTagsByMessageId,
     getActiveTagsBySession,

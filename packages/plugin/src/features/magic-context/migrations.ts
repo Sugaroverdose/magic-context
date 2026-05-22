@@ -658,6 +658,55 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 20,
+        description: "Add subagent invocation token accounting",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS subagent_invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    harness TEXT NOT NULL,
+                    subagent TEXT NOT NULL,
+                    task TEXT,
+                    provider_id TEXT,
+                    model_id TEXT,
+                    started_at INTEGER NOT NULL,
+                    ended_at INTEGER,
+                    status TEXT NOT NULL,
+                    input_tokens INTEGER NOT NULL DEFAULT 0,
+                    output_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    parent_invocation_id INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_sai_session_started
+                    ON subagent_invocations(session_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_sai_subagent
+                    ON subagent_invocations(subagent, started_at DESC);
+            `);
+        },
+    },
+    {
+        version: 21,
+        description: "Add session lifetime work metrics",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            if (!cols.some((c) => c.name === "new_work_tokens")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN new_work_tokens INTEGER NOT NULL DEFAULT 0",
+                );
+            }
+            if (!cols.some((c) => c.name === "total_input_tokens")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
+                );
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

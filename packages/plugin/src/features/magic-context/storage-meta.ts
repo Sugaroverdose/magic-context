@@ -30,6 +30,7 @@ export {
     getPersistedTodoSyntheticAnchor,
     getSessionsWithPendingMarker,
     getSessionsWithPendingPiMarker,
+    getSessionWorkMetrics,
     getStrippedPlaceholderIds,
     incrementHistorianFailure,
     loadPersistedUsage,
@@ -53,6 +54,7 @@ export {
     setPersistedReasoningWatermark,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
+    setSessionWorkMetrics,
     setStrippedPlaceholderIds,
 } from "./storage-meta-persisted";
 export {
