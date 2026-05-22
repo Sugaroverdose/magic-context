@@ -63,6 +63,7 @@ import {
 	getPendingPiCompactionMarkerState,
 	getTagsByNumbers,
 	getTopNBySize,
+	setSessionWorkMetrics,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
@@ -87,6 +88,7 @@ import {
 	createTagger,
 	type Tagger,
 } from "@magic-context/core/features/magic-context/tagger";
+import { computePiWorkMetrics } from "@magic-context/core/features/magic-context/work-metrics";
 import {
 	applyFlushedStatuses,
 	applyPendingOperations,
@@ -1823,6 +1825,23 @@ export function registerPiContextHandler(
 					sessionId,
 					`synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
+			}
+
+			if (result.executedWorkThisPass) {
+				try {
+					const metrics = computePiWorkMetrics(outputMessages as unknown[]);
+					setSessionWorkMetrics(
+						options.db,
+						sessionId,
+						metrics.newWorkTokens,
+						metrics.totalInputTokens,
+					);
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
 			}
 
 			logTransformTiming(sessionId, "postTransformPhase", tPostTransform);

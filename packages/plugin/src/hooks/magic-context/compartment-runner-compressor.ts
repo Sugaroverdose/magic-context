@@ -12,9 +12,11 @@ import {
     getCompartments,
     getSessionFacts,
     incrementCompressionDepth,
+    openDatabase,
     replaceAllCompartmentState,
     replaceAllCompartmentStateAndBumpDepth,
 } from "../../features/magic-context/storage";
+import { recordChildInvocation } from "../../features/magic-context/subagent-token-capture";
 import type { PluginContext } from "../../plugin/types";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
@@ -680,6 +682,30 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
     );
 
     let agentSessionId: string | null = null;
+    const startedAt = Date.now();
+    let invocationRecorded = false;
+    const recordInvocation = (params: {
+        status: "completed" | "failed";
+        messages?: unknown[];
+        error?: unknown;
+    }) => {
+        if (invocationRecorded) return;
+        invocationRecorded = true;
+        try {
+            recordChildInvocation({
+                db: openDatabase(),
+                parentSessionId: sessionId,
+                harness: "opencode",
+                subagent: "compressor",
+                startedAt,
+                status: params.status,
+                messages: params.messages,
+                error: params.error,
+            });
+        } catch (error) {
+            sessionLog(sessionId, "subagent token accounting unavailable", getErrorMessage(error));
+        }
+    };
     try {
         const createResponse = await client.session.create({
             body: { parentID: sessionId, title: "magic-context-compressor" },
@@ -695,6 +721,7 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
 
         if (!agentSessionId) {
             sessionLog(sessionId, "compressor: could not create child session");
+            recordInvocation({ status: "failed", error: "could not create child session" });
             return null;
         }
 
@@ -724,6 +751,7 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
         const messages = normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,
         });
+        recordInvocation({ status: "completed", messages });
         const result = extractLatestAssistantText(messages);
         if (!result) {
             sessionLog(sessionId, "compressor: historian returned no output");
@@ -757,6 +785,7 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
         }
         return snapped.result;
     } catch (error: unknown) {
+        recordInvocation({ status: "failed", error });
         sessionLog(sessionId, "compressor: historian call failed:", getErrorMessage(error));
         return null;
     } finally {

@@ -4,6 +4,9 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { openDatabase } from "@magic-context/core/features/magic-context/storage";
+import type { SubagentKind } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
+import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
 import type {
 	SubagentProgressEvent,
 	SubagentRunner,
@@ -111,6 +114,14 @@ const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
 	"dreamer",
 	"magic-context-dreamer",
 ]);
+
+function inferAccountingSubagent(agent: string): SubagentKind {
+	if (agent.includes("sidekick")) return "sidekick";
+	if (agent.includes("dreamer")) return "dreamer";
+	if (agent.includes("compressor")) return "compressor";
+	if (agent.includes("recomp")) return "recomp";
+	return "historian";
+}
 
 /**
  * Pi-side implementation of `SubagentRunner`.
@@ -240,13 +251,48 @@ export class PiSubagentRunner implements SubagentRunner {
 		options: SubagentRunOptions,
 	): Promise<SubagentRunResult> {
 		const startTime = Date.now();
+		let recordedAccounting = false;
+		const recordAccounting = (
+			result: SubagentRunResult,
+			messages: unknown[] = [],
+		) => {
+			if (!options.accountingSessionId || recordedAccounting) return;
+			recordedAccounting = true;
+			recordChildInvocation({
+				db: openDatabase(),
+				parentSessionId: options.accountingSessionId,
+				harness: "pi",
+				subagent:
+					options.accountingSubagent ?? inferAccountingSubagent(options.agent),
+				task: options.accountingTask ?? null,
+				startedAt: startTime,
+				status: result.ok
+					? "completed"
+					: result.reason === "abort"
+						? "aborted"
+						: "failed",
+				messages,
+				providerId:
+					typeof options.model === "string"
+						? options.model.split("/")[0]
+						: null,
+				modelId:
+					typeof options.model === "string"
+						? options.model.split("/").slice(1).join("/")
+						: null,
+				error: result.ok ? null : result.error,
+				parentInvocationId: options.accountingParentInvocationId ?? null,
+			});
+		};
 		if (options.signal?.aborted) {
-			return {
+			const result: SubagentRunResult = {
 				ok: false,
 				reason: "abort",
 				error: "pi subagent aborted by caller",
 				durationMs: Date.now() - startTime,
 			};
+			recordAccounting(result);
+			return result;
 		}
 		const args = buildArgs(options);
 
@@ -255,6 +301,7 @@ export class PiSubagentRunner implements SubagentRunner {
 		// fallback chain is configured, `buildArgs` emits Pi's `--models a,b,c`.
 
 		return new Promise<SubagentRunResult>((resolve) => {
+			let accountingMessages: unknown[] = [];
 			// Track whether we've already resolved so timeout/abort/exit don't
 			// double-resolve. JS promises tolerate double-resolve silently but
 			// we want explicit control so we can distinguish "timeout fired
@@ -264,6 +311,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			const settle = (result: SubagentRunResult) => {
 				if (settled) return;
 				settled = true;
+				recordAccounting(result, accountingMessages);
 				resolve(result);
 			};
 
@@ -395,6 +443,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			// `message_end` for the final assistant turn (stopReason="stop"
 			// + no toolCall content), then drain until natural child exit.
 			const accumulatedMessages: unknown[] = [];
+			accountingMessages = accumulatedMessages;
 
 			rl.on("line", (line) => {
 				if (line.length === 0) return;

@@ -372,6 +372,8 @@ async function runCompressorPass(
 			timeoutMs: args.historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
 			cwd: args.directory,
 			thinkingLevel: args.thinkingLevel,
+			accountingSessionId: args.sessionId,
+			accountingSubagent: "compressor",
 		});
 		if (!result.ok) {
 			sessionLog(

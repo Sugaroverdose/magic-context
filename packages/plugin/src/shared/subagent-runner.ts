@@ -90,6 +90,20 @@ export interface SubagentRunOptions {
      * runner's hot path. Errors are swallowed.
      */
     onProgress?: (event: SubagentProgressEvent) => void;
+
+    /** Optional token accounting metadata. When present, harness runners persist subagent_invocations. */
+    accountingSessionId?: string | undefined;
+    accountingSubagent?:
+        | "historian"
+        | "historian_editor"
+        | "compressor"
+        | "dreamer"
+        | "sidekick"
+        | "user_memory_review"
+        | "recomp"
+        | undefined;
+    accountingTask?: string | null | undefined;
+    accountingParentInvocationId?: number | null | undefined;
 }
 
 /**

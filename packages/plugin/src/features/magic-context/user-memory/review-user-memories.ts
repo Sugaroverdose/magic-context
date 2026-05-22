@@ -7,6 +7,7 @@ import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { renewLease } from "../dreamer/lease";
 import { DREAMER_SYSTEM_PROMPT } from "../dreamer/task-prompts";
+import { recordChildInvocation } from "../subagent-token-capture";
 import {
     deleteUserMemoryCandidates,
     dismissUserMemory,
@@ -105,6 +106,26 @@ Return valid JSON (no markdown fencing):
 If no promotions are warranted, return empty arrays. Always consume reviewed candidates so they don't accumulate indefinitely.`;
 
     let agentSessionId: string | null = null;
+    const startedAt = Date.now();
+    let invocationRecorded = false;
+    const recordInvocation = (params: {
+        status: "completed" | "failed";
+        messages?: unknown[];
+        error?: unknown;
+    }) => {
+        if (!args.parentSessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        recordChildInvocation({
+            db: args.db,
+            parentSessionId: args.parentSessionId,
+            harness: "opencode",
+            subagent: "user_memory_review",
+            startedAt,
+            status: params.status,
+            messages: params.messages,
+            error: params.error,
+        });
+    };
     const abortController = new AbortController();
     const leaseInterval = setInterval(() => {
         try {
@@ -131,7 +152,11 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             { preferResponseOnMissingData: true },
         );
         agentSessionId = typeof created?.id === "string" ? created.id : null;
-        if (!agentSessionId) throw new Error("Could not create user memory review session.");
+        if (!agentSessionId) {
+            const error = new Error("Could not create user memory review session.");
+            recordInvocation({ status: "failed", error });
+            throw error;
+        }
 
         log(`[dreamer] user-memories: child session created ${agentSessionId}`);
 
@@ -164,6 +189,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,
         });
+        recordInvocation({ status: "completed", messages });
         const responseText = extractLatestAssistantText(messages);
         if (!responseText) {
             log("[dreamer] user-memories: no response from review agent");

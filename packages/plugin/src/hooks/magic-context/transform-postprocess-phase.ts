@@ -17,10 +17,12 @@ import {
     pruneNoteNudgeAnchors,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
+    setSessionWorkMetrics,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
+import { computeOpenCodeWorkMetrics } from "../../features/magic-context/work-metrics";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { applyContextNudge } from "./apply-context-nudge";
@@ -39,6 +41,7 @@ import { hasVisibleNoteReadCall } from "./note-visibility";
 import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
+import { withReadOnlySessionDb } from "./read-session-db";
 import { replaySentinelByMessageIds } from "./sentinel";
 import {
     clearOldReasoning,
@@ -958,6 +961,20 @@ export async function runPostTransformPhase(
         pendingOpsRanSuccessfully;
 
     if (workExecutedSuccessfully) {
+        try {
+            const metrics = withReadOnlySessionDb((openCodeDb) =>
+                computeOpenCodeWorkMetrics(openCodeDb, args.sessionId),
+            );
+            setSessionWorkMetrics(
+                args.db,
+                args.sessionId,
+                metrics.newWorkTokens,
+                metrics.totalInputTokens,
+            );
+        } catch (err) {
+            sessionLog(args.sessionId, "work-metrics update failed:", getErrorMessage(err));
+        }
+
         try {
             const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
             if (currentFlag !== null) {

@@ -144,6 +144,8 @@ export function registerCtxAugCommand(
 				cwd: ctx.cwd,
 				signal: ctx.signal,
 				thinkingLevel: config.thinking_level,
+				accountingSessionId: sessionLabel,
+				accountingSubagent: "sidekick",
 			});
 
 			if (!result.ok) {

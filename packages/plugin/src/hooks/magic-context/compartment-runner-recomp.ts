@@ -246,6 +246,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 fallbackModelId: deps.fallbackModelId,
                 fallbackModels: deps.fallbackModels,
                 twoPass: deps.historianTwoPass,
+                subagentKind: "recomp",
                 callbacks: {
                     onRepairRetry: async (error) => {
                         await sendIgnoredMessage(

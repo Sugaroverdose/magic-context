@@ -21,6 +21,7 @@ import {
 } from "../key-files/identify-key-files";
 import { getMemoryCountsByStatus } from "../memory/storage-memory";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
+import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { acquireLease, getLeaseHolder, releaseLease, renewLease } from "./lease";
@@ -276,6 +277,27 @@ async function identifyKeyFilesForSession(args: {
         };
 
         let agentSessionId: string | null = null;
+        const startedAt = Date.now();
+        let invocationRecorded = false;
+        const recordInvocation = (params: {
+            status: "completed" | "failed";
+            messages?: unknown[];
+            error?: unknown;
+        }) => {
+            if (!args.parentSessionId || invocationRecorded) return;
+            invocationRecorded = true;
+            recordChildInvocation({
+                db: args.db,
+                parentSessionId: args.parentSessionId,
+                harness: "opencode",
+                subagent: "dreamer",
+                task: "key-files",
+                startedAt,
+                status: params.status,
+                messages: params.messages,
+                error: params.error,
+            });
+        };
         const abortController = new AbortController();
         const leaseInterval = setInterval(() => {
             try {
@@ -305,7 +327,9 @@ async function identifyKeyFilesForSession(args: {
             );
             agentSessionId = typeof created?.id === "string" ? created.id : null;
             if (!agentSessionId) {
-                throw new Error("Could not create key-file identification session.");
+                const error = new Error("Could not create key-file identification session.");
+                recordInvocation({ status: "failed", error });
+                throw error;
             }
 
             log(`[key-files][${args.sessionId}] child session created ${agentSessionId}`);
@@ -339,6 +363,7 @@ async function identifyKeyFilesForSession(args: {
             const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                 preferResponseOnMissingData: true,
             });
+            recordInvocation({ status: "completed", messages });
             const responseText = extractLatestAssistantText(messages);
             if (!responseText) {
                 log(
@@ -366,6 +391,7 @@ async function identifyKeyFilesForSession(args: {
             );
             applyHeuristicFallback();
         } catch (error) {
+            recordInvocation({ status: "failed", error });
             if (args.isLeaseLost?.() || abortController.signal.aborted) {
                 log(
                     `[key-files][${args.sessionId}] lease lost during identification — skipping heuristic fallback`,
@@ -604,6 +630,27 @@ export async function runDream(args: {
             log(`[dreamer] starting task: ${taskName}`);
             const taskStartedAt = Date.now();
             let agentSessionId: string | null = null;
+            const invocationStartedAt = Date.now();
+            let invocationRecorded = false;
+            const recordInvocation = (params: {
+                status: "completed" | "failed" | "aborted";
+                messages?: unknown[];
+                error?: unknown;
+            }) => {
+                if (!parentSessionId || invocationRecorded) return;
+                invocationRecorded = true;
+                recordChildInvocation({
+                    db: args.db,
+                    parentSessionId,
+                    harness: "opencode",
+                    subagent: "dreamer",
+                    task: taskName,
+                    startedAt: invocationStartedAt,
+                    status: params.status,
+                    messages: params.messages,
+                    error: params.error,
+                });
+            };
             // AbortController lets us cancel the in-flight LLM prompt immediately when lease is lost
             const taskAbortController = new AbortController();
             // Renew lease periodically while the LLM task runs (can take 5+ min on slow models)
@@ -665,7 +712,9 @@ export async function runDream(args: {
                 );
                 agentSessionId = typeof createdSession?.id === "string" ? createdSession.id : null;
                 if (!agentSessionId) {
-                    throw new Error("Dreamer could not create its child session.");
+                    const error = new Error("Dreamer could not create its child session.");
+                    recordInvocation({ status: "failed", error });
+                    throw error;
                 }
                 log(`[dreamer] task ${taskName}: child session created ${agentSessionId}`);
 
@@ -700,6 +749,7 @@ export async function runDream(args: {
                 const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                     preferResponseOnMissingData: true,
                 });
+                recordInvocation({ status: "completed", messages });
                 const taskResult = extractLatestAssistantText(messages);
                 if (!taskResult) {
                     throw new Error("Dreamer returned no assistant output.");
@@ -717,6 +767,7 @@ export async function runDream(args: {
                 lastErrorSignature = null;
                 consecutiveSameErrorFailures = 0;
             } catch (error) {
+                recordInvocation({ status: lostLease ? "aborted" : "failed", error });
                 const durationMs = Date.now() - taskStartedAt;
                 const errorDescription = describeError(error);
                 logWithStackHead(
@@ -1070,6 +1121,27 @@ Only include notes whose conditions you could definitively evaluate against exte
 
     const taskStartedAt = Date.now();
     let agentSessionId: string | null = null;
+    const startedAt = Date.now();
+    let invocationRecorded = false;
+    const recordInvocation = (params: {
+        status: "completed" | "failed" | "aborted";
+        messages?: unknown[];
+        error?: unknown;
+    }) => {
+        if (!args.parentSessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        recordChildInvocation({
+            db: args.db,
+            parentSessionId: args.parentSessionId,
+            harness: "opencode",
+            subagent: "dreamer",
+            task: "smart-notes",
+            startedAt,
+            status: params.status,
+            messages: params.messages,
+            error: params.error,
+        });
+    };
     const abortController = new AbortController();
     const leaseInterval = setInterval(() => {
         try {
@@ -1098,7 +1170,11 @@ Only include notes whose conditions you could definitively evaluate against exte
             { preferResponseOnMissingData: true },
         );
         agentSessionId = typeof created?.id === "string" ? created.id : null;
-        if (!agentSessionId) throw new Error("Could not create smart note evaluation session.");
+        if (!agentSessionId) {
+            const error = new Error("Could not create smart note evaluation session.");
+            recordInvocation({ status: "failed", error });
+            throw error;
+        }
 
         log(`[dreamer] smart notes: child session created ${agentSessionId}`);
 
@@ -1131,6 +1207,7 @@ Only include notes whose conditions you could definitively evaluate against exte
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,
         });
+        recordInvocation({ status: "completed", messages });
         const output = extractLatestAssistantText(messages);
         if (!output) throw new Error("Smart note evaluation returned no output.");
 

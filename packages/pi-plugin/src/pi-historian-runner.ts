@@ -404,6 +404,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				cwd: directory,
 				thinkingLevel,
 				onProgress: buildProgressLogger("first"),
+				accountingSessionId: sessionId,
+				accountingSubagent: "historian",
 			});
 
 			let validatedPass = await validateHistorianResult(
@@ -446,6 +448,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					cwd: directory,
 					thinkingLevel,
 					onProgress: buildProgressLogger("repair"),
+					accountingSessionId: sessionId,
+					accountingSubagent: "historian",
 				});
 				validatedPass = await validateHistorianResult(
 					repairResult,
@@ -503,6 +507,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						cwd: directory,
 						thinkingLevel,
 						onProgress: buildProgressLogger("editor"),
+						accountingSessionId: sessionId,
+						accountingSubagent: "historian_editor",
 					});
 					const editorPass = await validateHistorianResult(
 						editorResult,

@@ -81,6 +81,7 @@ export interface HistorianRunResult {
     result?: string;
     error?: string;
     dumpPath?: string;
+    invocationId?: number;
 }
 
 export type ValidatedHistorianPassResult =

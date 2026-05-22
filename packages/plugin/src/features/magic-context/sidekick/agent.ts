@@ -5,6 +5,8 @@ import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
+import { openDatabase } from "../storage";
+import { recordChildInvocation } from "../subagent-token-capture";
 import { SIDEKICK_SYSTEM_PROMPT, stripThinkingBlocks } from "./core";
 
 // Re-export the system prompt so existing call sites that import from this
@@ -22,6 +24,30 @@ export async function runSidekick(deps: {
 }): Promise<string | null> {
     const fallbackModels = resolveFallbackChain(SIDEKICK_AGENT, deps.config.fallback_models);
     let agentSessionId: string | null = null;
+    const startedAt = Date.now();
+    let invocationRecorded = false;
+    const recordInvocation = (params: {
+        status: "completed" | "failed";
+        messages?: unknown[];
+        error?: unknown;
+    }) => {
+        if (!deps.sessionId || invocationRecorded) return;
+        invocationRecorded = true;
+        try {
+            recordChildInvocation({
+                db: openDatabase(),
+                parentSessionId: deps.sessionId,
+                harness: "opencode",
+                subagent: "sidekick",
+                startedAt,
+                status: params.status,
+                messages: params.messages,
+                error: params.error,
+            });
+        } catch (error) {
+            sessionLog(deps.sessionId, "subagent token accounting unavailable:", error);
+        }
+    };
 
     try {
         const createResponse = await deps.client.session.create({
@@ -38,7 +64,9 @@ export async function runSidekick(deps: {
         );
         agentSessionId = typeof createdSession?.id === "string" ? createdSession.id : null;
         if (!agentSessionId) {
-            throw new Error("Sidekick could not create its child session.");
+            const error = new Error("Sidekick could not create its child session.");
+            recordInvocation({ status: "failed", error });
+            throw error;
         }
 
         await shared.promptSyncWithModelSuggestionRetry(
@@ -67,6 +95,7 @@ export async function runSidekick(deps: {
         const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
             preferResponseOnMissingData: true,
         });
+        recordInvocation({ status: "completed", messages });
         const taskResult = extractLatestAssistantText(messages);
         if (!taskResult) {
             return null;
@@ -75,6 +104,7 @@ export async function runSidekick(deps: {
         const finalText = stripThinkingBlocks(taskResult);
         return finalText.length > 0 ? finalText : null;
     } catch (error) {
+        recordInvocation({ status: "failed", error });
         if (deps.sessionId) {
             sessionLog(deps.sessionId, "sidekick failed:", error);
         } else {
