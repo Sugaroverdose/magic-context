@@ -960,21 +960,27 @@ export async function runPostTransformPhase(
         heuristicsRanSuccessfully ||
         pendingOpsRanSuccessfully;
 
-    if (workExecutedSuccessfully) {
-        try {
-            const metrics = withReadOnlySessionDb((openCodeDb) =>
-                computeOpenCodeWorkMetrics(openCodeDb, args.sessionId),
-            );
-            setSessionWorkMetrics(
-                args.db,
-                args.sessionId,
-                metrics.newWorkTokens,
-                metrics.totalInputTokens,
-            );
-        } catch (err) {
-            sessionLog(args.sessionId, "work-metrics update failed:", getErrorMessage(err));
-        }
+    // Work-metrics update runs on EVERY transform pass (not just execute passes).
+    // The SQL helper is pure-read on OpenCode's message table; setSessionWorkMetrics
+    // is a pure write to session_meta (no tag state, no message[0] mutation, no
+    // cache-busting). Gating on workExecutedSuccessfully would mean sessions
+    // sitting below execute threshold never see populated values, making the
+    // TUI Stats section permanently zero for low-pressure work.
+    try {
+        const metrics = withReadOnlySessionDb((openCodeDb) =>
+            computeOpenCodeWorkMetrics(openCodeDb, args.sessionId),
+        );
+        setSessionWorkMetrics(
+            args.db,
+            args.sessionId,
+            metrics.newWorkTokens,
+            metrics.totalInputTokens,
+        );
+    } catch (err) {
+        sessionLog(args.sessionId, "work-metrics update failed:", getErrorMessage(err));
+    }
 
+    if (workExecutedSuccessfully) {
         try {
             const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
             if (currentFlag !== null) {

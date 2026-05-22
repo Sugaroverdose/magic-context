@@ -1827,21 +1827,26 @@ export function registerPiContextHandler(
 				);
 			}
 
-			if (result.executedWorkThisPass) {
-				try {
-					const metrics = computePiWorkMetrics(outputMessages as unknown[]);
-					setSessionWorkMetrics(
-						options.db,
-						sessionId,
-						metrics.newWorkTokens,
-						metrics.totalInputTokens,
-					);
-				} catch (err) {
-					sessionLog(
-						sessionId,
-						`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+			// Work-metrics update runs on EVERY transform pass (not just
+			// execute passes). The Pi compute helper is pure-read on
+			// outputMessages; setSessionWorkMetrics is a pure write to
+			// session_meta (no tag state, no message[0] mutation, no
+			// cache-busting). Gating on executedWorkThisPass would mean
+			// sessions sitting below execute threshold never see populated
+			// values, making Pi's status surface permanently zero.
+			try {
+				const metrics = computePiWorkMetrics(outputMessages as unknown[]);
+				setSessionWorkMetrics(
+					options.db,
+					sessionId,
+					metrics.newWorkTokens,
+					metrics.totalInputTokens,
+				);
+			} catch (err) {
+				sessionLog(
+					sessionId,
+					`work-metrics update failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
 			}
 
 			logTransformTiming(sessionId, "postTransformPhase", tPostTransform);
