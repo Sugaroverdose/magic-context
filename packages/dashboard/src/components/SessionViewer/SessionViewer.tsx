@@ -1642,16 +1642,14 @@ export default function SessionViewer() {
                       <td>Input tokens</td>
                       <td>{metaData().last_input_tokens.toLocaleString()}</td>
                     </tr>
+                    {/* v0.21.8 ships a single "Total tokens" row while we
+                        figure out how to present new-work / reprocessed
+                        without confusing users. The underlying columns
+                        (new_work_tokens, total_input_tokens) are still
+                        populated by the runtime; only the UI is simplified
+                        for now. */}
                     <tr>
-                      <td>New work</td>
-                      <td>{metaData().new_work_tokens.toLocaleString()}</td>
-                    </tr>
-                    <tr>
-                      <td>Reprocessed</td>
-                      <td>{Math.max(0, metaData().total_input_tokens - metaData().new_work_tokens).toLocaleString()}</td>
-                    </tr>
-                    <tr>
-                      <td>Total input</td>
+                      <td>Total tokens</td>
                       <td>{metaData().total_input_tokens.toLocaleString()}</td>
                     </tr>
                     <tr>

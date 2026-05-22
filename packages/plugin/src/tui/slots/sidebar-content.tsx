@@ -442,27 +442,18 @@ const SidebarContent = (props: {
                 </>
             )}
 
-            {/* Stats */}
-            {s()?.newWorkTokens != null && (
+            {/* Stats — v0.21.8 ships a single "Total tokens" number while we
+                figure out how to present the new-work / reprocessed
+                categorization without confusing users. The underlying
+                snapshot fields (newWorkTokens, totalInputTokens) and the
+                session_meta columns are still populated; only the UI is
+                simplified for now. */}
+            {s()?.totalInputTokens != null && (
                 <>
                     <SectionHeader theme={props.theme} title="Stats" />
                     <StatRow
                         theme={props.theme}
-                        label="New work"
-                        value={compactTokens(s()!.newWorkTokens!)}
-                        dim
-                    />
-                    <StatRow
-                        theme={props.theme}
-                        label="Reprocessed"
-                        value={compactTokens(
-                            Math.max(0, (s()!.totalInputTokens ?? 0) - (s()!.newWorkTokens ?? 0)),
-                        )}
-                        dim
-                    />
-                    <StatRow
-                        theme={props.theme}
-                        label="Total input"
+                        label="Total tokens"
                         value={compactTokens(s()!.totalInputTokens ?? 0)}
                         dim
                     />
