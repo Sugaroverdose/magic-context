@@ -18,6 +18,7 @@ export {
     clearIndexedMessages,
     deleteIndexedMessage,
 } from "./message-index";
+export { runMigrations } from "./migrations";
 export {
     computeProjectDocsHash,
     readProjectDocsCanonical,
@@ -32,15 +33,40 @@ export {
 export {
     type ContextDatabase,
     closeDatabase,
+    enforceSchemaFence,
     getDatabasePersistenceError,
+    getPersistedSchemaVersion,
+    initializeDatabase,
     isDatabasePersisted,
+    LATEST_SUPPORTED_VERSION,
+    type OpenDatabaseOptions,
     openDatabase,
+    schemaVersionIsSupported,
 } from "./storage-db";
+export {
+    deleteIdentityRekeyMap,
+    getIdentityRekeyMap,
+    type IdentityRekeyMapRow,
+    listIdentityRekeyMaps,
+    upsertIdentityRekeyMap,
+} from "./storage-identity-rekey-map";
+export {
+    clearM0MutationsForSession,
+    deleteM0Mutation,
+    getM0Mutation,
+    getM0MutationsAfterId,
+    getM0MutationsBySession,
+    getMaxM0MutationId,
+    type M0MutationLogRow,
+    type M0MutationType,
+    queueM0Mutation,
+} from "./storage-m0-mutation-log";
 export {
     type AppendAutoSearchHintOutcome,
     type AutoSearchHintDecision,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
+    clearCachedM0,
     clearDeferredExecutePendingIfMatches,
     clearDetectedContextLimit,
     clearEmergencyRecovery,
@@ -76,9 +102,11 @@ export {
     loadPersistedUsage,
     type PendingCompactionMarker,
     type PendingPiCompactionMarker,
+    type PersistCachedM0Payload,
     type PersistedOverflowState,
     type PersistedTodoSyntheticAnchor,
     peekDeferredExecutePending,
+    persistCachedM0,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
     recordDetectedContextLimit,
@@ -122,6 +150,16 @@ export {
     removePendingOp,
 } from "./storage-ops";
 export {
+    bumpProjectMemoryEpoch,
+    bumpProjectUserProfileVersion,
+    deleteProjectState,
+    ensureProjectState,
+    GLOBAL_USER_PROFILE_PROJECT_PATH,
+    getProjectState,
+    type ProjectStateRow,
+    setProjectState,
+} from "./storage-project-state";
+export {
     getSourceContents,
     replaceSourceContent,
     saveSourceContent,
@@ -150,3 +188,12 @@ export {
     updateTagMessageId,
     updateTagStatus,
 } from "./storage-tags";
+export {
+    clearV22BackfillFailures,
+    deleteV22BackfillFailure,
+    getV22BackfillFailure,
+    listV22BackfillFailures,
+    recordV22BackfillFailure,
+    type V22BackfillErrorClass,
+    type V22BackfillFailureRow,
+} from "./storage-v22-backfill-failures";

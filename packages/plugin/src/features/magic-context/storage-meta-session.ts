@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { clearCompressionDepth } from "./compression-depth-storage";
@@ -9,15 +10,48 @@ import {
     getDefaultSessionMeta,
     isSessionMetaRow,
     META_COLUMNS,
+    NULL_BIND_META_KEYS,
+    SESSION_META_SELECT_COLUMNS,
     toSessionMeta,
 } from "./storage-meta-shared";
 import type { SessionMeta } from "./types";
 
+const SESSION_META_FALLBACK_SELECTS: Partial<
+    Record<(typeof SESSION_META_SELECT_COLUMNS)[number], string>
+> = {
+    cache_ttl: "'5m' AS cache_ttl",
+    last_nudge_band: "'' AS last_nudge_band",
+    last_transform_error: "'' AS last_transform_error",
+    system_prompt_hash: "'' AS system_prompt_hash",
+    last_todo_state: "'' AS last_todo_state",
+    cached_m0_bytes: "NULL AS cached_m0_bytes",
+    cached_m0_project_memory_epoch: "NULL AS cached_m0_project_memory_epoch",
+    cached_m0_project_user_profile_version: "NULL AS cached_m0_project_user_profile_version",
+    cached_m0_max_compartment_seq: "NULL AS cached_m0_max_compartment_seq",
+    cached_m0_max_memory_id: "NULL AS cached_m0_max_memory_id",
+    cached_m0_max_mutation_id: "NULL AS cached_m0_max_mutation_id",
+    cached_m0_project_docs_hash: "NULL AS cached_m0_project_docs_hash",
+    cached_m0_materialized_at: "NULL AS cached_m0_materialized_at",
+    cached_m0_session_facts_version: "NULL AS cached_m0_session_facts_version",
+    cached_m0_upgrade_state: "NULL AS cached_m0_upgrade_state",
+    upgrade_reminded_at: "NULL AS upgrade_reminded_at",
+};
+
+function getSessionMetaSelectColumns(db: Database): string {
+    const existingColumns = new Set(
+        (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
+            (column) => column.name,
+        ),
+    );
+    return SESSION_META_SELECT_COLUMNS.map((column) => {
+        if (existingColumns.has(column)) return column;
+        return SESSION_META_FALLBACK_SELECTS[column] ?? `0 AS ${column}`;
+    }).join(", ");
+}
+
 export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {
     const result = db
-        .prepare(
-            "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, observed_safe_input_tokens, cache_alert_sent, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, system_prompt_tokens, conversation_tokens, tool_call_tokens, cleared_reasoning_through_tag, last_todo_state FROM session_meta WHERE session_id = ?",
-        )
+        .prepare(`SELECT ${getSessionMetaSelectColumns(db)} FROM session_meta WHERE session_id = ?`)
         .get(sessionId);
 
     if (isSessionMetaRow(result)) {
@@ -55,7 +89,7 @@ export function updateSessionMeta(
     updates: Partial<SessionMeta>,
 ): void {
     const setClauses: string[] = [];
-    const values: Array<string | number> = [];
+    const values: Array<string | number | Buffer | null> = [];
 
     for (const [key, column] of Object.entries(META_COLUMNS)) {
         const value = updates[key as keyof SessionMeta];
@@ -63,7 +97,10 @@ export function updateSessionMeta(
 
         if (value === null) {
             setClauses.push(`${column} = ?`);
-            values.push("");
+            values.push(NULL_BIND_META_KEYS.has(key) ? null : "");
+        } else if (key === "cachedM0Bytes" && value instanceof Uint8Array) {
+            setClauses.push(`${column} = ?`);
+            values.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
         } else if (BOOLEAN_META_KEYS.has(key)) {
             setClauses.push(`${column} = ?`);
             values.push(value ? 1 : 0);

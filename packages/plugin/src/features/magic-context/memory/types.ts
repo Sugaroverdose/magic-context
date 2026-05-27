@@ -19,6 +19,7 @@ export interface Memory {
     category: MemoryCategory;
     content: string;
     normalizedHash: string;
+    importance: number;
     sourceSessionId: string | null;
     sourceType: MemorySourceType;
     seenCount: number;
@@ -41,6 +42,7 @@ export interface MemoryInput {
     projectPath: string;
     category: MemoryCategory;
     content: string;
+    importance?: number | null;
     sourceSessionId?: string;
     sourceType?: MemorySourceType;
     expiresAt?: number | null;

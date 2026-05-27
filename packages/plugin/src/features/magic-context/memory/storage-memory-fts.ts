@@ -1,5 +1,5 @@
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
-import { COLUMN_MAP, isMemoryRow, toMemory } from "./storage-memory";
+import { getMemorySelectColumns, isMemoryRow, toMemory } from "./storage-memory";
 import type { Memory } from "./types";
 
 const DEFAULT_SEARCH_LIMIT = 10;
@@ -8,12 +8,8 @@ const searchStatements = new WeakMap<Database, PreparedStatement>();
 function getSearchStatement(db: Database): PreparedStatement {
     let stmt = searchStatements.get(db);
     if (!stmt) {
-        const selectColumns = Object.entries(COLUMN_MAP)
-            .map(([property, column]) => `memories.${column} AS ${property}`)
-            .join(", ");
-
         stmt = db.prepare(
-            `SELECT ${selectColumns} FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid WHERE memories.project_path = ? AND memories.status IN ('active', 'permanent') AND (memories.expires_at IS NULL OR memories.expires_at > ?) AND memories_fts MATCH ? ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?`,
+            `SELECT ${getMemorySelectColumns(db)} FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid WHERE memories.project_path = ? AND memories.status IN ('active', 'permanent') AND (memories.expires_at IS NULL OR memories.expires_at > ?) AND memories_fts MATCH ? ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?`,
         );
         searchStatements.set(db, stmt);
     }

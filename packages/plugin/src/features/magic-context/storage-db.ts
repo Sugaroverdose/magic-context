@@ -1,5 +1,5 @@
 import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
     getLegacyOpenCodeMagicContextStorageDir,
     getMagicContextStorageDir,
@@ -20,7 +20,17 @@ const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
-function resolveDatabasePath(): { dbDir: string; dbPath: string } {
+export const LATEST_SUPPORTED_VERSION = 22;
+
+export interface OpenDatabaseOptions {
+    dbPath?: string;
+    latestSupportedVersion?: number;
+}
+
+function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: string } {
+    if (dbPathOverride) {
+        return { dbDir: dirname(dbPathOverride), dbPath: dbPathOverride };
+    }
     const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
 }
@@ -79,6 +89,55 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
     }
 }
 
+export function getPersistedSchemaVersion(db: Database): number {
+    const hasMigrationsTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+        .get();
+    if (!hasMigrationsTable) {
+        return 0;
+    }
+    const row = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as
+        | { version: number | null }
+        | undefined;
+    return row?.version ?? 0;
+}
+
+export function schemaVersionIsSupported(
+    db: Database,
+    latestSupportedVersion = LATEST_SUPPORTED_VERSION,
+): boolean {
+    return getPersistedSchemaVersion(db) <= latestSupportedVersion;
+}
+
+function getRuntimeLatestSupportedVersion(options?: OpenDatabaseOptions): number {
+    if (options?.latestSupportedVersion !== undefined) {
+        return options.latestSupportedVersion;
+    }
+    const override = process.env.MAGIC_CONTEXT_LATEST_SUPPORTED_VERSION;
+    if (override) {
+        const parsed = Number.parseInt(override, 10);
+        if (Number.isFinite(parsed)) {
+            return parsed;
+        }
+    }
+    return LATEST_SUPPORTED_VERSION;
+}
+
+export function enforceSchemaFence(
+    db: Database,
+    dbPath: string,
+    latestSupportedVersion: number,
+): boolean {
+    const persistedVersion = getPersistedSchemaVersion(db);
+    if (persistedVersion <= latestSupportedVersion) {
+        return true;
+    }
+    log(
+        `[magic-context] storage fatal: refusing to open ${dbPath}; database schema v${persistedVersion} is newer than this binary supports (max v${latestSupportedVersion}). Upgrade Magic Context/OpenCode/Pi before writing to this cache.`,
+    );
+    return false;
+}
+
 export function initializeDatabase(db: Database): void {
     // SQLite per-connection PRAGMAs. foreign_keys MUST run before any reads
     // or writes: it defaults to OFF, which silently breaks every ON DELETE
@@ -127,6 +186,11 @@ export function initializeDatabase(db: Database): void {
       end_message_id TEXT DEFAULT '',
       title TEXT NOT NULL,
       content TEXT NOT NULL,
+      importance INTEGER NOT NULL DEFAULT 50,
+      episode_type TEXT,
+      p1_embedding BLOB,
+      p1_embedding_model_id TEXT,
+      legacy INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
@@ -172,6 +236,7 @@ export function initializeDatabase(db: Database): void {
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       normalized_hash TEXT NOT NULL,
+      importance INTEGER,
       source_session_id TEXT,
       source_type TEXT DEFAULT 'historian',
       seen_count INTEGER DEFAULT 1,
@@ -249,6 +314,41 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TABLE IF NOT EXISTS project_key_files_version (
       project_path TEXT    PRIMARY KEY,
       version      INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS project_state (
+      project_path TEXT PRIMARY KEY,
+      project_memory_epoch INTEGER NOT NULL DEFAULT 0,
+      project_user_profile_version INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS m0_mutation_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      mutation_type TEXT NOT NULL CHECK (mutation_type IN (
+        'compartment_delete', 'compartment_merge', 'recomp_boundary_change', 'compartment_upgrade'
+      )),
+      target_id INTEGER,
+      queued_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_m0_mutation_log_session ON m0_mutation_log(session_id);
+
+    CREATE TABLE IF NOT EXISTS v22_identity_rekey_map (
+      old_project_path TEXT PRIMARY KEY,
+      new_project_path TEXT NOT NULL,
+      rekeyed_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS v22_backfill_failures (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      table_name TEXT NOT NULL,
+      row_id INTEGER NOT NULL,
+      raw_project_path TEXT NOT NULL,
+      error_class TEXT NOT NULL CHECK (error_class IN ('not_git_repo', 'git_missing', 'git_timeout', 'permission_denied', 'unknown')),
+      error_message TEXT,
+      failed_at INTEGER NOT NULL,
+      UNIQUE(table_name, row_id)
     );
 
     -- (smart_notes: see note above; merged into unified notes table by migration v1)
@@ -343,7 +443,18 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- deferred_execute_state: intentionally NULLABLE without a default.
       -- Absence is SQL NULL; presence is a JSON blob written via
       -- setDeferredExecutePendingIfAbsent. Excluded from healNullTextColumns.
-      deferred_execute_state TEXT
+      deferred_execute_state TEXT,
+      cached_m0_bytes BLOB,
+      cached_m0_project_memory_epoch INTEGER,
+      cached_m0_project_user_profile_version INTEGER,
+      cached_m0_max_compartment_seq INTEGER,
+      cached_m0_max_memory_id INTEGER,
+      cached_m0_max_mutation_id INTEGER,
+      cached_m0_project_docs_hash TEXT,
+      cached_m0_materialized_at INTEGER,
+      cached_m0_session_facts_version INTEGER,
+      cached_m0_upgrade_state TEXT,
+      upgrade_reminded_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS subagent_invocations (
@@ -515,6 +626,58 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // NOT be added to `healNullTextColumns`.
     ensureColumn(db, "session_meta", "deferred_execute_state", "TEXT");
 
+    ensureColumn(db, "compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
+    ensureColumn(db, "compartments", "episode_type", "TEXT");
+    ensureColumn(db, "compartments", "p1_embedding", "BLOB");
+    ensureColumn(db, "compartments", "p1_embedding_model_id", "TEXT");
+    ensureColumn(db, "compartments", "legacy", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "memories", "importance", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
+    ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_project_user_profile_version", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_max_compartment_seq", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_max_memory_id", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_max_mutation_id", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_project_docs_hash", "TEXT");
+    ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
+    ensureColumn(db, "session_meta", "upgrade_reminded_at", "INTEGER");
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS project_state (
+        project_path TEXT PRIMARY KEY,
+        project_memory_epoch INTEGER NOT NULL DEFAULT 0,
+        project_user_profile_version INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS m0_mutation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        mutation_type TEXT NOT NULL CHECK (mutation_type IN (
+          'compartment_delete', 'compartment_merge', 'recomp_boundary_change', 'compartment_upgrade'
+        )),
+        target_id INTEGER,
+        queued_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_m0_mutation_log_session ON m0_mutation_log(session_id);
+      CREATE TABLE IF NOT EXISTS v22_identity_rekey_map (
+        old_project_path TEXT PRIMARY KEY,
+        new_project_path TEXT NOT NULL,
+        rekeyed_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS v22_backfill_failures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        row_id INTEGER NOT NULL,
+        raw_project_path TEXT NOT NULL,
+        error_class TEXT NOT NULL CHECK (error_class IN ('not_git_repo', 'git_missing', 'git_timeout', 'permission_denied', 'unknown')),
+        error_message TEXT,
+        failed_at INTEGER NOT NULL,
+        UNIQUE(table_name, row_id)
+      );
+    `);
+
     // NULL-column healing runs as migration v5 (one-shot at schema upgrade).
     // Previously it ran on every plugin startup — each heal function issued
     // ~25 no-op UPDATE statements (one per column) against session_meta,
@@ -680,8 +843,8 @@ export function ensureColumn(
     definition: string,
 ): void {
     if (
-        !/^[a-z_]+$/.test(table) ||
-        !/^[a-z_]+$/.test(column) ||
+        !/^[a-z][a-z0-9_]*$/.test(table) ||
+        !/^[a-z][a-z0-9_]*$/.test(column) ||
         !/^[A-Z0-9_'(),[\]\s]+$/i.test(definition)
     ) {
         throw new Error(`Unsafe schema identifier: ${table}.${column} ${definition}`);
@@ -720,10 +883,20 @@ export function ensureColumn(
  * (server plugin: registers a startup warning + skips the runtime;
  * Pi plugin: logs warning + skips the extension).
  */
-export function openDatabase(): Database {
-    const { dbDir, dbPath } = resolveDatabasePath();
+export function openDatabase(): Database;
+export function openDatabase(dbPath: string): Database;
+export function openDatabase(options: OpenDatabaseOptions): Database;
+export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Database {
+    const options =
+        typeof dbPathOrOptions === "string" ? { dbPath: dbPathOrOptions } : dbPathOrOptions;
+    const explicitDbPath = options?.dbPath !== undefined;
+    const { dbDir, dbPath } = resolveDatabasePath(options?.dbPath);
+    const latestSupportedVersion = getRuntimeLatestSupportedVersion(options);
     const existing = databases.get(dbPath);
     if (existing) {
+        if (!enforceSchemaFence(existing, dbPath, latestSupportedVersion)) {
+            return null as unknown as Database;
+        }
         if (!persistenceByDatabase.has(existing)) {
             persistenceByDatabase.set(existing, true);
         }
@@ -731,16 +904,28 @@ export function openDatabase(): Database {
     }
 
     try {
-        migrateLegacyStorageIfNeeded(dbPath, dbDir);
+        if (!explicitDbPath) {
+            migrateLegacyStorageIfNeeded(dbPath, dbDir);
+        }
         mkdirSync(dbDir, { recursive: true });
 
         const db = new Database(dbPath);
+        if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
+            closeQuietly(db);
+            return null as unknown as Database;
+        }
         initializeDatabase(db);
         runMigrations(db);
-        try {
-            deleteOrphanProjectKeyFiles(db);
-        } catch (error) {
-            log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
+        if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
+            closeQuietly(db);
+            return null as unknown as Database;
+        }
+        if (!explicitDbPath) {
+            try {
+                deleteOrphanProjectKeyFiles(db);
+            } catch (error) {
+                log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
+            }
         }
         // Tool-owner backfill (plan v3.3.1, Layer B). Runs once per
         // boot to populate tool_owner_message_id on legacy tool tags.
@@ -752,12 +937,14 @@ export function openDatabase(): Database {
         // SQLite errors, and per-session failures are logged but
         // never fail-close the plugin. Lazy adoption (Layer C) covers
         // any rows the backfill couldn't reach.
-        try {
-            runToolOwnerBackfill(db);
-        } catch (error) {
-            log(
-                `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
-            );
+        if (!explicitDbPath) {
+            try {
+                runToolOwnerBackfill(db);
+            } catch (error) {
+                log(
+                    `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
+                );
+            }
         }
         // Wire the persistence-backed tool-definition measurement store and
         // rehydrate the in-memory map from any prior writes. Doing this here
@@ -775,7 +962,7 @@ export function openDatabase(): Database {
         const detail = getErrorMessage(error);
         log(`[magic-context] storage fatal: failed to open ${dbPath}: ${detail}`);
         // No silent in-memory fallback — see comment above. Caller must
-        // catch and disable Magic Context for this run.
+        // catch and disable Magic Context for that run.
         throw new Error(
             `[magic-context] storage unavailable: ${detail}. Magic Context is disabled for this run; check log for details.`,
         );
@@ -802,4 +989,4 @@ export function closeDatabase(): void {
     }
 }
 
-export type ContextDatabase = ReturnType<typeof openDatabase>;
+export type ContextDatabase = Database;

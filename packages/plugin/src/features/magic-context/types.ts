@@ -65,6 +65,17 @@ export interface SessionMeta {
     toolCallTokens: number;
     clearedReasoningThroughTag: number;
     lastTodoState: string;
+    cachedM0Bytes: Buffer | null;
+    cachedM0ProjectMemoryEpoch: number | null;
+    cachedM0ProjectUserProfileVersion: number | null;
+    cachedM0MaxCompartmentSeq: number | null;
+    cachedM0MaxMemoryId: number | null;
+    cachedM0MaxMutationId: number | null;
+    cachedM0ProjectDocsHash: string | null;
+    cachedM0MaterializedAt: number | null;
+    cachedM0SessionFactsVersion: number | null;
+    cachedM0UpgradeState: string | null;
+    upgradeRemindedAt: number | null;
 }
 
 export type SchedulerDecision = "execute" | "defer";

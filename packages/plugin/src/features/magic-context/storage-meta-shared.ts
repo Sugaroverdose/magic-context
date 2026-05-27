@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import type { SessionMeta } from "./types";
@@ -25,7 +26,52 @@ export interface SessionMetaRow {
     tool_call_tokens: number;
     cleared_reasoning_through_tag: number;
     last_todo_state: string;
+    cached_m0_bytes: Buffer | Uint8Array | null;
+    cached_m0_project_memory_epoch: number | null;
+    cached_m0_project_user_profile_version: number | null;
+    cached_m0_max_compartment_seq: number | null;
+    cached_m0_max_memory_id: number | null;
+    cached_m0_max_mutation_id: number | null;
+    cached_m0_project_docs_hash: string | null;
+    cached_m0_materialized_at: number | null;
+    cached_m0_session_facts_version: number | null;
+    cached_m0_upgrade_state: string | null;
+    upgrade_reminded_at: number | null;
 }
+
+export const SESSION_META_SELECT_COLUMNS = [
+    "session_id",
+    "last_response_time",
+    "cache_ttl",
+    "counter",
+    "last_nudge_tokens",
+    "last_nudge_band",
+    "last_transform_error",
+    "is_subagent",
+    "last_context_percentage",
+    "last_input_tokens",
+    "observed_safe_input_tokens",
+    "cache_alert_sent",
+    "times_execute_threshold_reached",
+    "compartment_in_progress",
+    "system_prompt_hash",
+    "system_prompt_tokens",
+    "conversation_tokens",
+    "tool_call_tokens",
+    "cleared_reasoning_through_tag",
+    "last_todo_state",
+    "cached_m0_bytes",
+    "cached_m0_project_memory_epoch",
+    "cached_m0_project_user_profile_version",
+    "cached_m0_max_compartment_seq",
+    "cached_m0_max_memory_id",
+    "cached_m0_max_mutation_id",
+    "cached_m0_project_docs_hash",
+    "cached_m0_materialized_at",
+    "cached_m0_session_facts_version",
+    "cached_m0_upgrade_state",
+    "upgrade_reminded_at",
+] as const;
 
 export const META_COLUMNS: Record<string, string> = {
     lastResponseTime: "last_response_time",
@@ -47,9 +93,34 @@ export const META_COLUMNS: Record<string, string> = {
     toolCallTokens: "tool_call_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
     lastTodoState: "last_todo_state",
+    cachedM0Bytes: "cached_m0_bytes",
+    cachedM0ProjectMemoryEpoch: "cached_m0_project_memory_epoch",
+    cachedM0ProjectUserProfileVersion: "cached_m0_project_user_profile_version",
+    cachedM0MaxCompartmentSeq: "cached_m0_max_compartment_seq",
+    cachedM0MaxMemoryId: "cached_m0_max_memory_id",
+    cachedM0MaxMutationId: "cached_m0_max_mutation_id",
+    cachedM0ProjectDocsHash: "cached_m0_project_docs_hash",
+    cachedM0MaterializedAt: "cached_m0_materialized_at",
+    cachedM0SessionFactsVersion: "cached_m0_session_facts_version",
+    cachedM0UpgradeState: "cached_m0_upgrade_state",
+    upgradeRemindedAt: "upgrade_reminded_at",
 };
 
 export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress", "cacheAlertSent"]);
+
+export const NULL_BIND_META_KEYS = new Set([
+    "cachedM0Bytes",
+    "cachedM0ProjectMemoryEpoch",
+    "cachedM0ProjectUserProfileVersion",
+    "cachedM0MaxCompartmentSeq",
+    "cachedM0MaxMemoryId",
+    "cachedM0MaxMutationId",
+    "cachedM0ProjectDocsHash",
+    "cachedM0MaterializedAt",
+    "cachedM0SessionFactsVersion",
+    "cachedM0UpgradeState",
+    "upgradeRemindedAt",
+]);
 
 // Defensive typeof checks: columns may be NULL in DB when a row was seeded
 // before a column was added with ensureColumn (SQLite sets existing rows to
@@ -64,6 +135,16 @@ function isStringOrNull(value: unknown): boolean {
 
 function isNumberOrNull(value: unknown): boolean {
     return value === null || typeof value === "number";
+}
+
+function isBlobOrNull(value: unknown): boolean {
+    return value === null || Buffer.isBuffer(value) || value instanceof Uint8Array;
+}
+
+function toBufferOrNull(value: Buffer | Uint8Array | null): Buffer | null {
+    if (value === null) return null;
+    if (Buffer.isBuffer(value)) return value;
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
 }
 
 export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
@@ -95,7 +176,18 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.conversation_tokens) &&
         isNumberOrNull(r.tool_call_tokens) &&
         isNumberOrNull(r.cleared_reasoning_through_tag) &&
-        isStringOrNull(r.last_todo_state)
+        isStringOrNull(r.last_todo_state) &&
+        isBlobOrNull(r.cached_m0_bytes) &&
+        isNumberOrNull(r.cached_m0_project_memory_epoch) &&
+        isNumberOrNull(r.cached_m0_project_user_profile_version) &&
+        isNumberOrNull(r.cached_m0_max_compartment_seq) &&
+        isNumberOrNull(r.cached_m0_max_memory_id) &&
+        isNumberOrNull(r.cached_m0_max_mutation_id) &&
+        isStringOrNull(r.cached_m0_project_docs_hash) &&
+        isNumberOrNull(r.cached_m0_materialized_at) &&
+        isNumberOrNull(r.cached_m0_session_facts_version) &&
+        isStringOrNull(r.cached_m0_upgrade_state) &&
+        isNumberOrNull(r.upgrade_reminded_at)
     );
 }
 
@@ -121,6 +213,17 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         toolCallTokens: 0,
         clearedReasoningThroughTag: 0,
         lastTodoState: "",
+        cachedM0Bytes: null,
+        cachedM0ProjectMemoryEpoch: null,
+        cachedM0ProjectUserProfileVersion: null,
+        cachedM0MaxCompartmentSeq: null,
+        cachedM0MaxMemoryId: null,
+        cachedM0MaxMutationId: null,
+        cachedM0ProjectDocsHash: null,
+        cachedM0MaterializedAt: null,
+        cachedM0SessionFactsVersion: null,
+        cachedM0UpgradeState: null,
+        upgradeRemindedAt: null,
     };
 }
 
@@ -167,6 +270,9 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
     // here. Coerce to 0 so callers see a usable SessionMeta without having
     // to null-check every scalar field.
     const numOrZero = (value: unknown): number => (typeof value === "number" ? value : 0);
+    const numOrNull = (value: unknown): number | null => (typeof value === "number" ? value : null);
+    const stringOrNull = (value: unknown): string | null =>
+        typeof value === "string" ? value : null;
     return {
         sessionId: row.session_id,
         lastResponseTime: row.last_response_time,
@@ -189,5 +295,81 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         toolCallTokens: numOrZero(row.tool_call_tokens),
         clearedReasoningThroughTag: numOrZero(row.cleared_reasoning_through_tag),
         lastTodoState: lastTodoStateRaw,
+        cachedM0Bytes: toBufferOrNull(row.cached_m0_bytes),
+        cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
+        cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),
+        cachedM0MaxCompartmentSeq: numOrNull(row.cached_m0_max_compartment_seq),
+        cachedM0MaxMemoryId: numOrNull(row.cached_m0_max_memory_id),
+        cachedM0MaxMutationId: numOrNull(row.cached_m0_max_mutation_id),
+        cachedM0ProjectDocsHash: stringOrNull(row.cached_m0_project_docs_hash),
+        cachedM0MaterializedAt: numOrNull(row.cached_m0_materialized_at),
+        cachedM0SessionFactsVersion: numOrNull(row.cached_m0_session_facts_version),
+        cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
+        upgradeRemindedAt: numOrNull(row.upgrade_reminded_at),
     };
+}
+
+export interface PersistCachedM0Payload {
+    m0Bytes: Buffer;
+    projectMemoryEpoch: number | null;
+    projectUserProfileVersion: number | null;
+    maxCompartmentSeq: number;
+    maxMemoryId: number | null;
+    maxMutationId: number | null;
+    projectDocsHash: string | null;
+    materializedAt: number;
+    sessionFactsVersion: number;
+    upgradeState: string | null;
+}
+
+export function persistCachedM0(
+    db: Database,
+    sessionId: string,
+    payload: PersistCachedM0Payload,
+): void {
+    ensureSessionMetaRow(db, sessionId);
+    db.prepare(
+        `UPDATE session_meta SET
+            cached_m0_bytes = ?,
+            cached_m0_project_memory_epoch = ?,
+            cached_m0_project_user_profile_version = ?,
+            cached_m0_max_compartment_seq = ?,
+            cached_m0_max_memory_id = ?,
+            cached_m0_max_mutation_id = ?,
+            cached_m0_project_docs_hash = ?,
+            cached_m0_materialized_at = ?,
+            cached_m0_session_facts_version = ?,
+            cached_m0_upgrade_state = ?
+         WHERE session_id = ?`,
+    ).run(
+        Buffer.from(payload.m0Bytes),
+        payload.projectMemoryEpoch,
+        payload.projectUserProfileVersion,
+        payload.maxCompartmentSeq,
+        payload.maxMemoryId,
+        payload.maxMutationId,
+        payload.projectDocsHash,
+        payload.materializedAt,
+        payload.sessionFactsVersion,
+        payload.upgradeState,
+        sessionId,
+    );
+}
+
+export function clearCachedM0(db: Database, sessionId: string): void {
+    ensureSessionMetaRow(db, sessionId);
+    db.prepare(
+        `UPDATE session_meta SET
+            cached_m0_bytes = ?,
+            cached_m0_project_memory_epoch = ?,
+            cached_m0_project_user_profile_version = ?,
+            cached_m0_max_compartment_seq = ?,
+            cached_m0_max_memory_id = ?,
+            cached_m0_max_mutation_id = ?,
+            cached_m0_project_docs_hash = ?,
+            cached_m0_materialized_at = ?,
+            cached_m0_session_facts_version = ?,
+            cached_m0_upgrade_state = ?
+         WHERE session_id = ?`,
+    ).run(null, null, null, null, null, null, null, null, null, null, sessionId);
 }

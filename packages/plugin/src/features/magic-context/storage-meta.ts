@@ -62,3 +62,8 @@ export {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "./storage-meta-session";
+export {
+    clearCachedM0,
+    type PersistCachedM0Payload,
+    persistCachedM0,
+} from "./storage-meta-shared";

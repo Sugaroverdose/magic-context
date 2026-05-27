@@ -95,6 +95,7 @@ describe("work metrics", () => {
     });
 
     test("live OpenCode smoke targets stay within 1%", () => {
+        if (process.env.MAGIC_CONTEXT_RUN_LIVE_OPENCODE_SMOKE !== "1") return;
         const dbPath = join(homedir(), ".local", "share", "opencode", "opencode.db");
         if (!existsSync(dbPath)) return;
         const db = new Database(dbPath, { readonly: true });

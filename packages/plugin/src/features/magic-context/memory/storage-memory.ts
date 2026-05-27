@@ -16,6 +16,7 @@ export const COLUMN_MAP: Record<keyof Memory, string> = {
     category: "category",
     content: "content",
     normalizedHash: "normalized_hash",
+    importance: "importance",
     sourceSessionId: "source_session_id",
     sourceType: "source_type",
     seenCount: "seen_count",
@@ -84,6 +85,7 @@ const getMemoryCountStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryCountByProjectStatements = new WeakMap<Database, PreparedStatement>();
 const getMemoryCountsByStatusStatements = new WeakMap<Database, PreparedStatement>();
 const memoriesByProjectStatements = new Map<string, WeakMap<Database, PreparedStatement>>();
+const memoryImportanceColumnCache = new WeakMap<Database, boolean>();
 
 export interface MemoryCountsByStatus {
     total: number;
@@ -102,9 +104,26 @@ interface MemoryCountByStatusRow {
     superseded_by_memory_id: number | null;
 }
 
-function getMemorySelectColumns(tableName = "memories"): string {
+function hasMemoryImportanceColumn(db: Database): boolean {
+    const cached = memoryImportanceColumnCache.get(db);
+    if (cached !== undefined) return cached;
+    const columns = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name?: string }>;
+    const hasColumn = columns.some((column) => column.name === "importance");
+    memoryImportanceColumnCache.set(db, hasColumn);
+    return hasColumn;
+}
+
+export function getMemorySelectColumns(db: Database, tableName = "memories"): string {
     return Object.entries(COLUMN_MAP)
-        .map(([property, column]) => `${tableName}.${column} AS ${property}`)
+        .map(([property, column]) => {
+            if (property === "importance" && !hasMemoryImportanceColumn(db)) {
+                return "50 AS importance";
+            }
+            if (property === "importance") {
+                return `COALESCE(${tableName}.${column}, 50) AS ${property}`;
+            }
+            return `${tableName}.${column} AS ${property}`;
+        })
         .join(", ");
 }
 
@@ -151,6 +170,7 @@ export function isMemoryRow(row: unknown): row is Memory {
         isMemoryCategory(candidate.category) &&
         typeof candidate.content === "string" &&
         typeof candidate.normalizedHash === "string" &&
+        typeof candidate.importance === "number" &&
         isNullableString(candidate.sourceSessionId) &&
         isMemorySourceType(candidate.sourceType) &&
         typeof candidate.seenCount === "number" &&
@@ -177,6 +197,7 @@ export function toMemory(row: Memory): Memory {
         category: row.category,
         content: row.content,
         normalizedHash: row.normalizedHash,
+        importance: row.importance,
         sourceSessionId: row.sourceSessionId,
         sourceType: row.sourceType,
         seenCount: row.seenCount,
@@ -199,9 +220,13 @@ export function toMemory(row: Memory): Memory {
 function getInsertMemoryStatement(db: Database): PreparedStatement {
     let stmt = insertMemoryStatements.get(db);
     if (!stmt) {
-        stmt = db.prepare(
-            "INSERT INTO memories (project_path, category, content, normalized_hash, source_session_id, source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at, superseded_by_memory_id, merged_from, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        );
+        stmt = hasMemoryImportanceColumn(db)
+            ? db.prepare(
+                  "INSERT INTO memories (project_path, category, content, normalized_hash, importance, source_session_id, source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at, superseded_by_memory_id, merged_from, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              )
+            : db.prepare(
+                  "INSERT INTO memories (project_path, category, content, normalized_hash, source_session_id, source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at, superseded_by_memory_id, merged_from, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              );
         insertMemoryStatements.set(db, stmt);
     }
     return stmt;
@@ -211,7 +236,7 @@ function getMemoryByHashStatement(db: Database): PreparedStatement {
     let stmt = getMemoryByHashStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            `SELECT ${getMemorySelectColumns()} FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?`,
+            `SELECT ${getMemorySelectColumns(db)} FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?`,
         );
         getMemoryByHashStatements.set(db, stmt);
     }
@@ -221,7 +246,7 @@ function getMemoryByHashStatement(db: Database): PreparedStatement {
 function getMemoryByIdStatement(db: Database): PreparedStatement {
     let stmt = getMemoryByIdStatements.get(db);
     if (!stmt) {
-        stmt = db.prepare(`SELECT ${getMemorySelectColumns()} FROM memories WHERE id = ?`);
+        stmt = db.prepare(`SELECT ${getMemorySelectColumns(db)} FROM memories WHERE id = ?`);
         getMemoryByIdStatements.set(db, stmt);
     }
     return stmt;
@@ -239,7 +264,7 @@ function getMemoriesByProjectStatement(db: Database, statuses: MemoryStatus[]): 
     if (!stmt) {
         const placeholders = statuses.map(() => "?").join(", ");
         stmt = db.prepare(
-            `SELECT ${getMemorySelectColumns()} FROM memories WHERE project_path = ? AND status IN (${placeholders}) AND (expires_at IS NULL OR expires_at > ?) ORDER BY category ASC, updated_at DESC, id ASC`,
+            `SELECT ${getMemorySelectColumns(db)} FROM memories WHERE project_path = ? AND status IN (${placeholders}) AND (expires_at IS NULL OR expires_at > ?) ORDER BY category ASC, updated_at DESC, id ASC`,
         );
         statements.set(db, stmt);
     }
@@ -383,11 +408,16 @@ function getMemoryCountsByStatusStatement(db: Database): PreparedStatement {
 export function insertMemory(db: Database, input: MemoryInput): Memory {
     const now = Date.now();
     const normalizedHash = computeNormalizedHash(input.content);
-    const result = getInsertMemoryStatement(db).run(
+    const insertValues: Array<string | number | null> = [
         input.projectPath,
         input.category,
         input.content,
         normalizedHash,
+    ];
+    if (hasMemoryImportanceColumn(db)) {
+        insertValues.push(input.importance ?? 50);
+    }
+    insertValues.push(
         input.sourceSessionId ?? null,
         input.sourceType ?? "historian",
         1,
@@ -405,6 +435,7 @@ export function insertMemory(db: Database, input: MemoryInput): Memory {
         null,
         input.metadataJson ?? null,
     );
+    const result = getInsertMemoryStatement(db).run(...insertValues);
 
     const insertedResult = result as { lastInsertRowid?: number | bigint };
     const inserted = getMemoryById(db, Number(insertedResult.lastInsertRowid));

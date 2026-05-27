@@ -1,6 +1,6 @@
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { healAllNullColumns } from "./storage-db";
+import { ensureColumn, healAllNullColumns } from "./storage-db";
 
 /**
  * Versioned migration framework for magic-context's SQLite database.
@@ -20,6 +20,12 @@ interface Migration {
     version: number;
     description: string;
     up: (db: Database) => void;
+}
+
+function tableExists(db: Database, name: string): boolean {
+    return Boolean(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(name),
+    );
 }
 
 const MIGRATIONS: Migration[] = [
@@ -705,6 +711,124 @@ const MIGRATIONS: Migration[] = [
                     "ALTER TABLE session_meta ADD COLUMN total_input_tokens INTEGER NOT NULL DEFAULT 0",
                 );
             }
+        },
+    },
+    {
+        version: 22,
+        description: "v2.0 cache architecture schema foundation",
+        up: (db: Database) => {
+            const hasSessionMetaTable = tableExists(db, "session_meta");
+            const hasCompartmentsTable = tableExists(db, "compartments");
+            const hasMemoriesTable = tableExists(db, "memories");
+
+            if (hasSessionMetaTable) {
+                ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
+                ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");
+                ensureColumn(
+                    db,
+                    "session_meta",
+                    "cached_m0_project_user_profile_version",
+                    "INTEGER",
+                );
+                ensureColumn(db, "session_meta", "cached_m0_max_compartment_seq", "INTEGER");
+                ensureColumn(db, "session_meta", "cached_m0_max_memory_id", "INTEGER");
+                ensureColumn(db, "session_meta", "cached_m0_max_mutation_id", "INTEGER");
+                ensureColumn(db, "session_meta", "cached_m0_project_docs_hash", "TEXT");
+                ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
+                ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
+                ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
+                ensureColumn(db, "session_meta", "upgrade_reminded_at", "INTEGER");
+            }
+
+            if (hasCompartmentsTable) {
+                ensureColumn(db, "compartments", "importance", "INTEGER NOT NULL DEFAULT 50");
+                ensureColumn(db, "compartments", "episode_type", "TEXT");
+                ensureColumn(db, "compartments", "p1_embedding", "BLOB");
+                ensureColumn(db, "compartments", "p1_embedding_model_id", "TEXT");
+                ensureColumn(db, "compartments", "legacy", "INTEGER NOT NULL DEFAULT 0");
+            }
+
+            if (hasMemoriesTable) {
+                ensureColumn(db, "memories", "importance", "INTEGER");
+            }
+
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS schema_migrations_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS project_state (
+                    project_path TEXT PRIMARY KEY,
+                    project_memory_epoch INTEGER NOT NULL DEFAULT 0,
+                    project_user_profile_version INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS m0_mutation_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    mutation_type TEXT NOT NULL CHECK (mutation_type IN (
+                        'compartment_delete',
+                        'compartment_merge',
+                        'recomp_boundary_change',
+                        'compartment_upgrade'
+                    )),
+                    target_id INTEGER,
+                    queued_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_m0_mutation_log_session
+                    ON m0_mutation_log(session_id);
+
+                CREATE TABLE IF NOT EXISTS v22_identity_rekey_map (
+                    old_project_path TEXT PRIMARY KEY,
+                    new_project_path TEXT NOT NULL,
+                    rekeyed_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS v22_backfill_failures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    row_id INTEGER NOT NULL,
+                    raw_project_path TEXT NOT NULL,
+                    error_class TEXT NOT NULL CHECK (error_class IN (
+                        'not_git_repo',
+                        'git_missing',
+                        'git_timeout',
+                        'permission_denied',
+                        'unknown'
+                    )),
+                    error_message TEXT,
+                    failed_at INTEGER NOT NULL,
+                    UNIQUE(table_name, row_id)
+                );
+            `);
+
+            if (hasCompartmentsTable) {
+                db.exec(`
+                    INSERT OR IGNORE INTO schema_migrations_meta (key, value)
+                    SELECT 'v22_legacy_compartment_boundary', CAST(COALESCE(MAX(id), 0) AS TEXT)
+                    FROM compartments
+                `);
+
+                const boundaryRow = db
+                    .prepare(
+                        "SELECT value FROM schema_migrations_meta WHERE key = 'v22_legacy_compartment_boundary'",
+                    )
+                    .get() as { value: string } | undefined;
+                const compartmentBoundary = Number.parseInt(boundaryRow?.value ?? "0", 10);
+                db.prepare("UPDATE compartments SET legacy = 1 WHERE legacy = 0 AND id <= ?").run(
+                    Number.isFinite(compartmentBoundary) ? compartmentBoundary : 0,
+                );
+            } else {
+                db.prepare(
+                    "INSERT OR IGNORE INTO schema_migrations_meta (key, value) VALUES ('v22_legacy_compartment_boundary', '0')",
+                ).run();
+            }
+
+            db.prepare(
+                "INSERT OR IGNORE INTO schema_migrations_meta (key, value) VALUES ('v22_legacy_memory_backfill', 'pending')",
+            ).run();
         },
     },
 ];
