@@ -19,6 +19,17 @@ export {
     deleteIndexedMessage,
 } from "./message-index";
 export {
+    computeProjectDocsHash,
+    readProjectDocsCanonical,
+} from "./project-docs-hash";
+export {
+    normalizeStoredProjectPath,
+    ProjectIdentityError,
+    type ProjectIdentityErrorClass,
+    resolveProjectIdentity,
+    resolveProjectIdentityStrict,
+} from "./project-identity";
+export {
     type ContextDatabase,
     closeDatabase,
     getDatabasePersistenceError,
