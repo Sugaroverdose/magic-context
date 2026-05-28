@@ -33,14 +33,10 @@ function sha256(input: string | Buffer): string {
     return createHash("sha256").update(input).digest("hex");
 }
 
-function systemPrompt(h: PiTestHarness): string {
-    const system = h.mock.lastRequest()?.body.system;
-    if (typeof system === "string") return system;
-    // Pi sends system as an array of `{ type: "text", text: "..." }` blocks.
-    // Join the unescaped `text` fields so test assertions can match the
-    // original XML/markdown content rather than its JSON-escaped form.
-    if (Array.isArray(system)) {
-        return system
+function textBlocks(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) {
+        return value
             .map((b: unknown) => {
                 if (b && typeof b === "object" && "text" in b) {
                     const t = (b as { text: unknown }).text;
@@ -50,7 +46,32 @@ function systemPrompt(h: PiTestHarness): string {
             })
             .join("\n");
     }
-    return JSON.stringify(system ?? "");
+    return value == null ? "" : JSON.stringify(value);
+}
+
+/**
+ * Concatenate the system field plus every message's text content from the
+ * last request.
+ *
+ * v2 moves the `<key-files>` block out of the system prompt and into the
+ * m[0]/m[1] messages (prepended as the first user messages by
+ * prependM0M1Messages). Pi sends both system and message content as arrays
+ * of `{ type: "text", text }` blocks, so this joins the unescaped `text`
+ * fields across the whole wire for content-presence assertions.
+ */
+function systemPrompt(h: PiTestHarness): string {
+    const request = h.mock.lastRequest();
+    if (!request) return "";
+    const parts: string[] = [textBlocks(request.body.system)];
+    const messages = request.body.messages;
+    if (Array.isArray(messages)) {
+        for (const msg of messages) {
+            if (msg && typeof msg === "object" && "content" in msg) {
+                parts.push(textBlocks((msg as { content: unknown }).content));
+            }
+        }
+    }
+    return parts.join("\n");
 }
 
 function openSeedDb(sharedDataDir: string): { db: Database; dbPath: string } {

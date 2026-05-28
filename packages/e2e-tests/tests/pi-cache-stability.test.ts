@@ -62,6 +62,36 @@ function requestMessages(request: { body: { messages?: unknown } }): unknown[] {
     return Array.isArray(request.body.messages) ? request.body.messages : [];
 }
 
+/**
+ * Concatenate the system field plus every message's text content.
+ *
+ * v2 moves <project-docs>/<user-profile>/<key-files> out of the system
+ * prompt and into the m[0]/m[1] messages (prepended as the first two user
+ * messages by prependM0M1Messages). Content-presence assertions must scan
+ * the whole wire, not just body.system.
+ */
+function wireText(request: { body: { system?: unknown; messages?: unknown } }): string {
+    const parts: string[] = [];
+    const sys = request.body.system;
+    if (typeof sys === "string") parts.push(sys);
+    else if (sys != null) parts.push(JSON.stringify(sys));
+    for (const msg of requestMessages(request)) {
+        if (msg && typeof msg === "object") {
+            const content = (msg as { content?: unknown }).content;
+            if (typeof content === "string") parts.push(content);
+            else if (Array.isArray(content)) {
+                for (const block of content) {
+                    if (block && typeof block === "object" && "text" in block) {
+                        const t = (block as { text: unknown }).text;
+                        if (typeof t === "string") parts.push(t);
+                    }
+                }
+            }
+        }
+    }
+    return parts.join("\n");
+}
+
 function firstUserMessage(request: { body: { messages?: unknown } }): unknown {
     return requestMessages(request).find(
         (message) =>
@@ -382,11 +412,17 @@ describe("pi cache stability", () => {
                     });
                 }
 
-                const systems = mainRequests(h).map((request) => serialize(request.body.system));
+                const requests = mainRequests(h);
+                const systems = requests.map((request) => serialize(request.body.system));
                 expect(systems.length).toBeGreaterThanOrEqual(4);
+                // System field stays byte-identical across defer turns 2..N.
                 expect(new Set(systems.slice(1)).size).toBe(1);
-                expect(systems.at(-1)).toContain("<project-docs>");
-                expect(systems.at(-1)).toContain("Pi cache-stability architecture note");
+                // v2: <project-docs> moved from system → m[0]/m[1] messages.
+                // Assert the content reaches the model on the wire (system +
+                // messages), not the legacy system-only location.
+                const lastWire = wireText(requests.at(-1)!);
+                expect(lastWire).toContain("<project-docs>");
+                expect(lastWire).toContain("Pi cache-stability architecture note");
             },
         );
     }, 180_000);
