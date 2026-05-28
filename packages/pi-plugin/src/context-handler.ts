@@ -2559,6 +2559,8 @@ interface RunPipelineArgs {
 	injection?: {
 		injectionBudgetTokens: number;
 		temporalAwareness?: boolean;
+		keyFilesEnabled?: boolean;
+		keyFilesTokenBudget?: number;
 	};
 	/**
 	 * Optional entry-id array, indexed 1:1 with `messages`, providing

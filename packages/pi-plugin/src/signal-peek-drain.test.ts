@@ -149,12 +149,12 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		expect(before).not.toContain("historyRefreshSessions.delete(sessionId)");
 	});
 
-	test("history drain happens AFTER injectSessionHistoryIntoPi succeeds", () => {
+	test("history drain happens AFTER injectM0M1Pi succeeds", () => {
 		// Find the injection block inside runPipeline. The drain must be:
 		//  1. Inside the try block (so it only runs on success)
-		//  2. After the injectSessionHistoryIntoPi call returns
+		//  2. After the injectM0M1Pi call returns
 		//  3. Guarded by isCacheBusting
-		const idx = code.indexOf("injectSessionHistoryIntoPi(");
+		const idx = code.indexOf("injectM0M1Pi(");
 		expect(idx).toBeGreaterThan(0);
 		// Look at the next ~600 chars after the injection call
 		const segment = code.slice(idx, idx + 1200);
