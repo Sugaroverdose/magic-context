@@ -1,6 +1,12 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { DREAMER_AGENT } from "../../agents/dreamer";
-import { getMemoriesByProject, getMemoryById, insertMemory } from "../../features/magic-context";
+import {
+    getMemoriesByProject,
+    getMemoryById,
+    getProjectState,
+    insertMemory,
+    normalizeStoredProjectPath,
+} from "../../features/magic-context";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 
@@ -48,6 +54,14 @@ function createTestDb(): Database {
             model_id  TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS project_state
+        (
+            project_path                 TEXT PRIMARY KEY,
+            project_memory_epoch         INTEGER NOT NULL DEFAULT 0,
+            project_user_profile_version INTEGER NOT NULL DEFAULT 0,
+            updated_at                   INTEGER NOT NULL
+        );
+
         CREATE
         VIRTUAL
         TABLE IF
@@ -81,6 +95,10 @@ function createTestDb(): Database {
 
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
     ({ sessionID, agent, directory: "/repo/project" }) as never;
+
+function getProjectMemoryEpoch(db: Database, projectPath: string): number {
+    return getProjectState(db, normalizeStoredProjectPath(projectPath))?.projectMemoryEpoch ?? 0;
+}
 
 afterAll(() => {
     mock.restore();
@@ -122,6 +140,22 @@ describe("createCtxMemoryTools", () => {
             expect(memories[0]?.sourceType).toBe("agent");
             expect(memories[0]?.sourceSessionId).toBe("ses-memory");
             expect(memories[0]?.category).toBe("USER_DIRECTIVES");
+        });
+
+        it("does not bump project memory epoch for additive writes", async () => {
+            const identity = normalizeStoredProjectPath("/repo/project");
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "USER_DIRECTIVES",
+                    content: "Prefer compact diffs.",
+                },
+                toolContext(),
+            );
+
+            expect(result).toContain("Saved memory");
+            expect(getProjectState(db, identity)).toBeNull();
         });
 
         it("returns error when content is missing", async () => {
@@ -197,6 +231,7 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain("Archived memory");
             expect(updated?.status).toBe("archived");
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
         });
 
         it("returns error when ID is missing", async () => {
@@ -261,6 +296,62 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
             expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=10m");
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+        });
+
+        it("normalizes legacy raw project paths before bumping the epoch", async () => {
+            const rawProjectPath = "/legacy/raw-project";
+            const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
+            const legacyTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => projectIdentity,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+            });
+            const memory = insertMemory(db, {
+                projectPath: rawProjectPath,
+                category: "CONFIG_DEFAULTS",
+                content: "timeout=5s",
+            });
+
+            const result = await legacyTools.ctx_memory.execute(
+                {
+                    action: "update",
+                    id: memory.id,
+                    content: "timeout=10s",
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
+            expect(getProjectState(db, projectIdentity)?.projectMemoryEpoch).toBe(1);
+            expect(getProjectState(db, rawProjectPath)).toBeNull();
+        });
+
+        it("rolls back content updates when the epoch bump fails", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "cache_ttl=5m",
+            });
+            db.exec("DROP TABLE project_state");
+
+            let thrown: unknown;
+            try {
+                await tools.ctx_memory.execute(
+                    {
+                        action: "update",
+                        id: memory.id,
+                        content: "cache_ttl=10m",
+                    },
+                    toolContext("ses-dreamer", DREAMER_AGENT),
+                );
+            } catch (error) {
+                thrown = error;
+            }
+
+            expect(String(thrown)).toContain("project_state");
+            expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=5m");
         });
     });
 
@@ -292,6 +383,38 @@ describe("createCtxMemoryTools", () => {
             expect(activeMemories[0]?.content).toBe("Use bun for all scripts in this repository.");
             expect(getMemoryById(db, first.id)?.status).toBe("archived");
             expect(getMemoryById(db, second.id)?.status).toBe("archived");
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+        });
+
+        it("bumps each affected project identity once when merging across identities", async () => {
+            const first = insertMemory(db, {
+                projectPath: "/repo/project-a",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const second = insertMemory(db, {
+                projectPath: "/repo/project-a",
+                category: "CONSTRAINTS",
+                content: "Use bun for test scripts",
+            });
+            const third = insertMemory(db, {
+                projectPath: "/repo/project-b",
+                category: "CONSTRAINTS",
+                content: "Use bun for build scripts",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [first.id, second.id, third.id],
+                    content: "Use bun for all scripts in this repository.",
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain("Merged memories");
+            expect(getProjectMemoryEpoch(db, "/repo/project-a")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project-b")).toBe(1);
         });
     });
 
@@ -316,6 +439,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)?.metadataJson).toContain(
                 "Removed subsystem no longer exists",
             );
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
         });
     });
 

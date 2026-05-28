@@ -1,6 +1,5 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
-import { invalidateAllMemoryBlockCaches } from "../../features/magic-context/compartment-storage";
 import {
     archiveMemory,
     CATEGORY_PRIORITY,
@@ -13,14 +12,18 @@ import {
     mergeMemoryStats,
     saveEmbedding,
     supersededMemory,
-    updateMemoryContent,
     updateMemorySeenCount,
 } from "../../features/magic-context/memory";
 import {
     embedTextForProject,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
+import { invalidateMemory } from "../../features/magic-context/memory/embedding-cache";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
+import {
+    bumpProjectMemoryEpoch,
+    normalizeStoredProjectPath,
+} from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
@@ -180,6 +183,55 @@ function getSourceType(deps: CtxMemoryToolDeps) {
     return deps.sourceType ?? "agent";
 }
 
+interface MemoryProjectPathRow {
+    project_path: string;
+}
+
+function projectPathForMemoryId(db: CtxMemoryToolDeps["db"], id: number): string | null {
+    const row = db.prepare("SELECT project_path FROM memories WHERE id = ?").get(id) as
+        | MemoryProjectPathRow
+        | undefined;
+    return row?.project_path ?? null;
+}
+
+function projectIdentityForStoredPath(rawProjectPath: string): string {
+    return normalizeStoredProjectPath(rawProjectPath);
+}
+
+function memoryBelongsToProject(memory: Memory, projectPath: string): boolean {
+    return (
+        memory.projectPath === projectPath ||
+        projectIdentityForStoredPath(memory.projectPath) === projectPath
+    );
+}
+
+function projectIdentitiesForMemoryIds(
+    db: CtxMemoryToolDeps["db"],
+    ids: readonly number[],
+): string[] {
+    const identities = new Set<string>();
+    for (const id of ids) {
+        const rawProjectPath = projectPathForMemoryId(db, id);
+        if (rawProjectPath) {
+            identities.add(projectIdentityForStoredPath(rawProjectPath));
+        }
+    }
+    return [...identities];
+}
+
+function updateMemoryContentInCurrentTransaction(
+    db: CtxMemoryToolDeps["db"],
+    memory: Memory,
+    content: string,
+    normalizedHash: string,
+): void {
+    db.prepare(
+        "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+    ).run(content, normalizedHash, Date.now(), memory.id);
+    db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
+    invalidateMemory(memory.projectPath, memory.id);
+}
+
 function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
     const allowedActions = getAllowedActions(deps);
 
@@ -284,7 +336,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
 
-                invalidateAllMemoryBlockCaches(deps.db);
                 return `Saved memory [ID: ${memory.id}] in ${category}.`;
             }
 
@@ -293,14 +344,19 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: 'id' is required when action is 'delete'.";
                 }
 
-                const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== projectPath) {
-                    return `Error: Memory with ID ${args.id} was not found.`;
+                const memoryId = args.id;
+                const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
+                const memory = getMemoryById(deps.db, memoryId);
+                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
+                    return `Error: Memory with ID ${memoryId} was not found.`;
                 }
 
-                archiveMemory(deps.db, args.id);
-                invalidateAllMemoryBlockCaches(deps.db);
-                return `Archived memory [ID: ${args.id}].`;
+                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
+                deps.db.transaction(() => {
+                    archiveMemory(deps.db, memoryId);
+                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                })();
+                return `Archived memory [ID: ${memoryId}].`;
             }
 
             if (args.action === "list") {
@@ -324,8 +380,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: 'content' is required when action is 'update'.";
                 }
 
+                const rawProjectPath = projectPathForMemoryId(deps.db, args.id);
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== projectPath) {
+                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 
@@ -340,7 +397,16 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
                 }
 
-                updateMemoryContent(deps.db, memory.id, content, normalizedHash);
+                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
+                deps.db.transaction(() => {
+                    updateMemoryContentInCurrentTransaction(
+                        deps.db,
+                        memory,
+                        content,
+                        normalizedHash,
+                    );
+                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                })();
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
@@ -349,7 +415,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
 
-                invalidateAllMemoryBlockCaches(deps.db);
                 return `Updated memory [ID: ${memory.id}] in ${memory.category}.`;
             }
 
@@ -371,9 +436,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: One or more source memories were not found.";
                 }
 
-                if (sourceMemories.some((memory) => memory.projectPath !== projectPath)) {
-                    return "Error: All memories to merge must belong to the current project.";
-                }
+                const affectedProjectIdentities = projectIdentitiesForMemoryIds(deps.db, ids);
 
                 const category =
                     getValidatedCategory(args.category) ?? sourceMemories[0]?.category ?? null;
@@ -448,7 +511,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         nextCanonical.content !== content ||
                         nextCanonical.normalizedHash !== normalizedHash
                     ) {
-                        updateMemoryContent(deps.db, nextCanonical.id, content, normalizedHash);
+                        updateMemoryContentInCurrentTransaction(
+                            deps.db,
+                            nextCanonical,
+                            content,
+                            normalizedHash,
+                        );
                     }
 
                     mergeMemoryStats(
@@ -467,6 +535,10 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         supersededMemory(deps.db, memory.id, nextCanonical.id);
                     }
 
+                    for (const projectIdentity of affectedProjectIdentities) {
+                        bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                    }
+
                     return nextCanonical;
                 })();
 
@@ -478,7 +550,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
 
-                invalidateAllMemoryBlockCaches(deps.db);
                 const supersededIds = sourceMemories
                     .map((memory) => memory.id)
                     .filter((id) => id !== canonicalMemory.id);
@@ -490,16 +561,21 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: 'id' is required when action is 'archive'.";
                 }
 
-                const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== projectPath) {
-                    return `Error: Memory with ID ${args.id} was not found.`;
+                const memoryId = args.id;
+                const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
+                const memory = getMemoryById(deps.db, memoryId);
+                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
+                    return `Error: Memory with ID ${memoryId} was not found.`;
                 }
 
-                archiveMemory(deps.db, args.id, args.reason);
-                invalidateAllMemoryBlockCaches(deps.db);
+                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
+                deps.db.transaction(() => {
+                    archiveMemory(deps.db, memoryId, args.reason);
+                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                })();
                 return args.reason?.trim()
-                    ? `Archived memory [ID: ${args.id}] (${args.reason.trim()}).`
-                    : `Archived memory [ID: ${args.id}].`;
+                    ? `Archived memory [ID: ${memoryId}] (${args.reason.trim()}).`
+                    : `Archived memory [ID: ${memoryId}].`;
             }
 
             return "Error: Unknown action.";

@@ -5,7 +5,7 @@ import {
     processDreamQueue,
 } from "../../features/magic-context/dreamer";
 import { runSidekick } from "../../features/magic-context/sidekick/agent";
-import { getCompartments } from "../../features/magic-context/storage";
+import { clearCachedM0, getCompartments } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
@@ -33,11 +33,19 @@ interface RecompConfirmation {
 const recompConfirmationBySession = new Map<string, RecompConfirmation>();
 const RECOMP_CONFIRMATION_WINDOW_MS = 60_000;
 
+const RECOMP_USAGE = [
+    "Usage:",
+    "- `/ctx-recomp` — full rebuild from message 1 to the protected tail",
+    "- `/ctx-recomp <start>-<end>` — partial rebuild of a message range (e.g. `/ctx-recomp 1-11322`)",
+    "- `/ctx-recomp --upgrade` — upgrade legacy v1 compartments to v2 layout (Wave 3 runner)",
+].join("\n");
+
 /** Parse `/ctx-recomp` arguments.
  *
  *  Accepted forms:
  *  - empty / whitespace-only → full recomp
  *  - `<start>-<end>`         → partial recomp with explicit inclusive range
+ *  - `--upgrade`            → upgrade legacy compartments (dispatch stub until Wave 3)
  *
  *  Returns an error object for unparseable or nonsensical inputs. */
 export function parseRecompArgs(
@@ -45,15 +53,17 @@ export function parseRecompArgs(
 ):
     | { kind: "full" }
     | { kind: "partial"; range: PartialRecompRange }
+    | { kind: "upgrade" }
     | { kind: "error"; message: string } {
     const trimmed = raw.trim();
     if (trimmed === "") return { kind: "full" };
+    if (trimmed === "--upgrade") return { kind: "upgrade" };
 
     const match = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
     if (!match) {
         return {
             kind: "error",
-            message: `Invalid /ctx-recomp arguments: \`${trimmed}\`.\n\nUsage:\n- \`/ctx-recomp\` — full rebuild from message 1 to the protected tail\n- \`/ctx-recomp <start>-<end>\` — partial rebuild of a message range (e.g. \`/ctx-recomp 1-11322\`)`,
+            message: `Invalid /ctx-recomp arguments: \`${trimmed}\`.\n\n${RECOMP_USAGE}`,
         };
     }
 
@@ -93,6 +103,35 @@ const SENTINEL_PREFIX = "__CONTEXT_MANAGEMENT_";
  *  command.execute.before). Filed as a known issue. */
 function throwSentinel(command: string): never {
     throw new Error(`${SENTINEL_PREFIX}${command.toUpperCase()}_HANDLED__`);
+}
+
+function getLegacyCompartmentCount(db: Database, sessionId: string): number {
+    try {
+        const row = db
+            .prepare(
+                "SELECT COUNT(*) AS count FROM compartments WHERE session_id = ? AND legacy = 1",
+            )
+            .get(sessionId) as { count?: number } | undefined;
+        return typeof row?.count === "number" ? row.count : 0;
+    } catch {
+        // Older test/upgrade schemas may not have the v22 legacy column yet.
+        return 0;
+    }
+}
+
+function executeRecompUpgradeStub(db: Database, sessionId: string): string {
+    const legacyCount = getLegacyCompartmentCount(db, sessionId);
+    if (legacyCount === 0) {
+        return "## Magic Recomp Upgrade\n\nNothing to upgrade: this session has no legacy compartments.";
+    }
+
+    // TODO(wave-3): wire upgrade runner.
+    return [
+        "## Magic Recomp Upgrade",
+        "",
+        `Found ${legacyCount} legacy compartment${legacyCount === 1 ? "" : "s"} for this session.`,
+        "Upgrade runner not yet implemented (Wave 3). No state was changed.",
+    ].join("\n");
 }
 
 /**
@@ -279,7 +318,12 @@ export function createMagicContextCommandHandler(deps: {
     onFlush?: (sessionId: string) => void;
     /** Runs /ctx-recomp. When `range` is provided, runs partial recomp over
      *  that range (snapped to enclosing compartment boundaries). When omitted,
-     *  runs full recomp from message 1 to the protected tail. */
+     *  runs full recomp from message 1 to the protected tail.
+     *
+     *  TODO(worker-f): once bumpSessionFactsVersion is exported, the underlying
+     *  recomp publish path must call it in the same transaction that replaces
+     *  session_facts. Command parsing stays here; fact writes happen in the
+     *  runner/storage layer. */
     executeRecomp?: (
         sessionId: string,
         options?: { range?: PartialRecompRange },
@@ -348,6 +392,7 @@ export function createMagicContextCommandHandler(deps: {
 
             if (isFlush) {
                 result = executeFlush(deps.db, sessionId);
+                clearCachedM0(deps.db, sessionId);
                 deps.onFlush?.(sessionId);
             }
 
@@ -379,6 +424,8 @@ export function createMagicContextCommandHandler(deps: {
                 const parsedArgs = parseRecompArgs(input.arguments);
                 if (parsedArgs.kind === "error") {
                     result = `## Magic Recomp — Invalid Arguments\n\n${parsedArgs.message}`;
+                } else if (parsedArgs.kind === "upgrade") {
+                    result = executeRecompUpgradeStub(deps.db, sessionId);
                 } else if (isTuiConnected()) {
                     // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.
                     // Partial-range args fall through to the full-recomp dialog for now — TUI

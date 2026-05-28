@@ -9,7 +9,7 @@ export function getMagicContextBuiltinCommands(): BuiltinCommandConfig {
         "ctx-recomp": {
             template: "ctx-recomp",
             description:
-                "Rebuild compartments and facts from raw history without publishing partial results",
+                "Rebuild compartments and facts from raw history; use --upgrade to check legacy compartment upgrade readiness",
         },
         "ctx-flush": {
             template: "ctx-flush",

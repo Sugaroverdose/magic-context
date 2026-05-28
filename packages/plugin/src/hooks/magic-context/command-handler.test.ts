@@ -44,6 +44,7 @@ function createTestDb(): Database {
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      legacy INTEGER NOT NULL DEFAULT 0,
       UNIQUE(session_id, sequence)
     );
     CREATE TABLE IF NOT EXISTS session_facts (
@@ -80,6 +81,16 @@ function createTestDb(): Database {
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
       last_todo_state TEXT DEFAULT '',
+      cached_m0_bytes BLOB,
+      cached_m0_project_memory_epoch INTEGER,
+      cached_m0_project_user_profile_version INTEGER,
+      cached_m0_max_compartment_seq INTEGER,
+      cached_m0_max_memory_id INTEGER,
+      cached_m0_max_mutation_id INTEGER,
+      cached_m0_project_docs_hash TEXT,
+      cached_m0_materialized_at INTEGER,
+      cached_m0_session_facts_version INTEGER,
+      cached_m0_upgrade_state TEXT,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
@@ -142,6 +153,62 @@ function insertSessionMeta(
         0,
         0,
     );
+}
+
+function seedCachedM0(db: Database, sessionId: string): void {
+    insertSessionMeta(db, sessionId);
+    db.prepare(
+        `UPDATE session_meta SET
+            cached_m0_bytes = ?,
+            cached_m0_project_memory_epoch = 7,
+            cached_m0_project_user_profile_version = 3,
+            cached_m0_max_compartment_seq = 42,
+            cached_m0_max_memory_id = 99,
+            cached_m0_max_mutation_id = 12,
+            cached_m0_project_docs_hash = 'docs-hash',
+            cached_m0_materialized_at = 123456,
+            cached_m0_session_facts_version = 5,
+            cached_m0_upgrade_state = 'pending'
+         WHERE session_id = ?`,
+    ).run(Buffer.from("cached m0"), sessionId);
+}
+
+function getCachedM0Row(db: Database, sessionId: string) {
+    return db
+        .prepare(
+            `SELECT
+                cached_m0_bytes AS bytes,
+                cached_m0_project_memory_epoch AS projectMemoryEpoch,
+                cached_m0_project_user_profile_version AS userProfileVersion,
+                cached_m0_max_compartment_seq AS maxCompartmentSeq,
+                cached_m0_max_memory_id AS maxMemoryId,
+                cached_m0_max_mutation_id AS maxMutationId,
+                cached_m0_project_docs_hash AS projectDocsHash,
+                cached_m0_materialized_at AS materializedAt,
+                cached_m0_session_facts_version AS sessionFactsVersion,
+                cached_m0_upgrade_state AS upgradeState
+             FROM session_meta WHERE session_id = ?`,
+        )
+        .get(sessionId) as
+        | {
+              bytes: Buffer | Uint8Array | null;
+              projectMemoryEpoch: number | null;
+              userProfileVersion: number | null;
+              maxCompartmentSeq: number | null;
+              maxMemoryId: number | null;
+              maxMutationId: number | null;
+              projectDocsHash: string | null;
+              materializedAt: number | null;
+              sessionFactsVersion: number | null;
+              upgradeState: string | null;
+          }
+        | undefined;
+}
+
+function insertLegacyCompartment(db: Database, sessionId: string): void {
+    db.prepare(
+        "INSERT INTO compartments (session_id, sequence, start_message, end_message, title, content, created_at, legacy) VALUES (?, 0, 1, 10, 'Legacy', 'legacy content', ?, 1)",
+    ).run(sessionId, Date.now());
 }
 
 function getPendingOpsCount(db: Database, sessionId: string): number {
@@ -260,6 +327,64 @@ describe("createMagicContextCommandHandler", () => {
             expect(getTagStatus(db, "ses-flush", 1)).toBe("dropped");
             expect(getTagStatus(db, "ses-flush", 2)).toBe("dropped");
             expect(getStickyTurnReminder(db, "ses-flush")).toBe("");
+        });
+
+        it("clears cached m0 fields for the current session", async () => {
+            seedCachedM0(db, "ses-flush-cache");
+            const sendNotification = mock(async () => {});
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                sendNotification,
+            });
+
+            expect(getCachedM0Row(db, "ses-flush-cache")?.bytes).not.toBeNull();
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    { command: "ctx-flush", sessionID: "ses-flush-cache", arguments: "" },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+            );
+
+            expect(getCachedM0Row(db, "ses-flush-cache")).toMatchObject({
+                bytes: null,
+                projectMemoryEpoch: null,
+                userProfileVersion: null,
+                maxCompartmentSeq: null,
+                maxMemoryId: null,
+                maxMutationId: null,
+                projectDocsHash: null,
+                materializedAt: null,
+                sessionFactsVersion: null,
+                upgradeState: null,
+            });
+        });
+
+        it("does not clear cached m0 fields for other sessions", async () => {
+            seedCachedM0(db, "ses-flush-cache");
+            seedCachedM0(db, "ses-other-cache");
+            const sendNotification = mock(async () => {});
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    { command: "ctx-flush", sessionID: "ses-flush-cache", arguments: "" },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-FLUSH_HANDLED__",
+            );
+
+            expect(getCachedM0Row(db, "ses-flush-cache")?.bytes).toBeNull();
+            expect(getCachedM0Row(db, "ses-other-cache")?.bytes).not.toBeNull();
+            expect(getCachedM0Row(db, "ses-other-cache")?.projectMemoryEpoch).toBe(7);
         });
     });
 
@@ -416,6 +541,69 @@ describe("createMagicContextCommandHandler", () => {
                 2,
                 "ses-recomp",
                 expect.stringContaining("## Magic Recomp"),
+                {},
+            );
+        });
+
+        it("returns a no-op message for /ctx-recomp --upgrade when no legacy compartments exist", async () => {
+            const sendNotification = mock(async () => {});
+            const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                executeRecomp,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-recomp",
+                        sessionID: "ses-upgrade-empty",
+                        arguments: "--upgrade",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
+            );
+
+            expect(executeRecomp).not.toHaveBeenCalled();
+            expect(sendNotification).toHaveBeenCalledWith(
+                "ses-upgrade-empty",
+                expect.stringContaining("Nothing to upgrade"),
+                {},
+            );
+        });
+
+        it("dispatches /ctx-recomp --upgrade to the Wave 3 runner stub for legacy sessions", async () => {
+            insertLegacyCompartment(db, "ses-upgrade-legacy");
+            const sendNotification = mock(async () => {});
+            const executeRecomp = mock(async () => "## Magic Recomp\n\nRebuilt state.");
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                executeRecomp,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-recomp",
+                        sessionID: "ses-upgrade-legacy",
+                        arguments: "--upgrade",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
+            );
+
+            expect(executeRecomp).not.toHaveBeenCalled();
+            expect(sendNotification).toHaveBeenCalledWith(
+                "ses-upgrade-legacy",
+                expect.stringContaining("Upgrade runner not yet implemented (Wave 3)"),
                 {},
             );
         });
