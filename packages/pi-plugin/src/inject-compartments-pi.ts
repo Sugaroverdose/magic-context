@@ -376,6 +376,22 @@ function historySliceTokensPi(m0Text: string): number {
 	return slice ? estimateTokens(slice) : 0;
 }
 
+/**
+ * Fail-open wrapper around getActiveUserMemories (parity with OpenCode's
+ * safeGetActiveUserMemories). On a DB that predates the user_memories table
+ * (unmigrated / partially-initialized), the raw call throws "no such table:
+ * user_memories"; OpenCode degrades to an empty profile, so Pi must too —
+ * otherwise m[0] materialization crashes the whole transform on such DBs.
+ */
+function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
+	try {
+		return getActiveUserMemories(db);
+	} catch (error) {
+		if (String(error).includes("no such table: user_memories")) return [];
+		throw error;
+	}
+}
+
 export interface PiM0M1State {
 	sessionId: string;
 	projectIdentity: string;
@@ -542,7 +558,7 @@ function renderUserProfileBlock(
 	wrapper = "user-profile",
 	memoriesOverride?: UserMemory[],
 ): string {
-	const memories = memoriesOverride ?? getActiveUserMemories(db);
+	const memories = memoriesOverride ?? safeGetActiveUserMemoriesPi(db);
 	if (memories.length === 0) return "";
 	return `<${wrapper}>\n${memories
 		.map((memory) => `- ${escapeXmlContent(memory.content)}`)
@@ -613,7 +629,7 @@ export function renderM0Pi(
 	// bytes on the wire than OpenCode for the same state, and let m[0] grow
 	// without bound as the global user-profile accumulates.
 	const trimmedProfile = trimUserMemoriesToBudget(
-		getActiveUserMemories(db),
+		safeGetActiveUserMemoriesPi(db),
 		state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS,
 	);
 	const userProfile = renderUserProfileBlock(
@@ -710,7 +726,13 @@ export function materializeM0Pi(
 	// outside the lock so the write-locked critical section is tiny.
 	db.exec("BEGIN IMMEDIATE");
 	try {
-		const current = readCurrentMarkers(db, state, docs.canonicalHash);
+		// Re-read the docs hash FROM DISK here (no override) so a project-docs
+		// edit between Phase 1 and persist is actually detected. Passing the
+		// Phase-1 docs.canonicalHash override would make current.projectDocsHash
+		// echo the snapshot value, defeating the stale check below and letting a
+		// stale-docs m[0] persist (OpenCode's readCurrentM0SnapshotMarkers always
+		// recomputes the docs hash from disk — this restores that parity).
+		const current = readCurrentMarkers(db, state);
 		// maxMemoryId deliberately EXCLUDED (parity with OpenCode materializeM0):
 		// additive memory writes don't bump projectMemoryEpoch and must NOT bust
 		// m[0] — they surface in m[1] via the persisted maxMemoryId watermark. A
@@ -879,7 +901,7 @@ export function renderM1Pi(
 		const profileBudget =
 			state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS;
 		const trimmedProfile = trimUserMemoriesToBudget(
-			getActiveUserMemories(db),
+			safeGetActiveUserMemoriesPi(db),
 			Math.max(1, Math.floor(profileBudget * 0.25)),
 		);
 		const profileBlock = renderUserProfileBlock(

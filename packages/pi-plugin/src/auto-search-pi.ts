@@ -204,11 +204,22 @@ function extractUserPromptText(message: UserMessage): string {
 function findLatestMeaningfulUserMessage(
 	messages: AgentMessage[],
 	entryIds: readonly (string | undefined)[],
+	entryIdByRef?: ReadonlyMap<object, string> | null,
 ): { message: UserMessage; messageId: string } | null {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user") continue;
 		if (collectUserPromptParts(msg).trim().length === 0) continue;
+
+		// Reference-identity resolution takes precedence: `entryIds` is positional
+		// against the pre-splice array, but `messages` may have been spliced since
+		// (compartment trim / placeholder strip), so index i can be stale. The
+		// ref-map resolves the actual current message correctly.
+		const byRef =
+			entryIdByRef && msg && typeof msg === "object"
+				? entryIdByRef.get(msg as object)
+				: undefined;
+		if (typeof byRef === "string") return { message: msg, messageId: byRef };
 
 		const messageId = entryIds[i];
 		if (typeof messageId === "string") return { message: msg, messageId };
@@ -257,9 +268,15 @@ export async function runAutoSearchHintForPi(args: {
 	db: Database;
 	messages: AgentMessage[];
 	entryIds?: readonly (string | undefined)[] | null;
+	/**
+	 * Splice-safe message→entryId map keyed by AgentMessage reference. Resolved
+	 * against branch entries; correct even though `messages` was spliced since
+	 * the positional `entryIds` was computed. Takes precedence over `entryIds`.
+	 */
+	entryIdByRef?: ReadonlyMap<object, string> | null;
 	options: PiAutoSearchOptions;
 }): Promise<AgentMessage[]> {
-	const { sessionId, db, messages, options } = args;
+	const { sessionId, db, messages, options, entryIdByRef } = args;
 	const entryIds =
 		args.entryIds === undefined
 			? messages.map((message, index) => {
@@ -276,7 +293,11 @@ export async function runAutoSearchHintForPi(args: {
 			})
 		: entryIds;
 
-	const found = findLatestMeaningfulUserMessage(messages, effectiveEntryIds);
+	const found = findLatestMeaningfulUserMessage(
+		messages,
+		effectiveEntryIds,
+		entryIdByRef,
+	);
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;

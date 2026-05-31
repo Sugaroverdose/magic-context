@@ -95,7 +95,10 @@ import type {
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
-import { convertEntriesToRawMessages } from "./read-session-pi";
+import {
+	convertEntriesToRawMessages,
+	SYNTH_USER_ID_PREFIX,
+} from "./read-session-pi";
 
 const HISTORIAN_AGENT_NAME = "magic-context-historian";
 const DEFAULT_HISTORIAN_TIMEOUT_MS = 120_000;
@@ -206,7 +209,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	};
 
 	updateSessionMeta(db, sessionId, { compartmentInProgress: true });
-	let completedSuccessfully = false;
 	let stateFilePath: string | undefined;
 
 	// historian_runs telemetry (migration v24) — recorded ONCE in finally so every
@@ -827,7 +829,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionId,
 				`historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
 			);
-			completedSuccessfully = true;
 
 			// historian_runs telemetry — full success metrics.
 			{
@@ -1024,6 +1025,26 @@ export function buildPiCompactionSummary(
  * RawMessage at ordinal `N` carries `id` populated from either the
  * real underlying entry (user|assistant|unknown role) or the first
  * folded toolResult entry (synthetic user) — never empty.
+ *
+ * # Why we ADVANCE past synthetic-user ordinals
+ *
+ * A folded-toolResult run is emitted as a synthetic-user RawMessage whose id is
+ * `${SYNTH_USER_ID_PREFIX}<realToolResultId>` — NOT a real SessionEntry id. Pi's
+ * compaction replay (`getBranch`/`buildSessionContext`) starts the kept tail at
+ * the entry whose real `entry.id === compaction.firstKeptEntryId`; a synthetic
+ * id matches nothing, so the deferred drain treats the marker as stale, CAS-
+ * clears the pending blob, and the native marker is NEVER written → the branch
+ * never trims → unbounded growth toward overflow. Pi also never cuts a
+ * compaction boundary at a `toolResult` because the kept tail must not start
+ * with an orphaned tool result (the provider lowerers emit it unpaired). So when
+ * the boundary lands on a synthetic-user (folded toolResult) ordinal, advance to
+ * the next ordinal carrying a REAL, replay-safe entry id (the following
+ * assistant/user). If no such later entry exists yet (tail is still folded tool
+ * results), return null and defer the marker — exactly Pi's native behavior of
+ * never choosing a tool-result tail as a cut point. Advancing the kept start
+ * does NOT drop content: the skipped folded-toolResult raw messages belong to
+ * the summarized span (their ordinals are ≤ the compartment's endMessage), so
+ * they are covered by the summary, not lost from the kept tail.
  */
 export function findFirstKeptEntryId(
 	entries: unknown[],
@@ -1031,7 +1052,14 @@ export function findFirstKeptEntryId(
 ): string | null {
 	const rawMessages = convertEntriesToRawMessages(entries);
 	const target = lastCompactedOrdinal + 1;
-	const match = rawMessages.find((m) => m.ordinal === target);
-	if (!match) return null;
-	return match.id.length > 0 ? match.id : null;
+	// Advance from the boundary ordinal to the first RawMessage carrying a real
+	// (non-synthetic, non-empty) entry id. Synthetic-user ids can't be matched by
+	// Pi compaction replay and must never be used as firstKeptEntryId.
+	for (const m of rawMessages) {
+		if (m.ordinal < target) continue;
+		if (m.id.length === 0) continue;
+		if (m.id.startsWith(SYNTH_USER_ID_PREFIX)) continue;
+		return m.id;
+	}
+	return null;
 }

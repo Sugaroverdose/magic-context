@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { UnifiedSearchResult } from "@magic-context/core/features/magic-context/search";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
-import { appendAutoSearchHintDecision } from "@magic-context/core/features/magic-context/storage";
+import {
+	appendAutoSearchHintDecision,
+	getAutoSearchHintDecisions,
+} from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	clearAutoSearchForPiSession,
@@ -109,6 +112,51 @@ describe("runAutoSearchHintForPi", () => {
 
 			expect(spy).not.toHaveBeenCalled();
 			expect(textOf(fresh[0] as never)).not.toContain("<ctx-search-hint>");
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("resolves the anchor by reference when the positional entryIds is stale (post-splice)", async () => {
+		// Simulates the runPipeline splice: `entryIds` was resolved against a
+		// PRE-splice array where the latest user message sat at a higher index.
+		// After the splice, the latest user message is at index 0 of the current
+		// array, but the stale positional entryIds[0] points at a DIFFERENT,
+		// now-removed message's id ("entry-OLD-WRONG"). The reference-keyed map
+		// must win and anchor the hint to the real id ("entry-REAL").
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			async () => [memoryResult()],
+		);
+		try {
+			const latest = userMessage("explain the historian cache wiring", 1);
+			const currentMessages = [latest];
+			// Stale positional array (wrong id at index 0).
+			const stalePositionalEntryIds = ["entry-OLD-WRONG"];
+			// Splice-safe reference map: the actual current message -> real id.
+			const entryIdByRef = new Map<object, string>([
+				[latest as object, "entry-REAL"],
+			]);
+
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: currentMessages,
+				entryIds: stalePositionalEntryIds,
+				entryIdByRef,
+				options: baseOptions,
+			});
+
+			// The hint was injected onto the latest message...
+			expect(textOf(currentMessages[0])).toContain("<ctx-search-hint>");
+			// ...and the persisted decision is keyed to the REAL id, not the stale
+			// positional one — proving reference resolution took precedence.
+			const decisions = getAutoSearchHintDecisions(db, "ses-auto");
+			expect(decisions.some((d) => d.messageId === "entry-REAL")).toBe(true);
+			expect(decisions.some((d) => d.messageId === "entry-OLD-WRONG")).toBe(
+				false,
+			);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

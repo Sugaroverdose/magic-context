@@ -1,7 +1,12 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { convertEntriesToRawMessages, isMidTurnPi } from "./read-session-pi";
+import { findFirstKeptEntryId } from "./pi-historian-runner";
+import {
+	convertEntriesToRawMessages,
+	isMidTurnPi,
+	SYNTH_USER_ID_PREFIX,
+} from "./read-session-pi";
 
 describe("isMidTurnPi", () => {
 	it("is mid-turn when the latest assistant stopReason is toolUse", () => {
@@ -295,5 +300,69 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 				r.id.startsWith("synth-user-tr-"),
 		);
 		expect(syntheticUsers.length).toBe(50);
+	});
+});
+
+describe("findFirstKeptEntryId — replay-safe boundary resolution", () => {
+	function messageEntry(
+		id: string,
+		message: Record<string, unknown>,
+	): Record<string, unknown> {
+		return { type: "message", id, message };
+	}
+
+	// Branch: user(u-0) → assistant(toolCall) → toolResult → assistant(text).
+	// RawMessage ordinals: 1=u-0, 2=asst-1, 3=synthetic-user(folds tr-1, id
+	// `${PREFIX}tr-1`), 4=asst-2.
+	const entries = [
+		messageEntry("u-0", { role: "user", content: "go" }),
+		messageEntry("asst-1", {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc-1", name: "read" }],
+		}),
+		messageEntry("tr-1", {
+			role: "toolResult",
+			toolCallId: "tc-1",
+			toolName: "read",
+			content: [{ type: "text", text: "out" }],
+		}),
+		messageEntry("asst-2", {
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+		}),
+	];
+
+	it("returns a real entry id when the boundary lands on a normal message", () => {
+		// boundary after ordinal 1 (u-0) → kept start is ordinal 2 (asst-1).
+		expect(findFirstKeptEntryId(entries, 1)).toBe("asst-1");
+	});
+
+	it("ADVANCES past a folded-toolResult synthetic user to the next real entry", () => {
+		// boundary after ordinal 2 (asst-1) → ordinal 3 is the synthetic user
+		// folding tr-1 (id `${PREFIX}tr-1`), which Pi compaction replay cannot
+		// match. Must advance to ordinal 4 (asst-2), NOT return the synthetic id.
+		const kept = findFirstKeptEntryId(entries, 2);
+		expect(kept).toBe("asst-2");
+		expect(kept?.startsWith(SYNTH_USER_ID_PREFIX)).toBe(false);
+	});
+
+	it("defers (null) when only folded tool-result tails remain after the boundary", () => {
+		// Tail ends in a folded toolResult with no following real entry.
+		const tailEntries = [
+			messageEntry("u-0", { role: "user", content: "go" }),
+			messageEntry("asst-1", {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tc-1", name: "read" }],
+			}),
+			messageEntry("tr-1", {
+				role: "toolResult",
+				toolCallId: "tc-1",
+				toolName: "read",
+				content: [{ type: "text", text: "out" }],
+			}),
+		];
+		// boundary after ordinal 2 → only the synthetic-user (folded tr-1) tail
+		// remains → no replay-safe real entry → defer.
+		expect(findFirstKeptEntryId(tailEntries, 2)).toBeNull();
 	});
 });

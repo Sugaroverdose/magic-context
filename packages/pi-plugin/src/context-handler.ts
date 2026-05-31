@@ -1125,6 +1125,34 @@ export function collectMessageEntryIdsByRef(
 	return result;
 }
 
+/**
+ * Build a `Map<AgentMessage-ref, SessionEntry.id>` from branch entries.
+ *
+ * Same source-of-truth as `collectMessageEntryIdsByRef` (the message-typed
+ * branch entries), but keyed by object identity instead of collapsed to a
+ * positional array. This is the splice-safe map threaded to post-mutation
+ * consumers (sticky reminders, note nudges, auto-search) so they resolve the
+ * CURRENT message's entry id by reference rather than by a stale index. Only the
+ * lossless reference path is included — the fingerprint fallback in
+ * `collectMessageEntryIdsByRef` is position/consumption-ordered and not safe to
+ * reuse out of order, so unmapped messages simply fall through (anchor defers).
+ */
+function buildEntryIdByRefMap(
+	branchEntries: readonly unknown[] | null,
+): Map<object, string> {
+	const map = new Map<object, string>();
+	if (!branchEntries) return map;
+	for (const entry of branchEntries) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as { type?: unknown; id?: unknown; message?: unknown };
+		if (e.type !== "message") continue;
+		if (typeof e.id !== "string") continue;
+		if (!e.message || typeof e.message !== "object") continue;
+		map.set(e.message as object, e.id);
+	}
+	return map;
+}
+
 function readPiBranchEntriesForContext(
 	ctx: ExtensionContext,
 	sessionId: string,
@@ -1285,6 +1313,11 @@ export function registerPiContextHandler(
 							sessionId,
 							branchEntries,
 						);
+			// Splice-safe message→entryId map keyed by reference. runPipeline
+			// mutates the message array in place (compartment trim + placeholder
+			// strip), so post-mutation consumers must resolve by identity, not by
+			// the stale positional strictEntryIds.
+			const entryIdByRef = buildEntryIdByRefMap(branchEntries);
 
 			const tLastUser = performance.now();
 			const latestUser = findLatestUserMessageIdPi(
@@ -1663,6 +1696,8 @@ export function registerPiContextHandler(
 								usageContextLimit,
 								executeThresholdPercentage:
 									options.historian?.executeThresholdPercentage,
+								executeThresholdTokens:
+									options.historian?.executeThresholdTokens,
 								modelKey: liveModelBySession.get(sessionId),
 							}),
 						}
@@ -1719,6 +1754,7 @@ export function registerPiContextHandler(
 					db: options.db,
 					messages: outputMessages,
 					entryIds: entryIds ?? null,
+					entryIdByRef,
 					hasRecentReduceCall: hasRecentPiCtxReduceExecution(sessionId),
 					isCacheBustingPass: cacheBustingPass,
 				});
@@ -1755,6 +1791,7 @@ export function registerPiContextHandler(
 					messages: outputMessages,
 					projectIdentity,
 					entryIds: strictEntryIds,
+					entryIdByRef,
 					// Same signal OpenCode uses to gate sticky-anchor GC
 					// (isCacheBustingPass = history-refresh OR work executed).
 					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
@@ -1777,6 +1814,7 @@ export function registerPiContextHandler(
 						db: options.db,
 						messages: outputMessages,
 						entryIds: strictEntryIds,
+						entryIdByRef,
 						options: {
 							enabled: true,
 							scoreThreshold: options.autoSearch.scoreThreshold,
@@ -2006,6 +2044,7 @@ function resolveHistoryBudgetTokensForPi(args: {
 	usageInputTokens: number;
 	usageContextLimit: number | undefined;
 	executeThresholdPercentage: PiHistorianOptions["executeThresholdPercentage"];
+	executeThresholdTokens: PiHistorianOptions["executeThresholdTokens"];
 	modelKey: string | undefined;
 }): number | undefined {
 	const {
@@ -2014,6 +2053,7 @@ function resolveHistoryBudgetTokensForPi(args: {
 		usageInputTokens,
 		usageContextLimit,
 		executeThresholdPercentage,
+		executeThresholdTokens,
 		modelKey,
 	} = args;
 	if (!historyBudgetPercentage || usagePercentage <= 0) return undefined;
@@ -2026,7 +2066,13 @@ function resolveHistoryBudgetTokensForPi(args: {
 	if (!Number.isFinite(derivedLimit) || derivedLimit <= 0) return undefined;
 	return Math.floor(
 		derivedLimit *
+			// Pass executeThresholdTokens so token-based per-model thresholds drive
+			// the history budget identically to OpenCode (resolveHistoryBudgetTokens).
+			// Without it, a session configured with execute_threshold_tokens would
+			// get a different (percentage-only) decay budget than OpenCode → different
+			// render tiers for the same state.
 			(resolveExecuteThreshold(executeThresholdPercentage ?? 65, modelKey, 65, {
+				tokensConfig: executeThresholdTokens,
 				contextLimit: derivedLimit,
 			}) /
 				100) *
@@ -3247,6 +3293,12 @@ function applyStickyTurnReminder(args: {
 	db: ContextDatabase;
 	messages: PiAgentMessage[];
 	entryIds: readonly (string | undefined)[] | null;
+	/**
+	 * Splice-safe message→entryId map keyed by AgentMessage reference. Resolved
+	 * against branch entries; correct even though `messages` was spliced since
+	 * the positional `entryIds` was computed. Takes precedence over `entryIds`.
+	 */
+	entryIdByRef?: ReadonlyMap<object, string> | null;
 	hasRecentReduceCall: boolean;
 	isCacheBustingPass: boolean;
 }): PiAgentMessage[] {
@@ -3261,7 +3313,14 @@ function applyStickyTurnReminder(args: {
 	const messageIdByIndex = buildPiMessageIdByIndex(
 		args.messages,
 		args.entryIds,
+		false,
+		args.entryIdByRef,
 	);
+	// Reference-resolved set of entry ids actually present in the CURRENT
+	// (post-splice) messages — used to decide whether the anchored reminder
+	// message is still visible, instead of the stale positional `entryIds`.
+	const visibleResolvedIds = new Set<string>(messageIdByIndex.values());
+	const allResolved = messageIdByIndex.size === args.messages.length;
 	if (reminder.messageId) {
 		const reinjected = appendReminderToUserMessageByIdPi(
 			args.messages,
@@ -3272,9 +3331,8 @@ function applyStickyTurnReminder(args: {
 		if (
 			!reinjected &&
 			args.isCacheBustingPass &&
-			args.entryIds !== null &&
-			!args.entryIds.includes(undefined) &&
-			!args.entryIds.includes(reminder.messageId)
+			allResolved &&
+			!visibleResolvedIds.has(reminder.messageId)
 		) {
 			clearPersistedStickyTurnReminder(args.db, args.sessionId);
 		}
@@ -3326,6 +3384,12 @@ function applyNoteNudges(args: {
 	projectIdentity: string;
 	entryIds: readonly (string | undefined)[] | null;
 	/**
+	 * Splice-safe message→entryId map keyed by AgentMessage reference. Resolved
+	 * against branch entries and correct even though `messages` was spliced since
+	 * `entryIds` (positional) was computed. Takes precedence over `entryIds`.
+	 */
+	entryIdByRef?: ReadonlyMap<object, string> | null;
+	/**
 	 * Whether THIS pass is cache-busting. Sticky-anchor pruning is storage-only
 	 * and must run ONLY on cache-busting passes (parity with OpenCode
 	 * transform-postprocess `args.fullFeatureMode && isCacheBustingPass`). On a
@@ -3334,13 +3398,20 @@ function applyNoteNudges(args: {
 	 */
 	isCacheBusting: boolean;
 }): PiAgentMessage[] {
-	const { sessionId, db, messages, projectIdentity, entryIds } = args;
+	const { sessionId, db, messages, projectIdentity, entryIds, entryIdByRef } =
+		args;
 
-	const messageIdByIndex = buildPiMessageIdByIndex(messages, entryIds);
+	const messageIdByIndex = buildPiMessageIdByIndex(
+		messages,
+		entryIds,
+		false,
+		entryIdByRef,
+	);
 	const replayMessageIdByIndex = buildPiMessageIdByIndex(
 		messages,
 		entryIds,
 		true,
+		entryIdByRef,
 	);
 
 	for (const anchor of getNoteNudgeAnchors(db, sessionId)) {
@@ -3421,16 +3492,21 @@ function applyNoteNudges(args: {
 	// Storage-only GC of stale sticky anchors — gated on cache-busting passes
 	// ONLY (parity with OpenCode). Pruning on a defer pass would mutate persisted
 	// sticky-injection state and could shift future replay bytes.
-	if (
-		args.isCacheBusting &&
-		entryIds !== null &&
-		!entryIds.includes(undefined)
-	) {
-		const visibleIds = new Set(
-			entryIds.filter((id): id is string => typeof id === "string"),
-		);
-		pruneNoteNudgeAnchors(db, sessionId, visibleIds);
-		pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
+	//
+	// The visible set MUST reflect the CURRENT (post-splice) messages, not the
+	// stale positional `entryIds`: pruning against pre-splice positions could
+	// drop an anchor whose message is still present (just shifted) and therefore
+	// erase a still-needed replay. We derive it from `messageIdByIndex`, which is
+	// reference-resolved against the current array. Only prune when every current
+	// message resolved to a real id (a partial map could miss a present message
+	// and wrongly prune its anchor).
+	if (args.isCacheBusting) {
+		const visibleIds = new Set<string>(messageIdByIndex.values());
+		const allResolved = messageIdByIndex.size === messages.length;
+		if (allResolved && visibleIds.size > 0) {
+			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
+			pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
+		}
 	}
 
 	return messages;
@@ -3474,13 +3550,48 @@ function hasMeaningfulUserTextPi(message: PiAgentMessage): boolean {
 
 type PiMessageIdByIndex = Map<number, string>;
 
+/**
+ * Build an index→entryId map for the CURRENT `messages` array.
+ *
+ * # Why a per-call rebuild keyed by reference, not a frozen positional array
+ *
+ * `strictEntryIds` is a positional array resolved against the ORIGINAL
+ * `event.messages` at pass start. `runPipeline` then structurally mutates the
+ * array in place — compartment-boundary trim and `stripPiDroppedPlaceholderMessages`
+ * both `splice()` messages out, shifting every later index. Any consumer that
+ * runs AFTER those splices (sticky reminders, note nudges, auto-search hints)
+ * must NOT index the stale positional `strictEntryIds[]` against the shifted
+ * array — index N no longer points at the same message, so anchors would resolve
+ * to the wrong SessionEntry id and replay/prune on the wrong message (the Pi
+ * analogue of the #81 positional-drift class).
+ *
+ * Reference identity survives splices (splicing changes positions, not object
+ * identity). When `entryIdByRef` is supplied, each CURRENT message is resolved
+ * through it by identity, so the map is correct regardless of how many splices
+ * happened. The positional `entryIds` path is kept for pre-mutation callers
+ * (those that legitimately align to the original `event.messages`).
+ */
 function buildPiMessageIdByIndex(
 	messages: PiAgentMessage[],
 	entryIds: readonly (string | undefined)[] | null,
 	includeMessageIdFallback = false,
+	entryIdByRef?: ReadonlyMap<object, string> | null,
 ): PiMessageIdByIndex {
 	const ids = new Map<number, string>();
 	for (let index = 0; index < messages.length; index += 1) {
+		// Reference-identity resolution takes precedence: correct even after the
+		// array was spliced since strictEntryIds was computed.
+		if (entryIdByRef) {
+			const msg = messages[index];
+			const byRef =
+				msg && typeof msg === "object"
+					? entryIdByRef.get(msg as object)
+					: undefined;
+			if (typeof byRef === "string") {
+				ids.set(index, byRef);
+				continue;
+			}
+		}
 		const entryId = entryIds?.[index];
 		if (typeof entryId === "string") {
 			ids.set(index, entryId);

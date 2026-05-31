@@ -72,6 +72,19 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-session-raw";
 
+/**
+ * Prefix for the synthetic-user RawMessage id emitted when a run of `toolResult`
+ * entries is folded into a user turn (the toolResult→assistant transition). The
+ * id is `${SYNTH_USER_ID_PREFIX}${firstRealToolResultEntryId}` — NOT a real
+ * SessionEntry id. Pi's `getBranch()`/compaction replay matches against real
+ * `entry.id`, and Pi never cuts a compaction boundary at a `toolResult` (the
+ * kept tail must not start with an orphaned tool result), so any consumer that
+ * needs a replay-safe real entry id (e.g. compaction `firstKeptEntryId`) must
+ * detect this prefix and advance past it. Exported so those consumers share one
+ * definition instead of re-deriving the `synth-user-` literal.
+ */
+export const SYNTH_USER_ID_PREFIX = "synth-user-";
+
 export function isMidTurnPi(event: unknown, _sessionId: string): boolean {
 	const messages = (event as { messages?: unknown })?.messages;
 	if (!Array.isArray(messages)) return false;
@@ -231,7 +244,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 			if (pendingToolParts.length > 0) {
 				result.push({
 					ordinal: nextOrdinal++,
-					id: `synth-user-${pendingFirstRealId}`,
+					id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
 					role: "user",
 					parts: pendingToolParts,
 				});
@@ -266,7 +279,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 	if (pendingToolParts.length > 0) {
 		result.push({
 			ordinal: nextOrdinal,
-			id: `synth-user-${pendingFirstRealId}`,
+			id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
 			role: "user",
 			parts: pendingToolParts,
 		});
