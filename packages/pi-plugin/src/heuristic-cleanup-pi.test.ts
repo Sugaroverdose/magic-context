@@ -221,4 +221,85 @@ describe("applyPiHeuristicCleanup", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("drops a STALE ctx_reduce but preserves a FRESH one reusing the same callId", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-reduce-collision";
+			// Two assistant turns both invoke ctx_reduce with the SAME callId
+			// "reduce-1" (callId counters repeat across turns). The OLD one is stale
+			// (tag age < cutoff); the FRESH one is recent (must survive). Composite
+			// (owner, callId) identity must distinguish them — a bare-callId match
+			// would wrongly drop both.
+			const messages = [
+				userMessage("old request", 1),
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "reducing (old)" },
+						{
+							type: "toolCall",
+							id: "reduce-1",
+							name: "ctx_reduce",
+							arguments: {},
+						},
+					],
+					timestamp: 2,
+				},
+				{
+					...toolResultMessage("reduce-1", "reduced old", 3),
+					toolName: "ctx_reduce",
+				},
+				// …several turns later…
+				userMessage("a", 4),
+				assistantMessage("b", 5),
+				userMessage("c", 6),
+				assistantMessage("d", 7),
+				userMessage("fresh request", 8),
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "reducing (fresh)" },
+						{
+							type: "toolCall",
+							id: "reduce-1",
+							name: "ctx_reduce",
+							arguments: {},
+						},
+					],
+					timestamp: 9,
+				},
+				{
+					...toolResultMessage("reduce-1", "reduced fresh", 10),
+					toolName: "ctx_reduce",
+				},
+				userMessage("latest", 11),
+			];
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			const transcript = createPiTranscript(messages, sessionId);
+			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
+
+			// Cutoff chosen so only the OLD ctx_reduce tag is below it.
+			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
+				autoDropToolAge: 3,
+				dropToolStructure: true,
+				protectedTags: 0,
+			});
+			transcript.commit();
+
+			// Exactly ONE stale ctx_reduce dropped (the old turn), NOT both.
+			expect(result.droppedStaleReduceCalls).toBe(1);
+
+			// The two ctx_reduce tool tags share callId "reduce-1" but have
+			// DISTINCT owners; exactly one must be dropped, the fresher preserved.
+			const reduceTags = getTagsBySession(db, sessionId)
+				.filter((tag) => tag.type === "tool" && tag.messageId === "reduce-1")
+				.map((tag) => tag.status);
+			expect(reduceTags.filter((s) => s === "dropped")).toHaveLength(1);
+			expect(reduceTags.filter((s) => s === "active")).toHaveLength(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });

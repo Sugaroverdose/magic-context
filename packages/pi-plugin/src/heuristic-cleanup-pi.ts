@@ -173,13 +173,29 @@ function buildPiToolFingerprints(
 	return fingerprints;
 }
 
+/**
+ * Identify stale `ctx_reduce` tool calls by COMPOSITE (owner, callId) identity.
+ *
+ * A bare-callId match is unsafe: Pi/OpenCode can reuse a tool callId across
+ * assistant turns (the reason tool tags carry tool_owner_message_id), so a stale
+ * ctx_reduce call in an OLD assistant message must NOT cause a FRESH ctx_reduce
+ * reusing the same callId in a recent turn to be dropped. We key by
+ * `${ownerStableId}\x00${callId}` — the owner being the assistant message that
+ * holds the toolCall part (resolveStableId of that message), which is exactly
+ * what the tag row's tool_owner_message_id records.
+ *
+ * Returns both a composite set (for tags carrying an owner) and a bare-callId set
+ * (legacy NULL-owner rows written before composite identity, matched by callId
+ * alone — same lazy-adoption fallback the rest of the tag pipeline uses).
+ */
 function collectStaleReduceCallIds(
 	messages: readonly unknown[],
 	messageIdToMaxTag: Map<string, number>,
 	toolAgeCutoff: number,
 	resolveStableId: (msg: unknown, index: number) => string | undefined,
-): Set<string> {
-	const staleCallIds = new Set<string>();
+): { composite: Set<string>; bareCallIds: Set<string> } {
+	const composite = new Set<string>();
+	const bareCallIds = new Set<string>();
 	for (let i = 0; i < messages.length; i++) {
 		const raw = messages[i];
 		if (!raw || typeof raw !== "object") continue;
@@ -201,10 +217,11 @@ function collectStaleReduceCallIds(
 			if (p.type !== "toolCall") continue;
 			if (p.name !== "ctx_reduce") continue;
 			if (typeof p.id !== "string" || p.id.length === 0) continue;
-			staleCallIds.add(p.id);
+			composite.add(`${stableId}\x00${p.id}`);
+			bareCallIds.add(p.id);
 		}
 	}
-	return staleCallIds;
+	return { composite, bareCallIds };
 }
 
 /**
@@ -298,18 +315,28 @@ export function applyPiHeuristicCleanup(
 	})();
 
 	// ── Pass 1b: stale ctx_reduce calls (Pi persisted-drop replay) ──────
-	const staleReduceCallIds = collectStaleReduceCallIds(
+	const staleReduce = collectStaleReduceCallIds(
 		piMessages,
 		buildMessageIdToMaxTagFromTargets(targets),
 		toolAgeCutoff,
 		resolveStableId,
 	);
-	if (staleReduceCallIds.size > 0) {
+	if (staleReduce.composite.size > 0 || staleReduce.bareCallIds.size > 0) {
 		db.transaction(() => {
 			for (const tag of tags) {
 				if (tag.status !== "active") continue;
 				if (tag.type !== "tool") continue;
-				if (!tag.messageId || !staleReduceCallIds.has(tag.messageId)) continue;
+				if (!tag.messageId) continue;
+				// Composite match for tags carrying an owner — prevents a reused
+				// callId in a fresh turn from being dropped by a stale call in an
+				// old turn. Legacy NULL-owner rows fall back to bare callId match
+				// (lazy adoption: they predate composite identity).
+				const matched = tag.toolOwnerMessageId
+					? staleReduce.composite.has(
+							`${tag.toolOwnerMessageId}\x00${tag.messageId}`,
+						)
+					: staleReduce.bareCallIds.has(tag.messageId);
+				if (!matched) continue;
 				const target = targets.get(tag.tagNumber);
 				target?.drop?.();
 				updateTagDropMode(db, sessionId, tag.tagNumber, "full");
