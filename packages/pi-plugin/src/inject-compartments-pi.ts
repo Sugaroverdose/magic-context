@@ -205,30 +205,38 @@ function trimPiMessagesToBoundary(
 	if (cutoffIndex < 0) return 0;
 
 	// Start with the same prefix trim as the shared OpenCode projection, then
-	// repeatedly sweep both directions across Pi's split tool-call shape:
-	//   - removed assistant toolCall -> any kept toolResult is orphaned
-	//   - removed toolResult -> any kept assistant carrying that toolCall is unsafe
-	// Tool results are not guaranteed to be contiguous with their calls once Pi
-	// has injected user turns, custom messages, or other extension output, so a
-	// simple "advance while next message is toolResult" leaves non-contiguous
-	// provider-invalid orphans in the visible request.
+	// repeatedly sweep both directions across Pi's split tool-call shape. The
+	// sweep is intentionally scoped by the owning assistant message index, not by
+	// bare callId: Pi/OpenCode may reuse callIds across turns, and a global callId
+	// match can delete a valid kept-tail pair from a later turn. Pair ownership is
+	// inferred from the nearest assistant carrying that callId (backward first,
+	// then forward for legacy/test shapes where a result precedes its call). This
+	// preserves the non-contiguous same-turn cleanup while avoiding cross-turn
+	// over-removal.
 	const remove = new Set<number>();
 	for (let i = 0; i <= cutoffIndex; i++) remove.add(i);
 
 	let changed = true;
 	while (changed) {
 		changed = false;
-		const removedCallIds = new Set<string>();
-		const removedResultIds = new Set<string>();
+		const removedCallKeys = new Set<string>();
+		const removedResultKeys = new Set<string>();
 
 		for (const index of remove) {
 			const msg = piMessages[index];
 			if (!msg) continue;
 			if (msg.role === "assistant") {
-				for (const callId of getPiToolCallIds(msg)) removedCallIds.add(callId);
+				for (const callId of getPiToolCallIds(msg)) {
+					removedCallKeys.add(toolPairKey(callId, index));
+				}
 			} else if (msg.role === "toolResult") {
 				const callId = getPiToolResultCallId(msg);
-				if (callId) removedResultIds.add(callId);
+				const ownerIndex = callId
+					? findToolResultOwnerAssistantIndex(piMessages, index, callId)
+					: null;
+				if (callId && ownerIndex !== null) {
+					removedResultKeys.add(toolPairKey(callId, ownerIndex));
+				}
 			}
 		}
 
@@ -238,7 +246,14 @@ function trimPiMessagesToBoundary(
 			if (!msg) continue;
 			if (msg.role === "toolResult") {
 				const callId = getPiToolResultCallId(msg);
-				if (callId && removedCallIds.has(callId)) {
+				const ownerIndex = callId
+					? findToolResultOwnerAssistantIndex(piMessages, i, callId)
+					: null;
+				if (
+					callId &&
+					ownerIndex !== null &&
+					removedCallKeys.has(toolPairKey(callId, ownerIndex))
+				) {
 					remove.add(i);
 					changed = true;
 				}
@@ -246,7 +261,11 @@ function trimPiMessagesToBoundary(
 			}
 			if (msg.role === "assistant") {
 				const callIds = getPiToolCallIds(msg);
-				if (callIds.some((callId) => removedResultIds.has(callId))) {
+				if (
+					callIds.some((callId) =>
+						removedResultKeys.has(toolPairKey(callId, i)),
+					)
+				) {
 					remove.add(i);
 					changed = true;
 				}
@@ -258,6 +277,30 @@ function trimPiMessagesToBoundary(
 	const removed = piMessages.length - kept.length;
 	piMessages.splice(0, piMessages.length, ...kept);
 	return removed;
+}
+
+function toolPairKey(callId: string, assistantIndex: number): string {
+	return `${callId}\0${assistantIndex}`;
+}
+
+function findToolResultOwnerAssistantIndex(
+	messages: readonly PiAgentMessage[],
+	resultIndex: number,
+	callId: string,
+): number | null {
+	for (let i = resultIndex - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg?.role === "assistant" && getPiToolCallIds(msg).includes(callId)) {
+			return i;
+		}
+	}
+	for (let i = resultIndex + 1; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg?.role === "assistant" && getPiToolCallIds(msg).includes(callId)) {
+			return i;
+		}
+	}
+	return null;
 }
 
 function getPiToolCallIds(message: PiAssistantMessage): string[] {
@@ -386,6 +429,8 @@ const PI_M1_PLACEHOLDER =
 // transition because there is none). Revisit if Pi gains a session-upgrade flow
 // that must invalidate m[0].
 const PI_M0_UPGRADE_STATE = "pi-m0m1-v2";
+const EMPTY_MAX_COMPARTMENT_SEQ = -1;
+const piCachedBoundaryColumnEnsured = new WeakSet<ContextDatabase>();
 
 type PiCompartment = ReturnType<typeof getCompartments>[number];
 
@@ -453,6 +498,7 @@ export interface PiM0SnapshotMarkers {
 	sessionFactsVersion: number;
 	materializedAt: number;
 	upgradeState: string;
+	lastBaselineEndMessageId: string | null;
 }
 
 export interface PiMaterializeDecision {
@@ -485,25 +531,108 @@ function getSessionFactsVersion(
 	return 0;
 }
 
+function normalizeCachedMaxCompartmentSeq(
+	db: ContextDatabase,
+	sessionId: string,
+	stored: number,
+): number {
+	// Backward compatibility for legacy empty snapshots persisted with 0: only
+	// reinterpret 0 as empty when the session truly has no compartments. If a
+	// seq-0 compartment exists, 0 is a real watermark and must remain publishable.
+	if (stored === 0 && getCompartments(db, sessionId).length === 0) {
+		return EMPTY_MAX_COMPARTMENT_SEQ;
+	}
+	return stored;
+}
+
+function ensurePiCachedBoundaryColumn(db: ContextDatabase): void {
+	if (piCachedBoundaryColumnEnsured.has(db)) return;
+	const existing = db
+		.prepare("PRAGMA table_info(session_meta)")
+		.all() as Array<{ name?: unknown }>;
+	if (
+		!existing.some(
+			(column) => column.name === "cached_m0_last_baseline_end_message_id",
+		)
+	) {
+		db.exec(
+			"ALTER TABLE session_meta ADD COLUMN cached_m0_last_baseline_end_message_id TEXT",
+		);
+	}
+	piCachedBoundaryColumnEnsured.add(db);
+}
+
+function getCachedBoundary(
+	db: ContextDatabase,
+	sessionId: string,
+): string | null {
+	ensurePiCachedBoundaryColumn(db);
+	const row = db
+		.prepare(
+			"SELECT cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+		)
+		.get(sessionId) as { boundary?: unknown } | undefined;
+	return typeof row?.boundary === "string" && row.boundary.length > 0
+		? row.boundary
+		: null;
+}
+
+function setCachedBoundary(
+	db: ContextDatabase,
+	sessionId: string,
+	boundary: string | null,
+): void {
+	ensurePiCachedBoundaryColumn(db);
+	db.prepare(
+		"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+	).run(boundary, sessionId);
+}
+
 function getCachedMarkers(
 	db: ContextDatabase,
 	state: PiM0M1State,
 ): PiM0SnapshotMarkers | null {
 	const meta = getOrCreateSessionMeta(db, state.sessionId);
 	if (!meta.cachedM0Bytes) return null;
-	if (meta.cachedM0MaxCompartmentSeq === null) return null;
-	if (meta.cachedM0MaxMemoryId === null) return null;
+	if (
+		meta.cachedM0MaxCompartmentSeq === null ||
+		meta.cachedM0MaxMemoryId === null ||
+		meta.cachedM0MaxMutationId === null ||
+		meta.cachedM0ProjectMemoryEpoch === null ||
+		meta.cachedM0ProjectUserProfileVersion === null ||
+		meta.cachedM0ProjectDocsHash === null ||
+		meta.cachedM0SessionFactsVersion === null ||
+		meta.cachedM0MaterializedAt === null ||
+		meta.cachedM0UpgradeState === null
+	) {
+		return null;
+	}
+	const maxCompartmentSeq = normalizeCachedMaxCompartmentSeq(
+		db,
+		state.sessionId,
+		meta.cachedM0MaxCompartmentSeq,
+	);
 	return {
-		maxCompartmentSeq: meta.cachedM0MaxCompartmentSeq,
+		maxCompartmentSeq,
 		maxMemoryId: meta.cachedM0MaxMemoryId,
-		maxMutationId: meta.cachedM0MaxMutationId ?? 0,
-		projectMemoryEpoch: meta.cachedM0ProjectMemoryEpoch ?? 0,
-		projectUserProfileVersion: meta.cachedM0ProjectUserProfileVersion ?? 0,
-		projectDocsHash: meta.cachedM0ProjectDocsHash ?? "",
-		sessionFactsVersion: meta.cachedM0SessionFactsVersion ?? 0,
-		materializedAt: meta.cachedM0MaterializedAt ?? 0,
-		upgradeState: meta.cachedM0UpgradeState ?? "",
+		maxMutationId: meta.cachedM0MaxMutationId,
+		projectMemoryEpoch: meta.cachedM0ProjectMemoryEpoch,
+		projectUserProfileVersion: meta.cachedM0ProjectUserProfileVersion,
+		projectDocsHash: meta.cachedM0ProjectDocsHash,
+		sessionFactsVersion: meta.cachedM0SessionFactsVersion,
+		materializedAt: meta.cachedM0MaterializedAt,
+		upgradeState: meta.cachedM0UpgradeState,
+		lastBaselineEndMessageId: getCachedBoundary(db, state.sessionId),
 	};
+}
+
+function lastBaselineEndMessageId(
+	compartments: readonly PiCompartment[],
+): string | null {
+	const last = compartments.at(-1);
+	return last?.endMessageId && last.endMessageId.length > 0
+		? last.endMessageId
+		: null;
 }
 
 function readCurrentMarkers(
@@ -522,7 +651,7 @@ function readCurrentMarkers(
 		maxCompartmentSeq:
 			compartments.length > 0
 				? Math.max(...compartments.map((compartment) => compartment.sequence))
-				: 0,
+				: EMPTY_MAX_COMPARTMENT_SEQ,
 		maxMemoryId:
 			memories.length > 0
 				? Math.max(...memories.map((memory) => memory.id))
@@ -543,6 +672,7 @@ function readCurrentMarkers(
 		upgradeState: `${PI_M0_UPGRADE_STATE}:${
 			compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 		}`,
+		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 	};
 }
 
@@ -560,12 +690,14 @@ export function mustMaterializePi(
 	if (!decodeCachedM0(meta.cachedM0Bytes)) {
 		return { value: true, reason: "cache_invalid" };
 	}
-	if (
-		meta.cachedM0MaxCompartmentSeq === null ||
-		meta.cachedM0MaxMemoryId === null
-	) {
+	if (getCachedMarkers(db, state) === null) {
 		return { value: true, reason: "cache_invalid" };
 	}
+	const cachedMaxCompartmentSeq = normalizeCachedMaxCompartmentSeq(
+		db,
+		state.sessionId,
+		meta.cachedM0MaxCompartmentSeq ?? EMPTY_MAX_COMPARTMENT_SEQ,
+	);
 	if (meta.cachedM0UpgradeState !== current.upgradeState) {
 		return { value: true, reason: "renderer_upgrade" };
 	}
@@ -588,7 +720,7 @@ export function mustMaterializePi(
 	if (current.maxMutationId !== (meta.cachedM0MaxMutationId ?? 0)) {
 		return { value: true, reason: "pending_mutations" };
 	}
-	if (current.maxCompartmentSeq !== (meta.cachedM0MaxCompartmentSeq ?? 0)) {
+	if (current.maxCompartmentSeq !== cachedMaxCompartmentSeq) {
 		return { value: true, reason: "new_compartment" };
 	}
 	// maxMemoryId is deliberately NOT a materialization trigger (parity with
@@ -701,6 +833,15 @@ export function renderM0Pi(
  *  same SQLite DB, or the historian — mutated state mid-materialization). Caught
  *  by the retry wrapper so we never cache m[0] bytes that no longer match the
  *  markers they were rendered from. */
+function isTransientSqliteLockError(error: unknown): boolean {
+	const message = String(error);
+	return (
+		message.includes("SQLITE_BUSY") ||
+		message.includes("SQLITE_LOCKED") ||
+		message.includes("database is locked")
+	);
+}
+
 export class PiMaterializeContentionError extends Error {
 	constructor(reason: string) {
 		super(`pi m[0] materialization contention: ${reason}`);
@@ -733,7 +874,7 @@ function readFrozenM0InputsPi(
 			maxCompartmentSeq: compartments.reduce(
 				(max, compartment) =>
 					compartment.sequence > max ? compartment.sequence : max,
-				0,
+				EMPTY_MAX_COMPARTMENT_SEQ,
 			),
 			maxMemoryId: memories.reduce(
 				(max, memory) => (memory.id > max ? memory.id : max),
@@ -748,6 +889,7 @@ function readFrozenM0InputsPi(
 			upgradeState: `${PI_M0_UPGRADE_STATE}:${
 				compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 			}`,
+			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 		};
 		return { docs, markers, compartments, memories, userProfile };
 	});
@@ -846,12 +988,20 @@ export function materializeM0Pi(
 		attempts += 1;
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
+	ensurePiCachedBoundaryColumn(db);
 
 	// Phase 2 + 3 (locked): re-read markers under BEGIN IMMEDIATE; if anything
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the
 	// caller retry. Otherwise persist the cache atomically. Rendering stays
 	// outside the lock so the write-locked critical section is tiny.
-	db.exec("BEGIN IMMEDIATE");
+	try {
+		db.exec("BEGIN IMMEDIATE");
+	} catch (error) {
+		if (isTransientSqliteLockError(error)) {
+			throw new PiMaterializeContentionError("begin immediate locked");
+		}
+		throw error;
+	}
 	try {
 		// Re-read the docs hash FROM DISK here (no override) so a project-docs
 		// edit between Phase 1 and persist is actually detected. Passing the
@@ -902,7 +1052,6 @@ export function materializeM0Pi(
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
 			upgradeState: snapshotMarkers.upgradeState,
 		});
-
 		// Persist the rendered-memory identity in the SAME transaction as the m[0]
 		// snapshot (parity with OpenCode materializeM0). `memory_block_ids` /
 		// `memory_block_count` are otherwise written only by the dead legacy v1
@@ -928,6 +1077,11 @@ export function materializeM0Pi(
 		);
 
 		db.exec("COMMIT");
+		setCachedBoundary(
+			db,
+			state.sessionId,
+			snapshotMarkers.lastBaselineEndMessageId,
+		);
 	} catch (error) {
 		try {
 			db.exec("ROLLBACK");
@@ -1046,17 +1200,10 @@ export function renderM1Pi(
 }
 
 function findCompartmentBoundaryForSnapshot(
-	db: ContextDatabase,
-	sessionId: string,
 	markers: PiM0SnapshotMarkers,
 ): string | null {
-	const compartments = getCompartments(db, sessionId).filter(
-		(compartment) => compartment.sequence <= markers.maxCompartmentSeq,
-	);
-	const last = compartments.at(-1);
-	return last?.endMessageId && last.endMessageId.length > 0
-		? last.endMessageId
-		: null;
+	if (markers.maxCompartmentSeq < 0) return null;
+	return markers.lastBaselineEndMessageId;
 }
 
 function prependM0M1Messages(
@@ -1175,11 +1322,7 @@ export function injectM0M1Pi(
 		}
 	}
 
-	const boundaryId = findCompartmentBoundaryForSnapshot(
-		db,
-		state.sessionId,
-		markers,
-	);
+	const boundaryId = findCompartmentBoundaryForSnapshot(markers);
 	const skippedVisibleMessages = boundaryId
 		? trimPiMessagesToBoundary(piMessages, entryIds, boundaryId)
 		: 0;
@@ -1210,6 +1353,7 @@ export function clearM0M1PiCache(
 	reason: string,
 ): void {
 	clearCachedM0(db, sessionId);
+	setCachedBoundary(db, sessionId, null);
 	logSession(sessionId, `cleared cached m[0] (${reason})`);
 }
 

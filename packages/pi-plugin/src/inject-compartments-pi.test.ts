@@ -18,6 +18,7 @@ import {
 	__test,
 	injectM0M1Pi,
 	materializeM0Pi,
+	materializeM0PiWithRetry,
 	mustMaterializePi,
 	renderM0Pi,
 	renderM1Pi,
@@ -150,6 +151,32 @@ describe("trimPiMessagesToBoundary", () => {
 		expect(messages.length).toBe(2);
 	});
 
+	it("does not over-remove a later kept tool pair that reuses a trimmed callId", () => {
+		const messages = [
+			assistant(["reused"]),
+			result("reused"),
+			user("between turns"),
+			assistant(["reused"]),
+			result("reused"),
+			user("keep"),
+		];
+
+		const removed = __test.trimPiMessagesToBoundary(
+			messages,
+			["a1", "r1", "u1", "a2", "r2", "u2"],
+			"a1",
+		);
+
+		expect(removed).toBe(2);
+		expect(messages.map((m) => m.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+		]);
+		expect((messages[3] as { content: string }).content).toBe("keep");
+	});
+
 	it("renders frozen compartment and user-profile snapshots without m[0]/m[1] duplication", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0-frozen-cp-profile-"));
@@ -202,6 +229,7 @@ describe("trimPiMessagesToBoundary", () => {
 				sessionFactsVersion: 0,
 				materializedAt: 0,
 				upgradeState: "",
+				lastBaselineEndMessageId: "entry-1",
 			});
 
 			expect(m0).toContain("old compartment body");
@@ -325,6 +353,138 @@ describe("injectM0M1Pi", () => {
 			expect(result.m0Materialized).toBe(true);
 			expect(result.m0Reason).toBe("cache_invalid");
 			expect(textOf(second[0] as never)).toContain("<session-history>");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("routes cached m[0] with any partial required marker through guarded rematerialize", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-partial-marker-"));
+		try {
+			const state = piState("ses-pi-partial-marker", cwd);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_materialized_at = NULL WHERE session_id = ?",
+			).run(state.sessionId);
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: true,
+				reason: "cache_invalid",
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("retries instead of losing seq-0 compartment published during materialization", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-seq0-race-"));
+		try {
+			const state = piState("ses-pi-seq0-race", cwd);
+			const originalExec = db.exec.bind(db);
+			let injectedRace = false;
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE" && !injectedRace) {
+					injectedRace = true;
+					appendCompartments(db, state.sessionId, [
+						{
+							sequence: 0,
+							startMessage: 1,
+							endMessage: 1,
+							startMessageId: "entry-0",
+							endMessageId: "entry-0",
+							title: "First",
+							content: "U: first turn\nseq zero body",
+						},
+					]);
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const { m0, snapshotMarkers } = materializeM0PiWithRetry(state, db);
+
+			expect(injectedRace).toBe(true);
+			expect(snapshotMarkers.maxCompartmentSeq).toBe(0);
+			expect(m0).toContain("seq zero body");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("trims against the frozen cached boundary instead of live rewritten compartments", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-frozen-boundary-"));
+		try {
+			const state = piState("ses-pi-frozen-boundary", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "old-end",
+					endMessageId: "old-end",
+					title: "Frozen",
+					content: "U: old turn\nfrozen body",
+				},
+			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			db.prepare(
+				"UPDATE compartments SET end_message_id = ? WHERE session_id = ? AND sequence = 0",
+			).run("too-far", state.sessionId);
+
+			const messages = [
+				userMessage("old visible", 10),
+				userMessage("must stay", 11),
+				userMessage("keep", 12),
+			];
+			const result = injectM0M1Pi(state, db, messages as never, [
+				"old-end",
+				"too-far",
+				"keep",
+			]);
+
+			expect(result.skippedVisibleMessages).toBe(1);
+			expect(textOf(messages[2] as never)).toBe("must stay");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("falls back to cached m[0] when BEGIN IMMEDIATE is busy", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-begin-busy-"));
+		try {
+			const state = piState("ses-pi-begin-busy", cwd);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-0",
+					endMessageId: "entry-0",
+					title: "Busy",
+					content: "U: busy turn\nbusy fallback body",
+				},
+			]);
+			const originalExec = db.exec.bind(db);
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE") {
+					throw new Error("SQLITE_BUSY: database is locked");
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const messages = [userMessage("hello", 10)];
+			const result = injectM0M1Pi(state, db, messages as never);
+
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(messages[0] as never)).toBe(
+				"<session-history></session-history>",
+			);
+			expect(textOf(messages[1] as never)).toContain("busy fallback body");
 		} finally {
 			closeQuietly(db);
 		}
