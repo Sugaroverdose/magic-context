@@ -430,7 +430,6 @@ const PI_M1_PLACEHOLDER =
 // that must invalidate m[0].
 const PI_M0_UPGRADE_STATE = "pi-m0m1-v2";
 const EMPTY_MAX_COMPARTMENT_SEQ = -1;
-const piCachedBoundaryColumnEnsured = new WeakSet<ContextDatabase>();
 
 type PiCompartment = ReturnType<typeof getCompartments>[number];
 
@@ -545,28 +544,10 @@ function normalizeCachedMaxCompartmentSeq(
 	return stored;
 }
 
-function ensurePiCachedBoundaryColumn(db: ContextDatabase): void {
-	if (piCachedBoundaryColumnEnsured.has(db)) return;
-	const existing = db
-		.prepare("PRAGMA table_info(session_meta)")
-		.all() as Array<{ name?: unknown }>;
-	if (
-		!existing.some(
-			(column) => column.name === "cached_m0_last_baseline_end_message_id",
-		)
-	) {
-		db.exec(
-			"ALTER TABLE session_meta ADD COLUMN cached_m0_last_baseline_end_message_id TEXT",
-		);
-	}
-	piCachedBoundaryColumnEnsured.add(db);
-}
-
 function getCachedBoundary(
 	db: ContextDatabase,
 	sessionId: string,
 ): string | null {
-	ensurePiCachedBoundaryColumn(db);
 	const row = db
 		.prepare(
 			"SELECT cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
@@ -582,7 +563,6 @@ function setCachedBoundary(
 	sessionId: string,
 	boundary: string | null,
 ): void {
-	ensurePiCachedBoundaryColumn(db);
 	db.prepare(
 		"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
 	).run(boundary, sessionId);
@@ -988,7 +968,6 @@ export function materializeM0Pi(
 		attempts += 1;
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
-	ensurePiCachedBoundaryColumn(db);
 
 	// Phase 2 + 3 (locked): re-read markers under BEGIN IMMEDIATE; if anything
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the

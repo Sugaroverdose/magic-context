@@ -476,6 +476,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
+      cached_m0_last_baseline_end_message_id TEXT,
       upgrade_reminded_at INTEGER,
       pi_stable_id_scheme INTEGER
     );
@@ -711,6 +712,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
+    // Pi-only: frozen baseline boundary (end_message_id) captured at
+    // materialization so Pi trims against the snapshot boundary that produced
+    // m[0], not a live-recomputed one a concurrent recomp could have moved.
+    // Declared centrally (shared session_meta table) rather than via an ad-hoc
+    // ALTER in the Pi plugin.
+    ensureColumn(db, "session_meta", "cached_m0_last_baseline_end_message_id", "TEXT");
     ensureColumn(db, "session_meta", "upgrade_reminded_at", "INTEGER");
 
     db.exec(`
