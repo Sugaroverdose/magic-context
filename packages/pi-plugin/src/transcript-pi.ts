@@ -622,6 +622,29 @@ function createPiAssistantPart(
 				markDirty(messageIndex);
 				return true;
 			}
+			if (p?.type === "toolCall") {
+				const replacementArgs = { __magic_context_replacement__: newText };
+				try {
+					if (JSON.stringify(p.arguments) === JSON.stringify(replacementArgs)) {
+						return false;
+					}
+				} catch {
+					// Non-serializable args still need to be replaceable.
+				}
+				const newContent = current.slice();
+				newContent[partIndex] = {
+					type: "toolCall",
+					id: p.id,
+					name: p.name,
+					arguments: replacementArgs,
+				};
+				working[messageIndex] = {
+					...(working[messageIndex] as PiAssistantMessage),
+					content: newContent,
+				};
+				markDirty(messageIndex);
+				return true;
+			}
 			return false;
 		},
 		setToolOutput(): boolean {

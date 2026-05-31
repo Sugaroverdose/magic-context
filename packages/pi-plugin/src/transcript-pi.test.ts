@@ -110,6 +110,28 @@ describe("createPiTranscript", () => {
 		expect(textOf(output[1] as never)).toBe("changed array");
 	});
 
+	it("falls back to replacing toolCall arguments through setText", () => {
+		const messages = [
+			assistantToolCall("call-1", "Read", { path: "large-file.txt" }),
+		];
+		const transcript = createPiTranscript(messages, "ses-transcript");
+		const part = transcript.messages[0]?.parts[0];
+
+		expect(() => part?.setToolOutput("[truncated]")).toThrow(
+			"setToolOutput on assistant part",
+		);
+		expect(part?.setText("[truncated]")).toBe(true);
+		transcript.commit();
+
+		const output = transcript.getOutputMessages() as Array<{
+			content: Array<{ type: string; arguments?: Record<string, unknown> }>;
+		}>;
+		expect(output[0]?.content[0]).toMatchObject({
+			type: "toolCall",
+			arguments: { __magic_context_replacement__: "[truncated]" },
+		});
+	});
+
 	it("folds Pi toolResult messages into the following user transcript message", () => {
 		const messages = [
 			assistantToolCall("call-1", "Read", { path: "x" }),

@@ -144,6 +144,7 @@ export function tagTranscript(
     // changes against the wrong tool pair.
     const toolAggregates = new Map<string, ToolAggregate & { tagId: number }>();
     const openToolAggregateKeysByCallId = new Map<string, string[]>();
+    let activeToolResultRun: { callId: string; aggregateKey: string } | undefined;
 
     // v3.3.1 Layer C (plan v3.3.1 Finding #16): the previous outer
     // db.transaction() wrapper rolled back EVERY tag insert + savedSource
@@ -155,6 +156,7 @@ export function tagTranscript(
     for (let msgIndex = 0; msgIndex < transcript.messages.length; msgIndex += 1) {
         const message = transcript.messages[msgIndex];
         if (message === undefined) continue;
+        activeToolResultRun = undefined;
         const messageId = message.info.id;
 
         let textOrdinal = 0;
@@ -163,6 +165,10 @@ export function tagTranscript(
         for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
             const part = parts[partIndex];
             if (part === undefined) continue;
+
+            if (part.kind !== "tool_result") {
+                activeToolResultRun = undefined;
+            }
 
             if (part.kind === "text") {
                 // Synthetic message ids (Pi tail synthetic user with
@@ -191,13 +197,17 @@ export function tagTranscript(
             }
 
             if (part.kind === "tool_use" || part.kind === "tool_result") {
-                if (messageId === undefined) continue;
+                if (messageId === undefined) {
+                    activeToolResultRun = undefined;
+                    continue;
+                }
 
                 const callId = part.id;
                 const text = part.getText() ?? "";
                 const meta = part.getToolMetadata();
 
                 if (typeof callId !== "string" || callId.length === 0) {
+                    activeToolResultRun = undefined;
                     // No stable callId to aggregate on. Tag independently.
                     tagToolPart({
                         sessionId,
@@ -215,14 +225,23 @@ export function tagTranscript(
                 }
 
                 const pendingKeys = openToolAggregateKeysByCallId.get(callId) ?? [];
-                const existingKey =
-                    part.kind === "tool_result"
-                        ? pendingKeys.find((key) => {
-                              const aggregate = toolAggregates.get(key);
-                              return !aggregate?.occurrences.some((occ) => occ.kind === "tool_result");
-                          })
-                        : undefined;
-                const aggregateKey = existingKey ?? makeToolCompositeKey(messageId, callId);
+                let existingKey: string | undefined;
+                if (part.kind === "tool_result") {
+                    if (
+                        activeToolResultRun !== undefined &&
+                        activeToolResultRun.callId === callId
+                    ) {
+                        existingKey = activeToolResultRun.aggregateKey;
+                    } else {
+                        existingKey = pendingKeys.find((key) => {
+                            const aggregate = toolAggregates.get(key);
+                            return !aggregate?.occurrences.some(
+                                (occ) => occ.kind === "tool_result",
+                            );
+                        });
+                    }
+                }
+                const aggregateKey: string = existingKey ?? makeToolCompositeKey(messageId, callId);
                 const existing = toolAggregates.get(aggregateKey);
                 if (existing) {
                     // Later occurrence for this owner+callId pair. Merge into the
@@ -260,6 +279,9 @@ export function tagTranscript(
                         existing.tagId,
                         buildAggregateTarget(existing.tagId, existing.occurrences),
                     );
+                    if (part.kind === "tool_result") {
+                        activeToolResultRun = { callId, aggregateKey };
+                    }
                 } else {
                     // First occurrence for this owner+callId identity — reserve
                     // the tag number. Owner stays stable across passes because
@@ -299,6 +321,9 @@ export function tagTranscript(
                         part.setText(prependTag(tagId, text));
                     }
                     targets.set(tagId, buildAggregateTarget(tagId, aggregate.occurrences));
+                    if (part.kind === "tool_result") {
+                        activeToolResultRun = { callId, aggregateKey };
+                    }
                 }
             }
             // thinking, image, file, structural, unknown → skip.
@@ -407,6 +432,18 @@ function tagToolPart(args: TagToolPartArgs): void {
     args.targets.set(tagId, buildToolTarget(args.part, args.message));
 }
 
+function setToolContentOrText(part: TranscriptPart, content: string): boolean {
+    try {
+        if (part.setToolOutput(content)) return true;
+    } catch {
+        // Pi assistant tool_use parts deliberately assert if callers try
+        // to write a nonexistent output slot. Truncated-mode drops still
+        // need to shrink the invocation, so fall back to visible text/args
+        // replacement while preserving the adapter-level invariant.
+    }
+    return part.setText(content);
+}
+
 /**
  * Build a TagTarget that walks ALL occurrences of a tool call (invocation
  * + result) when mutating. This is the per-callId aggregate target used
@@ -435,9 +472,7 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
             for (const occ of occurrences) {
                 // Try setToolOutput first (works on tool_result-shaped parts);
                 // fall back to setText so tool_use parts also get sentinelized.
-                if (occ.part.setToolOutput(content)) {
-                    changed = true;
-                } else if (occ.part.setText(content)) {
+                if (setToolContentOrText(occ.part, content)) {
                     changed = true;
                 }
             }
@@ -468,7 +503,7 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
             const sentinel = "[truncated]";
             let any = false;
             for (const occ of occurrences) {
-                if (occ.part.setToolOutput(sentinel) || occ.part.setText(sentinel)) {
+                if (setToolContentOrText(occ.part, sentinel)) {
                     any = true;
                 }
             }
@@ -528,7 +563,7 @@ function buildToolTarget(
 ): TagTarget {
     return {
         setContent(content: string): boolean {
-            return part.setToolOutput(content) || part.setText(content);
+            return setToolContentOrText(part, content);
         },
         getContent(): string | null {
             return part.getText() ?? null;
@@ -549,7 +584,7 @@ function buildToolTarget(
             // via setToolOutput so the underlying tool_result content
             // gets the truncation; falls back to setText for cases
             // where the part type doesn't support setToolOutput.
-            const ok = part.setToolOutput("[truncated]") || part.setText("[truncated]");
+            const ok = setToolContentOrText(part, "[truncated]");
             return ok ? "truncated" : "absent";
         },
         message: {
