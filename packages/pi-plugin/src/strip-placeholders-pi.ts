@@ -105,17 +105,28 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		return resolvePiStableId(msg, index);
 	};
 
+	// Ids of every message present in the CURRENT (trimmed+injected) window,
+	// captured BEFORE the removal splice. Used to prune below-boundary ids from
+	// the persisted set. Captured pre-removal so placeholders stripped THIS pass
+	// stay in the set — Pi rebuilds AgentMessage[] from JSONL every pass, so a
+	// still-in-window placeholder must keep its id to be re-stripped next pass.
+	// Only populated when discovering (cache-busting/cutover) AND a carried map
+	// is present (production path); the index-fallback path can't safely prune.
+	const canPrune =
+		(isCacheBusting || args.forceDiscovery === true) && !!stableIdByRef;
+	const presentIds = canPrune ? new Set<string>() : null;
+
 	if (isCacheBusting || args.forceDiscovery) {
 		for (let i = 0; i < messages.length; i++) {
 			const id = idOf(messages[i], i);
 			if (!id) continue;
+			presentIds?.add(id);
 			if (!messageIsPlaceholderOnly(messages[i])) continue;
 			if (!idsToStrip.has(id)) {
 				idsToStrip.add(id);
 				discovered++;
 			}
 		}
-		if (discovered > 0) setStrippedPlaceholderIds(db, sessionId, idsToStrip);
 	}
 
 	let removed = 0;
@@ -126,10 +137,34 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		removed++;
 	}
 
-	if (removed > 0 || discovered > 0) {
+	// Persist on cache-busting/cutover passes. When pruning is possible (carried
+	// map present) also drop below-boundary ids (in the persisted set but no
+	// longer in the window) so the set doesn't grow unbounded over a long session
+	// — Pi's compaction boundary only advances, so an id absent from the current
+	// window is gone for good and safe to drop. Pruning is storage-only and gated
+	// to cache-busting passes (parity with note-nudge/sticky GC): the bytes
+	// already change on these passes, and a defer pass must never mutate persisted
+	// replay state.
+	let pruned = 0;
+	if (presentIds) {
+		const finalIds = new Set<string>();
+		for (const id of idsToStrip) {
+			if (presentIds.has(id)) finalIds.add(id);
+		}
+		pruned = idsToStrip.size - finalIds.size;
+		if (discovered > 0 || pruned > 0) {
+			setStrippedPlaceholderIds(db, sessionId, finalIds);
+		}
+	} else if (discovered > 0) {
+		// No carried map (legacy/test path): can't safely prune, but still persist
+		// newly discovered ids exactly as the pre-prune behavior did.
+		setStrippedPlaceholderIds(db, sessionId, idsToStrip);
+	}
+
+	if (removed > 0 || discovered > 0 || pruned > 0) {
 		sessionLog(
 			sessionId,
-			`placeholder strip: removed=${removed} discovered=${discovered}`,
+			`placeholder strip: removed=${removed} discovered=${discovered} pruned=${pruned}`,
 		);
 	}
 	return { removed, discovered };

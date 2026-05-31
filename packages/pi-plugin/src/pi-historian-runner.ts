@@ -1000,7 +1000,20 @@ export function buildPiCompactionSummary(
 		const last = compartments[compartments.length - 1];
 		return `Magic Context compacted messages ${first?.startMessage ?? "?"}-${last?.endMessage ?? "?"}.`;
 	}
-	return `Magic Context compacted: ${titles.join("; ")}`;
+	// Cap the title list so the marker summary stays bounded. This summary lives
+	// behind the compaction boundary (not model-visible — filterCompacted stops
+	// here and <session-history> replaces it), but it IS written to the JSONL and
+	// can surface in Pi's resume picker. Joining ALL titles grows unbounded with
+	// compartment count (a recomp/upgrade on a long session has hundreds), so cap
+	// to the first N and summarize the remainder.
+	const MAX_SUMMARY_TITLES = 5;
+	if (titles.length <= MAX_SUMMARY_TITLES) {
+		return `Magic Context compacted: ${titles.join("; ")}`;
+	}
+	const shown = titles.slice(0, MAX_SUMMARY_TITLES).join("; ");
+	return `Magic Context compacted ${titles.length} segments: ${shown}; …and ${
+		titles.length - MAX_SUMMARY_TITLES
+	} more`;
 }
 
 /**

@@ -66,6 +66,93 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 		}
 	});
 
+	it("prunes below-boundary ids from the persisted set on cache-busting passes", () => {
+		const db = createTestDb();
+		try {
+			// Pass 1: discover two placeholders under real carried ids.
+			const phA = assistantMessage("[dropped §2§]", 2);
+			const phB = assistantMessage("[dropped §3§]", 3);
+			const pass1 = [userMessage("keep", 1), phA, phB];
+			const map1 = new Map<object, string>([
+				[pass1[0] as object, "entry-keep"],
+				[phA as object, "entry-A"],
+				[phB as object, "entry-B"],
+			]);
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-prune",
+				messages: pass1,
+				isCacheBusting: true,
+				stableIdByRef: map1,
+			});
+			expect(getStrippedPlaceholderIds(db, "ses-prune").size).toBe(2);
+
+			// Pass 2 (cache-busting): entry-A has fallen below the compaction
+			// boundary (no longer in the window); only entry-B remains present.
+			// The persisted set must prune entry-A.
+			const phB2 = assistantMessage("[dropped §3§]", 3);
+			const pass2 = [userMessage("keep", 1), phB2];
+			const map2 = new Map<object, string>([
+				[pass2[0] as object, "entry-keep"],
+				[phB2 as object, "entry-B"],
+			]);
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-prune",
+				messages: pass2,
+				isCacheBusting: true,
+				stableIdByRef: map2,
+			});
+			const remaining = getStrippedPlaceholderIds(db, "ses-prune");
+			expect(remaining.has("entry-B")).toBe(true);
+			expect(remaining.has("entry-A")).toBe(false); // pruned below-boundary
+			expect(remaining.size).toBe(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("does NOT prune on defer passes (storage-only GC gated to cache-busting)", () => {
+		const db = createTestDb();
+		try {
+			const phA = assistantMessage("[dropped §2§]", 2);
+			const pass1 = [userMessage("keep", 1), phA];
+			const map1 = new Map<object, string>([
+				[pass1[0] as object, "entry-keep"],
+				[phA as object, "entry-A"],
+			]);
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-defer-noprune",
+				messages: pass1,
+				isCacheBusting: true,
+				stableIdByRef: map1,
+			});
+			expect(
+				getStrippedPlaceholderIds(db, "ses-defer-noprune").has("entry-A"),
+			).toBe(true);
+
+			// Defer pass where entry-A is absent — must NOT prune (defer passes
+			// never mutate persisted replay state).
+			const pass2 = [userMessage("keep", 1)];
+			const map2 = new Map<object, string>([
+				[pass2[0] as object, "entry-keep"],
+			]);
+			stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-defer-noprune",
+				messages: pass2,
+				isCacheBusting: false,
+				stableIdByRef: map2,
+			});
+			expect(
+				getStrippedPlaceholderIds(db, "ses-defer-noprune").has("entry-A"),
+			).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("uses the carried-id map by object-ref and survives an index shift", () => {
 		const db = createTestDb();
 		try {

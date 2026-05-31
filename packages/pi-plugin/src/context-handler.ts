@@ -1785,12 +1785,27 @@ export function registerPiContextHandler(
 
 			// Stamp the new stable-id scheme ONLY after a successful cutover pass
 			// that actually executed (re-tagged + re-dropped under the new scheme).
-			// runPipeline returned without throwing = the controlled bust completed;
-			// stamping here (not before) means a mid-pass failure leaves the old
-			// scheme so the next pass retries the cutover instead of skipping it.
-			// Guard on executedWorkThisPass: if the forced execute somehow degraded
-			// to no-op, don't stamp (retry next pass).
-			if (stableIdSchemeCutover && result.executedWorkThisPass) {
+			// Stamp the new scheme only when the cutover's ESSENTIAL work completed.
+			// Re-keying tag identity (pi-msg-* → entry-id) orphans the old drop
+			// state, so previously-dropped tools resurface as fresh active tags;
+			// the cutover is not "done" until heuristic cleanup actually re-dropped
+			// them. `executedWorkThisPass` is too loose — it's set true even when
+			// the heuristics try-block THREW (the empty-pending-ops path also sets
+			// it), which would stamp the scheme while the re-drop never happened,
+			// leaving resurrected tools in context permanently. Gate on
+			// `heuristicsExecuted` (the re-drop ran without throwing) when heuristics
+			// are enabled; when disabled there are no drops to redo, so a completed
+			// pipeline (executedWorkThisPass) is sufficient. The forced pass reliably
+			// runs heuristics (shouldRunHeuristics is true under the forced
+			// execute+materialize), so a genuine throw defers the stamp and the next
+			// pass retries the cutover rather than skipping it — no infinite loop
+			// unless heuristics throws every pass, which is a separate bug that this
+			// gate correctly refuses to paper over.
+			const cutoverWorkComplete =
+				options.heuristics === undefined
+					? result.executedWorkThisPass
+					: result.heuristicsExecuted;
+			if (stableIdSchemeCutover && cutoverWorkComplete) {
 				try {
 					updateSessionMeta(options.db, sessionId, {
 						piStableIdScheme: PI_STABLE_ID_SCHEME,
@@ -1822,7 +1837,10 @@ export function registerPiContextHandler(
 					db: options.db,
 					messages: outputMessages,
 					entryIds: entryIds ?? null,
-					entryIdByRef,
+					// Post-commit/post-splice ref-map from runPipeline — the
+					// pass-start `entryIdByRef` keys pre-commit objects and misses
+					// cloned (dirty) messages, resolving anchors to the wrong id.
+					entryIdByRef: result.postCommitEntryIdByRef,
 					hasRecentReduceCall: hasRecentPiCtxReduceExecution(sessionId),
 					isCacheBustingPass: cacheBustingPass,
 				});
@@ -1859,7 +1877,8 @@ export function registerPiContextHandler(
 					messages: outputMessages,
 					projectIdentity,
 					entryIds: strictEntryIds,
-					entryIdByRef,
+					// Post-commit/post-splice ref-map (see sticky reminder above).
+					entryIdByRef: result.postCommitEntryIdByRef,
 					// Same signal OpenCode uses to gate sticky-anchor GC
 					// (isCacheBustingPass = history-refresh OR work executed).
 					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
@@ -1882,7 +1901,8 @@ export function registerPiContextHandler(
 						db: options.db,
 						messages: outputMessages,
 						entryIds: strictEntryIds,
-						entryIdByRef,
+						// Post-commit/post-splice ref-map (see sticky reminder above).
+						entryIdByRef: result.postCommitEntryIdByRef,
 						options: {
 							enabled: true,
 							scoreThreshold: options.autoSearch.scoreThreshold,
@@ -2645,6 +2665,16 @@ interface RunPipelineResult {
 	targetCount: number;
 	reasoningWatermark: number;
 	activeTags: ReturnType<typeof getActiveTagsBySession>;
+	/**
+	 * REAL-SessionEntry-id map keyed by AgentMessage object identity, built AFTER
+	 * transcript.commit() and BEFORE injection splices. The ONLY correct map for
+	 * consumers running after runPipeline mutated the array (sticky reminder,
+	 * note nudges, auto-search): the pass-start `entryIdByRef` keys pre-commit
+	 * objects and misses every cloned (dirty) message. Contains NO pi-msg-*
+	 * fallback ids, so a branch-resolution failure leaves a message unmapped and
+	 * the consumer correctly falls to its degraded (entryIds === null) path.
+	 */
+	postCommitEntryIdByRef: ReadonlyMap<object, string>;
 }
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
@@ -3141,15 +3171,29 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// commit() just locks the result in.
 	transcript.commit();
 
-	// Carried stable-id map for placeholder stripping (3b-A). Built AFTER commit()
-	// — commit reassigns args.messages[idx] = working[idx] (cloned objects for
-	// dirty messages), so building before would key stale refs the post-commit
-	// array no longer holds. Built BEFORE injectM0M1Pi — injection splices/unshifts
-	// the array, after which positional entryIds[index] is stale; object identity
-	// survives the splice, so a ref-keyed map resolves correctly post-injection.
-	// stripPiDroppedPlaceholderMessages reads carried ids by object-ref (skip-on-
-	// miss: the only legitimate misses are injection's synthetic m[0]/m[1] prepends).
-	const placeholderStableIdByRef = new Map<object, string>();
+	// Two post-commit stable-id maps, both keyed by AgentMessage object identity.
+	// Built AFTER commit() — commit reassigns args.messages[idx] = working[idx]
+	// (cloned objects for dirty messages), so a map built BEFORE the pipeline (the
+	// pass-start `entryIdByRef`) keys the PRE-commit objects and misses every
+	// cloned message. Built BEFORE injectM0M1Pi — injection splices/unshifts the
+	// array, after which positional entryIds[index] is stale; object identity
+	// survives both the clone and the splice, so a ref-keyed map resolves correctly
+	// for consumers that run AFTER the pipeline mutates the array. There is NO
+	// structural splice between pass start and here (only commit's in-place
+	// reassignment), so positional entryIds[i] is still authoritative at build time.
+	//
+	// Two maps because the consumers have DIFFERENT identity contracts:
+	//   1. postCommitStableIdByRef (FULL fallback via resolvePiStableId, incl.
+	//      pi-msg-* index ids) — for stripPiDroppedPlaceholderMessages, which needs
+	//      a stable id for EVERY message (skip-on-miss + legacy path).
+	//   2. postCommitEntryIdByRef (REAL SessionEntry ids ONLY, no pi-msg-* fallback)
+	//      — for sticky reminder / note nudges / auto-search. These must fall to
+	//      their degraded path (entryIds === null) when branch resolution failed;
+	//      a pi-msg-* fallback id would defeat that and anchor to an unstable id.
+	// The only legitimate misses are injection's synthetic m[0]/m[1] prepends,
+	// which carry no SessionEntry id and must not be anchored.
+	const postCommitStableIdByRef = new Map<object, string>();
+	const postCommitEntryIdByRef = new Map<object, string>();
 	for (let i = 0; i < args.messages.length; i++) {
 		const m = args.messages[i];
 		if (!m || typeof m !== "object") continue;
@@ -3159,7 +3203,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.entryIds,
 			args.entryIdByRef ?? undefined,
 		);
-		if (id) placeholderStableIdByRef.set(m as object, id);
+		if (id) postCommitStableIdByRef.set(m as object, id);
+		// Real-only: positional entryIds[i] is a real SessionEntry id or undefined
+		// (never pi-msg-*). Authoritative here because nothing has spliced yet.
+		const realId = args.entryIds?.[i];
+		if (typeof realId === "string" && realId.length > 0) {
+			postCommitEntryIdByRef.set(m as object, realId);
+		}
 	}
 
 	// 6. <session-history> injection — writes compartments, facts, and
@@ -3226,7 +3276,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		sessionId: args.sessionId,
 		messages: args.messages,
 		isCacheBusting: args.isCacheBusting,
-		stableIdByRef: placeholderStableIdByRef,
+		stableIdByRef: postCommitStableIdByRef,
 		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
 		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
@@ -3360,6 +3410,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			getOrCreateSessionMeta(args.db, args.sessionId)
 				.clearedReasoningThroughTag ?? 0,
 		activeTags,
+		postCommitEntryIdByRef,
 	};
 }
 

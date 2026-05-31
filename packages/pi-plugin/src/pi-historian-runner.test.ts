@@ -17,8 +17,42 @@ import {
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
-import { runPiHistorian } from "./pi-historian-runner";
+import {
+	buildPiCompactionSummary,
+	runPiHistorian,
+} from "./pi-historian-runner";
 import { createTestDb } from "./test-utils.test";
+
+describe("buildPiCompactionSummary", () => {
+	const mk = (title: string) => ({ title, startMessage: 1, endMessage: 2 });
+
+	it("joins all titles when at or below the cap", () => {
+		const summary = buildPiCompactionSummary(["a", "b", "c", "d", "e"].map(mk));
+		expect(summary).toBe("Magic Context compacted: a; b; c; d; e");
+		expect(summary).not.toContain("more");
+	});
+
+	it("caps the title list and stays bounded for large compartment counts", () => {
+		const many = Array.from({ length: 545 }, (_, i) => mk(`segment-${i}`));
+		const summary = buildPiCompactionSummary(many);
+		// Bounded: only the first 5 titles appear, plus a remainder count.
+		expect(summary).toContain("Magic Context compacted 545 segments:");
+		expect(summary).toContain(
+			"segment-0; segment-1; segment-2; segment-3; segment-4",
+		);
+		expect(summary).toContain("…and 540 more");
+		expect(summary).not.toContain("segment-5;");
+		// Length must not scale with compartment count.
+		expect(summary.length).toBeLessThan(200);
+	});
+
+	it("falls back to message range when titles are empty", () => {
+		const summary = buildPiCompactionSummary([
+			{ title: "  ", startMessage: 3, endMessage: 9 },
+		]);
+		expect(summary).toBe("Magic Context compacted messages 3-9.");
+	});
+});
 
 function rawMessages(count = 12) {
 	return Array.from({ length: count }, (_, index) => {

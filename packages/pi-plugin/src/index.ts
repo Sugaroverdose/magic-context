@@ -454,6 +454,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return;
 	}
 
+	// openDatabase() FAILS CLOSED by returning null (not throwing) on the schema
+	// fence — when the shared cross-harness DB has been migrated to a schema newer
+	// than this binary supports (e.g. a newer OpenCode/Pi build ran a migration).
+	// The try/catch above only catches genuine open exceptions, so without this
+	// guard `db` is null and the very next call (runDeferredV22Backfill) would
+	// crash the whole Pi process. Degrade gracefully instead: skip hook
+	// registration until the binary is upgraded. The detailed reason is already
+	// logged by openDatabase ("storage fatal: … newer than this binary supports").
+	if (!db) {
+		warn(
+			`Magic Context (pi) storage unavailable at ${dbPath} (cache schema is newer than this binary supports). ` +
+				"Plugin will not register hooks; upgrade/restart Pi/OpenCode/Magic Context to recover.",
+		);
+		return;
+	}
+
 	// v22 deferred legacy-memory identity backfill. openDatabase() has already
 	// run migrations; the runner is fire-and-forget and logs failures without
 	// blocking Pi startup.
