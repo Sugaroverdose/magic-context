@@ -215,12 +215,20 @@ function findLatestMeaningfulUserMessage(
 		// against the pre-splice array, but `messages` may have been spliced since
 		// (compartment trim / placeholder strip), so index i can be stale. The
 		// ref-map resolves the actual current message correctly.
-		const byRef =
-			entryIdByRef && msg && typeof msg === "object"
-				? entryIdByRef.get(msg as object)
-				: undefined;
-		if (typeof byRef === "string") return { message: msg, messageId: byRef };
+		if (entryIdByRef) {
+			const byRef =
+				msg && typeof msg === "object"
+					? entryIdByRef.get(msg as object)
+					: undefined;
+			if (typeof byRef === "string") return { message: msg, messageId: byRef };
+			// Ref-map MISS with a ref-map present: do NOT fall back to the stale
+			// positional `entryIds[i]` — after a splice it points at the wrong
+			// message and would anchor the auto-search hint to the wrong user turn.
+			// Treat as unresolved (degraded: no fresh hint this pass).
+			return null;
+		}
 
+		// No ref-map (pre-mutation caller): positional entryIds is authoritative.
 		const messageId = entryIds[i];
 		if (typeof messageId === "string") return { message: msg, messageId };
 		return null;

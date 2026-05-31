@@ -1412,24 +1412,42 @@ export function registerPiContextHandler(
 					sessionId,
 					`transform: ${reason} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
-				updateSessionMeta(options.db, sessionId, {
+				// Usage-pressure fields are cleared on BOTH first pass and model
+				// change — stale percentage/tokens from a prior model or pre-restart
+				// state must not drive threshold checks before message_end refreshes.
+				const usageReset = {
 					lastContextPercentage: 0,
 					lastInputTokens: 0,
 					observedSafeInputTokens: 0,
 					cacheAlertSent: false,
-					clearedReasoningThroughTag: 0,
-				});
-				clearHistorianFailureState(options.db, sessionId);
-				clearPersistedReasoningWatermark(options.db, sessionId);
+				};
 				if (modelChanged) {
+					// Model change ONLY: the reasoning watermark and historian
+					// failure/recovery state were specific to the previous model and
+					// must be discarded so the new model gets a clean slate.
+					updateSessionMeta(options.db, sessionId, {
+						...usageReset,
+						clearedReasoningThroughTag: 0,
+					});
+					clearHistorianFailureState(options.db, sessionId);
+					clearPersistedReasoningWatermark(options.db, sessionId);
 					clearDetectedContextLimit(options.db, sessionId);
 					clearEmergencyRecovery(options.db, sessionId);
+					sessionMetaForUsage.clearedReasoningThroughTag = 0;
+				} else {
+					// First pass after restart (same model): clear ONLY usage fields.
+					// historian-failure state and the reasoning watermark MUST be
+					// preserved — restart recovery uses the failure backoff, and
+					// clearing the reasoning watermark would resurface previously
+					// cleared reasoning (a cache bust + larger prompt). Mirrors
+					// OpenCode transform.ts first-pass reset ("Do NOT clear historian
+					// failure state here — restart recovery uses it").
+					updateSessionMeta(options.db, sessionId, usageReset);
 				}
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
-				sessionMetaForUsage.clearedReasoningThroughTag = 0;
 			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
@@ -1557,7 +1575,28 @@ export function registerPiContextHandler(
 			// scheme is stamped only AFTER the pass succeeds (end of runPipeline),
 			// so a mid-pass failure retries instead of skipping the cutover.
 			const storedStableIdScheme = sessionMeta.piStableIdScheme ?? 0;
-			const stableIdSchemeCutover = storedStableIdScheme < PI_STABLE_ID_SCHEME;
+			// Only activate the cutover when REAL SessionEntry ids are available this
+			// pass. The cutover re-keys persisted state from pi-msg-* index ids to
+			// real entry ids; if branch resolution failed (strictEntryIds null →
+			// pi-msg-* fallback), forcing an execute+materialize would burn a cache
+			// bust without re-keying anything, then either false-complete (if we
+			// stamped) or churn the placeholder set under pi-msg-* ids. Defer the
+			// whole cutover to a later pass when getBranch() succeeds.
+			const realEntryIdsAvailable =
+				strictEntryIds?.some(
+					(id) => typeof id === "string" && id.length > 0,
+				) ?? false;
+			const stableIdSchemeCutover =
+				storedStableIdScheme < PI_STABLE_ID_SCHEME && realEntryIdsAvailable;
+			if (
+				storedStableIdScheme < PI_STABLE_ID_SCHEME &&
+				!realEntryIdsAvailable
+			) {
+				sessionLog(
+					sessionId,
+					`stable-id scheme cutover deferred: real SessionEntry ids unavailable this pass (branch resolution failed) — will retry when getBranch() succeeds`,
+				);
+			}
 			if (stableIdSchemeCutover) {
 				schedulerDecision = "execute";
 				signalPiPendingMaterialization(sessionId);
@@ -1805,6 +1844,10 @@ export function registerPiContextHandler(
 				options.heuristics === undefined
 					? result.executedWorkThisPass
 					: result.heuristicsExecuted;
+			// `stableIdSchemeCutover` is already gated on realEntryIdsAvailable at
+			// activation (see the cutover-detection block above), so reaching here
+			// with it true guarantees real entry ids were used for the re-key. The
+			// remaining gate is cutoverWorkComplete (the re-drop actually ran).
 			if (stableIdSchemeCutover && cutoverWorkComplete) {
 				try {
 					updateSessionMeta(options.db, sessionId, {
@@ -3782,7 +3825,28 @@ function buildPiMessageIdByIndex(
 				ids.set(index, byRef);
 				continue;
 			}
+			// CRITICAL: when a ref-map is supplied, a MISS must NOT fall back to
+			// positional `entryIds[index]`. The ref-map is built against the
+			// CURRENT (post-commit/post-splice) array; `entryIds` is the stale
+			// pass-start positional array, so after a splice index N no longer
+			// points at the same message and the positional id would anchor the
+			// WRONG message. The only legitimate ref-map misses are injection's
+			// synthetic m[0]/m[1] prepends and commit-cloned messages with no real
+			// SessionEntry id — both must resolve to "unmapped" so the consumer
+			// degrades safely (replay-only / no fresh anchor) rather than mis-anchor.
+			// The own-`.id` fallback below IS splice-safe (reads the current
+			// object's own id, not a positional lookup) so it stays for replay
+			// callers (includeMessageIdFallback=true).
+			if (includeMessageIdFallback) {
+				const messageId = (messages[index] as { id?: unknown } | undefined)?.id;
+				if (typeof messageId === "string") {
+					ids.set(index, messageId);
+				}
+			}
+			continue;
 		}
+		// No ref-map (pre-mutation callers that legitimately align to the original
+		// event.messages): positional entryIds is authoritative.
 		const entryId = entryIds?.[index];
 		if (typeof entryId === "string") {
 			ids.set(index, entryId);

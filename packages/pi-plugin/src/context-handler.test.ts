@@ -10,6 +10,7 @@ import * as searchModule from "@magic-context/core/features/magic-context/search
 import {
 	addNote,
 	appendNoteNudgeAnchor,
+	getHistorianFailureState,
 	getNoteNudgeAnchors,
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -1238,6 +1239,54 @@ describe("registerPiContextHandler", () => {
 			expect(notify).toHaveBeenCalledWith(
 				expect.stringContaining("Historian recovery"),
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("first pass after restart PRESERVES historian-failure + reasoning watermark while clearing usage", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-firstpass-preserve";
+			// Simulate pre-restart state: persisted pressure (so the reset block
+			// fires), a persisted historian failure (restart recovery needs it),
+			// and a reasoning watermark (clearing it would resurface reasoning).
+			incrementHistorianFailure(db, sessionId, "previous failure");
+			updateSessionMeta(db, sessionId, {
+				lastContextPercentage: 62,
+				lastInputTokens: 120_000,
+				clearedReasoningThroughTag: 7,
+			});
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const msg = userMessage("after restart", 1);
+			await handler({ messages: [msg] as never[] }, {
+				...fakeContext(sessionId),
+				sessionManager: { getSessionId: () => sessionId },
+				// Same model as before (no model change) → first-pass path only.
+				getContextUsage: () => ({
+					tokens: 120_000,
+					percent: 62,
+					contextWindow: 200_000,
+				}),
+			} as never);
+
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			// Usage fields cleared (stale pressure must not drive thresholds).
+			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.lastInputTokens).toBe(0);
+			// PRESERVED — restart recovery + reasoning replay depend on these.
+			expect(meta.clearedReasoningThroughTag).toBe(7);
+			expect(
+				getHistorianFailureState(db, sessionId).failureCount,
+			).toBeGreaterThan(0);
 		} finally {
 			closeQuietly(db);
 		}
