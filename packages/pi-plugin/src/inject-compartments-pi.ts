@@ -283,6 +283,7 @@ function getPiToolResultCallId(message: PiToolResultMessage): string | null {
 
 export const __test = {
 	trimPiMessagesToBoundary,
+	renderFreshM0PiNonPersisted,
 };
 
 /**
@@ -385,6 +386,16 @@ const PI_M1_PLACEHOLDER =
 // transition because there is none). Revisit if Pi gains a session-upgrade flow
 // that must invalidate m[0].
 const PI_M0_UPGRADE_STATE = "pi-m0m1-v2";
+
+type PiCompartment = ReturnType<typeof getCompartments>[number];
+
+interface FrozenM0Inputs {
+	docs: ReturnType<typeof readProjectDocsCanonical>;
+	markers: PiM0SnapshotMarkers;
+	compartments: PiCompartment[];
+	memories: Memory[];
+	userProfile: UserMemory[];
+}
 
 /**
  * Real-tokenizer size of ONLY the <session-history> slice of a rendered m[0]
@@ -542,6 +553,19 @@ export function mustMaterializePi(
 	const meta = getOrCreateSessionMeta(db, state.sessionId);
 	const current = readCurrentMarkers(db, state);
 	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
+	// Keep invalid cached baselines on the guarded materialize path. The
+	// cache_invalid branch below does not have its own contention fallback, so
+	// detecting missing required markers / empty decoded bytes here prevents a
+	// lease-contention false negative from dropping m[0]/m[1] entirely.
+	if (!decodeCachedM0(meta.cachedM0Bytes)) {
+		return { value: true, reason: "cache_invalid" };
+	}
+	if (
+		meta.cachedM0MaxCompartmentSeq === null ||
+		meta.cachedM0MaxMemoryId === null
+	) {
+		return { value: true, reason: "cache_invalid" };
+	}
 	if (meta.cachedM0UpgradeState !== current.upgradeState) {
 		return { value: true, reason: "renderer_upgrade" };
 	}
@@ -599,6 +623,8 @@ export function renderM0Pi(
 	// (which would duplicate it across the m[0]/m[1] split). Mirrors OpenCode,
 	// where renderM0 takes memories as a parameter rather than re-reading.
 	memoriesOverride?: Memory[],
+	compartmentsOverride?: PiCompartment[],
+	userProfileOverride?: UserMemory[],
 ): string {
 	const allMemories =
 		memoriesOverride ??
@@ -630,7 +656,7 @@ export function renderM0Pi(
 	const baseHistoryBudget =
 		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
 	const decayed = renderDecayedCompartments({
-		compartments: getCompartments(db, state.sessionId),
+		compartments: compartmentsOverride ?? getCompartments(db, state.sessionId),
 		// v2: use the HISTORY budget (~60K), not the memory injection budget (~4K).
 		// Falling back to the memory budget would over-demote every compartment.
 		historyBudgetTokens:
@@ -652,7 +678,7 @@ export function renderM0Pi(
 	// bytes on the wire than OpenCode for the same state, and let m[0] grow
 	// without bound as the global user-profile accumulates.
 	const trimmedProfile = trimUserMemoriesToBudget(
-		safeGetActiveUserMemoriesPi(db),
+		userProfileOverride ?? safeGetActiveUserMemoriesPi(db),
 		state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS,
 	);
 	const userProfile = renderUserProfileBlock(
@@ -682,6 +708,97 @@ export class PiMaterializeContentionError extends Error {
 	}
 }
 
+function readFrozenM0InputsPi(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	docs = readProjectDocsCanonical(state.projectDirectory),
+	memoryCutoff?: number,
+): FrozenM0Inputs {
+	// Read every render source and its corresponding watermark as one short DB
+	// transaction. Rendering happens later, but m[0] bytes and m[1] watermarks now
+	// share the same frozen compartments/memories/user-profile set; a concurrent
+	// writer cannot make m[0] include rows that m[1] still considers "new".
+	const read = db.transaction(() => {
+		const compartments = getCompartments(db, state.sessionId);
+		const memories = getMemoriesByProject(
+			db,
+			state.projectIdentity,
+			["active", "permanent"],
+			memoryCutoff,
+		);
+		const userProfile = safeGetActiveUserMemoriesPi(db);
+		const projectState = getProjectState(db, state.projectIdentity);
+		const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
+		const markers: PiM0SnapshotMarkers = {
+			maxCompartmentSeq: compartments.reduce(
+				(max, compartment) =>
+					compartment.sequence > max ? compartment.sequence : max,
+				0,
+			),
+			maxMemoryId: memories.reduce(
+				(max, memory) => (memory.id > max ? memory.id : max),
+				0,
+			),
+			maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
+			projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
+			projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
+			projectDocsHash: docs.canonicalHash,
+			sessionFactsVersion: getSessionFactsVersion(db, state.sessionId),
+			materializedAt: Date.now(),
+			upgradeState: `${PI_M0_UPGRADE_STATE}:${
+				compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
+			}`,
+		};
+		return { docs, markers, compartments, memories, userProfile };
+	});
+	return read();
+}
+
+function renderFreshM0PiNonPersisted(
+	state: PiM0M1State,
+	db: ContextDatabase,
+): { m0: string; snapshotMarkers: PiM0SnapshotMarkers } {
+	const docs = readProjectDocsCanonical(state.projectDirectory);
+	const cachedMaterializedAt =
+		getOrCreateSessionMeta(db, state.sessionId).cachedM0MaterializedAt ?? 0;
+	const frozen = readFrozenM0InputsPi(state, db, docs, cachedMaterializedAt);
+	// CACHE STABILITY: materializedAt feeds the m[1] expiry cutoff. It must be
+	// stable across consecutive fallback passes, so reuse the last persisted value
+	// (or 0 when no cached baseline exists) rather than live Date.now().
+	frozen.markers.materializedAt = cachedMaterializedAt;
+	const historyBudget =
+		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+	let dpm = 1;
+	let m0 = renderM0Pi(
+		state,
+		db,
+		docs.renderedBlock,
+		dpm,
+		frozen.memories,
+		frozen.compartments,
+		frozen.userProfile,
+	);
+	let attempts = 0;
+	while (
+		historyBudget > 0 &&
+		historySliceTokensPi(m0) > historyBudget * 1.05 &&
+		attempts < 3
+	) {
+		dpm *= 1.15;
+		m0 = renderM0Pi(
+			state,
+			db,
+			docs.renderedBlock,
+			dpm,
+			frozen.memories,
+			frozen.compartments,
+			frozen.userProfile,
+		);
+		attempts += 1;
+	}
+	return { m0, snapshotMarkers: frozen.markers };
+}
+
 export function materializeM0Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
@@ -689,28 +806,11 @@ export function materializeM0Pi(
 	// Phase 1 (no lock): read markers + render. Rendering can be slow, so we do
 	// it OUTSIDE the write lock to keep the BEGIN IMMEDIATE critical section tiny.
 	const docs = readProjectDocsCanonical(state.projectDirectory);
-	const snapshotMarkers = readCurrentMarkers(db, state, docs.canonicalHash);
-	// Capture the memory set ATOMICALLY with the marker read so the rendered m[0]
-	// uses exactly the memories the maxMemoryId watermark was computed from. These
-	// are back-to-back synchronous reads on the single better-sqlite3 connection
-	// with no await between, so no writer can interleave. Passing this set into
-	// every renderM0Pi call below prevents a memory whose id is above the
-	// watermark from rendering in m[0] AND m[1] (duplicate across the split).
-	const snapshotMemories = getMemoriesByProject(db, state.projectIdentity, [
-		"active",
-		"permanent",
-	]);
-	// Derive the maxMemoryId watermark from the SAME set we render, not from the
-	// separate read inside readCurrentMarkers above. A memory inserted between
-	// those two reads would otherwise give a watermark LOWER than the max id we
-	// rendered, so that memory would appear in m[0] (rendered here) AND m[1]
-	// (id > persisted watermark) — duplicated across the split. Binding the
-	// watermark to the rendered set makes them consistent by construction,
-	// independent of read interleaving.
-	snapshotMarkers.maxMemoryId = snapshotMemories.reduce(
-		(max, m) => (m.id > max ? m.id : max),
-		0,
-	);
+	const frozen = readFrozenM0InputsPi(state, db, docs);
+	const snapshotMarkers = frozen.markers;
+	const snapshotMemories = frozen.memories;
+	const snapshotCompartments = frozen.compartments;
+	const snapshotUserProfile = frozen.userProfile;
 	// Over-budget tightening loop (matches OpenCode materializeM0): if the
 	// rendered m[0] exceeds the history budget, escalate the decay pressure and
 	// re-render up to 3x so tight budgets demote more aggressively. Without this,
@@ -722,6 +822,8 @@ export function materializeM0Pi(
 		docs.renderedBlock,
 		decayPressureMultiplier,
 		snapshotMemories,
+		snapshotCompartments,
+		snapshotUserProfile,
 	);
 	const historyBudget =
 		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
@@ -738,6 +840,8 @@ export function materializeM0Pi(
 			docs.renderedBlock,
 			decayPressureMultiplier,
 			snapshotMemories,
+			snapshotCompartments,
+			snapshotUserProfile,
 		);
 		attempts += 1;
 	}
@@ -1022,72 +1126,9 @@ export function injectM0M1Pi(
 				// block, so render a fresh (non-persisted) m[0] as a last resort.
 				// It is not cached because we couldn't win the materialize lock;
 				// the next pass re-materializes and persists.
-				const docs = readProjectDocsCanonical(state.projectDirectory);
-				markers = readCurrentMarkers(db, state, docs.canonicalHash);
-				// CACHE STABILITY (parity with OpenCode renderFreshM0NonPersisted):
-				// materializedAt feeds the m[1] expiry cutoff (renderM1Pi). It must
-				// be stable across consecutive fallback passes — live Date.now()
-				// (from readCurrentMarkers) would shift m[1] bytes when a memory's
-				// expires_at is straddled by two defer passes. Freeze to the last
-				// persisted materialization; if none exists, use 0 (stable: renders
-				// all memories with no expiry filtering, deterministic across passes).
-				{
-					const meta2 = getOrCreateSessionMeta(db, state.sessionId);
-					markers.materializedAt = meta2.cachedM0MaterializedAt ?? 0;
-				}
-				// Apply the over-budget tightening loop (parity with
-				// materializeM0Pi) so the fallback m[0] respects the budget the
-				// same way the persisted path does.
-				{
-					const historyBudget =
-						state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
-					// Freeze the memory snapshot ONCE for all fallback render
-					// attempts (parity with materializeM0Pi): a single read passed
-					// into every renderM0Pi call keeps the m[0] baseline byte-stable
-					// WITHIN a pass. Also pass the frozen materializedAt cutoff (set
-					// just above) so the expiry filter is identical ACROSS consecutive
-					// fallback defer passes too — without it, a live Date.now() default
-					// would drop a memory crossing expires_at between two passes and
-					// shift the m[0] baseline bytes (parity with OpenCode
-					// renderFreshM0NonPersisted's frozen-cutoff baseline read).
-					const fallbackMemories = getMemoriesByProject(
-						db,
-						state.projectIdentity,
-						["active", "permanent"],
-						markers.materializedAt,
-					);
-					// Align the m[1] memory watermark to the EXACT set rendered into
-					// this fallback m[0], by construction. readCurrentMarkers computed
-					// markers.maxMemoryId from its OWN separate getMemoriesByProject
-					// read; if a sibling inserted a memory between that read and this
-					// one, renderM1Pi(markers) could re-emit a memory already in m[0]
-					// as "new" (duplicate across m[0]/m[1]). Deriving the watermark
-					// from fallbackMemories — the same set renderM0Pi receives —
-					// removes the TOCTOU window (parity with materializeM0Pi's
-					// snapshot-aligned watermark).
-					markers.maxMemoryId = fallbackMemories.reduce(
-						(max, m) => (m.id > max ? m.id : max),
-						0,
-					);
-					let dpm = 1;
-					m0 = renderM0Pi(state, db, docs.renderedBlock, dpm, fallbackMemories);
-					let attempts = 0;
-					while (
-						historyBudget > 0 &&
-						historySliceTokensPi(m0) > historyBudget * 1.05 &&
-						attempts < 3
-					) {
-						dpm *= 1.15;
-						m0 = renderM0Pi(
-							state,
-							db,
-							docs.renderedBlock,
-							dpm,
-							fallbackMemories,
-						);
-						attempts += 1;
-					}
-				}
+				const fresh = renderFreshM0PiNonPersisted(state, db);
+				m0 = fresh.m0;
+				markers = fresh.snapshotMarkers;
 				contentionExhausted = true;
 				logSession(
 					state.sessionId,

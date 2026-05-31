@@ -8,12 +8,19 @@ import {
 	getMemoriesByProject,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getCompartments } from "@magic-context/core/features/magic-context/storage";
+import {
+	getActiveUserMemories,
+	insertUserMemory,
+} from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	__test,
 	injectM0M1Pi,
 	materializeM0Pi,
+	mustMaterializePi,
 	renderM0Pi,
+	renderM1Pi,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
 
@@ -142,6 +149,72 @@ describe("trimPiMessagesToBoundary", () => {
 		expect(removed).toBe(0);
 		expect(messages.length).toBe(2);
 	});
+
+	it("renders frozen compartment and user-profile snapshots without m[0]/m[1] duplication", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0-frozen-cp-profile-"));
+		try {
+			const state = piState("ses-pi-frozen-cp-profile", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-1",
+					endMessageId: "entry-1",
+					title: "Frozen",
+					content: "U: old turn\nold compartment body",
+				},
+			]);
+			insertUserMemory(db, "old profile memory", []);
+			const frozenCompartments = getCompartments(db, state.sessionId);
+			const frozenUserProfile = getActiveUserMemories(db);
+
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 2,
+					startMessage: 2,
+					endMessage: 2,
+					startMessageId: "entry-2",
+					endMessageId: "entry-2",
+					title: "Concurrent",
+					content: "U: new turn\nnew compartment body",
+				},
+			]);
+			insertUserMemory(db, "new profile memory", []);
+
+			const m0 = renderM0Pi(
+				state,
+				db,
+				"",
+				1,
+				[],
+				frozenCompartments,
+				frozenUserProfile,
+			);
+			const m1 = renderM1Pi(state, db, {
+				maxCompartmentSeq: 1,
+				maxMemoryId: 0,
+				maxMutationId: 0,
+				projectMemoryEpoch: 0,
+				projectUserProfileVersion: 0,
+				projectDocsHash: "",
+				sessionFactsVersion: 0,
+				materializedAt: 0,
+				upgradeState: "",
+			});
+
+			expect(m0).toContain("old compartment body");
+			expect(m0).toContain("old profile memory");
+			expect(m0).not.toContain("new compartment body");
+			expect(m0).not.toContain("new profile memory");
+			expect(m1).toContain("new compartment body");
+			expect(m1).not.toContain("old compartment body");
+			expect(m1).not.toContain("old profile memory");
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });
 
 function piState(sessionId: string, cwd: string) {
@@ -225,6 +298,33 @@ describe("injectM0M1Pi", () => {
 			expect(textOf(second[1] as never)).toContain(
 				"no new content since last materialization",
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("routes cached m[0] with NULL required marker through guarded rematerialize", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-null-marker-"));
+		try {
+			const state = piState("ses-pi-null-marker", cwd);
+			const first = [userMessage("hello", 10)];
+			injectM0M1Pi(state, db, first as never);
+
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
+			).run(state.sessionId);
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: true,
+				reason: "cache_invalid",
+			});
+			const second = [userMessage("hello", 10)];
+			const result = injectM0M1Pi(state, db, second as never);
+
+			expect(result.m0Materialized).toBe(true);
+			expect(result.m0Reason).toBe("cache_invalid");
+			expect(textOf(second[0] as never)).toContain("<session-history>");
 		} finally {
 			closeQuietly(db);
 		}
