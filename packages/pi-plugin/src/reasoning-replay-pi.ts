@@ -316,14 +316,16 @@ export function replayStrippedInlineThinkingPi(args: {
 }
 
 /**
- * Helper: replicate the stable id Pi's transcript-pi.ts builds for a
- * Pi message. We can't import the transcript adapter's private
- * `extractStableId` helper here, so we replicate its rule:
- *   `pi-msg-<index>-<timestamp>-<role>` (or `pi-msg-<index>-<role>`
- *   when no timestamp).
+ * @internal TEST-ONLY legacy index-id helper. NOT for production use.
  *
- * If transcript-pi.ts ever changes its stable-id format, this helper
- * MUST be updated in lockstep.
+ * Production code resolves stable ids exclusively through
+ * `resolvePiStableId` (read-session-pi.ts), which prefers the real
+ * SessionEntry id and only falls back to this `pi-msg-<index>-...` format.
+ * This standalone export produces ONLY the index-based fallback, which DRIFTS
+ * when the visible array shifts — using it in production would reintroduce the
+ * orphaned-state / cache-bust bug the unification fixed. It is retained solely
+ * so the reasoning-replay unit tests can exercise the index-id shape directly.
+ * Do not import it into production modules; reach for `resolvePiStableId`.
  */
 export function piMessageStableId(
 	msg: unknown,

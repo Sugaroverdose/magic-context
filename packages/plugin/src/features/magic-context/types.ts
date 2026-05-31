@@ -70,6 +70,13 @@ export interface SessionMeta {
     cachedM0ProjectUserProfileVersion: number | null;
     cachedM0MaxCompartmentSeq: number | null;
     cachedM0MaxMemoryId: number | null;
+    /**
+     * Pi message stable-id scheme version (Pi-only; OpenCode ignores it).
+     * NULL/0 = legacy index-based `pi-msg-*` ids; >=1 = real-SessionEntry-id
+     * scheme. Drives the one-time forced execute+materialize cutover when a
+     * session's stored scheme is below PI_STABLE_ID_SCHEME.
+     */
+    piStableIdScheme: number | null;
     cachedM0MaxMutationId: number | null;
     cachedM0ProjectDocsHash: string | null;
     cachedM0MaterializedAt: number | null;

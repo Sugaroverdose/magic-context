@@ -62,7 +62,7 @@ import { buildKeyFilesBlock } from "@magic-context/core/hooks/magic-context/key-
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
-import { SYNTH_USER_ID_PREFIX } from "./read-session-pi";
+import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 /**
  * Pi message shapes — kept structurally compatible with
@@ -116,12 +116,12 @@ function resolveStableId(
 	index: number,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): string {
-	const provided = entryIds?.[index];
-	if (typeof provided === "string" && provided.length > 0) return provided;
-	const ts = msg.timestamp;
-	const role = msg.role;
-	if (typeof ts !== "number") return `pi-msg-${index}-${role}`;
-	return `pi-msg-${index}-${ts}-${role}`;
+	// Delegate to the shared resolver (single source of truth). This path has no
+	// entryIdByRef (the trim projection is positional-only), so it uses the
+	// positional real id then the index fallback. resolvePiStableId returns
+	// undefined only for non-object msg; msg is a real PiAgentMessage here, so the
+	// `?? ""` is unreachable in practice and just satisfies the non-optional type.
+	return resolvePiStableId(msg, index, entryIds) ?? "";
 }
 
 /**

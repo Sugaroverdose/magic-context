@@ -20,7 +20,7 @@ const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
-export const LATEST_SUPPORTED_VERSION = 24;
+export const LATEST_SUPPORTED_VERSION = 25;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -476,7 +476,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
-      upgrade_reminded_at INTEGER
+      upgrade_reminded_at INTEGER,
+      pi_stable_id_scheme INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS subagent_invocations (
@@ -613,6 +614,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
     ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "pi_stable_id_scheme", "INTEGER");
     // JSON array of memory ids currently rendered in the cached <session-history>
     // memory block. Used by ctx_search to hard-filter memories the agent can
     // already see in context — they're wasted tokens and crowd out high-signal

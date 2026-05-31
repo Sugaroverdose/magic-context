@@ -110,6 +110,7 @@ export interface PiHeuristicCleanupResult {
  */
 function buildPiToolFingerprints(
 	messages: readonly unknown[],
+	resolveStableId: (msg: unknown, index: number) => string | undefined,
 ): Map<string, string> {
 	const fingerprints = new Map<string, string>();
 	for (let i = 0; i < messages.length; i++) {
@@ -122,12 +123,10 @@ function buildPiToolFingerprints(
 		};
 		if (msg.role !== "assistant") continue;
 		if (!Array.isArray(msg.content)) continue;
-		// Derive ownerMsgId using the same Pi-stable scheme as
-		// collectStaleReduceCallIds / transcript-pi.ts.
-		const ownerMsgId =
-			typeof msg.timestamp === "number"
-				? `pi-msg-${i}-${msg.timestamp}-assistant`
-				: `pi-msg-${i}-assistant`;
+		// ownerMsgId MUST match the id the transcript tagged this message with
+		// (resolvePiStableId) — real entry id when resolvable, index fallback else.
+		const ownerMsgId = resolveStableId(message, i);
+		if (!ownerMsgId) continue;
 		for (const part of msg.content) {
 			if (!part || typeof part !== "object") continue;
 			const p = part as {
@@ -178,6 +177,7 @@ function collectStaleReduceCallIds(
 	messages: readonly unknown[],
 	messageIdToMaxTag: Map<string, number>,
 	toolAgeCutoff: number,
+	resolveStableId: (msg: unknown, index: number) => string | undefined,
 ): Set<string> {
 	const staleCallIds = new Set<string>();
 	for (let i = 0; i < messages.length; i++) {
@@ -190,10 +190,8 @@ function collectStaleReduceCallIds(
 		};
 		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 
-		const stableId =
-			typeof msg.timestamp === "number"
-				? `pi-msg-${i}-${msg.timestamp}-assistant`
-				: `pi-msg-${i}-assistant`;
+		const stableId = resolveStableId(raw, i);
+		if (!stableId) continue;
 		const maxTag = messageIdToMaxTag.get(stableId) ?? 0;
 		if (maxTag === 0 || maxTag > toolAgeCutoff) continue;
 
@@ -231,7 +229,24 @@ export function applyPiHeuristicCleanup(
 	piMessages: readonly unknown[],
 	config: PiHeuristicCleanupConfig,
 	preloadedTags?: TagEntry[],
+	// Stable-id resolver — MUST be the same one the transcript tagged with, so the
+	// owner ids built here match `target.message.info.id` in messageIdToMaxTag.
+	// When omitted (older tests), falls back to the legacy index-based pi-msg-* id.
+	resolveId?: (msg: unknown, index: number) => string | undefined,
 ): PiHeuristicCleanupResult {
+	// Resolve owner/stable ids the same way the transcript tagged messages, so the
+	// ids built here key into messageIdToMaxTag (= target.message.info.id) correctly.
+	// Legacy fallback (no resolver) keeps the old index-based pi-msg-* scheme.
+	const resolveStableId = (msg: unknown, index: number): string | undefined => {
+		if (resolveId) return resolveId(msg, index);
+		if (!msg || typeof msg !== "object") return undefined;
+		const m = msg as { role?: unknown; timestamp?: number };
+		const role = typeof m.role === "string" ? m.role : "unknown";
+		return typeof m.timestamp === "number"
+			? `pi-msg-${index}-${m.timestamp}-${role}`
+			: `pi-msg-${index}-${role}`;
+	};
+
 	// All work in this function short-circuits on `tag.status !== "active"`.
 	// See OpenCode `applyHeuristicCleanup` for the full P0 perf rationale.
 	const tags = preloadedTags ?? getActiveTagsBySession(db, sessionId);
@@ -287,6 +302,7 @@ export function applyPiHeuristicCleanup(
 		piMessages,
 		buildMessageIdToMaxTagFromTargets(targets),
 		toolAgeCutoff,
+		resolveStableId,
 	);
 	if (staleReduceCallIds.size > 0) {
 		db.transaction(() => {
@@ -344,7 +360,7 @@ export function applyPiHeuristicCleanup(
 	})();
 
 	// ── Pass 3: tool dedup (Pi-shape fingerprinter) ───────────────────
-	const toolFingerprints = buildPiToolFingerprints(piMessages);
+	const toolFingerprints = buildPiToolFingerprints(piMessages, resolveStableId);
 	if (toolFingerprints.size > 0) {
 		const tagsByCompositeKey = new Map<string, TagEntry>();
 		for (const tag of tags) {

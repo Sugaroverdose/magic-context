@@ -65,4 +65,59 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("uses the carried-id map by object-ref and survives an index shift", () => {
+		const db = createTestDb();
+		try {
+			// Pass 1: discover under a real entry id carried by object-ref.
+			const placeholder = assistantMessage("[dropped §9§]", 2);
+			const pass1 = [userMessage("keep", 1), placeholder];
+			const map1 = new Map<object, string>([
+				[pass1[0] as object, "entry-keep"],
+				[placeholder as object, "entry-PH"],
+			]);
+			const r1 = stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-carry",
+				messages: pass1,
+				isCacheBusting: true,
+				stableIdByRef: map1,
+			});
+			expect(r1).toEqual({ removed: 1, discovered: 1 });
+			// Persisted under the REAL id, not pi-msg-*.
+			expect(getStrippedPlaceholderIds(db, "ses-carry").has("entry-PH")).toBe(
+				true,
+			);
+
+			// Pass 2 (defer): the SAME placeholder object now sits at a DIFFERENT
+			// index (prefix grew), and a synthetic m[0] prepend (NOT in the map) is
+			// at the head. Removal must still strip the placeholder by object-ref
+			// and SKIP the unmapped synthetic prepend.
+			const syntheticPrepend = userMessage("<session-history>…", 0);
+			const pass2 = [
+				syntheticPrepend,
+				userMessage("newer", 3),
+				userMessage("keep", 1),
+				placeholder,
+			];
+			const map2 = new Map<object, string>([
+				[pass2[1] as object, "entry-newer"],
+				[pass2[2] as object, "entry-keep"],
+				[placeholder as object, "entry-PH"],
+				// syntheticPrepend deliberately absent → skip-on-miss.
+			]);
+			const r2 = stripPiDroppedPlaceholderMessages({
+				db,
+				sessionId: "ses-carry",
+				messages: pass2,
+				isCacheBusting: false,
+				stableIdByRef: map2,
+			});
+			expect(r2.removed).toBe(1); // only the placeholder
+			expect(pass2).not.toContain(placeholder);
+			expect(pass2).toContain(syntheticPrepend); // unmapped → never stripped
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });

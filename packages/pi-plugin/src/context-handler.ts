@@ -64,6 +64,7 @@ import {
 	getTagsByNumbers,
 	getTopNBySize,
 	setSessionWorkMetrics,
+	setStrippedPlaceholderIds,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
@@ -147,11 +148,11 @@ import {
 	convertEntriesToRawMessages,
 	isMidTurnPi,
 	readPiSessionMessages,
+	resolvePiStableId,
 } from "./read-session-pi";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
-	piMessageStableId,
 	replayClearedReasoningPi,
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
@@ -178,6 +179,16 @@ const TOOL_HEAVY_TURN_REMINDER_TEXT =
  * (`packages/plugin/src/config/schema/magic-context.ts:303` → `.default(50)`).
  */
 const DEFAULT_CLEAR_REASONING_AGE = 50;
+
+/**
+ * Current Pi message stable-id scheme version. Bump when the durable message
+ * stable-id format changes in a way that re-keys persisted tag/source_contents/
+ * caveman/placeholder state. A session whose persisted `pi_stable_id_scheme` is
+ * below this triggers a one-time forced execute+materialize cutover.
+ *   0 (NULL) = legacy index-based `pi-msg-${index}-...` ids.
+ *   1        = real-SessionEntry-id scheme (resolvePiStableId).
+ */
+const PI_STABLE_ID_SCHEME = 1;
 
 /**
  * Per-session emergency-notification dedup. Mirrors OpenCode's
@@ -1533,6 +1544,37 @@ export function registerPiContextHandler(
 			}
 			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
 
+			// Pi stable-id scheme cutover (one-time, per session). When this
+			// session's persisted tags/source_contents/caveman/placeholder state
+			// were keyed under the OLD index-based pi-msg-* scheme (stored scheme <
+			// PI_STABLE_ID_SCHEME, NULL = 0 = legacy), switching to real-entry-id
+			// ids re-keys every row → the tagger re-tags and prior drops orphan.
+			// Force ONE controlled execute+materialize pass so heuristic cleanup
+			// re-drops by tag content and the prefix rebuilds in a single bust
+			// (rather than an uncontrolled defer-pass bust that could leak
+			// full-size content). Also clear stripped_placeholder_ids so the
+			// forced pass rediscovers placeholders under the new scheme. The new
+			// scheme is stamped only AFTER the pass succeeds (end of runPipeline),
+			// so a mid-pass failure retries instead of skipping the cutover.
+			const storedStableIdScheme = sessionMeta.piStableIdScheme ?? 0;
+			const stableIdSchemeCutover = storedStableIdScheme < PI_STABLE_ID_SCHEME;
+			if (stableIdSchemeCutover) {
+				schedulerDecision = "execute";
+				signalPiPendingMaterialization(sessionId);
+				try {
+					setStrippedPlaceholderIds(options.db, sessionId, new Set());
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`stable-id cutover: failed to clear stripped_placeholder_ids (continuing): ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+				sessionLog(
+					sessionId,
+					`stable-id scheme cutover: stored=${storedStableIdScheme} < current=${PI_STABLE_ID_SCHEME} — forcing execute+materialize this pass`,
+				);
+			}
+
 			const schedulerDecisionEarly = schedulerDecision;
 			const midTurn = isMidTurnPi(event, sessionId);
 			const bypassReason = detectMidTurnBypassReason({
@@ -1703,6 +1745,8 @@ export function registerPiContextHandler(
 						}
 					: undefined,
 				entryIds,
+				entryIdByRef,
+				stableIdSchemeCutover,
 				schedulerDecision,
 				// 95% emergency forces drop-all-tools regardless of the
 				// 85% gate, so the LLM call sees the smallest possible
@@ -1737,6 +1781,30 @@ export function registerPiContextHandler(
 					activeTags: result.activeTags,
 					rawMessageProvider,
 				});
+			}
+
+			// Stamp the new stable-id scheme ONLY after a successful cutover pass
+			// that actually executed (re-tagged + re-dropped under the new scheme).
+			// runPipeline returned without throwing = the controlled bust completed;
+			// stamping here (not before) means a mid-pass failure leaves the old
+			// scheme so the next pass retries the cutover instead of skipping it.
+			// Guard on executedWorkThisPass: if the forced execute somehow degraded
+			// to no-op, don't stamp (retry next pass).
+			if (stableIdSchemeCutover && result.executedWorkThisPass) {
+				try {
+					updateSessionMeta(options.db, sessionId, {
+						piStableIdScheme: PI_STABLE_ID_SCHEME,
+					});
+					sessionLog(
+						sessionId,
+						`stable-id scheme cutover complete — stamped scheme=${PI_STABLE_ID_SCHEME}`,
+					);
+				} catch (err) {
+					sessionLog(
+						sessionId,
+						`stable-id cutover: failed to stamp scheme (will retry next pass): ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
 			}
 
 			// Step 4b.4: nudge + note-nudge + auto-search hint. All three
@@ -2501,6 +2569,22 @@ interface RunPipelineArgs {
 	 */
 	entryIds?: readonly (string | undefined)[];
 	/**
+	 * Splice-safe message→entryId map keyed by AgentMessage reference. Best-effort
+	 * first try for stable-id resolution (misses messages tagging/drops cloned this
+	 * pass — positional entryIds is the mandatory fallback). Threaded so the
+	 * transcript-tag path and the reasoning/heuristic stable-id paths resolve the
+	 * SAME id for a message (the cross-path lookup invariant).
+	 */
+	entryIdByRef?: ReadonlyMap<object, string> | null;
+	/**
+	 * True on the one-time stable-id-scheme cutover pass (Pi message identity
+	 * switched from index-based to real-entry-id). Forces placeholder rediscovery
+	 * under the new scheme. The forced execute+materialize cutover machinery
+	 * (pi_stable_id_scheme persisted version) is wired by the caller; when unset,
+	 * no cutover behavior runs (safe default).
+	 */
+	stableIdSchemeCutover?: boolean;
+	/**
 	 * Pre-resolved scheduler decision for THIS pass. When `"execute"`,
 	 * heuristic cleanup runs (cache-busting). When `"defer"`, only the
 	 * cache-stable stages run (tagging + applyFlushedStatuses + replay
@@ -2597,7 +2681,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		logTransformTiming(args.sessionId, "injectTemporalMarkers", tTemporal);
 	}
 
-	const transcript = createPiTranscript(args.messages, args.sessionId);
+	// Pass entryIds so the transcript tags each message under its real SessionEntry
+	// id (position-independent) instead of the index-based pi-msg-* id that drifts
+	// when the visible array shifts (compaction trim / custom_message inserts),
+	// orphaning tags/source_contents/caveman/drop-state. Positional entryIds is
+	// exactly aligned here: tagging runs at transcript-build time, before any splice.
+	const transcript = createPiTranscript(
+		args.messages,
+		args.sessionId,
+		args.entryIds,
+	);
 	// Reasoning clearing/replay mutate `part.thinking` in place. They MUST target
 	// the transcript's `working` array (the channel commit() flushes), not the
 	// original `args.messages`: tagging/drops/caveman reassign working[idx] to
@@ -2606,6 +2699,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// source[idx] = working[idx], leaving the cleared-reasoning watermark ahead
 	// of the actual wire bytes → defer-pass replay divergence → cache bust.
 	const workingMessages = transcript.getWorkingMessages();
+	// Stable-id resolver for the reasoning/placeholder paths. MUST match the id the
+	// transcript assigned each message (so reasoning's messageIdToMaxTag lookup
+	// hits). Reasoning runs on `workingMessages` where tagging may have cloned
+	// working[i] → entryIdByRef misses those, so positional args.entryIds is the
+	// mandatory fallback (same precedence resolvePiStableId enforces).
+	const stableIdResolver = (msg: unknown, index: number): string | undefined =>
+		resolvePiStableId(
+			msg,
+			index,
+			args.entryIds,
+			args.entryIdByRef ?? undefined,
+		);
 	const currentTurnId = (() => {
 		const ids = buildPiMessageIdByIndex(
 			args.messages as PiAgentMessage[],
@@ -2811,14 +2916,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				sessionId: args.sessionId,
 				messages: workingMessages,
 				messageIdToMaxTag,
-				piMessageStableId,
+				piMessageStableId: stableIdResolver,
 			});
 			const inlineReplay = replayStrippedInlineThinkingPi({
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: workingMessages,
 				messageIdToMaxTag,
-				piMessageStableId,
+				piMessageStableId: stableIdResolver,
 			});
 			if (clearedReplay > 0 || inlineReplay > 0) {
 				sessionLog(
@@ -2946,6 +3051,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					caveman: args.heuristics.caveman,
 				},
 				activeTags,
+				stableIdResolver,
 			);
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
@@ -2990,13 +3096,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
-				piMessageStableId,
+				piMessageStableId: stableIdResolver,
 			});
 			const stripOutcome = stripInlineThinkingPi({
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
-				piMessageStableId,
+				piMessageStableId: stableIdResolver,
 			});
 			const combinedWatermark = Math.max(
 				clearOutcome.newWatermark,
@@ -3034,6 +3140,27 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// back to the underlying AgentMessage[] via the part proxies, so
 	// commit() just locks the result in.
 	transcript.commit();
+
+	// Carried stable-id map for placeholder stripping (3b-A). Built AFTER commit()
+	// — commit reassigns args.messages[idx] = working[idx] (cloned objects for
+	// dirty messages), so building before would key stale refs the post-commit
+	// array no longer holds. Built BEFORE injectM0M1Pi — injection splices/unshifts
+	// the array, after which positional entryIds[index] is stale; object identity
+	// survives the splice, so a ref-keyed map resolves correctly post-injection.
+	// stripPiDroppedPlaceholderMessages reads carried ids by object-ref (skip-on-
+	// miss: the only legitimate misses are injection's synthetic m[0]/m[1] prepends).
+	const placeholderStableIdByRef = new Map<object, string>();
+	for (let i = 0; i < args.messages.length; i++) {
+		const m = args.messages[i];
+		if (!m || typeof m !== "object") continue;
+		const id = resolvePiStableId(
+			m,
+			i,
+			args.entryIds,
+			args.entryIdByRef ?? undefined,
+		);
+		if (id) placeholderStableIdByRef.set(m as object, id);
+	}
 
 	// 6. <session-history> injection — writes compartments, facts, and
 	// project memories into message[0]. This is the second-biggest
@@ -3099,6 +3226,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		sessionId: args.sessionId,
 		messages: args.messages,
 		isCacheBusting: args.isCacheBusting,
+		stableIdByRef: placeholderStableIdByRef,
+		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
+		// previously-stripped placeholders get re-keyed under the new scheme this
+		// pass (discovery is otherwise gated on isCacheBusting = history-refresh).
+		forceDiscovery: args.stableIdSchemeCutover === true,
 	});
 
 	// Drain predicate intentionally has two Pi-specific terms beyond OpenCode's

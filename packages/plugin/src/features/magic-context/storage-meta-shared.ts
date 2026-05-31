@@ -37,6 +37,7 @@ export interface SessionMetaRow {
     cached_m0_session_facts_version: number | null;
     cached_m0_upgrade_state: string | null;
     upgrade_reminded_at: number | null;
+    pi_stable_id_scheme: number | null;
 }
 
 export const SESSION_META_SELECT_COLUMNS = [
@@ -71,6 +72,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_session_facts_version",
     "cached_m0_upgrade_state",
     "upgrade_reminded_at",
+    "pi_stable_id_scheme",
 ] as const;
 
 export const META_COLUMNS: Record<string, string> = {
@@ -104,6 +106,7 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0SessionFactsVersion: "cached_m0_session_facts_version",
     cachedM0UpgradeState: "cached_m0_upgrade_state",
     upgradeRemindedAt: "upgrade_reminded_at",
+    piStableIdScheme: "pi_stable_id_scheme",
 };
 
 export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress", "cacheAlertSent"]);
@@ -129,6 +132,7 @@ export const NULL_BIND_META_KEYS = new Set([
     "cachedM0SessionFactsVersion",
     "cachedM0UpgradeState",
     "upgradeRemindedAt",
+    "piStableIdScheme",
 ]);
 
 // Defensive typeof checks: columns may be NULL in DB when a row was seeded
@@ -196,7 +200,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.cached_m0_materialized_at) &&
         isNumberOrNull(r.cached_m0_session_facts_version) &&
         isStringOrNull(r.cached_m0_upgrade_state) &&
-        isNumberOrNull(r.upgrade_reminded_at)
+        isNumberOrNull(r.upgrade_reminded_at) &&
+        isNumberOrNull(r.pi_stable_id_scheme)
     );
 }
 
@@ -233,6 +238,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0SessionFactsVersion: null,
         cachedM0UpgradeState: null,
         upgradeRemindedAt: null,
+        piStableIdScheme: null,
     };
 }
 
@@ -331,6 +337,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0SessionFactsVersion: numOrNull(row.cached_m0_session_facts_version),
         cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
         upgradeRemindedAt: numOrNull(row.upgrade_reminded_at),
+        piStableIdScheme: numOrNull(row.pi_stable_id_scheme),
     };
 }
 

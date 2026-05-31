@@ -85,6 +85,61 @@ import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-se
  */
 export const SYNTH_USER_ID_PREFIX = "synth-user-";
 
+/**
+ * The single source of truth for a Pi message's durable stable id.
+ *
+ * Pi `AgentMessage`s carry no stable per-message id at the type level — the
+ * SessionEntry layer wraps them with a real `entry.id` in the JSONL store. This
+ * resolver returns that real id whenever it can, because real entry ids are
+ * POSITION-INDEPENDENT: they survive the structural shifts the visible message
+ * array undergoes every pass (compaction-marker prefix trim, custom_message
+ * inserts from other extensions). The `pi-msg-${index}-...` fallback is
+ * index-based and therefore DRIFTS across those shifts — any durable state keyed
+ * on a drifting id (tags, source_contents, caveman depth, drop-state, reasoning
+ * watermark, placeholder ids) silently orphans → prompt-cache bust + resurfaced
+ * reasoning/tools. So the fallback is a last resort, used only for messages with
+ * no resolvable real entry id (synthetic compaction summaries, custom_message
+ * wrappers).
+ *
+ * Precedence (locked by design review):
+ *   1. `entryIdByRef.get(msg)` — reference identity. Splice-safe, but MISSES a
+ *      message whose object was cloned this pass (tagging/drops replace
+ *      working[i] with a spread copy). Best-effort first try.
+ *   2. `entryIds[index]` — positional real entry id, aligned to the array the
+ *      caller resolved ids against. MANDATORY fallback: it covers the cloned-ref
+ *      case (1) misses, and is valid wherever the caller passes an entryIds array
+ *      still index-aligned to `msg`'s array (pre-injection-splice consumers).
+ *   3. `pi-msg-${index}-${ts}-${role}` — unstable index id. Only when neither real
+ *      id resolves.
+ *
+ * All Pi stable-id consumers MUST route through this one function so the id a
+ * message gets is identical across the transcript-tag path, the reasoning-replay
+ * lookup path, the heuristic-cleanup owner path, and the compaction-trim path —
+ * any divergence makes cross-path lookups (e.g. reasoning's messageIdToMaxTag)
+ * silently miss.
+ */
+export function resolvePiStableId(
+	msg: unknown,
+	index: number,
+	entryIds?: readonly (string | undefined)[],
+	entryIdByRef?: ReadonlyMap<object, string>,
+): string | undefined {
+	if (!msg || typeof msg !== "object") return undefined;
+	// 1. Reference identity — preferred, splice-safe (misses cloned objects).
+	const byRef = entryIdByRef?.get(msg as object);
+	if (typeof byRef === "string" && byRef.length > 0) return byRef;
+	// 2. Positional real entry id — mandatory fallback (covers cloned-ref misses).
+	const positional = entryIds?.[index];
+	if (typeof positional === "string" && positional.length > 0)
+		return positional;
+	// 3. Unstable index id — last resort (synthetic / unresolved messages only).
+	const m = msg as { role?: string; timestamp?: number };
+	const role = m.role ?? "unknown";
+	return typeof m.timestamp === "number"
+		? `pi-msg-${index}-${m.timestamp}-${role}`
+		: `pi-msg-${index}-${role}`;
+}
+
 export function isMidTurnPi(event: unknown, _sessionId: string): boolean {
 	const messages = (event as { messages?: unknown })?.messages;
 	if (!Array.isArray(messages)) return false;

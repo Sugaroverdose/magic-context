@@ -75,6 +75,7 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
+import { resolvePiStableId } from "./read-session-pi";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
 // Importing from @earendil-works/pi-ai directly would couple the plugin
@@ -145,6 +146,7 @@ type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
 export function createPiTranscript(
 	source: unknown[],
 	sessionId: string | undefined,
+	entryIds?: readonly (string | undefined)[],
 ): Transcript & {
 	/**
 	 * Pi-only escape hatch: returns the rebuilt message array suitable
@@ -182,6 +184,7 @@ export function createPiTranscript(
 		(messageIndex) => {
 			dirtyMessages.add(messageIndex);
 		},
+		entryIds,
 	);
 
 	let committed = false;
@@ -235,6 +238,7 @@ function buildTranscriptView(
 	working: PiAgentMessage[],
 	sessionId: string | undefined,
 	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage[] {
 	const result: TranscriptMessage[] = [];
 
@@ -268,6 +272,7 @@ function buildTranscriptView(
 						sessionId,
 						toolResultRun,
 						markDirty,
+						entryIds,
 					),
 				);
 				i += 1;
@@ -286,7 +291,14 @@ function buildTranscriptView(
 
 		if (msg.role === "user") {
 			result.push(
-				createUserTranscriptMessage(working, i, sessionId, [], markDirty),
+				createUserTranscriptMessage(
+					working,
+					i,
+					sessionId,
+					[],
+					markDirty,
+					entryIds,
+				),
 			);
 			i += 1;
 			continue;
@@ -294,7 +306,13 @@ function buildTranscriptView(
 
 		if (msg.role === "assistant") {
 			result.push(
-				createAssistantTranscriptMessage(working, i, sessionId, markDirty),
+				createAssistantTranscriptMessage(
+					working,
+					i,
+					sessionId,
+					markDirty,
+					entryIds,
+				),
 			);
 			i += 1;
 			continue;
@@ -303,7 +321,7 @@ function buildTranscriptView(
 		// Unknown role — surface as-is with kind "unknown" parts. Forward
 		// compatibility for new Pi message kinds we don't recognize yet.
 		result.push(
-			createOpaqueTranscriptMessage(working, i, sessionId, markDirty),
+			createOpaqueTranscriptMessage(working, i, sessionId, markDirty, entryIds),
 		);
 		i += 1;
 	}
@@ -321,6 +339,7 @@ function createUserTranscriptMessage(
 	sessionId: string | undefined,
 	foldedToolResults: { msg: PiToolResultMessage; index: number }[],
 	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const userMsg = working[index] as PiUserMessage;
 
@@ -331,7 +350,7 @@ function createUserTranscriptMessage(
 
 	return {
 		info: {
-			id: extractStableId(userMsg, index),
+			id: extractStableId(userMsg, index, entryIds),
 			role: "user",
 			sessionId,
 		},
@@ -412,11 +431,12 @@ function createAssistantTranscriptMessage(
 	index: number,
 	sessionId: string | undefined,
 	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const msg = working[index] as PiAssistantMessage;
 	return {
 		info: {
-			id: extractStableId(msg, index),
+			id: extractStableId(msg, index, entryIds),
 			role: "assistant",
 			sessionId,
 		},
@@ -433,11 +453,12 @@ function createOpaqueTranscriptMessage(
 	index: number,
 	sessionId: string | undefined,
 	_markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const msg = working[index];
 	return {
 		info: {
-			id: extractStableId(msg, index),
+			id: extractStableId(msg, index, entryIds),
 			role:
 				typeof (msg as { role?: string })?.role === "string"
 					? (msg as { role: string }).role
@@ -763,10 +784,12 @@ function classifyAssistantContent(part: unknown): TranscriptPartKind {
 function extractStableId(
 	msg: PiAgentMessage | undefined,
 	index: number,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): string | undefined {
-	if (msg === undefined) return undefined;
-	const ts = (msg as { timestamp?: number }).timestamp;
-	const role = (msg as { role?: string }).role ?? "unknown";
-	if (typeof ts !== "number") return `pi-msg-${index}-${role}`;
-	return `pi-msg-${index}-${ts}-${role}`;
+	// Single source of truth: prefer the real SessionEntry id (position-
+	// independent → tags/source_contents/caveman keyed on it survive array
+	// shifts), fall back to the unstable pi-msg-index id only when none resolves.
+	// No entryIdByRef here: tagging runs at transcript-build time on the freshly
+	// sliced `working` array, so positional entryIds[index] is exactly aligned.
+	return resolvePiStableId(msg, index, entryIds);
 }

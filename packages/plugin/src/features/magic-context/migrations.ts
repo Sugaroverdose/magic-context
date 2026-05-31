@@ -918,6 +918,26 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 25,
+        description: "pi_stable_id_scheme session_meta column (Pi message-id cutover gate)",
+        up: (db: Database) => {
+            // Pi-only: tracks which message stable-id scheme a session's persisted
+            // tags/source_contents/caveman/placeholder state were keyed under. NULL/0
+            // = legacy index-based pi-msg-* ids; >=1 = real-SessionEntry-id scheme.
+            // When a session's stored scheme < PI_STABLE_ID_SCHEME, Pi forces one
+            // execute+materialize cutover pass (re-tag + re-drop + placeholder
+            // rediscovery) then stamps the new scheme. OpenCode never reads/writes
+            // it. Guarded ADD COLUMN: session_meta already exists; SQLite sets
+            // existing rows to NULL (treated as scheme 0), not the DEFAULT.
+            const rows = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            if (!rows.some((row) => row.name === "pi_stable_id_scheme")) {
+                db.exec("ALTER TABLE session_meta ADD COLUMN pi_stable_id_scheme INTEGER");
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

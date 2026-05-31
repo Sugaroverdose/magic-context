@@ -21,7 +21,7 @@ import {
 	setStrippedPlaceholderIds,
 } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
-import { piMessageStableId } from "./reasoning-replay-pi";
+import { resolvePiStableId } from "./read-session-pi";
 
 const DROPPED_SEGMENT_PATTERN = /^\[dropped(?: §[^§]+§)?\]$/;
 
@@ -69,15 +69,45 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	sessionId: string;
 	messages: unknown[];
 	isCacheBusting: boolean;
+	/**
+	 * Carried stable-id map keyed by message object reference, built by the caller
+	 * POST-commit / PRE-injection (see context-handler). This runs AFTER
+	 * injectM0M1Pi splices the array, so positional index→id is stale; object
+	 * identity survives the splice. Skip-on-miss: the only legitimate misses are
+	 * injection's synthetic m[0]/m[1] prepends (never placeholders).
+	 */
+	stableIdByRef?: ReadonlyMap<object, string>;
+	/**
+	 * Force placeholder rediscovery regardless of isCacheBusting. Set on the
+	 * stable-id-scheme cutover pass so previously-stripped placeholders get
+	 * re-keyed under the new scheme (discovery is otherwise history-refresh-gated).
+	 */
+	forceDiscovery?: boolean;
 }): StripPiDroppedPlaceholderResult {
-	const { db, sessionId, messages, isCacheBusting } = args;
+	const { db, sessionId, messages, isCacheBusting, stableIdByRef } = args;
 	const persistedIds = getStrippedPlaceholderIds(db, sessionId);
 	const idsToStrip = new Set(persistedIds);
 	let discovered = 0;
 
-	if (isCacheBusting) {
+	// Resolve a message's stable id: carried map (object-ref, survives splice)
+	// first; fall back to the index-based id only when the message isn't in the
+	// map (legacy callers that pass no map, or the rare unmapped message).
+	const idOf = (msg: unknown, index: number): string | undefined => {
+		const m = msg && typeof msg === "object" ? (msg as object) : undefined;
+		const carried = m ? stableIdByRef?.get(m) : undefined;
+		if (typeof carried === "string" && carried.length > 0) return carried;
+		// Skip-on-miss when a map was provided: the only unmapped messages
+		// post-injection are synthetic m[0]/m[1] prepends, never placeholders.
+		if (stableIdByRef) return undefined;
+		// No carried map (legacy/test callers): resolve via the unified resolver
+		// (index-only inputs → the pi-msg-* fallback). Production always passes the
+		// map, so this branch is the legacy path only.
+		return resolvePiStableId(msg, index);
+	};
+
+	if (isCacheBusting || args.forceDiscovery) {
 		for (let i = 0; i < messages.length; i++) {
-			const id = piMessageStableId(messages[i], i);
+			const id = idOf(messages[i], i);
 			if (!id) continue;
 			if (!messageIsPlaceholderOnly(messages[i])) continue;
 			if (!idsToStrip.has(id)) {
@@ -90,7 +120,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 
 	let removed = 0;
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const id = piMessageStableId(messages[i], i);
+		const id = idOf(messages[i], i);
 		if (!id || !idsToStrip.has(id)) continue;
 		messages.splice(i, 1);
 		removed++;
