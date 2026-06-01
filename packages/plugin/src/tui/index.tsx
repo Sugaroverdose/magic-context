@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type TuiMessage, type StatusDetail } from "./data/context-db"
+import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type TuiMessage, type StatusDetail } from "./data/context-db"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -441,49 +441,56 @@ function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string |
     return undefined
 }
 
-function showRecompDialog(api: TuiPluginApi) {
-    const sessionId = getSessionId(api)
+async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
+    const sessionId = targetSessionId
     if (!sessionId) {
         api.ui.toast({ message: "No active session", variant: "warning" })
-        return
+        return false
     }
 
-    void getCompartmentCount(sessionId).then((count) => {
-        api.ui.dialog.replace(() => (
-            <api.ui.DialogConfirm
-                title="⚠️ Recomp Confirmation"
-                message={[
-                    `You have ${count} compartments.`,
-                    "",
-                    "Recomp will regenerate all compartments and facts from raw history.",
-                    "This may take a long time and consume significant tokens.",
-                    "",
-                    "Proceed?",
-                ].join("\n")}
-                onConfirm={() => {
-                    void requestRecomp(sessionId)
-                    kickRecompProgressRefresh()
-                    api.ui.toast({ message: "Recomp requested — historian will start shortly", variant: "info", duration: 5000 })
-                }}
-                onCancel={() => {
-                    api.ui.toast({ message: "Recomp cancelled", variant: "info", duration: 3000 })
-                }}
-            />
-        ))
-    })
+    const count = await getCompartmentCount(sessionId)
+    // Ack only after the dialog is actually shown for the same active session;
+    // route switches while the RPC detail load is in flight must leave it pending.
+    if (getSessionId(api) !== sessionId) return false
+
+    api.ui.dialog.replace(() => (
+        <api.ui.DialogConfirm
+            title="⚠️ Recomp Confirmation"
+            message={[
+                `You have ${count} compartments.`,
+                "",
+                "Recomp will regenerate all compartments and facts from raw history.",
+                "This may take a long time and consume significant tokens.",
+                "",
+                "Proceed?",
+            ].join("\n")}
+            onConfirm={() => {
+                void requestRecomp(sessionId)
+                kickRecompProgressRefresh()
+                api.ui.toast({ message: "Recomp requested — historian will start shortly", variant: "info", duration: 5000 })
+            }}
+            onCancel={() => {
+                api.ui.toast({ message: "Recomp cancelled", variant: "info", duration: 3000 })
+            }}
+        />
+    ))
+    return true
 }
 
 function showUpgradeDialog(
     api: TuiPluginApi,
     resume?: { stagedCount: number; stagedThrough: number },
-) {
-    const sessionId = getSessionId(api)
+    targetSessionId = getSessionId(api),
+): boolean {
+    const sessionId = targetSessionId
     if (!sessionId) {
         // No active session — nothing to upgrade. Silently skip (the server only
         // enqueues this for sessions with legacy compartments, but the TUI may
         // have switched sessions before the poller fired).
-        return
+        return false
     }
+
+    if (getSessionId(api) !== sessionId) return false
 
     const title = resume ? "🎆 Resume the interrupted upgrade?" : "🎆 Historian V2 is released!"
     const message = resume
@@ -548,20 +555,25 @@ function showUpgradeDialog(
             />
         ),
     )
+    return true
 }
 
-function showStatusDialog(api: TuiPluginApi) {
-    const sessionId = getSessionId(api)
+async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
+    const sessionId = targetSessionId
     if (!sessionId) {
         api.ui.toast({ message: "No active session", variant: "warning" })
-        return
+        return false
     }
 
     const directory = api.state.path.directory ?? ""
     const modelKey = getModelKeyFromMessages(api, sessionId)
-    void loadStatusDetail(sessionId, directory, modelKey).then((detail) => {
-        api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
-    })
+    const detail = await loadStatusDetail(sessionId, directory, modelKey)
+    // Ack only after the dialog is actually shown for the same active session;
+    // route switches while the RPC detail load is in flight must leave it pending.
+    if (getSessionId(api) !== sessionId) return false
+
+    api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
+    return true
 }
 
 /**
@@ -751,19 +763,30 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     // Poll for server→TUI messages: toasts and dialog requests.
     // The poller owns cursor advancement so notifications are acked only after
     // they are accepted for the still-active session and delivered to the UI.
+    let pollInFlight = false
     const messagePoller = setInterval(() => {
         // Scope the drain to the TUI's active session so notifications tagged for
         // a different session (served by the same RPC process) are not consumed
         // here. Do not poll on non-session routes: a session-scoped action fetched
         // while sessionless could otherwise be acked without being shown.
+        // Avoid overlapping read-only drains: the server re-delivers until acked,
+        // so a second in-flight poll can fetch and dispatch the same batch twice.
+        if (pollInFlight) return
+
         const requestedSessionId = getSessionId(api)
         if (!requestedSessionId) return
 
-        void consumeTuiMessages(requestedSessionId).then((messages) => {
+        pollInFlight = true
+        const pollGeneration = getRpcGeneration()
+        void consumeTuiMessages(requestedSessionId).then(async (messages) => {
             // The dialog handlers read the current session when they run. If the
             // user switched routes while the RPC was in flight, drop this whole
             // batch without advancing the cursor; the next poll for the new
             // session will fetch the right notifications.
+            // Ignore late responses from an older RPC client generation; close/init
+            // clears cursors and stale callbacks must not recreate them.
+            if (getRpcGeneration() !== pollGeneration) return
+
             if (getSessionId(api) !== requestedSessionId) return
 
             const handledMessages: TuiMessage[] = []
@@ -788,11 +811,13 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                 } else if (msg.type === "action") {
                     const action = msg.payload?.action
                     if (action === "show-status-dialog") {
-                        showStatusDialog(api)
-                        handledMessages.push(msg)
+                        if (await showStatusDialog(api, requestedSessionId)) {
+                            handledMessages.push(msg)
+                        }
                     } else if (action === "show-recomp-dialog") {
-                        showRecompDialog(api)
-                        handledMessages.push(msg)
+                        if (await showRecompDialog(api, requestedSessionId)) {
+                            handledMessages.push(msg)
+                        }
                     } else if (action === "show-upgrade-dialog") {
                         const resume =
                             msg.payload?.resume === true
@@ -801,14 +826,23 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                                       stagedThrough: Number(msg.payload?.stagedThrough ?? 0),
                                   }
                                 : undefined
-                        showUpgradeDialog(api, resume)
-                        handledMessages.push(msg)
+                        if (showUpgradeDialog(api, resume, requestedSessionId)) {
+                            handledMessages.push(msg)
+                        }
                     }
                 }
             }
+            // A dialog helper may have awaited more RPC work; re-check before
+            // acking so a dispose/reinit or route switch during that await cannot
+            // advance a stale cursor.
+            if (getRpcGeneration() !== pollGeneration) return
+            if (getSessionId(api) !== requestedSessionId) return
+
             markTuiMessagesHandled(requestedSessionId, handledMessages)
         }).catch(() => {
             // Intentional: message polling should never crash the TUI
+        }).finally(() => {
+            pollInFlight = false
         })
     }, 500)
 

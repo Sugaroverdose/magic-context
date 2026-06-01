@@ -10,6 +10,7 @@ import type { RpcNotificationMessage, SidebarSnapshot, StatusDetail } from "../.
 export type { SidebarSnapshot, StatusDetail };
 
 let rpcClient: MagicContextRpcClient | null = null;
+let rpcGeneration = 0;
 const lastReceivedNotificationIdBySession = new Map<string, number>();
 
 function getStorageDir(): string {
@@ -24,12 +25,22 @@ function getStorageDir(): string {
 /** Initialize the RPC client. Call once on TUI startup. */
 export function initRpcClient(directory: string): void {
     const storageDir = getStorageDir();
+    // Bump the generation before replacing the client so late notification
+    // responses from a disposed client cannot repopulate cleared cursors.
+    rpcGeneration += 1;
     lastReceivedNotificationIdBySession.clear();
     rpcClient = new MagicContextRpcClient(storageDir, directory);
 }
 
+export function getRpcGeneration(): number {
+    return rpcGeneration;
+}
+
 /** Clean up the RPC client. */
 export function closeRpc(): void {
+    // Closing invalidates any already-issued RPC calls; their callbacks must
+    // observe the new generation and avoid advancing stale notification cursors.
+    rpcGeneration += 1;
     rpcClient?.reset();
     rpcClient = null;
     lastReceivedNotificationIdBySession.clear();
