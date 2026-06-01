@@ -1378,7 +1378,9 @@ export function registerPiContextHandler(
 				isFirstContextPassForSession &&
 				liveModelBySession.get(sessionId) === undefined
 			) {
-				const seeded = findLastModelKeyFromBranch(ctx);
+				// Reuse the branch entries already read above (readPiBranchEntries
+				// ForContext) — getBranch() must be walked only once per event.
+				const seeded = findLastModelKeyFromBranch(branchEntries);
 				if (seeded !== undefined) {
 					liveModelBySession.set(sessionId, seeded);
 				}

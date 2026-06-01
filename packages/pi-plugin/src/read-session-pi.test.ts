@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
-import { convertEntriesToRawMessages, isMidTurnPi } from "./read-session-pi";
+import { convertEntriesToRawMessages, findLastModelKeyFromBranch, isMidTurnPi } from './read-session-pi';
 
 describe("isMidTurnPi", () => {
 	it("is mid-turn when the latest assistant stopReason is toolUse", () => {
@@ -361,5 +361,34 @@ describe("findFirstKeptEntryId — replay-safe boundary resolution", () => {
 		// boundary after ordinal 2 → only the synthetic-user (folded tr-1) tail
 		// remains → no replay-safe real entry → defer.
 		expect(findFirstKeptEntryId(tailEntries, 2)).toBeNull();
+	});
+});
+
+describe("findLastModelKeyFromBranch", () => {
+	it("returns the LAST model_change as provider/modelId", () => {
+		const entries = [
+			{ type: "model_change", provider: "openai", modelId: "gpt-5.4" },
+			{ type: "message", id: "m1", message: { role: "user" } },
+			{ type: "model_change", provider: "anthropic", modelId: "opus-4-8" },
+			{ type: "message", id: "m2", message: { role: "assistant" } },
+		];
+		expect(findLastModelKeyFromBranch(entries)).toBe("anthropic/opus-4-8");
+	});
+
+	it("returns undefined when there is no model_change entry (no-regression path)", () => {
+		const entries = [
+			{ type: "message", id: "m1", message: { role: "user" } },
+			{ type: "message", id: "m2", message: { role: "assistant" } },
+		];
+		expect(findLastModelKeyFromBranch(entries)).toBeUndefined();
+	});
+
+	it("ignores malformed model_change entries (missing provider/modelId)", () => {
+		expect(
+			findLastModelKeyFromBranch([{ type: "model_change", provider: "openai" }]),
+		).toBeUndefined();
+		expect(findLastModelKeyFromBranch([])).toBeUndefined();
+		expect(findLastModelKeyFromBranch(null)).toBeUndefined();
+		expect(findLastModelKeyFromBranch(undefined)).toBeUndefined();
 	});
 });

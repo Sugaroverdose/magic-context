@@ -242,22 +242,14 @@ export function readPiSessionMessages(ctx: ExtensionContext): RawMessage[] {
  * Returns undefined when the branch has no model_change entry (older sessions /
  * edge cases) — the caller then leaves previousModelKey undefined, preserving
  * today's no-reset behavior (no regression).
+ *
+ * Takes the ALREADY-READ branch entries (not ctx): the context handler reads
+ * `getBranch()` exactly once per event (a perf invariant — the branch is the
+ * whole JSONL); this must reuse that read, not re-walk.
  */
 export function findLastModelKeyFromBranch(
-	ctx: ExtensionContext,
+	entries: readonly unknown[] | null | undefined,
 ): string | undefined {
-	const sm = ctx.sessionManager;
-	if (sm === undefined) return undefined;
-	const getBranch = (sm as { getBranch?: (fromId?: string) => unknown[] })
-		.getBranch;
-	if (typeof getBranch !== "function") return undefined;
-
-	let entries: unknown[];
-	try {
-		entries = getBranch.call(sm);
-	} catch {
-		return undefined;
-	}
 	if (!Array.isArray(entries)) return undefined;
 
 	// Walk backwards: the last model_change is the session's current model.
