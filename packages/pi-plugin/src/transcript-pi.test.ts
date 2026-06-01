@@ -249,6 +249,8 @@ describe("createPiTranscript", () => {
 		]);
 		const toolResultParts = transcript.messages[1]?.parts ?? [];
 
+		// Truncated-mode drop: every block (incl. the image) must become a text
+		// "[truncated]" sentinel — the image bytes must NOT survive on the wire.
 		for (const part of toolResultParts) {
 			expect(part.setToolOutput("[truncated]")).toBe(true);
 		}
@@ -263,6 +265,7 @@ describe("createPiTranscript", () => {
 			{ type: "text", text: "[truncated]" },
 		]);
 
+		// Replay must be byte-identical (defer-pass cache stability).
 		const replay = createPiTranscript(output as never, "ses-truncated-image", [
 			"entry-assistant",
 			"entry-tool-result",
@@ -271,8 +274,6 @@ describe("createPiTranscript", () => {
 			part.setToolOutput("[truncated]");
 		}
 		replay.commit();
-
 		expect(JSON.stringify(output[1]?.content)).toBe(firstApplication);
 	});
-
 });

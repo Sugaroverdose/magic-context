@@ -71,10 +71,10 @@
 
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type {
-    Transcript,
-    TranscriptMessage,
-    TranscriptPart,
-    TranscriptPartKind,
+	Transcript,
+	TranscriptMessage,
+	TranscriptPart,
+	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
@@ -86,47 +86,47 @@ import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 type PiTextContent = { type: "text"; text: string; textSignature?: string };
 type PiThinkingContent = {
-    type: "thinking";
-    thinking: string;
-    thinkingSignature?: string;
-    redacted?: boolean;
+	type: "thinking";
+	thinking: string;
+	thinkingSignature?: string;
+	redacted?: boolean;
 };
 type PiImageContent = { type: "image"; data: string; mimeType: string };
 type PiToolCall = {
-    type: "toolCall";
-    id: string;
-    name: string;
-    arguments: Record<string, unknown>;
-    thoughtSignature?: string;
+	type: "toolCall";
+	id: string;
+	name: string;
+	arguments: Record<string, unknown>;
+	thoughtSignature?: string;
 };
 
 type PiUserMessage = {
-    role: "user";
-    content: string | (PiTextContent | PiImageContent)[];
-    timestamp: number;
+	role: "user";
+	content: string | (PiTextContent | PiImageContent)[];
+	timestamp: number;
 };
 
 type PiAssistantMessage = {
-    role: "assistant";
-    content: (PiTextContent | PiThinkingContent | PiToolCall)[];
-    api: string;
-    provider: string;
-    model: string;
-    responseId?: string;
-    usage: unknown;
-    stopReason: string;
-    errorMessage?: string;
-    timestamp: number;
+	role: "assistant";
+	content: (PiTextContent | PiThinkingContent | PiToolCall)[];
+	api: string;
+	provider: string;
+	model: string;
+	responseId?: string;
+	usage: unknown;
+	stopReason: string;
+	errorMessage?: string;
+	timestamp: number;
 };
 
 type PiToolResultMessage = {
-    role: "toolResult";
-    toolCallId: string;
-    toolName: string;
-    content: (PiTextContent | PiImageContent)[];
-    details?: unknown;
-    isError: boolean;
-    timestamp: number;
+	role: "toolResult";
+	toolCallId: string;
+	toolName: string;
+	content: (PiTextContent | PiImageContent)[];
+	details?: unknown;
+	isError: boolean;
+	timestamp: number;
 };
 
 type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
@@ -145,87 +145,87 @@ type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
  * structural typing.
  */
 export function createPiTranscript(
-    source: unknown[],
-    sessionId: string | undefined,
-    entryIds?: readonly (string | undefined)[],
+	source: unknown[],
+	sessionId: string | undefined,
+	entryIds?: readonly (string | undefined)[],
 ): Transcript & {
-    /**
-     * Pi-only escape hatch: returns the rebuilt message array suitable
-     * for `{ messages }` in the `pi.on("context", ...)` result. Returns
-     * the original array if no mutations occurred — preserves identity
-     * so Pi can short-circuit downstream cache invalidation.
-     */
-    getOutputMessages(): unknown[];
-    /**
-     * Pi-only escape hatch: the mutable `working` array that part proxies
-     * (tagging, drops, caveman) write to and `commit()` flushes back to source.
-     *
-     * Phases that mutate messages OUTSIDE the transcript part API — reasoning
-     * clearing/replay, which set `part.thinking = "[cleared]"` in place — MUST
-     * target this array, not the original `source`. Tagging/drops/caveman
-     * REASSIGN `working[idx]` to fresh spread-copied objects; if reasoning mutated
-     * `source[idx]` (a now-divergent object) instead, the later `commit()` would
-     * overwrite `source[idx] = working[idx]` and silently discard the reasoning
-     * mutation while the cleared-reasoning watermark still advanced — a defer-pass
-     * replay divergence (wire keeps original reasoning, state says cleared) that
-     * busts the prompt cache. Routing reasoning through `working` keeps every
-     * mutation in the single channel `commit()` flushes.
-     */
-    getWorkingMessages(): PiAgentMessage[];
+	/**
+	 * Pi-only escape hatch: returns the rebuilt message array suitable
+	 * for `{ messages }` in the `pi.on("context", ...)` result. Returns
+	 * the original array if no mutations occurred — preserves identity
+	 * so Pi can short-circuit downstream cache invalidation.
+	 */
+	getOutputMessages(): unknown[];
+	/**
+	 * Pi-only escape hatch: the mutable `working` array that part proxies
+	 * (tagging, drops, caveman) write to and `commit()` flushes back to source.
+	 *
+	 * Phases that mutate messages OUTSIDE the transcript part API — reasoning
+	 * clearing/replay, which set `part.thinking = "[cleared]"` in place — MUST
+	 * target this array, not the original `source`. Tagging/drops/caveman
+	 * REASSIGN `working[idx]` to fresh spread-copied objects; if reasoning mutated
+	 * `source[idx]` (a now-divergent object) instead, the later `commit()` would
+	 * overwrite `source[idx] = working[idx]` and silently discard the reasoning
+	 * mutation while the cleared-reasoning watermark still advanced — a defer-pass
+	 * replay divergence (wire keeps original reasoning, state says cleared) that
+	 * busts the prompt cache. Routing reasoning through `working` keeps every
+	 * mutation in the single channel `commit()` flushes.
+	 */
+	getWorkingMessages(): PiAgentMessage[];
 } {
-    const working = source.slice() as unknown as PiAgentMessage[];
-    const dirtyMessages = new Set<number>();
+	const working = source.slice() as unknown as PiAgentMessage[];
+	const dirtyMessages = new Set<number>();
 
-    // Normalize: fold consecutive toolResult runs into the immediately
-    // following user message as tool_result transcript parts. Track
-    // source-array locations so commit() can write mutations back.
-    const transcriptMessages: TranscriptMessage[] = buildTranscriptView(
-        working,
-        sessionId,
-        (messageIndex) => {
-            dirtyMessages.add(messageIndex);
-        },
-        entryIds,
-    );
+	// Normalize: fold consecutive toolResult runs into the immediately
+	// following user message as tool_result transcript parts. Track
+	// source-array locations so commit() can write mutations back.
+	const transcriptMessages: TranscriptMessage[] = buildTranscriptView(
+		working,
+		sessionId,
+		(messageIndex) => {
+			dirtyMessages.add(messageIndex);
+		},
+		entryIds,
+	);
 
-    let committed = false;
+	let committed = false;
 
-    return {
-        messages: transcriptMessages,
-        harness: "pi",
-        commit(): void {
-            if (committed) return;
-            committed = true;
-            // Sync mutations from `working` back into `source` so that
-            // any structural changes the caller applies to `source`
-            // directly (e.g. `<session-history>` injection's splice +
-            // message[0] prepend) compose correctly with our part-level
-            // mutations.
-            //
-            // Without this, source[i] still holds the pre-mutation
-            // shape (because part proxies wrote to `working[i]` only)
-            // and downstream callers that operate on source would
-            // either see stale content or skip mutated items entirely.
-            //
-            // The two arrays start identical (working = source.slice())
-            // so copying just the dirty indices is sufficient.
-            for (const idx of dirtyMessages) {
-                if (idx < source.length && idx < working.length) {
-                    (source as unknown as PiAgentMessage[])[idx] = working[idx];
-                }
-            }
-        },
-        getOutputMessages(): unknown[] {
-            // After commit(), source has all part-level mutations
-            // applied AND any structural changes the caller made
-            // directly to source (splices, unshifts). Returning source
-            // is therefore authoritative.
-            return source;
-        },
-        getWorkingMessages(): PiAgentMessage[] {
-            return working;
-        },
-    };
+	return {
+		messages: transcriptMessages,
+		harness: "pi",
+		commit(): void {
+			if (committed) return;
+			committed = true;
+			// Sync mutations from `working` back into `source` so that
+			// any structural changes the caller applies to `source`
+			// directly (e.g. `<session-history>` injection's splice +
+			// message[0] prepend) compose correctly with our part-level
+			// mutations.
+			//
+			// Without this, source[i] still holds the pre-mutation
+			// shape (because part proxies wrote to `working[i]` only)
+			// and downstream callers that operate on source would
+			// either see stale content or skip mutated items entirely.
+			//
+			// The two arrays start identical (working = source.slice())
+			// so copying just the dirty indices is sufficient.
+			for (const idx of dirtyMessages) {
+				if (idx < source.length && idx < working.length) {
+					(source as unknown as PiAgentMessage[])[idx] = working[idx];
+				}
+			}
+		},
+		getOutputMessages(): unknown[] {
+			// After commit(), source has all part-level mutations
+			// applied AND any structural changes the caller made
+			// directly to source (splices, unshifts). Returning source
+			// is therefore authoritative.
+			return source;
+		},
+		getWorkingMessages(): PiAgentMessage[] {
+			return working;
+		},
+	};
 }
 
 /**
@@ -236,84 +236,99 @@ export function createPiTranscript(
  * generated lazily (so part proxies can write back to `working`).
  */
 function buildTranscriptView(
-    working: PiAgentMessage[],
-    sessionId: string | undefined,
-    markDirty: (messageIndex: number) => void,
-    entryIds: readonly (string | undefined)[] | undefined,
+	working: PiAgentMessage[],
+	sessionId: string | undefined,
+	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage[] {
-    const result: TranscriptMessage[] = [];
+	const result: TranscriptMessage[] = [];
 
-    let i = 0;
-    while (i < working.length) {
-        const msg = working[i];
-        if (msg === undefined) {
-            i += 1;
-            continue;
-        }
+	let i = 0;
+	while (i < working.length) {
+		const msg = working[i];
+		if (msg === undefined) {
+			i += 1;
+			continue;
+		}
 
-        if (msg.role === "toolResult") {
-            // Collect contiguous toolResult run.
-            const toolResultRun: { msg: PiToolResultMessage; index: number }[] = [];
-            while (i < working.length) {
-                const candidate = working[i];
-                if (candidate === undefined || candidate.role !== "toolResult") break;
-                toolResultRun.push({ msg: candidate, index: i });
-                i += 1;
-            }
+		if (msg.role === "toolResult") {
+			// Collect contiguous toolResult run.
+			const toolResultRun: { msg: PiToolResultMessage; index: number }[] = [];
+			while (i < working.length) {
+				const candidate = working[i];
+				if (candidate === undefined || candidate.role !== "toolResult") break;
+				toolResultRun.push({ msg: candidate, index: i });
+				i += 1;
+			}
 
-            // Look ahead: if the next message is a user message, fold
-            // the tool results into it. Otherwise emit a synthetic user
-            // message for the run.
-            const next = i < working.length ? working[i] : undefined;
-            if (next?.role === "user") {
-                result.push(
-                    createUserTranscriptMessage(
-                        working,
-                        i,
-                        sessionId,
-                        toolResultRun,
-                        markDirty,
-                        entryIds,
-                    ),
-                );
-                i += 1;
-            } else {
-                result.push(
-                    createSyntheticToolResultUserMessage(
-                        working,
-                        sessionId,
-                        toolResultRun,
-                        markDirty,
-                        entryIds,
-                    ),
-                );
-            }
-            continue;
-        }
+			// Look ahead: if the next message is a user message, fold
+			// the tool results into it. Otherwise emit a synthetic user
+			// message for the run.
+			const next = i < working.length ? working[i] : undefined;
+			if (next?.role === "user") {
+				result.push(
+					createUserTranscriptMessage(
+						working,
+						i,
+						sessionId,
+						toolResultRun,
+						markDirty,
+						entryIds,
+					),
+				);
+				i += 1;
+			} else {
+				result.push(
+					createSyntheticToolResultUserMessage(
+						working,
+						sessionId,
+						toolResultRun,
+						markDirty,
+						entryIds,
+					),
+				);
+			}
+			continue;
+		}
 
-        if (msg.role === "user") {
-            result.push(
-                createUserTranscriptMessage(working, i, sessionId, [], markDirty, entryIds),
-            );
-            i += 1;
-            continue;
-        }
+		if (msg.role === "user") {
+			result.push(
+				createUserTranscriptMessage(
+					working,
+					i,
+					sessionId,
+					[],
+					markDirty,
+					entryIds,
+				),
+			);
+			i += 1;
+			continue;
+		}
 
-        if (msg.role === "assistant") {
-            result.push(
-                createAssistantTranscriptMessage(working, i, sessionId, markDirty, entryIds),
-            );
-            i += 1;
-            continue;
-        }
+		if (msg.role === "assistant") {
+			result.push(
+				createAssistantTranscriptMessage(
+					working,
+					i,
+					sessionId,
+					markDirty,
+					entryIds,
+				),
+			);
+			i += 1;
+			continue;
+		}
 
-        // Unknown role — surface as-is with kind "unknown" parts. Forward
-        // compatibility for new Pi message kinds we don't recognize yet.
-        result.push(createOpaqueTranscriptMessage(working, i, sessionId, markDirty, entryIds));
-        i += 1;
-    }
+		// Unknown role — surface as-is with kind "unknown" parts. Forward
+		// compatibility for new Pi message kinds we don't recognize yet.
+		result.push(
+			createOpaqueTranscriptMessage(working, i, sessionId, markDirty, entryIds),
+		);
+		i += 1;
+	}
 
-    return result;
+	return result;
 }
 
 /**
@@ -321,52 +336,59 @@ function buildTranscriptView(
  * optionally folding preceding toolResult parts into its parts list.
  */
 function createUserTranscriptMessage(
-    working: PiAgentMessage[],
-    index: number,
-    sessionId: string | undefined,
-    foldedToolResults: { msg: PiToolResultMessage; index: number }[],
-    markDirty: (messageIndex: number) => void,
-    entryIds: readonly (string | undefined)[] | undefined,
+	working: PiAgentMessage[],
+	index: number,
+	sessionId: string | undefined,
+	foldedToolResults: { msg: PiToolResultMessage; index: number }[],
+	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
-    const userMsg = working[index] as PiUserMessage;
+	const userMsg = working[index] as PiUserMessage;
 
-    // Pi user messages can have `content: string` (legacy) or
-    // `content: (TextContent | ImageContent)[]`. Normalize: a string
-    // becomes a single TextContent with locator pointing at partIndex 0.
-    const isStringContent = typeof userMsg.content === "string";
+	// Pi user messages can have `content: string` (legacy) or
+	// `content: (TextContent | ImageContent)[]`. Normalize: a string
+	// becomes a single TextContent with locator pointing at partIndex 0.
+	const isStringContent = typeof userMsg.content === "string";
 
-    return {
-        info: {
-            id: extractStableId(userMsg, index, entryIds),
-            role: "user",
-            sessionId,
-        },
-        get parts(): TranscriptPart[] {
-            const parts: TranscriptPart[] = [];
+	return {
+		info: {
+			id: extractStableId(userMsg, index, entryIds),
+			role: "user",
+			sessionId,
+		},
+		get parts(): TranscriptPart[] {
+			const parts: TranscriptPart[] = [];
 
-            // Folded tool results come FIRST (they precede the user's
-            // own content in real conversation order).
-            for (const { index: toolResultIndex } of foldedToolResults) {
-                const toolMsg = working[toolResultIndex] as PiToolResultMessage;
-                toolMsg.content.forEach((_, partIndex) => {
-                    parts.push(
-                        createPiToolResultPart(working, toolResultIndex, partIndex, markDirty),
-                    );
-                });
-            }
+			// Folded tool results come FIRST (they precede the user's
+			// own content in real conversation order).
+			for (const { index: toolResultIndex } of foldedToolResults) {
+				const toolMsg = working[toolResultIndex] as PiToolResultMessage;
+				toolMsg.content.forEach((_, partIndex) => {
+					parts.push(
+						createPiToolResultPart(
+							working,
+							toolResultIndex,
+							partIndex,
+							markDirty,
+						),
+					);
+				});
+			}
 
-            // Then the user's own content.
-            if (isStringContent) {
-                parts.push(createPiUserStringPart(working, index, markDirty));
-            } else if (Array.isArray(userMsg.content)) {
-                userMsg.content.forEach((_, partIndex) => {
-                    parts.push(createPiUserArrayPart(working, index, partIndex, markDirty));
-                });
-            }
+			// Then the user's own content.
+			if (isStringContent) {
+				parts.push(createPiUserStringPart(working, index, markDirty));
+			} else if (Array.isArray(userMsg.content)) {
+				userMsg.content.forEach((_, partIndex) => {
+					parts.push(
+						createPiUserArrayPart(working, index, partIndex, markDirty),
+					);
+				});
+			}
 
-            return parts;
-        },
-    };
+			return parts;
+		},
+	};
 }
 
 /**
@@ -377,88 +399,94 @@ function createUserTranscriptMessage(
  * cannot collide with real SessionEntry ids.
  */
 function createSyntheticToolResultUserMessage(
-    working: PiAgentMessage[],
-    sessionId: string | undefined,
-    toolResultRun: { msg: PiToolResultMessage; index: number }[],
-    markDirty: (messageIndex: number) => void,
-    entryIds: readonly (string | undefined)[] | undefined,
+	working: PiAgentMessage[],
+	sessionId: string | undefined,
+	toolResultRun: { msg: PiToolResultMessage; index: number }[],
+	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
-    return {
-        info: {
-            id: createSyntheticToolResultUserId(toolResultRun, entryIds),
-            role: "user",
-            sessionId,
-        },
-        get parts(): TranscriptPart[] {
-            const parts: TranscriptPart[] = [];
-            for (const { index: toolResultIndex } of toolResultRun) {
-                const toolMsg = working[toolResultIndex] as PiToolResultMessage;
-                toolMsg.content.forEach((_, partIndex) => {
-                    parts.push(
-                        createPiToolResultPart(working, toolResultIndex, partIndex, markDirty),
-                    );
-                });
-            }
-            return parts;
-        },
-    };
+	return {
+		info: {
+			id: createSyntheticToolResultUserId(toolResultRun, entryIds),
+			role: "user",
+			sessionId,
+		},
+		get parts(): TranscriptPart[] {
+			const parts: TranscriptPart[] = [];
+			for (const { index: toolResultIndex } of toolResultRun) {
+				const toolMsg = working[toolResultIndex] as PiToolResultMessage;
+				toolMsg.content.forEach((_, partIndex) => {
+					parts.push(
+						createPiToolResultPart(
+							working,
+							toolResultIndex,
+							partIndex,
+							markDirty,
+						),
+					);
+				});
+			}
+			return parts;
+		},
+	};
 }
 
+
 function createSyntheticToolResultUserId(
-    toolResultRun: { msg: PiToolResultMessage; index: number }[],
-    entryIds: readonly (string | undefined)[] | undefined,
+	toolResultRun: { msg: PiToolResultMessage; index: number }[],
+	entryIds: readonly (string | undefined)[] | undefined,
 ): string | undefined {
-    const first = toolResultRun[0];
-    if (first === undefined) return undefined;
-    const stableId = extractStableId(first.msg, first.index, entryIds);
-    return stableId === undefined ? undefined : `${SYNTH_USER_ID_PREFIX}${stableId}`;
+	const first = toolResultRun[0];
+	if (first === undefined) return undefined;
+	const stableId = extractStableId(first.msg, first.index, entryIds);
+	return stableId === undefined ? undefined : `${SYNTH_USER_ID_PREFIX}${stableId}`;
 }
 
 function createAssistantTranscriptMessage(
-    working: PiAgentMessage[],
-    index: number,
-    sessionId: string | undefined,
-    markDirty: (messageIndex: number) => void,
-    entryIds: readonly (string | undefined)[] | undefined,
+	working: PiAgentMessage[],
+	index: number,
+	sessionId: string | undefined,
+	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
-    const msg = working[index] as PiAssistantMessage;
-    return {
-        info: {
-            id: extractStableId(msg, index, entryIds),
-            role: "assistant",
-            sessionId,
-        },
-        get parts(): TranscriptPart[] {
-            return msg.content.map((_, partIndex) =>
-                createPiAssistantPart(working, index, partIndex, markDirty),
-            );
-        },
-    };
+	const msg = working[index] as PiAssistantMessage;
+	return {
+		info: {
+			id: extractStableId(msg, index, entryIds),
+			role: "assistant",
+			sessionId,
+		},
+		get parts(): TranscriptPart[] {
+			return msg.content.map((_, partIndex) =>
+				createPiAssistantPart(working, index, partIndex, markDirty),
+			);
+		},
+	};
 }
 
 function createOpaqueTranscriptMessage(
-    working: PiAgentMessage[],
-    index: number,
-    sessionId: string | undefined,
-    _markDirty: (messageIndex: number) => void,
-    entryIds: readonly (string | undefined)[] | undefined,
+	working: PiAgentMessage[],
+	index: number,
+	sessionId: string | undefined,
+	_markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
-    const msg = working[index];
-    return {
-        info: {
-            id: extractStableId(msg, index, entryIds),
-            role:
-                typeof (msg as { role?: string })?.role === "string"
-                    ? (msg as { role: string }).role
-                    : "unknown",
-            sessionId,
-        },
-        // Unknown messages have no parts as far as the transform is
-        // concerned. They pass through unmodified.
-        get parts(): TranscriptPart[] {
-            return [];
-        },
-    };
+	const msg = working[index];
+	return {
+		info: {
+			id: extractStableId(msg, index, entryIds),
+			role:
+				typeof (msg as { role?: string })?.role === "string"
+					? (msg as { role: string }).role
+					: "unknown",
+			sessionId,
+		},
+		// Unknown messages have no parts as far as the transform is
+		// concerned. They pass through unmodified.
+		get parts(): TranscriptPart[] {
+			return [];
+		},
+	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -466,313 +494,323 @@ function createOpaqueTranscriptMessage(
 /* ------------------------------------------------------------------ */
 
 function createPiUserStringPart(
-    working: PiAgentMessage[],
-    messageIndex: number,
-    markDirty: (messageIndex: number) => void,
+	working: PiAgentMessage[],
+	messageIndex: number,
+	markDirty: (messageIndex: number) => void,
 ): TranscriptPart {
-    return {
-        kind: "text",
-        // User text parts do not need per-part ids: tagTranscript keys them by
-        // the stable parent message id plus text ordinal.
-        id: undefined,
-        getText(): string | undefined {
-            const msg = working[messageIndex] as PiUserMessage | undefined;
-            if (msg === undefined) return undefined;
-            return typeof msg.content === "string" ? msg.content : undefined;
-        },
-        setText(newText: string): boolean {
-            const msg = working[messageIndex] as PiUserMessage | undefined;
-            if (msg === undefined || typeof msg.content !== "string") return false;
-            if (msg.content === newText) return false;
-            working[messageIndex] = { ...msg, content: newText };
-            markDirty(messageIndex);
-            return true;
-        },
-        setToolOutput(): boolean {
-            throw new Error("setToolOutput on user-text part");
-        },
-        getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
-            return { toolName: undefined, inputByteSize: 0 };
-        },
-        replaceWithSentinel(sentinelText: string): boolean {
-            const msg = working[messageIndex] as PiUserMessage | undefined;
-            if (msg === undefined) return false;
-            working[messageIndex] = { ...msg, content: sentinelText };
-            markDirty(messageIndex);
-            return true;
-        },
-    };
+	return {
+		kind: "text",
+		// User text parts do not need per-part ids: tagTranscript keys them by
+		// the stable parent message id plus text ordinal.
+		id: undefined,
+		getText(): string | undefined {
+			const msg = working[messageIndex] as PiUserMessage | undefined;
+			if (msg === undefined) return undefined;
+			return typeof msg.content === "string" ? msg.content : undefined;
+		},
+		setText(newText: string): boolean {
+			const msg = working[messageIndex] as PiUserMessage | undefined;
+			if (msg === undefined || typeof msg.content !== "string") return false;
+			if (msg.content === newText) return false;
+			working[messageIndex] = { ...msg, content: newText };
+			markDirty(messageIndex);
+			return true;
+		},
+		setToolOutput(): boolean {
+			throw new Error("setToolOutput on user-text part");
+		},
+		getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
+			return { toolName: undefined, inputByteSize: 0 };
+		},
+		replaceWithSentinel(sentinelText: string): boolean {
+			const msg = working[messageIndex] as PiUserMessage | undefined;
+			if (msg === undefined) return false;
+			working[messageIndex] = { ...msg, content: sentinelText };
+			markDirty(messageIndex);
+			return true;
+		},
+	};
 }
 
 function createPiUserArrayPart(
-    working: PiAgentMessage[],
-    messageIndex: number,
-    partIndex: number,
-    markDirty: (messageIndex: number) => void,
+	working: PiAgentMessage[],
+	messageIndex: number,
+	partIndex: number,
+	markDirty: (messageIndex: number) => void,
 ): TranscriptPart {
-    const msg = working[messageIndex] as PiUserMessage;
-    const part = Array.isArray(msg.content) ? msg.content[partIndex] : undefined;
-    const kind: TranscriptPartKind = classifyContent(part);
-    return {
-        kind,
-        // User array parts are not tool/content units. Text is keyed by parent
-        // message id + ordinal; images remain non-droppable user payloads.
-        id: undefined,
-        getText(): string | undefined {
-            const current = (working[messageIndex] as PiUserMessage).content;
-            if (!Array.isArray(current)) return undefined;
-            const p = current[partIndex];
-            if (p?.type === "text") return p.text;
-            return undefined;
-        },
-        setText(newText: string): boolean {
-            const current = (working[messageIndex] as PiUserMessage).content;
-            if (!Array.isArray(current)) return false;
-            const p = current[partIndex];
-            if (p?.type !== "text") return false;
-            if (p.text === newText) return false;
-            const newContent = current.slice();
-            newContent[partIndex] = { ...p, text: newText };
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiUserMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-        setToolOutput(): boolean {
-            throw new Error("setToolOutput on non-tool-result part");
-        },
-        getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
-            return { toolName: undefined, inputByteSize: 0 };
-        },
-        replaceWithSentinel(sentinelText: string): boolean {
-            const current = (working[messageIndex] as PiUserMessage).content;
-            if (!Array.isArray(current)) return false;
-            const newContent = current.slice();
-            newContent[partIndex] = { type: "text", text: sentinelText };
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiUserMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-    };
+	const msg = working[messageIndex] as PiUserMessage;
+	const part = Array.isArray(msg.content) ? msg.content[partIndex] : undefined;
+	const kind: TranscriptPartKind = classifyContent(part);
+	return {
+		kind,
+		// User array parts are not tool/content units. Text is keyed by parent
+		// message id + ordinal; images remain non-droppable user payloads.
+		id: undefined,
+		getText(): string | undefined {
+			const current = (working[messageIndex] as PiUserMessage).content;
+			if (!Array.isArray(current)) return undefined;
+			const p = current[partIndex];
+			if (p?.type === "text") return p.text;
+			return undefined;
+		},
+		setText(newText: string): boolean {
+			const current = (working[messageIndex] as PiUserMessage).content;
+			if (!Array.isArray(current)) return false;
+			const p = current[partIndex];
+			if (p?.type !== "text") return false;
+			if (p.text === newText) return false;
+			const newContent = current.slice();
+			newContent[partIndex] = { ...p, text: newText };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiUserMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+		setToolOutput(): boolean {
+			throw new Error("setToolOutput on non-tool-result part");
+		},
+		getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
+			return { toolName: undefined, inputByteSize: 0 };
+		},
+		replaceWithSentinel(sentinelText: string): boolean {
+			const current = (working[messageIndex] as PiUserMessage).content;
+			if (!Array.isArray(current)) return false;
+			const newContent = current.slice();
+			newContent[partIndex] = { type: "text", text: sentinelText };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiUserMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+	};
 }
 
 function createPiAssistantPart(
-    working: PiAgentMessage[],
-    messageIndex: number,
-    partIndex: number,
-    markDirty: (messageIndex: number) => void,
+	working: PiAgentMessage[],
+	messageIndex: number,
+	partIndex: number,
+	markDirty: (messageIndex: number) => void,
 ): TranscriptPart {
-    const msg = working[messageIndex] as PiAssistantMessage;
-    const part = msg.content[partIndex];
-    const kind = classifyAssistantContent(part);
-    const id = part?.type === "toolCall" ? part.id : undefined;
+	const msg = working[messageIndex] as PiAssistantMessage;
+	const part = msg.content[partIndex];
+	const kind = classifyAssistantContent(part);
+	const id = part?.type === "toolCall" ? part.id : undefined;
 
-    return {
-        kind,
-        id,
-        getText(): string | undefined {
-            const current = (working[messageIndex] as PiAssistantMessage).content;
-            const p = current[partIndex];
-            if (p?.type === "text") return p.text;
-            if (p?.type === "thinking") return p.thinking;
-            if (p?.type === "toolCall") {
-                try {
-                    return JSON.stringify(p.arguments);
-                } catch {
-                    return undefined;
-                }
-            }
-            return undefined;
-        },
-        setText(newText: string): boolean {
-            const current = (working[messageIndex] as PiAssistantMessage).content;
-            const p = current[partIndex];
-            if (p?.type === "text") {
-                if (p.text === newText) return false;
-                const newContent = current.slice();
-                newContent[partIndex] = { ...p, text: newText };
-                working[messageIndex] = {
-                    ...(working[messageIndex] as PiAssistantMessage),
-                    content: newContent,
-                };
-                markDirty(messageIndex);
-                return true;
-            }
-            if (p?.type === "thinking") {
-                if (p.thinking === newText) return false;
-                const newContent = current.slice();
-                newContent[partIndex] = { ...p, thinking: newText };
-                working[messageIndex] = {
-                    ...(working[messageIndex] as PiAssistantMessage),
-                    content: newContent,
-                };
-                markDirty(messageIndex);
-                return true;
-            }
-            if (p?.type === "toolCall") {
-                const replacementArgs = { __magic_context_replacement__: newText };
-                try {
-                    if (JSON.stringify(p.arguments) === JSON.stringify(replacementArgs)) {
-                        return false;
-                    }
-                } catch {
-                    // Non-serializable args still need to be replaceable.
-                }
-                const newContent = current.slice();
-                newContent[partIndex] = {
-                    type: "toolCall",
-                    id: p.id,
-                    name: p.name,
-                    arguments: replacementArgs,
-                };
-                working[messageIndex] = {
-                    ...(working[messageIndex] as PiAssistantMessage),
-                    content: newContent,
-                };
-                markDirty(messageIndex);
-                return true;
-            }
-            return false;
-        },
-        setToolOutput(): boolean {
-            // Assistant messages don't have tool outputs in Pi — those
-            // live in separate ToolResultMessage entries (handled by
-            // createPiToolResultPart). Calling this on an assistant
-            // part is always a programming error.
-            throw new Error("setToolOutput on assistant part");
-        },
-        getToolMetadata(): { toolName: string | undefined; inputByteSize: number } {
-            const current = (working[messageIndex] as PiAssistantMessage).content;
-            const p = current[partIndex];
-            if (p?.type !== "toolCall") {
-                return { toolName: undefined, inputByteSize: 0 };
-            }
-            let inputByteSize = 0;
-            try {
-                inputByteSize = JSON.stringify(p.arguments).length;
-            } catch {
-                inputByteSize = 0;
-            }
-            return { toolName: p.name, inputByteSize };
-        },
-        // Replace this assistant part's content with a sentinel placeholder.
-        //
-        // CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",
-        // id, name }` so the Pi → provider serializer still emits a
-        // `function_call` / `tool_use` block with the original `call_id`.
-        // The corresponding `toolResult` message in the conversation
-        // references that same `call_id` (via `toolCallId`); breaking the
-        // pairing causes the provider to reject the request with
-        // errors like "No tool call found for function call output with
-        // call_id …" (Codex) or "tool_use blocks must be followed by
-        // matching tool_result blocks" (Anthropic).
-        //
-        // We therefore keep the toolCall shell with its id + name and
-        // reduce `arguments` to a tiny marker object. Bulk argument
-        // content is what we really want to drop; the structural shape
-        // stays intact so message-pair integrity holds across the
-        // API boundary.
-        //
-        // For non-toolCall assistant parts (text / thinking) we still
-        // fall back to a plain text-sentinel replacement — those have no
-        // pairing constraint and the bulk reduction is the only goal.
-        replaceWithSentinel(sentinelText: string): boolean {
-            const current = (working[messageIndex] as PiAssistantMessage).content;
-            const existing = current[partIndex];
-            const newContent = current.slice();
-            if (existing && existing.type === "toolCall") {
-                newContent[partIndex] = {
-                    type: "toolCall",
-                    id: existing.id,
-                    name: existing.name,
-                    arguments: { __magic_context_dropped__: sentinelText },
-                };
-            } else {
-                newContent[partIndex] = { type: "text", text: sentinelText };
-            }
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiAssistantMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-    };
+	return {
+		kind,
+		id,
+		getText(): string | undefined {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const p = current[partIndex];
+			if (p?.type === "text") return p.text;
+			if (p?.type === "thinking") return p.thinking;
+			if (p?.type === "toolCall") {
+				try {
+					return JSON.stringify(p.arguments);
+				} catch {
+					return undefined;
+				}
+			}
+			return undefined;
+		},
+		setText(newText: string): boolean {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const p = current[partIndex];
+			if (p?.type === "text") {
+				if (p.text === newText) return false;
+				const newContent = current.slice();
+				newContent[partIndex] = { ...p, text: newText };
+				working[messageIndex] = {
+					...(working[messageIndex] as PiAssistantMessage),
+					content: newContent,
+				};
+				markDirty(messageIndex);
+				return true;
+			}
+			if (p?.type === "thinking") {
+				if (p.thinking === newText) return false;
+				const newContent = current.slice();
+				newContent[partIndex] = { ...p, thinking: newText };
+				working[messageIndex] = {
+					...(working[messageIndex] as PiAssistantMessage),
+					content: newContent,
+				};
+				markDirty(messageIndex);
+				return true;
+			}
+			if (p?.type === "toolCall") {
+				const replacementArgs = { __magic_context_replacement__: newText };
+				try {
+					if (JSON.stringify(p.arguments) === JSON.stringify(replacementArgs)) {
+						return false;
+					}
+				} catch {
+					// Non-serializable args still need to be replaceable.
+				}
+				const newContent = current.slice();
+				newContent[partIndex] = {
+					type: "toolCall",
+					id: p.id,
+					name: p.name,
+					arguments: replacementArgs,
+				};
+				working[messageIndex] = {
+					...(working[messageIndex] as PiAssistantMessage),
+					content: newContent,
+				};
+				markDirty(messageIndex);
+				return true;
+			}
+			return false;
+		},
+		setToolOutput(): boolean {
+			// Assistant messages don't have tool outputs in Pi — those
+			// live in separate ToolResultMessage entries (handled by
+			// createPiToolResultPart). Calling this on an assistant
+			// part is always a programming error.
+			throw new Error("setToolOutput on assistant part");
+		},
+		getToolMetadata(): { toolName: string | undefined; inputByteSize: number } {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const p = current[partIndex];
+			if (p?.type !== "toolCall") {
+				return { toolName: undefined, inputByteSize: 0 };
+			}
+			let inputByteSize = 0;
+			try {
+				inputByteSize = JSON.stringify(p.arguments).length;
+			} catch {
+				inputByteSize = 0;
+			}
+			return { toolName: p.name, inputByteSize };
+		},
+		// Replace this assistant part's content with a sentinel placeholder.
+		//
+		// CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",
+		// id, name }` so the Pi → provider serializer still emits a
+		// `function_call` / `tool_use` block with the original `call_id`.
+		// The corresponding `toolResult` message in the conversation
+		// references that same `call_id` (via `toolCallId`); breaking the
+		// pairing causes the provider to reject the request with
+		// errors like "No tool call found for function call output with
+		// call_id …" (Codex) or "tool_use blocks must be followed by
+		// matching tool_result blocks" (Anthropic).
+		//
+		// We therefore keep the toolCall shell with its id + name and
+		// reduce `arguments` to a tiny marker object. Bulk argument
+		// content is what we really want to drop; the structural shape
+		// stays intact so message-pair integrity holds across the
+		// API boundary.
+		//
+		// For non-toolCall assistant parts (text / thinking) we still
+		// fall back to a plain text-sentinel replacement — those have no
+		// pairing constraint and the bulk reduction is the only goal.
+		replaceWithSentinel(sentinelText: string): boolean {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const existing = current[partIndex];
+			const newContent = current.slice();
+			if (existing && existing.type === "toolCall") {
+				newContent[partIndex] = {
+					type: "toolCall",
+					id: existing.id,
+					name: existing.name,
+					arguments: { __magic_context_dropped__: sentinelText },
+				};
+			} else {
+				newContent[partIndex] = { type: "text", text: sentinelText };
+			}
+			working[messageIndex] = {
+				...(working[messageIndex] as PiAssistantMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+	};
 }
 
 function createPiToolResultPart(
-    working: PiAgentMessage[],
-    messageIndex: number,
-    partIndex: number,
-    markDirty: (messageIndex: number) => void,
+	working: PiAgentMessage[],
+	messageIndex: number,
+	partIndex: number,
+	markDirty: (messageIndex: number) => void,
 ): TranscriptPart {
-    const msg = working[messageIndex] as PiToolResultMessage;
-    // Every block inside one Pi ToolResultMessage belongs to the same
-    // droppable tool-output unit. Expose images as tool_result (not image)
-    // so tagTranscript aggregates text + image blocks under msg.toolCallId
-    // and a single drop replaces the whole result.
-    const kind: TranscriptPartKind = "tool_result";
-    return {
-        kind,
-        id: msg.toolCallId,
-        getText(): string | undefined {
-            const current = (working[messageIndex] as PiToolResultMessage).content;
-            const p = current[partIndex];
-            return p?.type === "text" ? p.text : undefined;
-        },
-        setText(newText: string): boolean {
-            // For tagging purposes, we do allow mutating the text of the
-            // surfaced tool_result text slot. setToolOutput is the
-            // canonical channel but setText is symmetric for tagging.
-            const current = (working[messageIndex] as PiToolResultMessage).content;
-            const p = current[partIndex];
-            if (p?.type !== "text") return false;
-            if (p.text === newText) return false;
-            const newContent = current.slice();
-            newContent[partIndex] = { ...p, text: newText };
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiToolResultMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-        setToolOutput(newText: string): boolean {
-            const current = (working[messageIndex] as PiToolResultMessage).content;
-            const p = current[partIndex];
-            if (p?.type === "text") return this.setText(newText);
-            const newContent = current.slice();
-            newContent[partIndex] = { type: "text", text: newText };
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiToolResultMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-        getToolMetadata(): { toolName: string; inputByteSize: number } {
-            return {
-                toolName: (working[messageIndex] as PiToolResultMessage).toolName,
-                inputByteSize: 0,
-            };
-        },
-        replaceWithSentinel(sentinelText: string): boolean {
-            const current = (working[messageIndex] as PiToolResultMessage).content;
-            const newContent = current.slice();
-            newContent[partIndex] = { type: "text", text: sentinelText };
-            working[messageIndex] = {
-                ...(working[messageIndex] as PiToolResultMessage),
-                content: newContent,
-            };
-            markDirty(messageIndex);
-            return true;
-        },
-    };
+	const msg = working[messageIndex] as PiToolResultMessage;
+	const part = msg.content[partIndex];
+	// Every block inside one Pi ToolResultMessage belongs to the same
+	// droppable tool-output unit. Expose images as tool_result (not image)
+	// so tagTranscript aggregates text + image blocks under msg.toolCallId
+	// and a single drop replaces the whole result.
+	const kind: TranscriptPartKind = "tool_result";
+	return {
+		kind,
+		id: msg.toolCallId,
+		getText(): string | undefined {
+			const current = (working[messageIndex] as PiToolResultMessage).content;
+			const p = current[partIndex];
+			return p?.type === "text" ? p.text : undefined;
+		},
+		setText(newText: string): boolean {
+			// For tagging purposes, we do allow mutating the text of the
+			// surfaced tool_result text slot. setToolOutput is the
+			// canonical channel but setText is symmetric for tagging.
+			const current = (working[messageIndex] as PiToolResultMessage).content;
+			const p = current[partIndex];
+			if (p?.type !== "text") return false;
+			if (p.text === newText) return false;
+			const newContent = current.slice();
+			newContent[partIndex] = { ...p, text: newText };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiToolResultMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+		setToolOutput(newText: string): boolean {
+			// Truncated-mode drops route through here. setText() only mutates
+			// `type:"text"` blocks, so an image (or any non-text) block in a tool
+			// result would be left INTACT — the model would still see the image
+			// bytes while the text became "[truncated]", and the drop bookkeeping
+			// would overstate reclaimed space. Rewrite a non-text block to a text
+			// sentinel (same conversion replaceWithSentinel does) so the whole
+			// tool-result block is actually truncated. setText() is deliberately
+			// NOT broadened — it's used by tag-prefix injection on normal passes,
+			// where converting images would corrupt the wire.
+			const current = (working[messageIndex] as PiToolResultMessage).content;
+			const p = current[partIndex];
+			if (p?.type === "text") return this.setText(newText);
+			const newContent = current.slice();
+			newContent[partIndex] = { type: "text", text: newText };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiToolResultMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+		getToolMetadata(): { toolName: string; inputByteSize: number } {
+			return {
+				toolName: (working[messageIndex] as PiToolResultMessage).toolName,
+				inputByteSize: 0,
+			};
+		},
+		replaceWithSentinel(sentinelText: string): boolean {
+			const current = (working[messageIndex] as PiToolResultMessage).content;
+			const newContent = current.slice();
+			newContent[partIndex] = { type: "text", text: sentinelText };
+			working[messageIndex] = {
+				...(working[messageIndex] as PiToolResultMessage),
+				content: newContent,
+			};
+			markDirty(messageIndex);
+			return true;
+		},
+	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -780,18 +818,18 @@ function createPiToolResultPart(
 /* ------------------------------------------------------------------ */
 
 function classifyContent(part: unknown): TranscriptPartKind {
-    if (!isRecord(part)) return "unknown";
-    if (part.type === "text") return "text";
-    if (part.type === "image") return "image";
-    return "unknown";
+	if (!isRecord(part)) return "unknown";
+	if (part.type === "text") return "text";
+	if (part.type === "image") return "image";
+	return "unknown";
 }
 
 function classifyAssistantContent(part: unknown): TranscriptPartKind {
-    if (!isRecord(part)) return "unknown";
-    if (part.type === "text") return "text";
-    if (part.type === "thinking") return "thinking";
-    if (part.type === "toolCall") return "tool_use";
-    return "unknown";
+	if (!isRecord(part)) return "unknown";
+	if (part.type === "text") return "text";
+	if (part.type === "thinking") return "thinking";
+	if (part.type === "toolCall") return "tool_use";
+	return "unknown";
 }
 
 /**
@@ -809,14 +847,14 @@ function classifyAssistantContent(part: unknown): TranscriptPartKind {
  * these synthetic IDs. Step 4b.3 wires the session-entry layer.
  */
 function extractStableId(
-    msg: PiAgentMessage | undefined,
-    index: number,
-    entryIds: readonly (string | undefined)[] | undefined,
+	msg: PiAgentMessage | undefined,
+	index: number,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): string | undefined {
-    // Single source of truth: prefer the real SessionEntry id (position-
-    // independent → tags/source_contents/caveman keyed on it survive array
-    // shifts), fall back to the unstable pi-msg-index id only when none resolves.
-    // No entryIdByRef here: tagging runs at transcript-build time on the freshly
-    // sliced `working` array, so positional entryIds[index] is exactly aligned.
-    return resolvePiStableId(msg, index, entryIds);
+	// Single source of truth: prefer the real SessionEntry id (position-
+	// independent → tags/source_contents/caveman keyed on it survive array
+	// shifts), fall back to the unstable pi-msg-index id only when none resolves.
+	// No entryIdByRef here: tagging runs at transcript-build time on the freshly
+	// sliced `working` array, so positional entryIds[index] is exactly aligned.
+	return resolvePiStableId(msg, index, entryIds);
 }
