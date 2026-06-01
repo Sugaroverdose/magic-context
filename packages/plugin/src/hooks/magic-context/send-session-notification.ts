@@ -73,7 +73,7 @@ export async function sendIgnoredMessage(
     // caller asked to force-persist (long-running outcome must stay in scrollback).
     // Cannot use process.env.OPENCODE_CLIENT — it's undefined in the server plugin process.
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
-    if (!forcePersist && checkTui()) {
+    if (!forcePersist && checkTui(sessionId)) {
         try {
             const c = client as Record<string, unknown>;
             const tui = c?.tui as Record<string, unknown> | undefined;

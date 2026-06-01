@@ -16,10 +16,22 @@ export interface RpcNotification {
 
 let queue: RpcNotification[] = [];
 let nextNotificationId = 1;
-// Timestamp of last drain — used to detect if TUI is actively polling.
+// Timestamp of last drain — used to detect if a TUI is actively polling.
 // The TUI polls every 500ms; we consider it connected if it polled within
 // the last 3 seconds (6× the poll interval, tolerates transient delays).
-let lastDrainAt = 0;
+//
+// PER-SESSION: a single server process can serve MANY sessions (e.g. a TUI on
+// session A plus an OpenCode Desktop opened on session B for the same project,
+// whose newer RPC server this TUI's port discovery then selects). The TUI
+// poller drains with ITS active session id, so a session is "TUI-connected"
+// only if a TUI recently drained FOR THAT session. A process-global timestamp
+// would make session B's producers (`/ctx-status`, upgrade reminder) take the
+// TUI-dialog path because session A's TUI is polling — queuing a B-scoped
+// dialog action that A's poller correctly refuses to show, so B's notice is
+// lost (it also suppressed B's non-TUI fallback). Tracking drains per session
+// routes each producer to the right delivery path.
+const lastDrainAtBySession = new Map<string, number>();
+let lastDrainAtAny = 0;
 const TUI_CONNECTED_WINDOW_MS = 3_000;
 
 /** Push a notification for TUI to pick up via polling. */
@@ -29,9 +41,27 @@ export function pushNotification(
     sessionId?: string,
 ): void {
     queue.push({ id: nextNotificationId++, type, payload, sessionId });
-    // Cap queue size to prevent unbounded growth if TUI is not polling
+    // Cap queue size to prevent unbounded growth if a TUI is not draining.
+    // Session-FAIR eviction: a naive `slice(-50)` drops the globally-oldest
+    // items, so a noisy session could evict ANOTHER session's single unseen
+    // notification. Instead, always retain each session's newest item, then
+    // fill the rest of the budget with the newest overall — no session can
+    // starve another's pending dialog out of the window.
     if (queue.length > 100) {
-        queue = queue.slice(-50);
+        const newestPerSession = new Map<string | undefined, number>();
+        for (const n of queue) {
+            const prev = newestPerSession.get(n.sessionId);
+            if (prev === undefined || n.id > prev) {
+                newestPerSession.set(n.sessionId, n.id);
+            }
+        }
+        const mustKeep = new Set(newestPerSession.values());
+        const byNewest = [...queue].sort((a, b) => b.id - a.id);
+        const kept: RpcNotification[] = [];
+        for (const n of byNewest) {
+            if (kept.length < 50 || mustKeep.has(n.id)) kept.push(n);
+        }
+        queue = kept.sort((a, b) => a.id - b.id);
     }
 }
 
@@ -57,7 +87,9 @@ export function drainNotifications(
     lastReceivedId = 0,
     sessionId?: string,
 ): RpcNotification[] {
-    lastDrainAt = Date.now();
+    const now = Date.now();
+    lastDrainAtAny = now;
+    if (sessionId !== undefined) lastDrainAtBySession.set(sessionId, now);
     const matchesClient = (notification: RpcNotification): boolean =>
         sessionId === undefined ||
         notification.sessionId === undefined ||
@@ -77,8 +109,19 @@ export function drainNotifications(
 }
 
 /** Whether a TUI client is actively polling for notifications.
- *  Returns true only if the TUI has drained within the last 3 seconds.
- *  This prevents stale-connected state after TUI closes or disconnects. */
-export function isTuiConnected(): boolean {
-    return lastDrainAt > 0 && Date.now() - lastDrainAt < TUI_CONNECTED_WINDOW_MS;
+ *  Returns true only if a TUI has drained within the last 3 seconds.
+ *
+ *  Pass `sessionId` (preferred) to ask whether a TUI is polling FOR THAT
+ *  SESSION — this is what producers (`/ctx-status`, `/ctx-recomp`, the upgrade
+ *  reminder) must use to decide dialog-vs-message, so a TUI on a different
+ *  session in the same process does not misroute their delivery. Omit it only
+ *  for legacy/global callers that genuinely have no session context; they fall
+ *  back to "any session recently drained" (the pre-per-session behavior). */
+export function isTuiConnected(sessionId?: string): boolean {
+    const now = Date.now();
+    if (sessionId !== undefined) {
+        const at = lastDrainAtBySession.get(sessionId) ?? 0;
+        return at > 0 && now - at < TUI_CONNECTED_WINDOW_MS;
+    }
+    return lastDrainAtAny > 0 && now - lastDrainAtAny < TUI_CONNECTED_WINDOW_MS;
 }

@@ -435,7 +435,7 @@ export function createMagicContextCommandHandler(deps: {
             }
 
             if (isStatus) {
-                if (isTuiConnected()) {
+                if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a native dialog
                     pushNotification("action", { action: "show-status-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-status: pushed show-status-dialog to TUI");
@@ -464,7 +464,7 @@ export function createMagicContextCommandHandler(deps: {
                     result = `## Magic Recomp — Invalid Arguments\n\n${parsedArgs.message}`;
                 } else if (parsedArgs.kind === "upgrade") {
                     result = executeRecompUpgradeStub(deps.db, sessionId);
-                } else if (isTuiConnected()) {
+                } else if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.
                     // Partial-range args fall through to the full-recomp dialog for now — TUI
                     // range UI is tracked as a phase-2 enhancement; typed args are ignored here.

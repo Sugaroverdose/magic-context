@@ -118,11 +118,13 @@ export interface UpgradeReminderDeps {
     ) => Promise<void>;
     /** Live notification params (model/variant/agent) for the active session. */
     getNotificationParams: (sessionId: string) => Record<string, unknown>;
-    /** True when a TUI client is actively polling (decides dialog vs ignored msg).
-     *  Optional: harnesses without an OpenCode-style TUI dialog system (e.g. Pi,
-     *  which delivers via `ctx.ui.notify`) omit this and always take the
-     *  `sendIgnoredMessage` path. */
-    isTuiConnected?: () => boolean;
+    /** True when a TUI client is actively polling FOR THIS SESSION (decides
+     *  dialog vs ignored msg). Must be session-scoped: a TUI on a different
+     *  session in the same process must not make this session take the dialog
+     *  path. Optional: harnesses without an OpenCode-style TUI dialog system
+     *  (e.g. Pi, which delivers via `ctx.ui.notify`) omit this and always take
+     *  the `sendIgnoredMessage` path. */
+    isTuiConnected?: (sessionId?: string) => boolean;
     /** Enqueue a server→TUI action so the TUI shows an interactive upgrade dialog
      *  ("Run upgrade now"/"Later") instead of a transient toast. TUI path only;
      *  omitted on harnesses without a dialog system. When `resume` is set, the
@@ -229,7 +231,7 @@ export async function maybeSendUpgradeReminder(
     // actionable notice. Non-TUI (Desktop/headless) path: a persisted ignored
     // message that stays visible in scrollback.
     try {
-        if (deps.isTuiConnected?.() && deps.pushTuiDialogAction) {
+        if (deps.isTuiConnected?.(sessionId) && deps.pushTuiDialogAction) {
             // Do NOT durably stamp on mere display. The durable stamp is set only
             // when the user makes an EXPLICIT choice (Confirm/Cancel) via the
             // `dismiss-upgrade-reminder` RPC. Stamping on display would permanently

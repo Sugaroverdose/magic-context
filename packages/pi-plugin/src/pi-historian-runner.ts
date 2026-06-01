@@ -721,18 +721,23 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			onNoteTrigger(db, sessionId, "historian_complete");
 
 			// Queue the tool/history drops for the just-compartmentalized range
-			// BEFORE signaling onPublished. onPublished fires the deferred
-			// materialization/history-refresh signal, and the code below awaits
-			// ensureProjectRegistered — during that await a concurrent `context`
-			// pass can consume the signal, materialize, and CAS-drain the pending
-			// marker. If the drops weren't queued yet, that pass would materialize
-			// with empty pendingOps and the drops would be stranded without their
-			// one-shot trigger. queueDrops is a pure synchronous DB write, so doing
-			// it here (post-COMMIT, pre-signal) keeps drops durable before any pass
-			// can observe the publish.
+			// here (post-COMMIT, pre-signal). onPublished fires the deferred
+			// materialization/history-refresh signal; a concurrent `context` pass
+			// can consume that signal and materialize m[0]/m[1]. Anything that
+			// must be visible to that materialization has to be durable BEFORE
+			// onPublished fires:
+			//   - drops (queued here): else the materializing pass runs with empty
+			//     pendingOps and the drops are stranded without their one-shot
+			//     trigger. queueDrops is a pure synchronous DB write.
+			//   - promoted facts (promoted below, then onPublished moved AFTER the
+			//     promotion block): m[1] renders new memories via the
+			//     `id > cachedM0MaxMemoryId` watermark, so if onPublished fired
+			//     here the concurrent materialization would miss this chunk's
+			//     just-promoted facts and surface them only one bust later.
+			// Events + p1 embeddings are stored-not-rendered / fire-and-forget, so
+			// they intentionally run AFTER onPublished — they don't affect the
+			// rendered m[0]/m[1] bytes.
 			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
-
-			onPublished?.();
 
 			// user observations are inserted POST-COMMIT,
 			// best-effort, so an auxiliary failure never rolls back the publish.
@@ -832,6 +837,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					.filter((c) => typeof c.id === "number" && c.p1.length > 0);
 				void embedAndStoreCompartments(db, sessionId, projectPath, toEmbed);
 			}
+
+			// Signal deferred materialization/history-refresh LAST — after fact
+			// promotion (above) so a concurrent `context` pass that consumes the
+			// signal renders this chunk's just-promoted facts in m[1] (new-memories
+			// watermark) instead of missing them until the next bust. Drops were
+			// queued pre-signal (a materializing pass needs them in pendingOps);
+			// events/embeddings are stored-not-rendered so their position is moot.
+			// Mirrors OpenCode's signal-last ordering in
+			// compartment-runner-incremental.ts.
+			onPublished?.();
 
 			sessionLog(
 				sessionId,

@@ -81,6 +81,20 @@ export function isRecompFailure(message: string): boolean {
     return /—\s*(Failed|Skipped)/.test(message);
 }
 
+/** Positive full-success predicate: the recomp rebuilt the ENTIRE requested
+ *  range, headed "## Magic Recomp — Complete". This is stricter than
+ *  `!isRecompFailure(...)`: a "— Partial" outcome publishes a valid prefix
+ *  (`published===true`) but did NOT cover the full range, and a lease-busy
+ *  no-op returns a heading with no status suffix at all. Gating the upgrade on
+ *  this — not on `!isRecompFailure` — prevents declaring "Complete" + running
+ *  the project-wide memory migration when compartments were only partially
+ *  rebuilt (tierless legacy rows would remain while memories migrated). A
+ *  Partial is reported as Incomplete; re-running the upgrade continues the
+ *  rebuild (the upgrade gate still sees the un-rebuilt legacy/tierless rows). */
+export function isRecompComplete(message: string): boolean {
+    return /—\s*Complete/.test(message);
+}
+
 /** Strip markdown headings + blank lines from a runner outcome message, leaving
  *  the human reason for compact sidebar/status display. Fixes the dogfood
  *  2026-05-30 cosmetic bug where a raw "## Magic Recomp — Failed" heading leaked
@@ -355,13 +369,18 @@ export async function runManagedUpgrade(
         // so the resume's recomp was skipped while migration ran anyway).
         const recompResult = await executeContextRecompWithResult(buildRecompDeps(ctx, sessionId));
 
-        if (!recompResult.published || isRecompFailure(recompResult.message)) {
-            // Recomp did not rebuild anything (failure OR skip/lease-busy). Do NOT
-            // run the project-wide migration or declare the upgrade complete.
+        // Require a POSITIVE full-success ("— Complete"), not merely the absence
+        // of a Failed/Skipped heading. A published "— Partial" rebuilt only a
+        // prefix (published===true, not a failure heading) — running migration +
+        // declaring Complete on it would migrate memories while leaving tierless
+        // legacy rows. A lease-busy no-op has no status suffix at all.
+        if (!recompResult.published || !isRecompComplete(recompResult.message)) {
+            // Recomp did not fully rebuild (failure, skip/lease-busy, OR partial).
+            // Do NOT run the project-wide migration or declare the upgrade complete.
             const reason = contextualizeUpgradeReason(
                 isRecompFailure(recompResult.message)
                     ? extractRecompReason(recompResult.message)
-                    : `Compartments were not rebuilt: ${extractRecompReason(recompResult.message)}`,
+                    : `Compartments were not fully rebuilt: ${extractRecompReason(recompResult.message)}`,
             );
             setRecompTerminal(ctx.liveSessionState, sessionId, "failed", reason);
             return `## Session Upgrade — Incomplete\n\n${reason}`;

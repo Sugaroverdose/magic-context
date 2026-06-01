@@ -10,6 +10,7 @@ import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/r
 import {
 	contextualizeUpgradeReason,
 	extractRecompReason,
+	isRecompComplete,
 	isRecompFailure,
 } from "@magic-context/core/hooks/magic-context/recomp-orchestrator";
 import { describeError } from "@magic-context/core/shared/error-message";
@@ -230,11 +231,20 @@ export function registerCtxSessionUpgradeCommand(
 				// declaring Complete on a skipped recomp leaves tierless rows but
 				// migrated memories + a project-wide cache-bust from the epoch bump
 				// (dogfood 2026-05-30, AFT false-complete under concurrent processes).
-				if (!recompResult.published || isRecompFailure(recompResult.message)) {
+				// Require a POSITIVE full-success ("— Complete"), not merely the
+				// absence of a Failed/Skipped heading: a published "— Partial"
+				// rebuilt only a prefix (published===true, not a failure heading),
+				// and running migration + declaring Complete on it would migrate
+				// memories while leaving tierless legacy rows. Mirrors OpenCode's
+				// recomp-orchestrator gate.
+				if (
+					!recompResult.published ||
+					!isRecompComplete(recompResult.message)
+				) {
 					const reason = contextualizeUpgradeReason(
 						isRecompFailure(recompResult.message)
 							? extractRecompReason(recompResult.message)
-							: `Compartments were not rebuilt: ${extractRecompReason(recompResult.message)}`,
+							: `Compartments were not fully rebuilt: ${extractRecompReason(recompResult.message)}`,
 					);
 					sendCtxStatusMessage(pi, {
 						title: "/ctx-session-upgrade",
