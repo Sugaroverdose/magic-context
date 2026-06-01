@@ -10,7 +10,7 @@ import type { RpcNotificationMessage, SidebarSnapshot, StatusDetail } from "../.
 export type { SidebarSnapshot, StatusDetail };
 
 let rpcClient: MagicContextRpcClient | null = null;
-let lastReceivedNotificationId = 0;
+const lastReceivedNotificationIdBySession = new Map<string, number>();
 
 function getStorageDir(): string {
     // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode
@@ -24,6 +24,7 @@ function getStorageDir(): string {
 /** Initialize the RPC client. Call once on TUI startup. */
 export function initRpcClient(directory: string): void {
     const storageDir = getStorageDir();
+    lastReceivedNotificationIdBySession.clear();
     rpcClient = new MagicContextRpcClient(storageDir, directory);
 }
 
@@ -31,7 +32,7 @@ export function initRpcClient(directory: string): void {
 export function closeRpc(): void {
     rpcClient?.reset();
     rpcClient = null;
-    lastReceivedNotificationId = 0;
+    lastReceivedNotificationIdBySession.clear();
 }
 
 const EMPTY_SNAPSHOT: SidebarSnapshot = {
@@ -259,6 +260,7 @@ export async function dismissUpgradeReminder(sessionId: string): Promise<boolean
 }
 
 export interface TuiMessage {
+    id: number;
     type: string;
     payload: Record<string, unknown>;
     sessionId?: string;
@@ -308,7 +310,7 @@ export async function markAnnounced(): Promise<boolean> {
 }
 
 /** Poll for pending server→TUI notifications via RPC. */
-export async function consumeTuiMessages(sessionId?: string): Promise<TuiMessage[]> {
+export async function consumeTuiMessages(sessionId: string): Promise<TuiMessage[]> {
     if (!rpcClient) return [];
     try {
         const result = await rpcClient.call<{ messages: RpcNotificationMessage[] }>(
@@ -316,21 +318,35 @@ export async function consumeTuiMessages(sessionId?: string): Promise<TuiMessage
             // Pass the TUI's active session so the server only drains
             // notifications scoped to it (or global ones). Without this, a
             // notification for another session served by the same process (e.g.
-            // OpenCode Desktop on the same project) could surface here.
-            { lastReceivedId: lastReceivedNotificationId, sessionId },
+            // OpenCode Desktop on the same project) could surface here. The
+            // cursor is per-session and is advanced by the poller only after it
+            // has delivered the returned batch.
+            {
+                lastReceivedId: lastReceivedNotificationIdBySession.get(sessionId) ?? 0,
+                sessionId,
+            },
         );
-        const messages = result.messages ?? [];
-        for (const message of messages) {
-            if (message.id > lastReceivedNotificationId) {
-                lastReceivedNotificationId = message.id;
-            }
-        }
-        return messages.map((m) => ({
+        return (result.messages ?? []).map((m) => ({
+            id: m.id,
             type: m.type,
             payload: m.payload,
             sessionId: m.sessionId,
         }));
     } catch {
         return [];
+    }
+}
+
+/** Advance the delivered-message cursor for one active TUI session. */
+export function markTuiMessagesHandled(sessionId: string, messages: TuiMessage[]): void {
+    const previous = lastReceivedNotificationIdBySession.get(sessionId) ?? 0;
+    let next = previous;
+    for (const message of messages) {
+        if (message.id > next) {
+            next = message.id;
+        }
+    }
+    if (next > previous) {
+        lastReceivedNotificationIdBySession.set(sessionId, next);
     }
 }

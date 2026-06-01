@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, requestRecomp, requestUpgrade, type StatusDetail } from "./data/context-db"
+import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, initRpcClient, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type TuiMessage, type StatusDetail } from "./data/context-db"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -749,22 +749,31 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     registerCommandPaletteEntries(api)
 
     // Poll for server→TUI messages: toasts and dialog requests.
-    // Single poller because consumeTuiMessages() is destructive (deletes consumed rows).
+    // The poller owns cursor advancement so notifications are acked only after
+    // they are accepted for the still-active session and delivered to the UI.
     const messagePoller = setInterval(() => {
         // Scope the drain to the TUI's active session so notifications tagged for
         // a different session (served by the same RPC process) are not consumed
-        // here. The client-side sessionId guard below is defense-in-depth in case
-        // an older server ignores the param and returns cross-session items.
-        const activeSessionId = getSessionId(api)
-        void consumeTuiMessages(activeSessionId ?? undefined).then((messages) => {
+        // here. Do not poll on non-session routes: a session-scoped action fetched
+        // while sessionless could otherwise be acked without being shown.
+        const requestedSessionId = getSessionId(api)
+        if (!requestedSessionId) return
+
+        void consumeTuiMessages(requestedSessionId).then((messages) => {
+            // The dialog handlers read the current session when they run. If the
+            // user switched routes while the RPC was in flight, drop this whole
+            // batch without advancing the cursor; the next poll for the new
+            // session will fetch the right notifications.
+            if (getSessionId(api) !== requestedSessionId) return
+
+            const handledMessages: TuiMessage[] = []
             for (const msg of messages) {
                 // Drop any action/dialog whose sessionId doesn't match this TUI's
                 // active session (session-less/global notifications still apply).
                 if (
                     msg.type === "action" &&
                     msg.sessionId &&
-                    activeSessionId &&
-                    msg.sessionId !== activeSessionId
+                    msg.sessionId !== requestedSessionId
                 ) {
                     continue
                 }
@@ -775,12 +784,15 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                         variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",
                         duration: typeof p.duration === "number" ? p.duration : 5000,
                     })
+                    handledMessages.push(msg)
                 } else if (msg.type === "action") {
                     const action = msg.payload?.action
                     if (action === "show-status-dialog") {
                         showStatusDialog(api)
+                        handledMessages.push(msg)
                     } else if (action === "show-recomp-dialog") {
                         showRecompDialog(api)
+                        handledMessages.push(msg)
                     } else if (action === "show-upgrade-dialog") {
                         const resume =
                             msg.payload?.resume === true
@@ -790,9 +802,11 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                                   }
                                 : undefined
                         showUpgradeDialog(api, resume)
+                        handledMessages.push(msg)
                     }
                 }
             }
+            markTuiMessagesHandled(requestedSessionId, handledMessages)
         }).catch(() => {
             // Intentional: message polling should never crash the TUI
         })
