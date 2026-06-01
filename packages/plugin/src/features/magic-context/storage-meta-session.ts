@@ -25,15 +25,18 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     system_prompt_hash: "'' AS system_prompt_hash",
     last_todo_state: "'' AS last_todo_state",
     cached_m0_bytes: "NULL AS cached_m0_bytes",
+    cached_m1_bytes: "NULL AS cached_m1_bytes",
     cached_m0_project_memory_epoch: "NULL AS cached_m0_project_memory_epoch",
     cached_m0_project_user_profile_version: "NULL AS cached_m0_project_user_profile_version",
     cached_m0_max_compartment_seq: "NULL AS cached_m0_max_compartment_seq",
     cached_m0_max_memory_id: "NULL AS cached_m0_max_memory_id",
     cached_m0_max_mutation_id: "NULL AS cached_m0_max_mutation_id",
+    cached_m0_max_memory_mutation_id: "NULL AS cached_m0_max_memory_mutation_id",
     cached_m0_project_docs_hash: "NULL AS cached_m0_project_docs_hash",
     cached_m0_materialized_at: "NULL AS cached_m0_materialized_at",
     cached_m0_session_facts_version: "NULL AS cached_m0_session_facts_version",
     cached_m0_upgrade_state: "NULL AS cached_m0_upgrade_state",
+    last_observed_model_key: "NULL AS last_observed_model_key",
     upgrade_reminded_at: "NULL AS upgrade_reminded_at",
 };
 
@@ -98,7 +101,10 @@ export function updateSessionMeta(
         if (value === null) {
             setClauses.push(`${column} = ?`);
             values.push(NULL_BIND_META_KEYS.has(key) ? null : "");
-        } else if (key === "cachedM0Bytes" && value instanceof Uint8Array) {
+        } else if (
+            (key === "cachedM0Bytes" || key === "cachedM1Bytes") &&
+            value instanceof Uint8Array
+        ) {
             setClauses.push(`${column} = ?`);
             values.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
         } else if (BOOLEAN_META_KEYS.has(key)) {

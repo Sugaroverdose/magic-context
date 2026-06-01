@@ -20,7 +20,7 @@ const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
-export const LATEST_SUPPORTED_VERSION = 25;
+export const LATEST_SUPPORTED_VERSION = 26;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -282,6 +282,19 @@ export function initializeDatabase(db: Database): void {
       model_id TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS memory_mutation_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      mutation_type TEXT NOT NULL CHECK (mutation_type IN ('archive', 'delete', 'update', 'superseded')),
+      target_memory_id INTEGER NOT NULL,
+      superseded_by_id INTEGER,
+      category TEXT,
+      new_content TEXT,
+      queued_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_project
+      ON memory_mutation_log(project_path, id);
+
     CREATE TABLE IF NOT EXISTS dream_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -472,7 +485,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_max_compartment_seq INTEGER,
       cached_m0_max_memory_id INTEGER,
       cached_m0_max_mutation_id INTEGER,
+      cached_m0_max_memory_mutation_id INTEGER,
       cached_m0_project_docs_hash TEXT,
+      cached_m1_bytes BLOB,
+      last_observed_model_key TEXT,
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
@@ -708,7 +724,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_max_compartment_seq", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_max_memory_id", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_max_mutation_id", "INTEGER");
+    ensureColumn(db, "session_meta", "cached_m0_max_memory_mutation_id", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_project_docs_hash", "TEXT");
+    ensureColumn(db, "session_meta", "cached_m1_bytes", "BLOB");
+    ensureColumn(db, "session_meta", "last_observed_model_key", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
@@ -737,6 +756,18 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         queued_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_m0_mutation_log_session ON m0_mutation_log(session_id);
+      CREATE TABLE IF NOT EXISTS memory_mutation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_path TEXT NOT NULL,
+        mutation_type TEXT NOT NULL CHECK (mutation_type IN ('archive', 'delete', 'update', 'superseded')),
+        target_memory_id INTEGER NOT NULL,
+        superseded_by_id INTEGER,
+        category TEXT,
+        new_content TEXT,
+        queued_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_project
+        ON memory_mutation_log(project_path, id);
       CREATE TABLE IF NOT EXISTS v22_identity_rekey_map (
         old_project_path TEXT PRIMARY KEY,
         new_project_path TEXT NOT NULL,

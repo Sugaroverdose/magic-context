@@ -203,7 +203,7 @@ describe("magic-context storage", () => {
         closeQuietly(db);
     });
 
-    it("clears recomp promotion memory cache and visible memory ids", () => {
+    it("clears recomp promotion m0/m1 cache and visible memory ids", () => {
         //#given
         const db = makeMemoryDatabase();
         const sessionId = "ses-recomp-cache";
@@ -239,7 +239,7 @@ describe("magic-context storage", () => {
                 "SELECT memory_block_cache AS cache, memory_block_ids AS ids, memory_block_count AS count FROM session_meta WHERE session_id = ?",
             )
             .get(sessionId) as { cache: string; ids: string; count: number };
-        expect(row).toEqual({ cache: "", ids: "", count: 2 });
+        expect(row).toEqual({ cache: "", ids: "", count: 0 });
         closeQuietly(db);
     });
     it("stores and replaces session notes by session", () => {

@@ -15,6 +15,7 @@ import {
     tallyFactsByCategory,
 } from "../../features/magic-context/storage-historian-runs";
 import {
+    clearCachedM0M1,
     clearPendingCompactionMarkerStateIf,
     getPendingCompactionMarkerState,
     updateSessionMeta,
@@ -121,9 +122,7 @@ export function promoteRecompStagingWithM0Mutation(
         });
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-        ).run(sessionId);
+        clearCachedM0M1(db, sessionId);
 
         db.exec("COMMIT");
         finished = true;

@@ -64,6 +64,7 @@ export {
 } from "./storage-meta-session";
 export {
     clearCachedM0,
+    clearCachedM0M1,
     type PersistCachedM0Payload,
     persistCachedM0,
 } from "./storage-meta-shared";

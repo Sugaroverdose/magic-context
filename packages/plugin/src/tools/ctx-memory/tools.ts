@@ -21,8 +21,8 @@ import {
 import { invalidateMemory } from "../../features/magic-context/memory/embedding-cache";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import {
-    bumpProjectMemoryEpoch,
     normalizeStoredProjectPath,
+    queueMemoryMutation,
 } from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
@@ -205,20 +205,6 @@ function memoryBelongsToProject(memory: Memory, projectPath: string): boolean {
     );
 }
 
-function projectIdentitiesForMemoryIds(
-    db: CtxMemoryToolDeps["db"],
-    ids: readonly number[],
-): string[] {
-    const identities = new Set<string>();
-    for (const id of ids) {
-        const rawProjectPath = projectPathForMemoryId(db, id);
-        if (rawProjectPath) {
-            identities.add(projectIdentityForStoredPath(rawProjectPath));
-        }
-    }
-    return [...identities];
-}
-
 function updateMemoryContentInCurrentTransaction(
     db: CtxMemoryToolDeps["db"],
     memory: Memory,
@@ -354,7 +340,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
                 deps.db.transaction(() => {
                     archiveMemory(deps.db, memoryId);
-                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                    queueMemoryMutation(deps.db, {
+                        projectPath: projectIdentity,
+                        mutationType: "delete",
+                        targetMemoryId: memoryId,
+                    });
                 })();
                 return `Archived memory [ID: ${memoryId}].`;
             }
@@ -405,7 +395,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         content,
                         normalizedHash,
                     );
-                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                    queueMemoryMutation(deps.db, {
+                        projectPath: projectIdentity,
+                        mutationType: "update",
+                        targetMemoryId: memory.id,
+                        category: memory.category,
+                        newContent: content,
+                    });
                 })();
                 queueMemoryEmbedding({
                     deps,
@@ -435,8 +431,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
-
-                const affectedProjectIdentities = projectIdentitiesForMemoryIds(deps.db, ids);
 
                 const category =
                     getValidatedCategory(args.category) ?? sourceMemories[0]?.category ?? null;
@@ -506,11 +500,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                     ? "dreamer"
                                     : getSourceType(deps),
                         });
-
-                    if (
+                    const canonicalContentChanged =
                         nextCanonical.content !== content ||
-                        nextCanonical.normalizedHash !== normalizedHash
-                    ) {
+                        nextCanonical.normalizedHash !== normalizedHash;
+
+                    if (canonicalContentChanged) {
                         updateMemoryContentInCurrentTransaction(
                             deps.db,
                             nextCanonical,
@@ -533,10 +527,22 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                             continue;
                         }
                         supersededMemory(deps.db, memory.id, nextCanonical.id);
+                        queueMemoryMutation(deps.db, {
+                            projectPath: projectIdentityForStoredPath(memory.projectPath),
+                            mutationType: "superseded",
+                            targetMemoryId: memory.id,
+                            supersededById: nextCanonical.id,
+                        });
                     }
 
-                    for (const projectIdentity of affectedProjectIdentities) {
-                        bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                    if (canonicalExisting && canonicalContentChanged) {
+                        queueMemoryMutation(deps.db, {
+                            projectPath: projectIdentityForStoredPath(nextCanonical.projectPath),
+                            mutationType: "update",
+                            targetMemoryId: nextCanonical.id,
+                            category,
+                            newContent: content,
+                        });
                     }
 
                     return nextCanonical;
@@ -571,7 +577,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
                 deps.db.transaction(() => {
                     archiveMemory(deps.db, memoryId, args.reason);
-                    bumpProjectMemoryEpoch(deps.db, projectIdentity);
+                    queueMemoryMutation(deps.db, {
+                        projectPath: projectIdentity,
+                        mutationType: "archive",
+                        targetMemoryId: memoryId,
+                    });
                 })();
                 return args.reason?.trim()
                     ? `Archived memory [ID: ${memoryId}] (${args.reason.trim()}).`

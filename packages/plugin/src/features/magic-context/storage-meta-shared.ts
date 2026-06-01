@@ -27,15 +27,18 @@ export interface SessionMetaRow {
     cleared_reasoning_through_tag: number;
     last_todo_state: string;
     cached_m0_bytes: Buffer | Uint8Array | null;
+    cached_m1_bytes: Buffer | Uint8Array | null;
     cached_m0_project_memory_epoch: number | null;
     cached_m0_project_user_profile_version: number | null;
     cached_m0_max_compartment_seq: number | null;
     cached_m0_max_memory_id: number | null;
     cached_m0_max_mutation_id: number | null;
+    cached_m0_max_memory_mutation_id: number | null;
     cached_m0_project_docs_hash: string | null;
     cached_m0_materialized_at: number | null;
     cached_m0_session_facts_version: number | null;
     cached_m0_upgrade_state: string | null;
+    last_observed_model_key: string | null;
     upgrade_reminded_at: number | null;
     pi_stable_id_scheme: number | null;
 }
@@ -62,15 +65,18 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cleared_reasoning_through_tag",
     "last_todo_state",
     "cached_m0_bytes",
+    "cached_m1_bytes",
     "cached_m0_project_memory_epoch",
     "cached_m0_project_user_profile_version",
     "cached_m0_max_compartment_seq",
     "cached_m0_max_memory_id",
     "cached_m0_max_mutation_id",
+    "cached_m0_max_memory_mutation_id",
     "cached_m0_project_docs_hash",
     "cached_m0_materialized_at",
     "cached_m0_session_facts_version",
     "cached_m0_upgrade_state",
+    "last_observed_model_key",
     "upgrade_reminded_at",
     "pi_stable_id_scheme",
 ] as const;
@@ -96,15 +102,18 @@ export const META_COLUMNS: Record<string, string> = {
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
     lastTodoState: "last_todo_state",
     cachedM0Bytes: "cached_m0_bytes",
+    cachedM1Bytes: "cached_m1_bytes",
     cachedM0ProjectMemoryEpoch: "cached_m0_project_memory_epoch",
     cachedM0ProjectUserProfileVersion: "cached_m0_project_user_profile_version",
     cachedM0MaxCompartmentSeq: "cached_m0_max_compartment_seq",
     cachedM0MaxMemoryId: "cached_m0_max_memory_id",
     cachedM0MaxMutationId: "cached_m0_max_mutation_id",
+    cachedM0MaxMemoryMutationId: "cached_m0_max_memory_mutation_id",
     cachedM0ProjectDocsHash: "cached_m0_project_docs_hash",
     cachedM0MaterializedAt: "cached_m0_materialized_at",
     cachedM0SessionFactsVersion: "cached_m0_session_facts_version",
     cachedM0UpgradeState: "cached_m0_upgrade_state",
+    lastObservedModelKey: "last_observed_model_key",
     upgradeRemindedAt: "upgrade_reminded_at",
     piStableIdScheme: "pi_stable_id_scheme",
 };
@@ -122,15 +131,18 @@ function ensureSessionFactsVersionColumn(db: Database): void {
 
 export const NULL_BIND_META_KEYS = new Set([
     "cachedM0Bytes",
+    "cachedM1Bytes",
     "cachedM0ProjectMemoryEpoch",
     "cachedM0ProjectUserProfileVersion",
     "cachedM0MaxCompartmentSeq",
     "cachedM0MaxMemoryId",
     "cachedM0MaxMutationId",
+    "cachedM0MaxMemoryMutationId",
     "cachedM0ProjectDocsHash",
     "cachedM0MaterializedAt",
     "cachedM0SessionFactsVersion",
     "cachedM0UpgradeState",
+    "lastObservedModelKey",
     "upgradeRemindedAt",
     "piStableIdScheme",
 ]);
@@ -191,15 +203,18 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.cleared_reasoning_through_tag) &&
         isStringOrNull(r.last_todo_state) &&
         isBlobOrNull(r.cached_m0_bytes) &&
+        isBlobOrNull(r.cached_m1_bytes) &&
         isNumberOrNull(r.cached_m0_project_memory_epoch) &&
         isNumberOrNull(r.cached_m0_project_user_profile_version) &&
         isNumberOrNull(r.cached_m0_max_compartment_seq) &&
         isNumberOrNull(r.cached_m0_max_memory_id) &&
         isNumberOrNull(r.cached_m0_max_mutation_id) &&
+        isNumberOrNull(r.cached_m0_max_memory_mutation_id) &&
         isStringOrNull(r.cached_m0_project_docs_hash) &&
         isNumberOrNull(r.cached_m0_materialized_at) &&
         isNumberOrNull(r.cached_m0_session_facts_version) &&
         isStringOrNull(r.cached_m0_upgrade_state) &&
+        isStringOrNull(r.last_observed_model_key) &&
         isNumberOrNull(r.upgrade_reminded_at) &&
         isNumberOrNull(r.pi_stable_id_scheme)
     );
@@ -228,15 +243,18 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         clearedReasoningThroughTag: 0,
         lastTodoState: "",
         cachedM0Bytes: null,
+        cachedM1Bytes: null,
         cachedM0ProjectMemoryEpoch: null,
         cachedM0ProjectUserProfileVersion: null,
         cachedM0MaxCompartmentSeq: null,
         cachedM0MaxMemoryId: null,
         cachedM0MaxMutationId: null,
+        cachedM0MaxMemoryMutationId: null,
         cachedM0ProjectDocsHash: null,
         cachedM0MaterializedAt: null,
         cachedM0SessionFactsVersion: null,
         cachedM0UpgradeState: null,
+        lastObservedModelKey: null,
         upgradeRemindedAt: null,
         piStableIdScheme: null,
     };
@@ -327,15 +345,18 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         clearedReasoningThroughTag: numOrZero(row.cleared_reasoning_through_tag),
         lastTodoState: lastTodoStateRaw,
         cachedM0Bytes: toBufferOrNull(row.cached_m0_bytes),
+        cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),
         cachedM0ProjectMemoryEpoch: numOrNull(row.cached_m0_project_memory_epoch),
         cachedM0ProjectUserProfileVersion: numOrNull(row.cached_m0_project_user_profile_version),
         cachedM0MaxCompartmentSeq: numOrNull(row.cached_m0_max_compartment_seq),
         cachedM0MaxMemoryId: numOrNull(row.cached_m0_max_memory_id),
         cachedM0MaxMutationId: numOrNull(row.cached_m0_max_mutation_id),
+        cachedM0MaxMemoryMutationId: numOrNull(row.cached_m0_max_memory_mutation_id),
         cachedM0ProjectDocsHash: stringOrNull(row.cached_m0_project_docs_hash),
         cachedM0MaterializedAt: numOrNull(row.cached_m0_materialized_at),
         cachedM0SessionFactsVersion: numOrNull(row.cached_m0_session_facts_version),
         cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
+        lastObservedModelKey: stringOrNull(row.last_observed_model_key),
         upgradeRemindedAt: numOrNull(row.upgrade_reminded_at),
         piStableIdScheme: numOrNull(row.pi_stable_id_scheme),
     };
@@ -348,6 +369,8 @@ export interface PersistCachedM0Payload {
     maxCompartmentSeq: number;
     maxMemoryId: number | null;
     maxMutationId: number | null;
+    maxMemoryMutationId?: number | null;
+    m1Bytes?: Buffer | null;
     projectDocsHash: string | null;
     materializedAt: number;
     sessionFactsVersion: number;
@@ -368,6 +391,8 @@ export function persistCachedM0(
             cached_m0_max_compartment_seq = ?,
             cached_m0_max_memory_id = ?,
             cached_m0_max_mutation_id = ?,
+            cached_m0_max_memory_mutation_id = ?,
+            cached_m1_bytes = ?,
             cached_m0_project_docs_hash = ?,
             cached_m0_materialized_at = ?,
             cached_m0_session_facts_version = ?,
@@ -380,6 +405,8 @@ export function persistCachedM0(
         payload.maxCompartmentSeq,
         payload.maxMemoryId,
         payload.maxMutationId,
+        payload.maxMemoryMutationId ?? null,
+        payload.m1Bytes ? Buffer.from(payload.m1Bytes) : null,
         payload.projectDocsHash,
         payload.materializedAt,
         payload.sessionFactsVersion,
@@ -388,20 +415,45 @@ export function persistCachedM0(
     );
 }
 
-export function clearCachedM0(db: Database, sessionId: string): void {
+export function clearCachedM0M1(db: Database, sessionId: string): void {
     ensureSessionMetaRow(db, sessionId);
-    db.prepare(
-        `UPDATE session_meta SET
-            cached_m0_bytes = ?,
-            cached_m0_project_memory_epoch = ?,
-            cached_m0_project_user_profile_version = ?,
-            cached_m0_max_compartment_seq = ?,
-            cached_m0_max_memory_id = ?,
-            cached_m0_max_mutation_id = ?,
-            cached_m0_project_docs_hash = ?,
-            cached_m0_materialized_at = ?,
-            cached_m0_session_facts_version = ?,
-            cached_m0_upgrade_state = ?
-         WHERE session_id = ?`,
-    ).run(null, null, null, null, null, null, null, null, null, null, sessionId);
+    const existingColumns = new Set(
+        (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
+            (column) => column.name,
+        ),
+    );
+    const clears: Array<[string, string | number | null]> = [
+        ["cached_m0_bytes", null],
+        ["cached_m1_bytes", null],
+        ["cached_m0_project_memory_epoch", null],
+        ["cached_m0_project_user_profile_version", null],
+        ["cached_m0_max_compartment_seq", null],
+        ["cached_m0_max_memory_id", null],
+        ["cached_m0_max_mutation_id", null],
+        ["cached_m0_max_memory_mutation_id", null],
+        ["cached_m0_project_docs_hash", null],
+        ["cached_m0_materialized_at", null],
+        ["cached_m0_session_facts_version", null],
+        ["cached_m0_upgrade_state", null],
+        ["cached_m0_last_baseline_end_message_id", null],
+        ["memory_block_cache", ""],
+        ["memory_block_count", 0],
+        ["memory_block_ids", ""],
+    ];
+    const setClauses: string[] = [];
+    const values: Array<string | number | null> = [];
+    for (const [column, value] of clears) {
+        if (!existingColumns.has(column)) continue;
+        setClauses.push(`${column} = ?`);
+        values.push(value);
+    }
+    if (setClauses.length === 0) return;
+    db.prepare(`UPDATE session_meta SET ${setClauses.join(", ")} WHERE session_id = ?`).run(
+        ...values,
+        sessionId,
+    );
+}
+
+export function clearCachedM0(db: Database, sessionId: string): void {
+    clearCachedM0M1(db, sessionId);
 }

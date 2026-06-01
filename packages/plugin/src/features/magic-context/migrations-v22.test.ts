@@ -8,7 +8,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import { closeDatabase, initializeDatabase, openDatabase } from "./storage-db";
 import { getOrCreateSessionMeta } from "./storage-meta-session";
-import { clearCachedM0, persistCachedM0 } from "./storage-meta-shared";
+import { clearCachedM0M1, persistCachedM0 } from "./storage-meta-shared";
 
 function columnNames(db: Database, table: string): string[] {
     return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
@@ -279,7 +279,7 @@ describe("migration v22", () => {
         }
     });
 
-    test("clears cached m0 fields to true SQL NULL", () => {
+    test("clears cached m0/m1 fields and memory block manifest", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
@@ -297,20 +297,40 @@ describe("migration v22", () => {
                 upgradeState: "pending",
             });
 
-            clearCachedM0(db, "ses-null");
+            db.prepare(
+                "UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_max_memory_mutation_id = ?, memory_block_cache = ?, memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+            ).run(Buffer.from("m1", "utf8"), 8, "stale", 2, "[1,2]", "ses-null");
+
+            clearCachedM0M1(db, "ses-null");
 
             const raw = db
                 .prepare(
-                    "SELECT cached_m0_bytes, cached_m0_project_docs_hash FROM session_meta WHERE session_id = ?",
+                    `SELECT cached_m0_bytes, cached_m1_bytes, cached_m0_max_memory_mutation_id,
+                            cached_m0_project_docs_hash, memory_block_cache, memory_block_count,
+                            memory_block_ids
+                       FROM session_meta
+                      WHERE session_id = ?`,
                 )
                 .get("ses-null") as {
                 cached_m0_bytes: Buffer | null;
+                cached_m1_bytes: Buffer | null;
+                cached_m0_max_memory_mutation_id: number | null;
                 cached_m0_project_docs_hash: string | null;
+                memory_block_cache: string;
+                memory_block_count: number;
+                memory_block_ids: string;
             };
             const meta = getOrCreateSessionMeta(db, "ses-null");
             expect(raw.cached_m0_bytes).toBeNull();
+            expect(raw.cached_m1_bytes).toBeNull();
+            expect(raw.cached_m0_max_memory_mutation_id).toBeNull();
             expect(raw.cached_m0_project_docs_hash).toBeNull();
+            expect(raw.memory_block_cache).toBe("");
+            expect(raw.memory_block_count).toBe(0);
+            expect(raw.memory_block_ids).toBe("");
             expect(meta.cachedM0Bytes).toBeNull();
+            expect(meta.cachedM1Bytes).toBeNull();
+            expect(meta.cachedM0MaxMemoryMutationId).toBeNull();
             expect(meta.cachedM0ProjectDocsHash).toBeNull();
         } finally {
             closeQuietly(db);

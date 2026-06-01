@@ -938,6 +938,65 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 26,
+        description: "memory mutation log and atomic m[1] cache columns",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_mutation_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_path TEXT NOT NULL,
+                    mutation_type TEXT NOT NULL CHECK (mutation_type IN (
+                        'archive',
+                        'delete',
+                        'update',
+                        'superseded'
+                    )),
+                    target_memory_id INTEGER NOT NULL,
+                    superseded_by_id INTEGER,
+                    category TEXT,
+                    new_content TEXT,
+                    queued_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_project
+                    ON memory_mutation_log(project_path, id);
+            `);
+            ensureColumn(db, "session_meta", "cached_m0_bytes", "BLOB");
+            ensureColumn(db, "session_meta", "cached_m0_project_memory_epoch", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_project_user_profile_version", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_max_compartment_seq", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_max_memory_id", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_max_mutation_id", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_max_memory_mutation_id", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_project_docs_hash", "TEXT");
+            ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
+            ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
+            ensureColumn(db, "session_meta", "cached_m1_bytes", "BLOB");
+            ensureColumn(db, "session_meta", "last_observed_model_key", "TEXT");
+            ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
+            ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
+            ensureColumn(db, "session_meta", "memory_block_ids", "TEXT DEFAULT ''");
+            db.prepare(
+                `UPDATE session_meta SET
+                    cached_m0_bytes = NULL,
+                    cached_m1_bytes = NULL,
+                    cached_m0_project_memory_epoch = NULL,
+                    cached_m0_project_user_profile_version = NULL,
+                    cached_m0_max_compartment_seq = NULL,
+                    cached_m0_max_memory_id = NULL,
+                    cached_m0_max_mutation_id = NULL,
+                    cached_m0_max_memory_mutation_id = NULL,
+                    cached_m0_project_docs_hash = NULL,
+                    cached_m0_materialized_at = NULL,
+                    cached_m0_session_facts_version = NULL,
+                    cached_m0_upgrade_state = NULL,
+                    memory_block_cache = '',
+                    memory_block_count = 0,
+                    memory_block_ids = ''`,
+            ).run();
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

@@ -24,6 +24,8 @@ import {
     computeProjectDocsHash,
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
+    getMaxMemoryMutationId,
+    getMemoryMutationsForRender,
     getProjectState,
     persistCachedM0,
     readProjectDocsCanonical,
@@ -501,6 +503,7 @@ export interface M0SnapshotMarkers {
     maxCompartmentSeq: number;
     maxMemoryId: number;
     maxMutationId: number;
+    maxMemoryMutationId: number;
     projectDocsHash: string;
     materializedAt: number;
     sessionFactsVersion: number;
@@ -511,11 +514,13 @@ export interface M0M1State {
     sessionId: string;
     isSubagent?: boolean;
     cachedM0Bytes: Buffer | null;
+    cachedM1Bytes: Buffer | null;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0ProjectUserProfileVersion: number | null;
     cachedM0MaxCompartmentSeq: number | null;
     cachedM0MaxMemoryId: number | null;
     cachedM0MaxMutationId: number | null;
+    cachedM0MaxMemoryMutationId: number | null;
     cachedM0ProjectDocsHash: string | null;
     cachedM0MaterializedAt: number | null;
     cachedM0SessionFactsVersion: number | null;
@@ -534,6 +539,8 @@ export interface M0M1RenderOptions {
     historyBudgetTokens?: number;
     userProfileBudgetTokens?: number;
     keyFiles?: KeyFilesConfigForRender;
+    isCacheBustingPass?: boolean;
+    preRenderedKeyFilesBlock?: string | null;
     beforePhase3ForTest?: () => void;
 }
 
@@ -545,7 +552,10 @@ export interface MaterializeDecision {
 export interface MaterializeM0Result {
     m0Bytes: Buffer;
     m0Text: string;
+    m1Bytes: Buffer;
+    m1Text: string;
     snapshotMarkers: M0SnapshotMarkers;
+    renderedMemoryIds: number[];
 }
 
 export interface InjectM0M1Result {
@@ -677,6 +687,9 @@ export function readCurrentM0SnapshotMarkers(args: {
         maxCompartmentSeq: getMaxCompartmentSeq(args.db, args.sessionId),
         maxMemoryId: getMaxMemoryId(args.db, args.projectPath),
         maxMutationId: getMaxM0MutationId(args.db, args.sessionId) ?? 0,
+        maxMemoryMutationId: args.projectPath
+            ? (getMaxMemoryMutationId(args.db, args.projectPath) ?? 0)
+            : 0,
         projectDocsHash: projectDirectory ? computeProjectDocsHash(projectDirectory) : "",
         materializedAt: Date.now(),
         sessionFactsVersion: getSessionFactsVersion(args.db, args.sessionId),
@@ -691,6 +704,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
     if (state.cachedM0MaxCompartmentSeq === null) return null;
     if (state.cachedM0MaxMemoryId === null) return null;
     if (state.cachedM0MaxMutationId === null) return null;
+    if (state.cachedM0MaxMemoryMutationId === null) return null;
     if (state.cachedM0SessionFactsVersion === null) return null;
     return {
         projectMemoryEpoch: state.cachedM0ProjectMemoryEpoch,
@@ -698,6 +712,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         maxCompartmentSeq: state.cachedM0MaxCompartmentSeq,
         maxMemoryId: state.cachedM0MaxMemoryId,
         maxMutationId: state.cachedM0MaxMutationId,
+        maxMemoryMutationId: state.cachedM0MaxMemoryMutationId,
         projectDocsHash: state.cachedM0ProjectDocsHash ?? "",
         materializedAt: state.cachedM0MaterializedAt ?? 0,
         sessionFactsVersion: state.cachedM0SessionFactsVersion,
@@ -713,6 +728,7 @@ export function mustMaterialize(args: {
     projectDirectory?: string;
 }): MaterializeDecision {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
+    if (!args.state.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
     const current = readCurrentM0SnapshotMarkers(args);
     if (args.state.cachedM0ProjectMemoryEpoch !== current.projectMemoryEpoch) {
         return { value: true, reason: "project_memory_epoch" };
@@ -728,8 +744,8 @@ export function mustMaterialize(args: {
     // (readNewMemoriesForM1 reads id > cachedM0MaxMemoryId). Triggering m[0]
     // rematerialization on every memory write would bust the m[0] cache on
     // routine additive writes — defeating the whole additive-stability design.
-    // Non-additive memory mutations (update/delete/archive/merge) bump
-    // project_memory_epoch instead, which IS a correct m[0] invalidation above.
+    // Memory mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile
+    // cursor, not as a materialization trigger; keep it out of this trigger set.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return { value: true, reason: "max_mutation_id" };
     }
@@ -1002,13 +1018,20 @@ export function renderM0(args: {
     return sections.join("\n\n").trim();
 }
 
-function applyMarkersToState(state: M0M1State, m0Bytes: Buffer, markers: M0SnapshotMarkers): void {
+function applyMarkersToState(
+    state: M0M1State,
+    m0Bytes: Buffer,
+    markers: M0SnapshotMarkers,
+    m1Bytes?: Buffer,
+): void {
     state.cachedM0Bytes = m0Bytes;
+    if (m1Bytes) state.cachedM1Bytes = m1Bytes;
     state.cachedM0ProjectMemoryEpoch = markers.projectMemoryEpoch;
     state.cachedM0ProjectUserProfileVersion = markers.projectUserProfileVersion;
     state.cachedM0MaxCompartmentSeq = markers.maxCompartmentSeq;
     state.cachedM0MaxMemoryId = markers.maxMemoryId;
     state.cachedM0MaxMutationId = markers.maxMutationId;
+    state.cachedM0MaxMemoryMutationId = markers.maxMemoryMutationId;
     state.cachedM0ProjectDocsHash = markers.projectDocsHash;
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
@@ -1112,31 +1135,41 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
     const m0Bytes = Buffer.from(m0Text, "utf8");
     snapshotMarkers.materializedAt = Date.now();
+    const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
+    const preRenderedKeyFilesBlock = preRenderKeyFilesBlock(options);
+    const phase3ProjectDocsHash = projectDirectory ? computeProjectDocsHash(projectDirectory) : "";
 
     options.beforePhase3ForTest?.();
 
+    let m1Text = M1_EMPTY_PLACEHOLDER;
+    let m1Bytes = Buffer.from(m1Text, "utf8");
     options.db.exec("BEGIN IMMEDIATE");
     try {
-        const current = readCurrentM0SnapshotMarkers({
-            db: options.db,
-            sessionId: options.sessionId,
-            projectPath,
-            projectDirectory,
-        });
+        const current: M0SnapshotMarkers = {
+            projectMemoryEpoch: getProjectMemoryEpoch(options.db, projectPath),
+            projectUserProfileVersion: getGlobalUserProfileVersion(options.db),
+            maxCompartmentSeq: getMaxCompartmentSeq(options.db, options.sessionId),
+            maxMemoryId: getMaxMemoryId(options.db, projectPath),
+            maxMutationId: getMaxM0MutationId(options.db, options.sessionId) ?? 0,
+            maxMemoryMutationId: projectPath
+                ? (getMaxMemoryMutationId(options.db, projectPath) ?? 0)
+                : 0,
+            projectDocsHash: phase3ProjectDocsHash,
+            materializedAt: Date.now(),
+            sessionFactsVersion: getSessionFactsVersion(options.db, options.sessionId),
+            upgradeState: getUpgradeState(options.db, options.sessionId),
+        };
         // NOTE: maxMemoryId is deliberately EXCLUDED from this stale-check.
-        // Additive memory writes (write/promote) do not bump projectMemoryEpoch
-        // and must NOT bust m[0] (they surface in m[1] via the persisted
-        // maxMemoryId watermark). A new memory landing between Phase 1 and Phase 3
-        // does not invalidate the rendered m[0] — m[0] correctly reflects the
-        // snapshot's memory set and the new one appears in m[1]. Non-additive
-        // mutations (update/delete/archive/merge) bump projectMemoryEpoch and ARE
-        // caught below. Including maxMemoryId here would convert every additive
-        // write into a spurious contention/re-materialize.
+        // Additive memory writes (write/promote) do not invalidate the rendered
+        // m[0]; they surface in m[1] via the maxMemoryId watermark. The memory
+        // mutation cursor IS included here because a materialization pass must
+        // reconcile every non-additive memory change up to its persisted cursor.
         const stale =
             current.projectMemoryEpoch !== snapshotMarkers.projectMemoryEpoch ||
             current.projectUserProfileVersion !== snapshotMarkers.projectUserProfileVersion ||
             current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
             current.maxMutationId !== snapshotMarkers.maxMutationId ||
+            current.maxMemoryMutationId !== snapshotMarkers.maxMemoryMutationId ||
             current.projectDocsHash !== snapshotMarkers.projectDocsHash ||
             current.sessionFactsVersion !== snapshotMarkers.sessionFactsVersion ||
             current.upgradeState !== snapshotMarkers.upgradeState;
@@ -1145,6 +1178,14 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             throw new MaterializeContentionError({ reason: "snapshot changed before Phase 3" });
         }
 
+        const m1Render = renderM1WithMetadata(
+            { ...options, preRenderedKeyFilesBlock },
+            snapshotMarkers,
+            renderedMemoryIds,
+        );
+        m1Text = m1Render.text;
+        m1Bytes = Buffer.from(m1Text, "utf8");
+
         persistCachedM0(options.db, options.sessionId, {
             m0Bytes,
             projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
@@ -1152,6 +1193,8 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
             maxMemoryId: snapshotMarkers.maxMemoryId,
             maxMutationId: snapshotMarkers.maxMutationId,
+            maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+            m1Bytes,
             projectDocsHash: snapshotMarkers.projectDocsHash,
             materializedAt: snapshotMarkers.materializedAt,
             sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
@@ -1167,7 +1210,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // dogfood 2026-05-30: AFT showed "Injected 256" against 124 live memories,
         // all 256 ids deleted. Same transaction as the m[0] snapshot so the cached
         // bytes and their id manifest never diverge.
-        const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
         options.db
             .prepare(
                 "UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
@@ -1184,7 +1226,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         throw error;
     }
 
-    return { m0Bytes, m0Text, snapshotMarkers };
+    return { m0Bytes, m0Text, m1Bytes, m1Text, snapshotMarkers, renderedMemoryIds };
 }
 
 export function materializeWithRetry(
@@ -1206,24 +1248,94 @@ export function materializeWithRetry(
     });
 }
 
-export function renderM1(options: M0M1RenderOptions, markers: M0SnapshotMarkers): string {
+function preRenderKeyFilesBlock(options: M0M1RenderOptions): string | null {
+    if (!options.projectDirectory) return null;
+    try {
+        return buildKeyFilesBlock(options.db, options.projectDirectory, options.keyFiles) ?? null;
+    } catch (error) {
+        sessionLog(options.sessionId, "key-files render for m[1] failed:", error);
+        return null;
+    }
+}
+
+function renderedKeyFilesBlock(options: M0M1RenderOptions): string | null {
+    if (options.preRenderedKeyFilesBlock !== undefined) {
+        return options.preRenderedKeyFilesBlock;
+    }
+    return preRenderKeyFilesBlock(options);
+}
+
+function renderMemoryUpdatesBlock(args: {
+    db: Database;
+    projectPath?: string;
+    afterId: number;
+    renderedMemoryIds: readonly number[];
+}): { block: string; count: number } {
+    if (!args.projectPath || args.renderedMemoryIds.length === 0) {
+        return { block: "", count: 0 };
+    }
+
+    const renderedIds = new Set(args.renderedMemoryIds);
+    const mutations = getMemoryMutationsForRender(
+        args.db,
+        args.projectPath,
+        args.afterId,
+        args.renderedMemoryIds,
+    );
+    if (mutations.length === 0) return { block: "", count: 0 };
+
+    const lines = ["These memories changed since the snapshot below — trust these:"];
+    for (const mutation of mutations) {
+        if (mutation.mutationType === "update") {
+            lines.push(
+                `  <updated id="${mutation.targetMemoryId}">${escapeXmlContent(mutation.newContent ?? "")}</updated>`,
+            );
+            continue;
+        }
+        if (mutation.mutationType === "superseded") {
+            if (mutation.supersededById !== null && renderedIds.has(mutation.supersededById)) {
+                lines.push(
+                    `  <superseded id="${mutation.targetMemoryId}" by="${mutation.supersededById}"/>`,
+                );
+            } else {
+                lines.push(`  <removed id="${mutation.targetMemoryId}"/>`);
+            }
+            continue;
+        }
+        lines.push(`  <removed id="${mutation.targetMemoryId}"/>`);
+    }
+
+    return {
+        block: `<memory-updates>\n${lines.join("\n")}\n</memory-updates>`,
+        count: mutations.length,
+    };
+}
+
+interface RenderM1Result {
+    text: string;
+    memoryUpdateCount: number;
+}
+
+function renderM1WithMetadata(
+    options: M0M1RenderOptions,
+    markers: M0SnapshotMarkers,
+    renderedMemoryIds: readonly number[],
+): RenderM1Result {
     if (!markers || markers.maxCompartmentSeq === undefined) {
         throw new RenderM1InvalidMarkersError(options.sessionId);
     }
 
     const blocks: string[] = [];
-    if (options.projectDirectory) {
-        try {
-            const keyFiles = buildKeyFilesBlock(
-                options.db,
-                options.projectDirectory,
-                options.keyFiles,
-            );
-            if (keyFiles) blocks.push(keyFiles);
-        } catch (error) {
-            sessionLog(options.sessionId, "key-files render for m[1] failed:", error);
-        }
-    }
+    const keyFiles = renderedKeyFilesBlock(options);
+    if (keyFiles) blocks.push(keyFiles);
+
+    const memoryUpdates = renderMemoryUpdatesBlock({
+        db: options.db,
+        projectPath: options.projectPath,
+        afterId: markers.maxMemoryMutationId,
+        renderedMemoryIds,
+    });
+    if (memoryUpdates.block) blocks.push(memoryUpdates.block);
 
     const newCompartments = readNewCompartments(
         options.db,
@@ -1280,13 +1392,193 @@ export function renderM1(options: M0M1RenderOptions, markers: M0SnapshotMarkers)
     // facts reach the agent as promoted memories via the new-memories block
     // above (maxMemoryId watermark), not via a <session_facts> delta here.
 
-    if (blocks.length === 0) return M1_EMPTY_PLACEHOLDER;
-    return `<session-history-since>\n${blocks.join("\n")}\n</session-history-since>`;
+    if (blocks.length === 0) {
+        return { text: M1_EMPTY_PLACEHOLDER, memoryUpdateCount: memoryUpdates.count };
+    }
+    return {
+        text: `<session-history-since>\n${blocks.join("\n")}\n</session-history-since>`,
+        memoryUpdateCount: memoryUpdates.count,
+    };
+}
+
+export function renderM1(
+    options: M0M1RenderOptions,
+    markers: M0SnapshotMarkers,
+    renderedMemoryIds: readonly number[] = [],
+): string {
+    return renderM1WithMetadata(options, markers, renderedMemoryIds).text;
 }
 
 function decodeM0Bytes(bytes: Buffer | Uint8Array | null): string | null {
     if (!bytes) return null;
     return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8");
+}
+
+interface CachedM0M1Row {
+    cached_m0_bytes: Buffer | Uint8Array | null;
+    cached_m1_bytes: Buffer | Uint8Array | null;
+    cached_m0_project_memory_epoch: number | null;
+    cached_m0_project_user_profile_version: number | null;
+    cached_m0_max_compartment_seq: number | null;
+    cached_m0_max_memory_id: number | null;
+    cached_m0_max_mutation_id: number | null;
+    cached_m0_max_memory_mutation_id: number | null;
+    cached_m0_project_docs_hash: string | null;
+    cached_m0_materialized_at: number | null;
+    cached_m0_session_facts_version: number | null;
+    cached_m0_upgrade_state: string | null;
+    memory_block_ids: string | null;
+}
+
+function toBuffer(value: Buffer | Uint8Array): Buffer {
+    return Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function bufferEqualsNullable(
+    left: Buffer | Uint8Array | null,
+    right: Buffer | Uint8Array | null,
+): boolean {
+    if (left === null || right === null) return left === right;
+    return toBuffer(left).equals(toBuffer(right));
+}
+
+function parseMemoryBlockIds(raw: string | null): number[] {
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter((value): value is number => typeof value === "number");
+    } catch {
+        return [];
+    }
+}
+
+function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | null {
+    return db
+        .prepare(
+            `SELECT cached_m0_bytes, cached_m1_bytes,
+                    cached_m0_project_memory_epoch,
+                    cached_m0_project_user_profile_version,
+                    cached_m0_max_compartment_seq,
+                    cached_m0_max_memory_id,
+                    cached_m0_max_mutation_id,
+                    cached_m0_max_memory_mutation_id,
+                    cached_m0_project_docs_hash,
+                    cached_m0_materialized_at,
+                    cached_m0_session_facts_version,
+                    cached_m0_upgrade_state,
+                    memory_block_ids
+               FROM session_meta
+              WHERE session_id = ?`,
+        )
+        .get(sessionId) as CachedM0M1Row | null;
+}
+
+function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
+    if (!row.cached_m0_bytes) return null;
+    if (row.cached_m0_project_memory_epoch === null) return null;
+    if (row.cached_m0_project_user_profile_version === null) return null;
+    if (row.cached_m0_max_compartment_seq === null) return null;
+    if (row.cached_m0_max_memory_id === null) return null;
+    if (row.cached_m0_max_mutation_id === null) return null;
+    if (row.cached_m0_max_memory_mutation_id === null) return null;
+    if (row.cached_m0_session_facts_version === null) return null;
+    return {
+        projectMemoryEpoch: row.cached_m0_project_memory_epoch,
+        projectUserProfileVersion: row.cached_m0_project_user_profile_version,
+        maxCompartmentSeq: row.cached_m0_max_compartment_seq,
+        maxMemoryId: row.cached_m0_max_memory_id,
+        maxMutationId: row.cached_m0_max_mutation_id,
+        maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
+        projectDocsHash: row.cached_m0_project_docs_hash ?? "",
+        materializedAt: row.cached_m0_materialized_at ?? 0,
+        sessionFactsVersion: row.cached_m0_session_facts_version,
+        upgradeState: row.cached_m0_upgrade_state,
+    };
+}
+
+function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
+    return (
+        bufferEqualsNullable(row.cached_m0_bytes, state.cachedM0Bytes) &&
+        row.cached_m0_project_memory_epoch === state.cachedM0ProjectMemoryEpoch &&
+        row.cached_m0_project_user_profile_version === state.cachedM0ProjectUserProfileVersion &&
+        row.cached_m0_max_compartment_seq === state.cachedM0MaxCompartmentSeq &&
+        row.cached_m0_max_memory_id === state.cachedM0MaxMemoryId &&
+        row.cached_m0_max_mutation_id === state.cachedM0MaxMutationId &&
+        row.cached_m0_max_memory_mutation_id === state.cachedM0MaxMemoryMutationId &&
+        (row.cached_m0_project_docs_hash ?? "") === (state.cachedM0ProjectDocsHash ?? "") &&
+        row.cached_m0_materialized_at === state.cachedM0MaterializedAt &&
+        row.cached_m0_session_facts_version === state.cachedM0SessionFactsVersion &&
+        (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null)
+    );
+}
+
+function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
+    const markers = markersFromCachedRow(row);
+    if (!row.cached_m0_bytes || !row.cached_m1_bytes || !markers) {
+        throw new RenderM1InvalidMarkersError(state.sessionId);
+    }
+    state.cachedM0Bytes = toBuffer(row.cached_m0_bytes);
+    state.cachedM1Bytes = toBuffer(row.cached_m1_bytes);
+    state.cachedM0ProjectMemoryEpoch = markers.projectMemoryEpoch;
+    state.cachedM0ProjectUserProfileVersion = markers.projectUserProfileVersion;
+    state.cachedM0MaxCompartmentSeq = markers.maxCompartmentSeq;
+    state.cachedM0MaxMemoryId = markers.maxMemoryId;
+    state.cachedM0MaxMutationId = markers.maxMutationId;
+    state.cachedM0MaxMemoryMutationId = markers.maxMemoryMutationId;
+    state.cachedM0ProjectDocsHash = markers.projectDocsHash;
+    state.cachedM0MaterializedAt = markers.materializedAt;
+    state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
+    state.cachedM0UpgradeState = markers.upgradeState;
+    state.snapshotMarkers = markers;
+}
+
+function replayCachedM1(state: M0M1State): string {
+    if (!state.cachedM1Bytes) {
+        throw new RenderM1InvalidMarkersError(state.sessionId);
+    }
+    return decodeM0Bytes(state.cachedM1Bytes) ?? M1_EMPTY_PLACEHOLDER;
+}
+
+function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
+    const preRenderedKeyFilesBlock = preRenderKeyFilesBlock(options);
+    options.db.exec("BEGIN IMMEDIATE");
+    try {
+        const row = readCachedM0M1Row(options.db, options.sessionId);
+        if (!row || !cachedRowMatchesState(row, options.state)) {
+            options.db.exec("ROLLBACK");
+            const sibling = readCachedM0M1Row(options.db, options.sessionId);
+            if (!sibling) throw new RenderM1InvalidMarkersError(options.sessionId);
+            applyCachedRowToState(options.state, sibling);
+            return { text: replayCachedM1(options.state), memoryUpdateCount: 0 };
+        }
+
+        const markers = markersFromCachedRow(row);
+        if (!markers) throw new RenderM1InvalidMarkersError(options.sessionId);
+        const renderedMemoryIds = parseMemoryBlockIds(row.memory_block_ids);
+        const rendered = renderM1WithMetadata(
+            { ...options, preRenderedKeyFilesBlock },
+            markers,
+            renderedMemoryIds,
+        );
+        const m1Bytes = Buffer.from(rendered.text, "utf8");
+        options.db
+            .prepare("UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?")
+            .run(m1Bytes, options.sessionId);
+        options.db.exec("COMMIT");
+        options.state.cachedM1Bytes = m1Bytes;
+        options.state.snapshotMarkers = markers;
+        return rendered;
+    } catch (error) {
+        try {
+            options.db.exec("ROLLBACK");
+        } catch {
+            // already rolled back
+        }
+        throw error;
+    }
 }
 
 function prependM0M1Messages(
@@ -1320,6 +1612,7 @@ function prependM0M1Messages(
 function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     m0Bytes: Buffer;
     snapshotMarkers: M0SnapshotMarkers;
+    renderedMemoryIds: number[];
 } {
     const projectPath = options.projectPath;
     const projectDirectory = options.projectDirectory;
@@ -1384,7 +1677,11 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
         attempts += 1;
     }
     if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
-    return { m0Bytes: Buffer.from(m0Text, "utf8"), snapshotMarkers };
+    return {
+        m0Bytes: Buffer.from(m0Text, "utf8"),
+        snapshotMarkers,
+        renderedMemoryIds: trimmed.renderOrder.map((memory) => memory.id),
+    };
 }
 
 export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
@@ -1407,39 +1704,48 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     });
     let rematerialized = false;
     let contentionExhausted = false;
+    let freshFallbackRenderedMemoryIds: number[] | null = null;
+    let m1Render: RenderM1Result | null = null;
 
     if (decision.value) {
         try {
             const materialized = materializeWithRetry(options);
-            applyMarkersToState(options.state, materialized.m0Bytes, materialized.snapshotMarkers);
+            applyMarkersToState(
+                options.state,
+                materialized.m0Bytes,
+                materialized.snapshotMarkers,
+                materialized.m1Bytes,
+            );
+            m1Render = { text: materialized.m1Text, memoryUpdateCount: 0 };
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
             if (options.state.cachedM0Bytes) {
                 // Preferred fallback: reuse the cached baseline. A sibling process
                 // mutated state mid-materialization; serving the slightly stale
-                // cached m[0] this pass is correct and the next pass retries.
+                // cached m[0]/m[1] pair this pass is correct and the next pass retries.
                 contentionExhausted = true;
                 options.state.snapshotMarkers =
                     options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);
                 sessionLog(
                     options.sessionId,
-                    `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached m[0]`,
+                    `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached m[0]/m[1]`,
                 );
             } else {
                 // No cached baseline to reuse — happens when the cache was cleared
                 // THIS pass (history refresh) and then hit contention. Dropping
                 // injection would send the model ZERO session history, so render a
-                // fresh non-persisted m[0] as a last resort (mirrors Pi
+                // fresh non-persisted m[0]/m[1] pair as a last resort (mirrors Pi
                 // injectM0M1Pi). Not cached because we couldn't win the lock; the
                 // next pass re-materializes and persists.
                 const fresh = renderFreshM0NonPersisted(options);
                 options.state.cachedM0Bytes = fresh.m0Bytes;
                 options.state.snapshotMarkers = fresh.snapshotMarkers;
+                freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
                 contentionExhausted = true;
                 sessionLog(
                     options.sessionId,
-                    `m[0] materialization contention exhausted after ${error.retries} retries with no cached fallback; rendered fresh non-persisted m[0]`,
+                    `m[0] materialization contention exhausted after ${error.retries} retries with no cached fallback; rendered fresh non-persisted m[0]/m[1]`,
                 );
             }
         }
@@ -1453,31 +1759,58 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     }
 
     let m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-    let m1Text = renderM1(options, options.state.snapshotMarkers);
+    let m1Text: string;
+    let memoryUpdateCount = 0;
+    let m1Recomputed = m1Render !== null;
+
+    if (m1Render) {
+        m1Text = m1Render.text;
+        memoryUpdateCount = m1Render.memoryUpdateCount;
+    } else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
+        const freshM1 = renderM1WithMetadata(
+            { ...options, preRenderedKeyFilesBlock: preRenderKeyFilesBlock(options) },
+            options.state.snapshotMarkers,
+            freshFallbackRenderedMemoryIds,
+        );
+        m1Text = freshM1.text;
+        memoryUpdateCount = freshM1.memoryUpdateCount;
+        m1Recomputed = true;
+    } else if (contentionExhausted) {
+        m1Text = replayCachedM1(options.state);
+    } else if (options.isCacheBustingPass) {
+        const refreshed = softRefreshCachedM1(options);
+        m1Text = refreshed.text;
+        memoryUpdateCount = refreshed.memoryUpdateCount;
+        m1Recomputed = true;
+        m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
+    } else {
+        m1Text = replayCachedM1(options.state);
+    }
 
     // Forced +15% drift refold (spec ARCHITECTURE.md: "A forced refold also
-    // fires at +15% budget drift if no natural hard bust occurred"). When m[1]
-    // has drifted past 15% of m[0]'s size without a materialization this pass,
-    // fold the accumulated delta into a fresh m[0] baseline so the volatile
-    // block doesn't grow unbounded between hard busts. Skipped when contention
-    // exhausted (we're already reusing a cached m[0] and must not thrash).
+    // fires at +15% budget drift if no natural hard bust occurred"). Run this
+    // only on cache-busting passes where m[1] was freshly recomputed; defer
+    // passes replay persisted bytes and must never live-read/refold.
     if (
         !rematerialized &&
         !contentionExhausted &&
+        m1Recomputed &&
+        options.isCacheBustingPass &&
         m0Text.length > 0 &&
-        // Only refold on GENUINE accumulated delta — never when m[1] is just the
-        // empty placeholder. Otherwise a tiny baseline (near-empty session) would
-        // see placeholder > m0*0.15 and refold every defer pass, breaking the
-        // byte-identical-defer cache invariant.
-        m1Text !== M1_EMPTY_PLACEHOLDER &&
-        m1Text.length > m0Text.length * 0.15
+        (memoryUpdateCount > 40 ||
+            (m1Text !== M1_EMPTY_PLACEHOLDER && m1Text.length > m0Text.length * 0.15))
     ) {
         try {
             const refolded = materializeWithRetry(options);
-            applyMarkersToState(options.state, refolded.m0Bytes, refolded.snapshotMarkers);
+            applyMarkersToState(
+                options.state,
+                refolded.m0Bytes,
+                refolded.snapshotMarkers,
+                refolded.m1Bytes,
+            );
             rematerialized = true;
             m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-            m1Text = renderM1(options, options.state.snapshotMarkers);
+            m1Text = refolded.m1Text;
         } catch (error) {
             // Contention during the drift refold is non-fatal: keep the current
             // (un-refolded) m[0]/m[1]; the next pass retries the fold.

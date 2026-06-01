@@ -10,6 +10,7 @@ import {
     bumpSessionFactsVersion,
     getOrCreateSessionMeta,
     queueM0Mutation,
+    queueMemoryMutation,
     setProjectState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -421,6 +422,7 @@ describe("m[0]/m[1] materialization", () => {
         const state = {
             ...readStateFromMeta(),
             cachedM0Bytes: Buffer.from("<session-history></session-history>"),
+            cachedM1Bytes: Buffer.from("<session-history-since></session-history-since>"),
             cachedM0ProjectMemoryEpoch: 5,
             cachedM0ProjectUserProfileVersion: 0,
             cachedM0MaxCompartmentSeq: 0,
@@ -575,22 +577,26 @@ describe("m[0]/m[1] materialization", () => {
         });
         const row = db
             .prepare(
-                `SELECT cached_m0_bytes, cached_m0_project_memory_epoch,
+                `SELECT cached_m0_bytes, cached_m1_bytes, cached_m0_project_memory_epoch,
                         cached_m0_project_user_profile_version, cached_m0_max_compartment_seq,
                         cached_m0_max_memory_id, cached_m0_max_mutation_id,
-                        cached_m0_project_docs_hash, cached_m0_materialized_at,
-                        cached_m0_session_facts_version, cached_m0_upgrade_state
+                        cached_m0_max_memory_mutation_id, cached_m0_project_docs_hash,
+                        cached_m0_materialized_at, cached_m0_session_facts_version,
+                        cached_m0_upgrade_state
                    FROM session_meta WHERE session_id = ?`,
             )
             .get(SESSION_ID) as Record<string, unknown>;
 
         expect(row.cached_m0_bytes).not.toBeNull();
+        expect(row.cached_m1_bytes).not.toBeNull();
         expect(Buffer.from(row.cached_m0_bytes as Buffer).toString("utf8")).toBe(result.m0Text);
+        expect(Buffer.from(row.cached_m1_bytes as Buffer).toString("utf8")).toBe(result.m1Text);
         expect(row.cached_m0_project_memory_epoch).toBe(0);
         expect(row.cached_m0_project_user_profile_version).toBe(0);
         expect(row.cached_m0_max_compartment_seq).toBe(0);
         expect(row.cached_m0_max_memory_id).toBe(0);
         expect(row.cached_m0_max_mutation_id).toBe(0);
+        expect(row.cached_m0_max_memory_mutation_id).toBe(0);
         expect(row.cached_m0_project_docs_hash).toBe("");
         expect(typeof row.cached_m0_materialized_at).toBe("number");
         expect(row.cached_m0_session_facts_version).toBe(0);
@@ -766,9 +772,11 @@ describe("m[0]/m[1] materialization", () => {
         expect(result.injected).toBe(true);
         expect(result.m0RematerializedThisPass).toBe(true);
         expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
+        expect(state.cachedM1Bytes).toBeInstanceOf(Buffer);
         expect(state.cachedM0ProjectMemoryEpoch).toBe(0);
         expect(state.cachedM0MaxCompartmentSeq).toBe(0);
         expect(state.cachedM0MaxMutationId).toBe(0);
+        expect(state.cachedM0MaxMemoryMutationId).toBe(0);
         expect(state.cachedM0ProjectDocsHash).toBe("");
         expect(typeof state.cachedM0MaterializedAt).toBe("number");
         expect(state.cachedM0SessionFactsVersion).toBe(0);
@@ -919,5 +927,284 @@ describe("m[0]/m[1] materialization", () => {
         expect(result.m0RematerializedThisPass).toBe(false);
         expect(renderedText(second[0])).toBe(firstM0);
         expect(result.m1Text).toContain("no new content since last materialization");
+    });
+
+    it("replays byte-identical m[1] on defer and surfaces additive memory on next cache-busting pass", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        replaceAllCompartmentState(
+            db,
+            SESSION_ID,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m0",
+                    endMessageId: "m0",
+                    title: "large baseline",
+                    content: "baseline ".repeat(300),
+                },
+            ],
+            [],
+        );
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "Large baseline memory. ".repeat(300),
+        });
+        const state = readStateFromMeta();
+        const first = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: first,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        const initialM1 = renderedText(first[1]);
+
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "New additive memory appears only after a bust.",
+        });
+
+        const deferOne = [userMessage("m2", "defer one")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: deferOne,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: false,
+        });
+        const deferTwo = [userMessage("m3", "defer two")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: deferTwo,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: false,
+        });
+
+        expect(renderedText(deferOne[1])).toBe(initialM1);
+        expect(renderedText(deferTwo[1])).toBe(initialM1);
+        expect(initialM1).not.toContain("New additive memory");
+
+        const bust = [userMessage("m4", "bust")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        expect(renderedText(bust[1])).toContain("<new-memories>");
+        expect(renderedText(bust[1])).toContain("New additive memory appears only after a bust.");
+    });
+
+    it("renders memory mutation removals on cache-busting pass and replays them on defer", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        replaceAllCompartmentState(
+            db,
+            SESSION_ID,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m0",
+                    endMessageId: "m0",
+                    title: "large baseline",
+                    content: "baseline ".repeat(300),
+                },
+            ],
+            [],
+        );
+        const memory = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "Baseline memory to remove from m0. ".repeat(300),
+        });
+        const state = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m1", "hello")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        queueMemoryMutation(db, {
+            projectPath: PROJECT_PATH,
+            mutationType: "archive",
+            targetMemoryId: memory.id,
+            queuedAt: 10,
+        });
+
+        const bust = [userMessage("m2", "bust")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        const m1 = renderedText(bust[1]);
+        expect(m1).toContain("<memory-updates>");
+        expect(m1).toContain(`These memories changed since the snapshot below — trust these:`);
+        expect(m1).toContain(`<removed id="${memory.id}"/>`);
+
+        const defer = [userMessage("m3", "defer")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: defer,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: false,
+        });
+        expect(renderedText(defer[1])).toBe(m1);
+    });
+
+    it("skips memory mutation deltas for memories trimmed out of m0", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const memory = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "This memory is too large for a one-token m0 budget.",
+        });
+        const state = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m1", "hello")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: 1,
+            isCacheBustingPass: true,
+        });
+        queueMemoryMutation(db, {
+            projectPath: PROJECT_PATH,
+            mutationType: "update",
+            targetMemoryId: memory.id,
+            newContent: "Updated but not resident.",
+            queuedAt: 10,
+        });
+
+        const bust = [userMessage("m2", "bust")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: 1,
+            isCacheBustingPass: true,
+        });
+
+        expect(renderedText(bust[1])).not.toContain("<memory-updates>");
+        expect(renderedText(bust[1])).not.toContain("Updated but not resident.");
+    });
+
+    it("reconcile rematerialization advances the memory mutation cursor and omits memory-updates", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const memory = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "Old baseline content.",
+        });
+        const state = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m1", "hello")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        db.prepare(
+            "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+        ).run("Reconciled content.", "reconciled-hash", Date.now(), memory.id);
+        queueMemoryMutation(db, {
+            projectPath: PROJECT_PATH,
+            mutationType: "update",
+            targetMemoryId: memory.id,
+            newContent: "Reconciled content.",
+            queuedAt: 10,
+        });
+        setProjectState(db, PROJECT_PATH, { projectMemoryEpoch: 1 });
+
+        const bust = [userMessage("m2", "bust")];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+
+        expect(result.m0RematerializedThisPass).toBe(true);
+        expect(renderedText(bust[0])).toContain("Reconciled content.");
+        expect(renderedText(bust[1])).not.toContain("<memory-updates>");
+    });
+
+    it("soft m1 refresh CAS rolls back and replays a sibling cached m1 on marker mismatch", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m1", "hello")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_max_memory_id = ?, cached_m1_bytes = ? WHERE session_id = ?",
+        ).run(
+            Buffer.from(`<session-history>${"baseline ".repeat(300)}</session-history>`, "utf8"),
+            99,
+            Buffer.from("sibling cached m1", "utf8"),
+            SESSION_ID,
+        );
+
+        const bust = [userMessage("m2", "bust")];
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: bust,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+        });
+
+        expect(result.m0RematerializedThisPass).toBe(false);
+        expect(result.m1Text).toBe("sibling cached m1");
+        expect(renderedText(bust[1])).toBe("sibling cached m1");
+        expect(state.cachedM0MaxMemoryId).toBe(99);
     });
 });

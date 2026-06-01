@@ -3,6 +3,7 @@ import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
     getMemoriesByProject,
     getMemoryById,
+    getMemoryMutationsForRender,
     getProjectState,
     insertMemory,
     normalizeStoredProjectPath,
@@ -62,6 +63,20 @@ function createTestDb(): Database {
             updated_at                   INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS memory_mutation_log
+        (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_path     TEXT NOT NULL,
+            mutation_type    TEXT NOT NULL,
+            target_memory_id INTEGER NOT NULL,
+            superseded_by_id INTEGER,
+            category         TEXT,
+            new_content      TEXT,
+            queued_at        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_project
+            ON memory_mutation_log(project_path, id);
+
         CREATE
         VIRTUAL
         TABLE IF
@@ -98,6 +113,15 @@ const toolContext = (sessionID = "ses-memory", agent = "general") =>
 
 function getProjectMemoryEpoch(db: Database, projectPath: string): number {
     return getProjectState(db, normalizeStoredProjectPath(projectPath))?.projectMemoryEpoch ?? 0;
+}
+
+function getMutationRows(db: Database, projectPath: string, renderedMemoryIds: number[]) {
+    return getMemoryMutationsForRender(
+        db,
+        normalizeStoredProjectPath(projectPath),
+        0,
+        renderedMemoryIds,
+    );
 }
 
 afterAll(() => {
@@ -231,7 +255,10 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain("Archived memory");
             expect(updated?.status).toBe("archived");
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                { mutationType: "delete", targetMemoryId: memory.id },
+            ]);
         });
 
         it("returns error when ID is missing", async () => {
@@ -296,10 +323,18 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
             expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=10m");
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                {
+                    mutationType: "update",
+                    targetMemoryId: memory.id,
+                    category: "CONFIG_DEFAULTS",
+                    newContent: "cache_ttl=10m",
+                },
+            ]);
         });
 
-        it("normalizes legacy raw project paths before bumping the epoch", async () => {
+        it("normalizes legacy raw project paths before queueing the mutation", async () => {
             const rawProjectPath = "/legacy/raw-project";
             const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
             const legacyTools = createCtxMemoryTools({
@@ -324,17 +359,20 @@ describe("createCtxMemoryTools", () => {
             );
 
             expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
-            expect(getProjectState(db, projectIdentity)?.projectMemoryEpoch).toBe(1);
+            expect(getProjectState(db, projectIdentity)).toBeNull();
             expect(getProjectState(db, rawProjectPath)).toBeNull();
+            expect(getMutationRows(db, projectIdentity, [memory.id])).toMatchObject([
+                { mutationType: "update", targetMemoryId: memory.id, newContent: "timeout=10s" },
+            ]);
         });
 
-        it("rolls back content updates when the epoch bump fails", async () => {
+        it("rolls back content updates when queueing the mutation fails", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_DEFAULTS",
                 content: "cache_ttl=5m",
             });
-            db.exec("DROP TABLE project_state");
+            db.exec("DROP TABLE memory_mutation_log");
 
             let thrown: unknown;
             try {
@@ -350,7 +388,7 @@ describe("createCtxMemoryTools", () => {
                 thrown = error;
             }
 
-            expect(String(thrown)).toContain("project_state");
+            expect(String(thrown)).toContain("memory_mutation_log");
             expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=5m");
         });
     });
@@ -383,10 +421,61 @@ describe("createCtxMemoryTools", () => {
             expect(activeMemories[0]?.content).toBe("Use bun for all scripts in this repository.");
             expect(getMemoryById(db, first.id)?.status).toBe("archived");
             expect(getMemoryById(db, second.id)?.status).toBe("archived");
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
+            expect(getMutationRows(db, "/repo/project", [first.id, second.id])).toMatchObject([
+                {
+                    mutationType: "superseded",
+                    targetMemoryId: first.id,
+                    supersededById: activeMemories[0]?.id,
+                },
+                {
+                    mutationType: "superseded",
+                    targetMemoryId: second.id,
+                    supersededById: activeMemories[0]?.id,
+                },
+            ]);
         });
 
-        it("bumps each affected project identity once when merging across identities", async () => {
+        it("queues an update row when an existing canonical memory content changes", async () => {
+            const canonical = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const duplicate = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for all scripts",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [canonical.id, duplicate.id],
+                    content: "USE BUN FOR SCRIPTS",
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain(`canonical memory [ID: ${canonical.id}]`);
+            expect(getMemoryById(db, canonical.id)?.content).toBe("USE BUN FOR SCRIPTS");
+            expect(
+                getMutationRows(db, "/repo/project", [canonical.id, duplicate.id]),
+            ).toMatchObject([
+                {
+                    mutationType: "superseded",
+                    targetMemoryId: duplicate.id,
+                    supersededById: canonical.id,
+                },
+                {
+                    mutationType: "update",
+                    targetMemoryId: canonical.id,
+                    newContent: "USE BUN FOR SCRIPTS",
+                },
+            ]);
+        });
+
+        it("queues superseded rows under each affected project identity when merging across identities", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project-a",
                 category: "CONSTRAINTS",
@@ -413,8 +502,15 @@ describe("createCtxMemoryTools", () => {
             );
 
             expect(result).toContain("Merged memories");
-            expect(getProjectMemoryEpoch(db, "/repo/project-a")).toBe(1);
-            expect(getProjectMemoryEpoch(db, "/repo/project-b")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project-a")).toBe(0);
+            expect(getProjectMemoryEpoch(db, "/repo/project-b")).toBe(0);
+            expect(getMutationRows(db, "/repo/project-a", [first.id, second.id])).toMatchObject([
+                { mutationType: "superseded", targetMemoryId: first.id },
+                { mutationType: "superseded", targetMemoryId: second.id },
+            ]);
+            expect(getMutationRows(db, "/repo/project-b", [third.id])).toMatchObject([
+                { mutationType: "superseded", targetMemoryId: third.id },
+            ]);
         });
     });
 
@@ -439,7 +535,10 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)?.metadataJson).toContain(
                 "Removed subsystem no longer exists",
             );
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(1);
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
+                { mutationType: "archive", targetMemoryId: memory.id },
+            ]);
         });
     });
 

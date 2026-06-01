@@ -66,6 +66,7 @@ export interface SessionMeta {
     clearedReasoningThroughTag: number;
     lastTodoState: string;
     cachedM0Bytes: Buffer | null;
+    cachedM1Bytes: Buffer | null;
     cachedM0ProjectMemoryEpoch: number | null;
     cachedM0ProjectUserProfileVersion: number | null;
     cachedM0MaxCompartmentSeq: number | null;
@@ -78,10 +79,12 @@ export interface SessionMeta {
      */
     piStableIdScheme: number | null;
     cachedM0MaxMutationId: number | null;
+    cachedM0MaxMemoryMutationId: number | null;
     cachedM0ProjectDocsHash: string | null;
     cachedM0MaterializedAt: number | null;
     cachedM0SessionFactsVersion: number | null;
     cachedM0UpgradeState: string | null;
+    lastObservedModelKey: string | null;
     upgradeRemindedAt: number | null;
 }
 

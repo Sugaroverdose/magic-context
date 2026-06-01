@@ -2,6 +2,7 @@ import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { isCompartmentLeaseHeld } from "./compartment-lease";
 import { getIncrementDepthStatement } from "./compression-depth-storage";
+import { clearCachedM0M1 } from "./storage-meta-shared";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertFactStatements = new WeakMap<Database, PreparedStatement>();
@@ -320,13 +321,7 @@ export function replaceSessionFacts(
     db.transaction(() => {
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
         insertFactRows(db, sessionId, facts, now);
-        // Clear cached injection block so next pass renders fresh — preserve memory_block_count
-        // because memories didn't change (only facts), and the dashboard reads count between busts.
-        // Clear memory_block_ids alongside so ctx_search's visible-memory filter doesn't use stale IDs
-        // during the short window between invalidation and the next render.
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-        ).run(sessionId);
+        clearCachedM0M1(db, sessionId);
     })();
 }
 
@@ -352,12 +347,7 @@ export function replaceAllCompartmentState(
         insertCompartmentRows(db, sessionId, compartments, now);
         insertFactRows(db, sessionId, facts, now);
 
-        // Clear cached injection block so next pass renders fresh — preserve memory_block_count
-        // because memories didn't change (only compartments/facts), and the dashboard reads count between busts.
-        // Clear memory_block_ids alongside so the visible-memory filter doesn't use stale IDs.
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-        ).run(sessionId);
+        clearCachedM0M1(db, sessionId);
     })();
 }
 
@@ -386,12 +376,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
         insertCompartmentRows(db, sessionId, compartments, now);
         insertFactRows(db, sessionId, facts, now);
 
-        // Clear cached injection block so next pass renders fresh — preserve memory_block_count
-        // because memories didn't change (only compartments/facts), and the dashboard reads count between busts.
-        // Clear memory_block_ids alongside so the visible-memory filter doesn't use stale IDs.
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-        ).run(sessionId);
+        clearCachedM0M1(db, sessionId);
 
         if (depthEndOrdinal >= depthStartOrdinal) {
             const stmt = getIncrementDepthStatement(db);
@@ -579,9 +564,7 @@ export function promoteRecompStaging(
             insertFactRows(db, sessionId, staging.facts, now);
             db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
             db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-            db.prepare(
-                "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-            ).run(sessionId);
+            clearCachedM0M1(db, sessionId);
             return { compartments: staging.compartments, facts: staging.facts };
         })();
     }
@@ -612,10 +595,7 @@ export function promoteRecompStaging(
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
-        // Clear cached injection block — preserve memory_block_count (memories didn't change)
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
-        ).run(sessionId);
+        clearCachedM0M1(db, sessionId);
 
         db.exec("COMMIT");
         finished = true;
@@ -638,11 +618,12 @@ export function promoteRecompStaging(
  */
 export function invalidateAllMemoryBlockCaches(db: Database): void {
     try {
-        // Clear both memory_block_cache and memory_block_ids so ctx_search's
-        // visible-memory filter can't use stale IDs either.
-        db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE memory_block_cache != '' OR memory_block_ids != ''",
-        ).run();
+        const rows = db.prepare("SELECT session_id FROM session_meta").all() as Array<{
+            session_id: string;
+        }>;
+        for (const row of rows) {
+            clearCachedM0M1(db, row.session_id);
+        }
     } catch {
         // Best-effort — session_meta may not exist in test environments
     }

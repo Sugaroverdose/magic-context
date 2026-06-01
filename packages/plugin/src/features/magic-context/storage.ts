@@ -63,11 +63,20 @@ export {
     queueM0Mutation as appendM0Mutation,
 } from "./storage-m0-mutation-log";
 export {
+    getMaxMemoryMutationId,
+    getMemoryMutation,
+    getMemoryMutationsForRender,
+    type MemoryMutationLogRow,
+    type MemoryMutationType,
+    queueMemoryMutation,
+} from "./storage-memory-mutation-log";
+export {
     type AppendAutoSearchHintOutcome,
     type AutoSearchHintDecision,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
     clearCachedM0,
+    clearCachedM0M1,
     clearDeferredExecutePendingIfMatches,
     clearDetectedContextLimit,
     clearEmergencyRecovery,

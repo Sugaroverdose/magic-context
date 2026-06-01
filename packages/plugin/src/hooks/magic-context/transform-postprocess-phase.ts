@@ -537,6 +537,7 @@ export async function runPostTransformPhase(
                 memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 keyFiles: args.m0M1.keyFiles,
+                isCacheBustingPass,
             });
             if (result.injected) {
                 sessionLog(
