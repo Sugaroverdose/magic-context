@@ -1471,23 +1471,23 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
         .collect();
     identities.sort();
 
-    // Resolve git:HASH identities via OpenCode's project table
-    let hash_to_project = resolve_from_opencode_db(&identities);
+    // Resolve friendly names/paths via the same enumeration the project picker
+    // uses. enumerate_projects_filtered recomputes identity with
+    // resolve_project_identity(&worktree) — the SAME git root-commit space the
+    // plugin stamps into git:<sha> — so these identities match. The older
+    // resolve_from_opencode_db matched git:<sha> against OpenCode's project.id,
+    // which is a DIFFERENT hash, so it never resolved a name and every Dreamer
+    // row fell back to git:<short>… (the regression this fixes).
+    let identity_to_row: HashMap<String, ProjectRow> = enumerate_projects_filtered(None)
+        .into_iter()
+        .map(|row| (row.identity.clone(), row))
+        .collect();
 
     let projects = identities
         .into_iter()
         .map(|id| {
-            let (label, path) = if let Some((name, worktree)) = hash_to_project.get(&id) {
-                let display = if name.is_empty() {
-                    // Use directory basename as label
-                    std::path::Path::new(worktree)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| worktree.clone())
-                } else {
-                    name.clone()
-                };
-                (display, Some(worktree.clone()))
+            let (label, path) = if let Some(row) = identity_to_row.get(&id) {
+                (row.display_name.clone(), Some(row.primary_path.clone()))
             } else if id.starts_with("git:") {
                 let short = &id[4..std::cmp::min(id.len(), 14)];
                 (format!("git:{short}…"), None)
@@ -1648,58 +1648,6 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
         .collect();
     rows.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     rows
-}
-
-/// Look up project names and worktrees from OpenCode's own database.
-/// OpenCode stores projects with `id` = git root commit hash and `worktree` = directory path.
-fn resolve_from_opencode_db(
-    identities: &[String],
-) -> std::collections::HashMap<String, (String, String)> {
-    let mut result = HashMap::new();
-
-    let Some(opencode_db) = resolve_opencode_db_path() else {
-        return result;
-    };
-
-    let conn = match open_readonly(&opencode_db) {
-        Ok(c) => c,
-        Err(_) => return result,
-    };
-
-    // Query all projects — the table is small
-    let mut stmt = match conn.prepare("SELECT id, name, worktree FROM project") {
-        Ok(s) => s,
-        Err(_) => return result,
-    };
-
-    let rows = match stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return result,
-    };
-
-    // Build a hash → (name, worktree) map
-    let mut oc_projects: HashMap<String, (String, String)> = HashMap::new();
-    for row in rows.flatten() {
-        let (id, name, worktree) = row;
-        oc_projects.insert(id, (name.unwrap_or_default(), worktree));
-    }
-
-    // Match our git:HASH identities against opencode project IDs
-    for identity in identities {
-        if let Some(hash) = identity.strip_prefix("git:") {
-            if let Some((name, worktree)) = oc_projects.get(hash) {
-                result.insert(identity.clone(), (name.clone(), worktree.clone()));
-            }
-        }
-    }
-
-    result
 }
 
 // ── Query implementations ─────────────────────────────────────
@@ -2295,12 +2243,17 @@ fn queue_memory_mutation(
     category: Option<&str>,
     new_content: Option<&str>,
 ) -> Result<(), rusqlite::Error> {
+    // Store the row under the resolved identity (git:/dir:), mirroring the plugin's
+    // queueMemoryMutation. The render-side filter queries by resolved identity, so a
+    // raw-path row would be invisible to it. Idempotent on already-resolved paths
+    // (every live memory row), defensive for any legacy raw path.
+    let identity = normalize_stored_project_path(project_path);
     tx.execute(
         "INSERT INTO memory_mutation_log
            (project_path, mutation_type, target_memory_id, superseded_by_id, category, new_content, queued_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            project_path,
+            identity,
             mutation_type,
             target_memory_id,
             superseded_by_id,
