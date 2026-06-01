@@ -14,7 +14,11 @@ import { getMagicContextBuiltinCommands } from "./features/builtin-commands/comm
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
-import { isDatabasePersisted, openDatabase } from "./features/magic-context/storage-db";
+import {
+    isDatabasePersisted,
+    openDatabase,
+    setSqlitePragmaConfig,
+} from "./features/magic-context/storage-db";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
@@ -40,6 +44,11 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);
+    // Apply SQLite connection tuning before the first openDatabase() below.
+    setSqlitePragmaConfig({
+        cacheSizeMb: pluginConfig.sqlite.cache_size_mb,
+        mmapSizeMb: pluginConfig.sqlite.mmap_size_mb,
+    });
     const autoUpdateAbort = new AbortController();
     process.once("exit", () => {
         autoUpdateAbort.abort();

@@ -62,6 +62,10 @@ describe("MagicContextConfigSchema", () => {
                     enabled: true,
                     min_clusters: 3,
                 },
+                sqlite: {
+                    cache_size_mb: 64,
+                    mmap_size_mb: 0,
+                },
                 system_prompt_injection: {
                     enabled: true,
                     skip_signatures: ["<!-- magic-context: skip -->"],

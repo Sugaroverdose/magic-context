@@ -9,7 +9,7 @@ import {
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
-import { openDatabase } from "../features/magic-context/storage";
+import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
 import { resolveFallbackChain } from "../shared/resolve-fallbacks";
 import type { Database } from "../shared/sqlite";
@@ -177,6 +177,10 @@ function runTick(origin: "startup" | "interval"): void {
                 const gitSnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
                 await sweepProject(reg, origin, db, gitSnapshot?.gitCommitEnabled === true);
             }
+            // Refresh planner stats once per tick (after per-project work).
+            // Self-gating: a no-op unless a table's row count drifted enough to
+            // warrant re-ANALYZE, and analysis_limit bounds any work it does.
+            runSqliteOptimize(db);
         } catch (error) {
             log("[magic-context] timer-triggered maintenance check failed:", error);
         }

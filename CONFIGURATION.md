@@ -128,6 +128,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `history_budget_percentage` | `number` (0.05–0.5) | `0.15` | Fraction of usable context (`context_limit × execute_threshold`) reserved for the history block. Triggers compression when exceeded. |
 | `compaction_markers` | `boolean` | `true` | Inject compaction boundaries into OpenCode's DB after historian publishes. Reduces transform input size for long sessions. |
 | `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
+| `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `compressor` | `object` | See below | Controls the background compressor that merges older compartments when the history block exceeds its budget. |
 
 ### `commit_cluster_trigger`
@@ -142,6 +143,24 @@ A **commit cluster** is a distinct work phase where the agent made one or more g
   }
 }
 ```
+
+### `sqlite`
+
+Per-connection PRAGMAs applied to Magic Context's own `context.db` at open. These tune SQLite's runtime behaviour only — they do not change the schema or what is stored, and they do not touch OpenCode's or Pi's databases.
+
+```jsonc
+{
+  "sqlite": {
+    "cache_size_mb": 64,   // default: 64, min: 2, max: 2048 — page-cache size per connection
+    "mmap_size_mb": 0      // default: 0 (disabled), min: 0, max: 8192 — memory-mapped I/O size
+  }
+}
+```
+
+- **`cache_size_mb`** — how much page cache each connection keeps resident (`PRAGMA cache_size`). The DB grows large on long-lived projects, and several hot paths do repeated full-table scans; a larger cache keeps those pages in memory instead of re-reading from disk. Raised from SQLite's ~2 MB default to **64 MB**.
+- **`mmap_size_mb`** — memory-maps the database file (`PRAGMA mmap_size`) so reads avoid a copy through the page cache. Can reduce read overhead on large DBs at the cost of address space. **Disabled by default (`0`)**, matching SQLite's default; raise it (e.g. `256`) only if you want to experiment with read performance.
+
+Separately, Magic Context runs `PRAGMA optimize` (bounded by `PRAGMA analysis_limit=400`) on its 15-minute maintenance tick. This is self-gating — it re-analyses a table only when its row count has drifted enough to matter — so the query planner keeps choosing good indexes as the database grows. There is no config knob for it.
 
 ### `compressor`
 

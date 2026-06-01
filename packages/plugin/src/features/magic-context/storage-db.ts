@@ -157,6 +157,49 @@ export function enforceSchemaFence(
     return false;
 }
 
+// Per-connection SQLite tuning, settable once at plugin init (before the first
+// openDatabase) so the 27 openDatabase call sites don't each need config
+// threading. Defaults match the config schema (64 MiB cache, mmap disabled) so
+// tests and early-init opens still get sane values.
+let sqlitePragmaConfig: { cacheSizeMb: number; mmapSizeMb: number } = {
+    cacheSizeMb: 64,
+    mmapSizeMb: 0,
+};
+
+export function setSqlitePragmaConfig(config: { cacheSizeMb: number; mmapSizeMb: number }): void {
+    sqlitePragmaConfig = config;
+}
+
+/**
+ * Apply the tunable per-connection PRAGMAs (cache_size, mmap_size,
+ * analysis_limit) from the current `sqlitePragmaConfig`. Idempotent and safe on
+ * an already-open connection — cache_size/mmap_size take effect immediately —
+ * so harnesses that open the DB before loading config (Pi) can call this once
+ * config is available without reopening.
+ */
+export function applySqliteTuningPragmas(db: Database): void {
+    // cache_size negative value = KiB of page cache (e.g. -65536 = 64 MiB).
+    db.exec(`PRAGMA cache_size=-${Math.round(sqlitePragmaConfig.cacheSizeMb * 1024)}`);
+    db.exec(`PRAGMA mmap_size=${Math.round(sqlitePragmaConfig.mmapSizeMb * 1024 * 1024)}`);
+    // Bound any ANALYZE that a later PRAGMA optimize triggers on this connection.
+    db.exec("PRAGMA analysis_limit=400");
+}
+
+/**
+ * Run SQLite's self-gating planner-stats refresh. `analysis_limit=400` caps the
+ * rows sampled per index so even a huge table can't cause a multi-second
+ * ANALYZE; `optimize` then re-analyzes only tables whose row counts drifted
+ * since the last ANALYZE (a no-op otherwise). Cheap to call periodically.
+ */
+export function runSqliteOptimize(db: Database): void {
+    try {
+        db.exec("PRAGMA analysis_limit=400");
+        db.exec("PRAGMA optimize");
+    } catch {
+        // Best-effort maintenance; never fail a caller over stats refresh.
+    }
+}
+
 export function initializeDatabase(db: Database): void {
     // SQLite per-connection PRAGMAs. foreign_keys MUST run before any reads
     // or writes: it defaults to OFF, which silently breaks every ON DELETE
@@ -164,6 +207,7 @@ export function initializeDatabase(db: Database): void {
     db.exec("PRAGMA foreign_keys=ON");
     db.exec("PRAGMA journal_mode=WAL");
     db.exec("PRAGMA busy_timeout=5000");
+    applySqliteTuningPragmas(db);
     db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

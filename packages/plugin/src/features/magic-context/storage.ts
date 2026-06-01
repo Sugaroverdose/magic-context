@@ -31,6 +31,7 @@ export {
     resolveProjectIdentityStrict,
 } from "./project-identity";
 export {
+    applySqliteTuningPragmas,
     type ContextDatabase,
     closeDatabase,
     enforceSchemaFence,
@@ -41,7 +42,9 @@ export {
     LATEST_SUPPORTED_VERSION,
     type OpenDatabaseOptions,
     openDatabase,
+    runSqliteOptimize,
     schemaVersionIsSupported,
+    setSqlitePragmaConfig,
 } from "./storage-db";
 export {
     deleteIdentityRekeyMap,

@@ -186,6 +186,11 @@ export interface MagicContextConfig {
         enabled: boolean;
         min_clusters: number;
     };
+    /** Per-connection SQLite tuning for Magic Context's own context.db. */
+    sqlite: {
+        cache_size_mb: number;
+        mmap_size_mb: number;
+    };
     /**
      * Controls whether and where Magic Context augments the system prompt
      * (`## Magic Context` guidance, `<project-docs>`, `<user-profile>`,
@@ -351,6 +356,21 @@ export const MagicContextConfigSchema = z
         // (decay-render.ts) replaces it, so there are no compressor knobs. A
         // leftover `compressor` block in an existing config is silently ignored
         // (the schema strips unknown keys).
+        /** SQLite connection tuning for Magic Context's own context.db. These are
+         *  per-connection PRAGMAs applied at open; they do not change the schema or
+         *  what is stored. */
+        sqlite: z
+            .object({
+                /** Page-cache size in MiB per connection (PRAGMA cache_size). Larger
+                 *  keeps more hot pages resident, cutting re-reads on repeated
+                 *  full-table scans. (min 2, max 2048, default 64) */
+                cache_size_mb: z.number().min(2).max(2048).default(64),
+                /** Memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap
+                 *  (SQLite default). Raising it can cut read overhead on large DBs at
+                 *  the cost of address space. (min 0, max 8192, default 0) */
+                mmap_size_mb: z.number().min(0).max(8192).default(0),
+            })
+            .default({ cache_size_mb: 64, mmap_size_mb: 0 }),
         /** Embedding provider configuration */
         embedding: EmbeddingConfigSchema.default({
             provider: "local",

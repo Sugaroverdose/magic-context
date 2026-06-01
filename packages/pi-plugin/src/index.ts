@@ -33,8 +33,17 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { getOrCreateSessionMeta, getPendingPiCompactionMarkerState, getSessionsWithPendingPiMarker, updateSessionMeta } from '@magic-context/core/features/magic-context/storage';
-import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import {
+	getOrCreateSessionMeta,
+	getPendingPiCompactionMarkerState,
+	getSessionsWithPendingPiMarker,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage";
+import {
+	applySqliteTuningPragmas,
+	openDatabase,
+	setSqlitePragmaConfig,
+} from "@magic-context/core/features/magic-context/storage-db";
 import {
 	getOverflowState,
 	recordOverflowDetected,
@@ -522,6 +531,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	for (const w of warnings) {
 		warn(`config: ${w}`);
 	}
+
+	// Pi opens the shared DB before config is available (above), so apply the
+	// configured SQLite tuning to the already-open connection now. cache_size /
+	// mmap_size take effect live; future opens in this process pick them up via
+	// setSqlitePragmaConfig.
+	setSqlitePragmaConfig({
+		cacheSizeMb: config.sqlite.cache_size_mb,
+		mmapSizeMb: config.sqlite.mmap_size_mb,
+	});
+	applySqliteTuningPragmas(db);
 
 	// Top-level disable: when `enabled: false` is set in config, register
 	// nothing — same fail-closed posture the OpenCode plugin uses.

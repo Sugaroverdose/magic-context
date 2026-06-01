@@ -214,6 +214,32 @@ function buildSchema(): Record<string, unknown> {
                     "Fire historian when enough commit clusters accumulate in the unsummarized tail",
             },
 
+            sqlite: {
+                type: "object",
+                properties: {
+                    cache_size_mb: {
+                        type: "number",
+                        minimum: 2,
+                        maximum: 2048,
+                        default: 64,
+                        description:
+                            "SQLite page-cache size in MiB per connection (PRAGMA cache_size).",
+                    },
+                    mmap_size_mb: {
+                        type: "number",
+                        minimum: 0,
+                        maximum: 8192,
+                        default: 0,
+                        description:
+                            "SQLite memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap.",
+                    },
+                },
+                additionalProperties: false,
+                default: { cache_size_mb: 64, mmap_size_mb: 0 },
+                description:
+                    "Per-connection SQLite tuning for Magic Context's own context.db (does not affect OpenCode/Pi databases).",
+            },
+
             compressor: {
                 type: "object",
                 properties: {
