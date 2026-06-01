@@ -520,14 +520,23 @@ describe("injectM0M1Pi", () => {
 
 			// And a second injection pass reuses the cache (no materialize) and
 			// degrades to no-trim rather than looping.
-			const result = injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				[],
+			const pass1Messages = [userMessage("hello", 10)];
+			const result1 = injectM0M1Pi(state, db, pass1Messages as never, []);
+			expect(result1.m0Materialized).toBe(false);
+			expect(result1.skippedVisibleMessages).toBe(0);
+
+			const pass2Messages = [userMessage("hello", 10)];
+			const result2 = injectM0M1Pi(state, db, pass2Messages as never, []);
+			expect(result2.m0Materialized).toBe(false);
+			expect(result2.m0Reason).toBeNull();
+
+			// Cache-stability invariant: a boundaryless session must render
+			// BYTE-IDENTICAL m[0]/m[1] across consecutive reuse passes (no
+			// materialize-vs-reuse oscillation). Compare the actual injected
+			// synthetic-prefix text, not just the materialized flag.
+			expect(textOf(pass2Messages[0] as never)).toBe(
+				textOf(pass1Messages[0] as never),
 			);
-			expect(result.m0Materialized).toBe(false);
-			expect(result.skippedVisibleMessages).toBe(0);
 		} finally {
 			closeQuietly(db);
 		}

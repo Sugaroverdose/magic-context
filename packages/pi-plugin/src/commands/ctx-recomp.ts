@@ -189,14 +189,20 @@ export function registerCtxRecompCommand(
 					// failed recomp didn't publish anything to refresh.
 					try {
 						queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
-						signalPiHistoryRefresh(sessionId);
-						signalPiPendingMaterialization(sessionId);
 					} catch (markerError) {
 						sessionLog(
 							sessionId,
-							`/ctx-recomp: post-publish marker/signal staging failed (recomp already published; continuing): ${describeError(markerError).brief}`,
+							`/ctx-recomp: post-publish marker staging failed (recomp already published; continuing): ${describeError(markerError).brief}`,
 						);
 					}
+					// Refresh signals MUST fire whenever the recomp published, even
+					// if marker staging threw above — they drive the next pass's
+					// <session-history> rebuild + queued-drop materialization, which
+					// are independent of the native compaction marker. Keeping them
+					// inside the marker try (as before) would skip them on a marker
+					// throw, leaving stale history until usage crossed execute.
+					signalPiHistoryRefresh(sessionId);
+					signalPiPendingMaterialization(sessionId);
 				}
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",

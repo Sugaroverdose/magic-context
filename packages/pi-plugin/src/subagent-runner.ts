@@ -1,3 +1,4 @@
+import { sessionLog } from '@magic-context/core/shared/logger';
 import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -320,7 +321,18 @@ export class PiSubagentRunner implements SubagentRunner {
 			const settle = (result: SubagentRunResult) => {
 				if (settled) return;
 				settled = true;
-				recordAccounting(result, accountingMessages);
+				// recordAccounting must never block resolution: a throw here (e.g.
+				// a DB write failure during token accounting) would leave the
+				// promise unresolved and hang the caller (historian/dreamer/
+				// sidekick). Accounting is best-effort telemetry; resolve regardless.
+				try {
+					recordAccounting(result, accountingMessages);
+				} catch (err) {
+					sessionLog(
+						options.accountingSessionId ?? "subagent",
+						`subagent accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
 				resolve(result);
 			};
 

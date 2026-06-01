@@ -227,6 +227,58 @@ export function readPiSessionMessages(ctx: ExtensionContext): RawMessage[] {
 }
 
 /**
+ * Resolve the LAST model the session was using, from the JSONL branch's
+ * `model_change` entries (shape: `{type:"model_change", provider, modelId}`).
+ * Returned as a `provider/modelId` key matching resolvePiContextModelKey.
+ *
+ * Used to seed liveModelBySession on the first context pass after a process
+ * restart: liveModelBySession is in-memory, so after a restart previousModelKey
+ * is undefined and a model change that happened while the process was down would
+ * NOT be detected — leaking the previous model's detected-context-limit /
+ * reasoning-watermark / historian-failure state into the new model. Seeding from
+ * the JSONL lets the first-pass model-change comparison fire correctly. Mirrors
+ * OpenCode seeding liveModelBySession from the latest assistant message's model.
+ *
+ * Returns undefined when the branch has no model_change entry (older sessions /
+ * edge cases) — the caller then leaves previousModelKey undefined, preserving
+ * today's no-reset behavior (no regression).
+ */
+export function findLastModelKeyFromBranch(
+	ctx: ExtensionContext,
+): string | undefined {
+	const sm = ctx.sessionManager;
+	if (sm === undefined) return undefined;
+	const getBranch = (sm as { getBranch?: (fromId?: string) => unknown[] })
+		.getBranch;
+	if (typeof getBranch !== "function") return undefined;
+
+	let entries: unknown[];
+	try {
+		entries = getBranch.call(sm);
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(entries)) return undefined;
+
+	// Walk backwards: the last model_change is the session's current model.
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const e = entries[i];
+		if (!e || typeof e !== "object") continue;
+		const v = e as { type?: unknown; provider?: unknown; modelId?: unknown };
+		if (v.type !== "model_change") continue;
+		if (
+			typeof v.provider === "string" &&
+			v.provider.length > 0 &&
+			typeof v.modelId === "string" &&
+			v.modelId.length > 0
+		) {
+			return `${v.provider}/${v.modelId}`;
+		}
+	}
+	return undefined;
+}
+
+/**
  * Pure conversion exposed for unit testing — call sites in production
  * always go through `readPiSessionMessages`.
  */

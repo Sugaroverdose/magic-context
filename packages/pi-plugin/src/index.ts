@@ -33,11 +33,7 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import {
-	getOrCreateSessionMeta,
-	getSessionsWithPendingPiMarker,
-	updateSessionMeta,
-} from "@magic-context/core/features/magic-context/storage";
+import { getOrCreateSessionMeta, getPendingPiCompactionMarkerState, getSessionsWithPendingPiMarker, updateSessionMeta } from '@magic-context/core/features/magic-context/storage';
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import {
 	getOverflowState,
@@ -845,6 +841,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			}
 			if (sessionId) {
 				trackSessionForProject(currentProject.projectIdentity, sessionId);
+
+				// Re-arm a pending Pi compaction-marker drain on session ACTIVATION,
+				// not just at process startup. session_before_switch clears the
+				// in-memory deferred-refresh/materialization sets for the outgoing
+				// session (those Sets are per-process and would otherwise leak); but
+				// the durable pending marker in session_meta survives. On switch-BACK
+				// the marker would then sit undrained (the drain is signal-driven, and
+				// startup-only rehydration never re-fires). Re-signal here when this
+				// session has a durable pending marker so the next pass drains it.
+				try {
+					const pending = getPendingPiCompactionMarkerState(db, sessionId);
+					if (pending) {
+						signalPiDeferredHistoryRefresh(sessionId);
+						signalPiPendingMaterialization(sessionId);
+					}
+				} catch {
+					// Best-effort: a read failure must not block agent start.
+				}
 
 				// E6d: one-time upgrade reminder for sessions with legacy (pre-v2)
 				// compartments. Model-invisible (ctx.ui.notify), self-gating via the

@@ -146,6 +146,7 @@ import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
 	convertEntriesToRawMessages,
+	findLastModelKeyFromBranch,
 	isMidTurnPi,
 	readPiSessionMessages,
 	resolvePiStableId,
@@ -1364,6 +1365,24 @@ export function registerPiContextHandler(
 			firstContextPassSeenBySession.add(sessionId);
 			const piUsage = ctx.getContextUsage?.();
 			const tModelDetect = performance.now();
+			// Seed the in-memory model key from the JSONL on the first pass after a
+			// (re)start. liveModelBySession is volatile, so without this a model
+			// switch that happened while the process was DOWN would go undetected
+			// (previousModelKey undefined → modelChanged false), leaking the prior
+			// model's detected-context-limit / reasoning-watermark / historian-
+			// failure state into the new model. The last model_change entry in the
+			// branch is the session's last-used model; seeding it lets the
+			// comparison below fire. No-op when the branch has no model_change
+			// (older sessions) — previousModelKey stays undefined (today's behavior).
+			if (
+				isFirstContextPassForSession &&
+				liveModelBySession.get(sessionId) === undefined
+			) {
+				const seeded = findLastModelKeyFromBranch(ctx);
+				if (seeded !== undefined) {
+					liveModelBySession.set(sessionId, seeded);
+				}
+			}
 			const previousModelKey = liveModelBySession.get(sessionId);
 			const currentModelKey = resolvePiContextModelKey(ctx);
 			const modelChanged =
@@ -3191,10 +3210,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// OpenCode's `clearOldReasoning` (strip-content.ts) gated to
 	// execute passes via the same scheduler decision used for
 	// heuristic cleanup.
-	if (
-		args.reasoningClearing &&
-		(args.schedulerDecision === "execute" || args.forceMaterialization === true)
-	) {
+	// Gate reasoning clearing on the SAME signal as heuristic drops
+	// (shouldRunHeuristics), not the narrower execute||forceMaterialization.
+	// OpenCode runs clearOldReasoning inside its shouldRunHeuristics block, so
+	// the reasoning-watermark advance rides the exact same cache-busting passes
+	// as the tool drops. The old gate skipped reasoning on pending/deferred-
+	// materialization passes where heuristics DO run — leaving reasoning on the
+	// wire on a pass that already dropped tools (inconsistent + a missed
+	// same-pass mutation). shouldRunHeuristics is the broader, correct set.
+	if (args.reasoningClearing && shouldRunHeuristics) {
 		try {
 			const tClearReasoning = performance.now();
 			const meta = getOrCreateSessionMeta(args.db, args.sessionId);
