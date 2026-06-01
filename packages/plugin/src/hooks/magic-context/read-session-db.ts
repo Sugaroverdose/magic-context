@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
@@ -19,6 +20,16 @@ interface PartDataRow {
 
 function getOpenCodeDbPath(): string {
     return join(getDataDir(), "opencode", "opencode.db");
+}
+
+/**
+ * Whether OpenCode's session DB file exists. Raw-message readers consult this
+ * before opening it so a harness with no OpenCode DB (a Pi-only install, or a
+ * transform whose per-session RawMessageProvider was unregistered out-of-band)
+ * degrades to "no messages" instead of throwing `unable to open database file`.
+ */
+export function openCodeDbExists(): boolean {
+    return existsSync(getOpenCodeDbPath());
 }
 
 let cachedReadOnlyDb: { path: string; db: Database } | null = null;

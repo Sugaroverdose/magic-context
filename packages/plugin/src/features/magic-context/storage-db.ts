@@ -31,6 +31,25 @@ function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: 
     if (dbPathOverride) {
         return { dbDir: dirname(dbPathOverride), dbPath: dbPathOverride };
     }
+    // Test-isolation guard. Under the test runner the preload
+    // (bunfig.toml `[test] preload`) sets MAGIC_CONTEXT_TEST_DATA_DIR to a
+    // throwaway temp dir AND XDG_DATA_HOME to the same dir. Tests that manage
+    // their OWN XDG_DATA_HOME (per-test temp dirs) keep working — we honor XDG
+    // below via getMagicContextStorageDir(). The guard fires ONLY when
+    // XDG_DATA_HOME is UNSET: that is the dangerous window, because
+    // getMagicContextStorageDir() would otherwise fall back to the REAL
+    // ~/.local/share and a bare openDatabase() would run migrations on the
+    // user's production DB. Some tests delete XDG_DATA_HOME to exercise
+    // path-fallback behavior (2026-06-01 incident: a dormant test migrated the
+    // live DB to v26 and fail-closed every running v25 binary); in that window
+    // we resolve into the dedicated test dir instead of the real path. No test
+    // mutates MAGIC_CONTEXT_TEST_DATA_DIR, so the guard cannot be defeated. It
+    // is never set in production.
+    const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    if (testDataDir && !process.env.XDG_DATA_HOME) {
+        const dbDir = join(testDataDir, "cortexkit", "magic-context");
+        return { dbDir, dbPath: join(dbDir, "context.db") };
+    }
     const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
 }

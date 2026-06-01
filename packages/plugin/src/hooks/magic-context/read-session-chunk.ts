@@ -1,6 +1,10 @@
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { removeSystemReminders } from "../../shared/system-directive";
-import { getRawSessionMessageCountFromDb, withReadOnlySessionDb } from "./read-session-db";
+import {
+    getRawSessionMessageCountFromDb,
+    openCodeDbExists,
+    withReadOnlySessionDb,
+} from "./read-session-db";
 import {
     type ChunkBlock,
     compactRole,
@@ -74,6 +78,15 @@ export function setRawMessageProvider(sessionId: string, provider: RawMessagePro
  * Run `fn` with a temporary per-session provider override. Cleans up
  * on return regardless of throw — preferred over manual
  * `setRawMessageProvider` / `cleanup()` pairs.
+ *
+ * ASYNC-SAFE: if `fn` returns a promise, cleanup is deferred until that promise
+ * settles, so the provider stays registered for the WHOLE async scope. A bare
+ * synchronous `finally` would unregister at `fn`'s FIRST `await` (the function
+ * returns a pending promise immediately), leaving later awaited reads —
+ * e.g. Pi's post-commit `queueDropsForCompartmentalizedMessages` — with no
+ * provider, so they fall through to OpenCode's session DB. For a Pi session
+ * that DB is the wrong source (empty), and on a Pi-only install it does not
+ * exist at all, throwing `unable to open database file`.
  */
 export function withRawMessageProvider<T>(
     sessionId: string,
@@ -81,11 +94,22 @@ export function withRawMessageProvider<T>(
     fn: () => T,
 ): T {
     const cleanup = setRawMessageProvider(sessionId, provider);
+    let result: T;
     try {
-        return fn();
-    } finally {
+        result = fn();
+    } catch (error) {
         cleanup();
+        throw error;
     }
+    if (
+        result !== null &&
+        typeof result === "object" &&
+        typeof (result as { then?: unknown }).then === "function"
+    ) {
+        return (result as unknown as Promise<unknown>).finally(cleanup) as unknown as T;
+    }
+    cleanup();
+    return result;
 }
 
 /** Strip system-reminder blocks and OMO markers from user text for chunk compaction. */
@@ -153,12 +177,19 @@ export function readRawSessionMessageById(sessionId: string, messageId: string):
     if (provider) {
         return provider.readMessages().find((message) => message.id === messageId) ?? null;
     }
+    if (!openCodeDbExists()) return null;
     return withReadOnlySessionDb((db) => readRawSessionMessageByIdFromDb(db, sessionId, messageId));
 }
 
 function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
     const provider = sessionProviders.get(sessionId);
     if (provider) return provider.readMessages();
+    // No provider: fall back to OpenCode's session DB — but only if it exists.
+    // A Pi-only install has no opencode.db, and a Pi transform whose provider
+    // was unregistered out-of-band (e.g. session cleared while an async
+    // historian is mid-flight) must not crash the post-commit drop-queue with
+    // `unable to open database file`. No source → no raw messages.
+    if (!openCodeDbExists()) return [];
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 
@@ -168,6 +199,7 @@ export function getRawSessionMessageCount(sessionId: string): number {
         if (provider.getMessageCount) return provider.getMessageCount();
         return provider.readMessages().length;
     }
+    if (!openCodeDbExists()) return 0;
     return withReadOnlySessionDb((db) => getRawSessionMessageCountFromDb(db, sessionId));
 }
 
