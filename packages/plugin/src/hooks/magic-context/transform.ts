@@ -791,7 +791,9 @@ export function createTransform(deps: TransformDeps) {
         let taggingSucceeded = false;
         try {
             const t0 = performance.now();
+            const tInitFromDb = performance.now();
             deps.tagger.initFromDb(sessionId, db);
+            logTransformTiming(sessionId, "tag.initFromDb", tInitFromDb);
             // Skip §N§ prefix injection when either:
             // - ctx_reduce_enabled is false (agents have no tool to act on tags)
             // - This is a subagent session (always treated as ctx_reduce_enabled=false)

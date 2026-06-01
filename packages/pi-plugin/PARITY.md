@@ -188,6 +188,28 @@ OpenCode gates m[1] recompute on `isCacheBustingPass` (`shouldApplyPendingOps ||
 
 ---
 
+## 11. Work-metrics: Pi folds the in-memory wire array; OpenCode computes lazily in RPC
+
+The TUI/status "work metrics" (new-work / total-input tokens) are a display-only
+value. The two harnesses compute it from different sources, so the cost profiles
+differ and the fixes differ:
+
+- **Pi** (`context-handler.ts`) calls `computePiWorkMetrics(outputMessages)` — a
+  fold over the already-in-memory wire array, bounded by the on-wire message
+  count. It is cheap per pass and stays where it is.
+- **OpenCode** previously called `computeOpenCodeWorkMetrics` on every transform
+  pass — a window-function `json_extract` scan over EVERY assistant row of the
+  session in OpenCode's DB (O(session age); ~250ms/pass at 47K rows). That was
+  removed from the transform hot path. OpenCode now computes it lazily and
+  incrementally in `buildSidebarSnapshot` (the only consumer) via
+  `computeOpenCodeWorkMetricsIncremental` + a per-process watermark carry.
+
+Pi does NOT need the incremental watermark machinery because its source is the
+bounded wire array, not an ever-growing DB table. Do not "port" the OpenCode
+lazy/incremental path to Pi — it would be solving a cost Pi does not have.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

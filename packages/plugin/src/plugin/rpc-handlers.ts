@@ -5,8 +5,17 @@
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../features/magic-context/memory/storage-memory";
-import { type ContextDatabase as Database, openDatabase } from "../features/magic-context/storage";
+import {
+    type ContextDatabase as Database,
+    openDatabase,
+    setSessionWorkMetrics,
+} from "../features/magic-context/storage";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
+import {
+    computeOpenCodeWorkMetricsIncremental,
+    emptyWorkMetricsCarry,
+    type WorkMetricsCarry,
+} from "../features/magic-context/work-metrics";
 import {
     resolveContextLimit,
     resolveExecuteThresholdDetail,
@@ -17,7 +26,11 @@ import {
     trimMemoriesToBudgetV2,
 } from "../hooks/magic-context/inject-compartments";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
-import { findLastAssistantModelFromOpenCodeDb } from "../hooks/magic-context/read-session-db";
+import {
+    findLastAssistantModelFromOpenCodeDb,
+    openCodeDbExists,
+    withReadOnlySessionDb,
+} from "../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
 import {
@@ -36,6 +49,45 @@ import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type { SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
+
+// Per-process incremental work-metrics state, keyed by session. The RPC server
+// is long-lived, so the carry survives across polls and each poll folds only
+// assistant rows newer than its watermark (≈0 when idle). Lost on restart —
+// the next poll cold-starts from the persisted session_meta value's session by
+// re-folding once, which is the acceptable one-time cost design A accepts.
+const workMetricsCarryBySession = new Map<string, WorkMetricsCarry>();
+
+/**
+ * Lazily compute work-metrics for the sidebar. Returns the persisted fallback
+ * (instant warm-start value) when OpenCode's DB is absent or the read fails,
+ * and write-throughs the fresh value to session_meta on success.
+ */
+function resolveSidebarWorkMetrics(
+    db: Database,
+    sessionId: string,
+    persistedNewWork: number,
+    persistedTotalInput: number,
+): { newWorkTokens: number; totalInputTokens: number } {
+    if (!openCodeDbExists()) {
+        return { newWorkTokens: persistedNewWork, totalInputTokens: persistedTotalInput };
+    }
+    try {
+        const carry = workMetricsCarryBySession.get(sessionId) ?? emptyWorkMetricsCarry();
+        const { carry: nextCarry, metrics } = withReadOnlySessionDb((openCodeDb) =>
+            computeOpenCodeWorkMetricsIncremental(openCodeDb, sessionId, carry),
+        );
+        workMetricsCarryBySession.set(sessionId, nextCarry);
+        // Write-through so the value warm-starts the sidebar after a restart.
+        try {
+            setSessionWorkMetrics(db, sessionId, metrics.newWorkTokens, metrics.totalInputTokens);
+        } catch {
+            // Non-fatal: the in-memory value is still returned below.
+        }
+        return metrics;
+    } catch {
+        return { newWorkTokens: persistedNewWork, totalInputTokens: persistedTotalInput };
+    }
+}
 
 function getDb(): Database | null {
     try {
@@ -141,8 +193,17 @@ export function buildSidebarSnapshot(
             ? Number(meta.last_context_percentage ?? meta.last_usage_percentage ?? 0)
             : 0;
         const inputTokens = meta ? Number(meta.last_input_tokens ?? 0) : 0;
-        const newWorkTokens = meta ? Number(meta.new_work_tokens ?? 0) : 0;
-        const totalInputTokens = meta ? Number(meta.total_input_tokens ?? 0) : 0;
+        // Work-metrics are computed lazily + incrementally HERE (the only
+        // consumer), not in the transform hot path. The persisted session_meta
+        // columns are a warm-start fallback used on cold start / DB-absent.
+        const persistedNewWork = meta ? Number(meta.new_work_tokens ?? 0) : 0;
+        const persistedTotalInput = meta ? Number(meta.total_input_tokens ?? 0) : 0;
+        const { newWorkTokens, totalInputTokens } = resolveSidebarWorkMetrics(
+            db,
+            sessionId,
+            persistedNewWork,
+            persistedTotalInput,
+        );
         const systemPromptTokens = meta ? Number(meta.system_prompt_tokens ?? 0) : 0;
         // messagesBlockTokens = token estimate of text/reasoning/image parts
         // in output.messages[] after transform, persisted by transform.ts.

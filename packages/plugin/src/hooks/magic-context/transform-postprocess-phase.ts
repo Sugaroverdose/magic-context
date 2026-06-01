@@ -18,12 +18,10 @@ import {
     pruneNoteNudgeAnchors,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
-    setSessionWorkMetrics,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
-import { computeOpenCodeWorkMetrics } from "../../features/magic-context/work-metrics";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { applyContextNudge } from "./apply-context-nudge";
@@ -44,7 +42,6 @@ import { hasVisibleNoteReadCall } from "./note-visibility";
 import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
-import { withReadOnlySessionDb } from "./read-session-db";
 import { replaySentinelByMessageIds } from "./sentinel";
 import {
     clearOldReasoning,
@@ -526,6 +523,7 @@ export async function runPostTransformPhase(
         args.m0M1 !== undefined &&
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory);
     if (m0M1Enabled && args.m0M1) {
+        const tInjectM0M1 = performance.now();
         try {
             const result = injectM0M1({
                 db: args.db,
@@ -552,6 +550,7 @@ export async function runPostTransformPhase(
                 getErrorMessage(error),
             );
         }
+        logTransformTiming(args.sessionId, "pp.injectM0M1", tInjectM0M1);
     } else if (args.fullFeatureMode && args.pendingCompartmentInjection) {
         const compartmentResult = renderCompartmentInjection(
             args.sessionId,
@@ -589,6 +588,7 @@ export async function runPostTransformPhase(
     // matches on cache-busting passes. Persist the merged set (placeholder + system-
     // injected) so defer passes produce the same message shape as the bust pass.
     {
+        const tPlaceholder = performance.now();
         const persistedIds = getStrippedPlaceholderIds(args.db, args.sessionId);
 
         // Step 1: Replay — re-apply sentinel to messages whose IDs were neutralized
@@ -641,6 +641,7 @@ export async function runPostTransformPhase(
                 );
             }
         }
+        logTransformTiming(args.sessionId, "pp.placeholderNeutralize", tPlaceholder);
     }
 
     // Sticky turn reminder replay is primary-only: subagents never CREATE
@@ -713,6 +714,7 @@ export async function runPostTransformPhase(
         }
     }
 
+    const tNudgeBlock = performance.now();
     const messagesSinceLastUser = countMessagesSinceLastUser(args.messages);
 
     if (args.fullFeatureMode) {
@@ -775,6 +777,9 @@ export async function runPostTransformPhase(
     // path inside `peekNoteNudgeText` should fire — see the comment block
     // there for the full rationale. Only computed when nudges can actually
     // fire (fullFeatureMode), so we skip the scan in subagent sessions.
+    logTransformTiming(args.sessionId, "pp.nudgeAndSticky", tNudgeBlock);
+
+    const tNoteAndTodo = performance.now();
     const noteReadStillVisible = args.fullFeatureMode
         ? hasVisibleNoteReadCall(args.messages)
         : false;
@@ -905,6 +910,8 @@ export async function runPostTransformPhase(
         }
     }
 
+    logTransformTiming(args.sessionId, "pp.noteAndTodoSynthesis", tNoteAndTodo);
+
     // Auto-search hint — append a vague-recall fragment hint to the latest
     // user message when experimental.auto_search is enabled and search
     // returns a high-confidence match. Gated behind fullFeatureMode: subagent
@@ -1017,25 +1024,12 @@ export async function runPostTransformPhase(
         heuristicsRanSuccessfully ||
         pendingOpsRanSuccessfully;
 
-    // Work-metrics update runs on EVERY transform pass (not just execute passes).
-    // The SQL helper is pure-read on OpenCode's message table; setSessionWorkMetrics
-    // is a pure write to session_meta (no tag state, no message[0] mutation, no
-    // cache-busting). Gating on workExecutedSuccessfully would mean sessions
-    // sitting below execute threshold never see populated values, making the
-    // TUI Stats section permanently zero for low-pressure work.
-    try {
-        const metrics = withReadOnlySessionDb((openCodeDb) =>
-            computeOpenCodeWorkMetrics(openCodeDb, args.sessionId),
-        );
-        setSessionWorkMetrics(
-            args.db,
-            args.sessionId,
-            metrics.newWorkTokens,
-            metrics.totalInputTokens,
-        );
-    } catch (err) {
-        sessionLog(args.sessionId, "work-metrics update failed:", getErrorMessage(err));
-    }
+    // Work-metrics (TUI sidebar Stats) are NOT computed here. They are a
+    // display-only value read solely by the RPC sidebar handler, and the
+    // computation is O(session age) — it was the dominant transform cost on
+    // long sessions when run every pass. It now runs lazily and incrementally
+    // in buildSidebarSnapshot (rpc-handlers.ts) when the TUI actually polls,
+    // keeping the prompt path free of it.
 
     if (workExecutedSuccessfully) {
         try {
@@ -1061,6 +1055,7 @@ export async function runPostTransformPhase(
         // block. The auto-search runner drops hint fragments for memories the
         // agent already sees in message[0] so the hint stays "vague recall"
         // for content not already in context.
+        const tAutoSearch = performance.now();
         const visibleMemoryIds = getVisibleMemoryIds(args.db, args.sessionId) ?? undefined;
 
         try {
@@ -1081,6 +1076,7 @@ export async function runPostTransformPhase(
         } catch (error) {
             sessionLog(args.sessionId, "auto-search runner failed:", error);
         }
+        logTransformTiming(args.sessionId, "pp.autoSearchHint", tAutoSearch);
     }
 
     if (args.fullFeatureMode && isCacheBustingPass) {

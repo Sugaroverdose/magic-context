@@ -3,7 +3,12 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
-import { computeOpenCodeWorkMetrics, computePiWorkMetrics } from "./work-metrics";
+import {
+    computeOpenCodeWorkMetrics,
+    computeOpenCodeWorkMetricsIncremental,
+    computePiWorkMetrics,
+    emptyWorkMetricsCarry,
+} from "./work-metrics";
 
 function createOpenCodeFixture(): Database {
     const db = new Database(":memory:");
@@ -92,6 +97,103 @@ describe("work metrics", () => {
                 },
             ]),
         ).toEqual({ newWorkTokens: 244, totalInputTokens: 320 });
+    });
+
+    // ── Incremental (watermark) fold ──────────────────────────────────────
+    // The incremental driver must produce byte-identical results to the
+    // window-function oracle, while only ever folding rows past its watermark.
+
+    function createIncrementalFixture(): Database {
+        const db = new Database(":memory:");
+        db.exec("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+        return db;
+    }
+
+    function insertWithId(
+        db: Database,
+        id: string,
+        sessionId: string,
+        time: number,
+        agent: string,
+        input: number,
+        output: number,
+    ): void {
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run(
+            id,
+            sessionId,
+            time,
+            JSON.stringify({ role: "assistant", agent, tokens: { input, output } }),
+        );
+    }
+
+    test("incremental cold start equals the window-function oracle", () => {
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 1, "build", 100, 1);
+        insertWithId(db, "m2", "ses", 2, "build", 200, 2);
+        insertWithId(db, "m3", "ses", 3, "build", 80, 3);
+        insertWithId(db, "m4", "ses", 4, "build", 120, 4);
+        insertWithId(db, "m5", "ses", 5, "a", 500, 9);
+
+        const oracle = computeOpenCodeWorkMetrics(db, "ses");
+        const { metrics } = computeOpenCodeWorkMetricsIncremental(
+            db,
+            "ses",
+            emptyWorkMetricsCarry(),
+        );
+        expect(metrics).toEqual(oracle);
+    });
+
+    test("incremental resume across polls equals a single full scan", () => {
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 1, "build", 100, 1);
+        insertWithId(db, "m2", "ses", 2, "build", 200, 2);
+
+        const carry = emptyWorkMetricsCarry();
+        const first = computeOpenCodeWorkMetricsIncremental(db, "ses", carry);
+        expect(first.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+
+        // New turns arrive; a second poll must fold only the new rows.
+        insertWithId(db, "m3", "ses", 3, "build", 80, 3);
+        insertWithId(db, "m4", "ses", 4, "build", 120, 4);
+        const second = computeOpenCodeWorkMetricsIncremental(db, "ses", first.carry);
+        expect(second.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+    });
+
+    test("most-recent row stays volatile until a newer row supersedes it", () => {
+        // Mirrors OpenCode writing a row at stream start then finalizing tokens:
+        // a poll mid-stream then a poll after finalize must both equal the oracle.
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 1, "build", 100, 5);
+        insertWithId(db, "m2", "ses", 2, "build", 0, 0); // freshly-created, not yet finalized
+
+        const carry = emptyWorkMetricsCarry();
+        const midStream = computeOpenCodeWorkMetricsIncremental(db, "ses", carry);
+        expect(midStream.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+
+        // Finalize the last row's tokens; the held-back row must re-fold fresh.
+        db.prepare("UPDATE message SET data = ? WHERE id = ?").run(
+            JSON.stringify({
+                role: "assistant",
+                agent: "build",
+                tokens: { input: 250, output: 7 },
+            }),
+            "m2",
+        );
+        const finalized = computeOpenCodeWorkMetricsIncremental(db, "ses", midStream.carry);
+        expect(finalized.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+    });
+
+    test("idle re-poll with no new rows is stable", () => {
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 1, "build", 100, 1);
+        insertWithId(db, "m2", "ses", 2, "build", 150, 2);
+        const carry = emptyWorkMetricsCarry();
+        const a = computeOpenCodeWorkMetricsIncremental(db, "ses", carry);
+        const b = computeOpenCodeWorkMetricsIncremental(db, "ses", a.carry);
+        expect(b.metrics).toEqual(a.metrics);
+        expect(b.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
     });
 
     test("live OpenCode smoke targets stay within 1%", () => {

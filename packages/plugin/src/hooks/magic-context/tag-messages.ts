@@ -26,6 +26,7 @@ import {
     type ToolDropResult,
     ToolMutationBatch,
 } from "./tool-drop-target";
+import { logTransformTiming } from "./transform-stage-logger";
 
 /**
  * v3.3.1 Layer C: derive `tool_owner_message_id` for a tool observation.
@@ -239,11 +240,13 @@ export function tagMessages(
     const batch = new ToolMutationBatch(messages);
     const assignments = tagger.getAssignments(sessionId);
     const resolver = createExistingTagResolver(sessionId, tagger, db);
+    const tGetSourceContents = performance.now();
     const sourceContents = getSourceContents(
         db,
         sessionId,
         collectRelevantSourceTagIds(messages, assignments),
     );
+    logTransformTiming(sessionId, "tag.getSourceContents", tGetSourceContents);
     let precedingThinkingParts: ThinkingLikePart[] = [];
     let lastReduceMessageIndex = -1;
     const RECENT_REDUCE_LOOKBACK = 10;
@@ -266,6 +269,13 @@ export function tagMessages(
     // each (tag insert, counter upsert, source_contents save) succeeds or
     // fails independently. A single tag failing no longer corrupts the
     // surrounding work in the same pass.
+    // Diagnostic accumulators (summed across the whole walk, logged once below).
+    let accDerive = 0;
+    let accGetToolTag = 0;
+    let accAssignTag = 0;
+    let accAssignToolTag = 0;
+    let accSaveSource = 0;
+    const tLoop = performance.now();
     for (let msgIndex = 0; msgIndex < messages.length; msgIndex++) {
         const message = messages[msgIndex];
         const messageId = typeof message.info.id === "string" ? message.info.id : null;
@@ -296,6 +306,7 @@ export function tagMessages(
                 // - result parts: pop the FIFO queue for this callId; if
                 //   empty, fall back to nearest-prior persisted owner;
                 //   ultimate fallback: result's own message id.
+                const _tDerive = performance.now();
                 const ownerMsgId = deriveToolOwnerMessageId(
                     sessionId,
                     db,
@@ -303,6 +314,7 @@ export function tagMessages(
                     toolObservation,
                     unpairedInvocations,
                 );
+                accDerive += performance.now() - _tDerive;
                 const compositeKey = makeToolCompositeKey(ownerMsgId, toolObservation.callId);
                 const entry = toolCallIndex.get(compositeKey) ?? {
                     occurrences: [],
@@ -312,11 +324,13 @@ export function tagMessages(
                 if (toolObservation.kind === "result") entry.hasResult = true;
                 toolCallIndex.set(compositeKey, entry);
 
+                const _tGetTool = performance.now();
                 let existingTagId = tagger.getToolTag(
                     sessionId,
                     toolObservation.callId,
                     ownerMsgId,
                 );
+                accGetToolTag += performance.now() - _tGetTool;
 
                 // v3.3.1 Layer C: legacy NULL-owner adoption for the
                 // invocation-only path. The second tool block
@@ -379,6 +393,7 @@ export function tagMessages(
                 // those bindings if the resolver populated them.
                 resolver.resolve(messageId, "message", contentId, textOrdinal);
                 const reasoningBytes = textOrdinal === 0 ? getReasoningByteSize(thinkingParts) : 0;
+                const _tAssignText = performance.now();
                 const tagId = tagger.assignTag(
                     sessionId,
                     contentId,
@@ -387,6 +402,7 @@ export function tagMessages(
                     db,
                     reasoningBytes,
                 );
+                accAssignTag += performance.now() - _tAssignText;
                 // Prefer persisted source_contents over the existingTagId
                 // signal: even if we just allocated a fresh tag (because in-
                 // memory state was lost), the DB may still have the original
@@ -400,7 +416,9 @@ export function tagMessages(
                 } else {
                     const sourceContent = stripTagPrefix(textPart.text);
                     if (sourceContent.trim().length > 0) {
+                        const _tSaveText = performance.now();
                         saveSourceContent(db, sessionId, tagId, sourceContent);
+                        accSaveSource += performance.now() - _tSaveText;
                     }
                 }
                 messageTagNumbers.set(
@@ -443,6 +461,7 @@ export function tagMessages(
                 const ownerMsgId = memo?.ownerMsgId ?? messageId ?? toolPart.callID;
                 const compositeKey = makeToolCompositeKey(ownerMsgId, toolPart.callID);
 
+                const _tAssignTool = performance.now();
                 const tagId = tagger.assignToolTag(
                     sessionId,
                     toolPart.callID,
@@ -453,6 +472,7 @@ export function tagMessages(
                     toolName,
                     inputByteSize,
                 );
+                accAssignToolTag += performance.now() - _tAssignTool;
                 messageTagNumbers.set(
                     message,
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
@@ -471,6 +491,7 @@ export function tagMessages(
                 const messageParts = message.parts;
                 const contentId = `${messageId}:file${partIndex}`;
                 const existingTagId = resolver.resolve(messageId, "file", contentId, fileOrdinal);
+                const _tAssignFile = performance.now();
                 const tagId = tagger.assignTag(
                     sessionId,
                     contentId,
@@ -478,10 +499,13 @@ export function tagMessages(
                     byteSize(filePart.url),
                     db,
                 );
+                accAssignTag += performance.now() - _tAssignFile;
                 if (existingTagId === undefined) {
                     const sourceContent = buildFileSourceContent(message.parts);
                     if (sourceContent) {
+                        const _tSaveFile = performance.now();
                         saveSourceContent(db, sessionId, tagId, sourceContent);
+                        accSaveSource += performance.now() - _tSaveFile;
                     }
                 }
                 messageTagNumbers.set(
@@ -532,6 +556,13 @@ export function tagMessages(
             }
         }
     }
+
+    logTransformTiming(sessionId, "tag.loop", tLoop);
+    logTransformTiming(sessionId, "tag.deriveOwner", performance.now() - accDerive);
+    logTransformTiming(sessionId, "tag.getToolTag", performance.now() - accGetToolTag);
+    logTransformTiming(sessionId, "tag.assignTag", performance.now() - accAssignTag);
+    logTransformTiming(sessionId, "tag.assignToolTag", performance.now() - accAssignToolTag);
+    logTransformTiming(sessionId, "tag.saveSource", performance.now() - accSaveSource);
 
     for (const [compositeKey, tagId] of toolTagByCallId) {
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
