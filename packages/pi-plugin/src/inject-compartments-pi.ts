@@ -538,14 +538,15 @@ function getSessionFactsVersion(
 }
 
 function normalizeCachedMaxCompartmentSeq(
-	db: ContextDatabase,
-	sessionId: string,
 	stored: number,
+	compartments: readonly PiCompartment[],
 ): number {
 	// Backward compatibility for legacy empty snapshots persisted with 0: only
-	// reinterpret 0 as empty when the session truly has no compartments. If a
-	// seq-0 compartment exists, 0 is a real watermark and must remain publishable.
-	if (stored === 0 && getCompartments(db, sessionId).length === 0) {
+	// reinterpret 0 as empty against the exact compartment snapshot used for the
+	// cache-validity decision. If a seq-0 compartment exists, 0 is a real
+	// watermark and must remain publishable; only a truly empty session upgrades
+	// the legacy sentinel to EMPTY_MAX_COMPARTMENT_SEQ.
+	if (stored === 0 && compartments.length === 0) {
 		return EMPTY_MAX_COMPARTMENT_SEQ;
 	}
 	return stored;
@@ -578,6 +579,7 @@ function setCachedBoundary(
 function getCachedMarkers(
 	db: ContextDatabase,
 	state: PiM0M1State,
+	compartmentsForNormalization?: readonly PiCompartment[],
 ): PiM0SnapshotMarkers | null {
 	const meta = getOrCreateSessionMeta(db, state.sessionId);
 	if (!meta.cachedM0Bytes) return null;
@@ -594,11 +596,14 @@ function getCachedMarkers(
 	) {
 		return null;
 	}
+	const compartments =
+		compartmentsForNormalization ?? getCompartments(db, state.sessionId);
 	const maxCompartmentSeq = normalizeCachedMaxCompartmentSeq(
-		db,
-		state.sessionId,
 		meta.cachedM0MaxCompartmentSeq,
+		compartments,
 	);
+	const lastBaselineEndMessageId = getCachedBoundary(db, state.sessionId);
+	if (maxCompartmentSeq >= 0 && lastBaselineEndMessageId === null) return null;
 	return {
 		maxCompartmentSeq,
 		maxMemoryId: meta.cachedM0MaxMemoryId,
@@ -609,7 +614,7 @@ function getCachedMarkers(
 		sessionFactsVersion: meta.cachedM0SessionFactsVersion,
 		materializedAt: meta.cachedM0MaterializedAt,
 		upgradeState: meta.cachedM0UpgradeState,
-		lastBaselineEndMessageId: getCachedBoundary(db, state.sessionId),
+		lastBaselineEndMessageId,
 	};
 }
 
@@ -627,7 +632,20 @@ function readCurrentMarkers(
 	state: PiM0M1State,
 	projectDocsHash?: string,
 ): PiM0SnapshotMarkers {
-	const compartments = getCompartments(db, state.sessionId);
+	return readCurrentMarkersFromCompartments(
+		db,
+		state,
+		getCompartments(db, state.sessionId),
+		projectDocsHash,
+	);
+}
+
+function readCurrentMarkersFromCompartments(
+	db: ContextDatabase,
+	state: PiM0M1State,
+	compartments: readonly PiCompartment[],
+	projectDocsHash?: string,
+): PiM0SnapshotMarkers {
 	const memories = getMemoriesByProject(db, state.projectIdentity, [
 		"active",
 		"permanent",
@@ -668,7 +686,8 @@ export function mustMaterializePi(
 	db: ContextDatabase,
 ): PiMaterializeDecision {
 	const meta = getOrCreateSessionMeta(db, state.sessionId);
-	const current = readCurrentMarkers(db, state);
+	const currentCompartments = getCompartments(db, state.sessionId);
+	const current = readCurrentMarkersFromCompartments(db, state, currentCompartments);
 	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
 	// Keep invalid cached baselines on the guarded materialize path. The
 	// cache_invalid branch below does not have its own contention fallback, so
@@ -677,13 +696,12 @@ export function mustMaterializePi(
 	if (!decodeCachedM0(meta.cachedM0Bytes)) {
 		return { value: true, reason: "cache_invalid" };
 	}
-	if (getCachedMarkers(db, state) === null) {
+	if (getCachedMarkers(db, state, currentCompartments) === null) {
 		return { value: true, reason: "cache_invalid" };
 	}
 	const cachedMaxCompartmentSeq = normalizeCachedMaxCompartmentSeq(
-		db,
-		state.sessionId,
 		meta.cachedM0MaxCompartmentSeq ?? EMPTY_MAX_COMPARTMENT_SEQ,
+		currentCompartments,
 	);
 	if (meta.cachedM0UpgradeState !== current.upgradeState) {
 		return { value: true, reason: "renderer_upgrade" };
@@ -821,12 +839,15 @@ export function renderM0Pi(
  *  by the retry wrapper so we never cache m[0] bytes that no longer match the
  *  markers they were rendered from. */
 function isTransientSqliteLockError(error: unknown): boolean {
-	const message = String(error);
-	return (
-		message.includes("SQLITE_BUSY") ||
-		message.includes("SQLITE_LOCKED") ||
-		message.includes("database is locked")
-	);
+	if (!error || typeof error !== "object") return false;
+	const { code, message } = error as { code?: unknown; message?: unknown };
+	if (typeof code === "string") {
+		if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+	}
+	if (typeof message === "string") {
+		return /database is locked/i.test(message) || /sqlite_(busy|locked)/i.test(message);
+	}
+	return false;
 }
 
 export class PiMaterializeContentionError extends Error {

@@ -358,6 +358,77 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
+
+	it("keeps legacy cached max seq 0 when a real seq-0 compartment exists", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-legacy-zero-real-"));
+		try {
+			const state = piState("ses-pi-legacy-zero-real", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-0",
+					endMessageId: "entry-0",
+					title: "Seq Zero",
+					content: "U: first turn\nseq zero body",
+				},
+			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, [
+				"entry-0",
+			]);
+
+			// Legacy rows persisted 0 both for empty snapshots and for a real seq-0
+			// baseline. With a compartment present, 0 is unambiguous and must remain
+			// the cached watermark, not be reinterpreted as the empty -1 sentinel.
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+			const messages = [userMessage("hello", 10)];
+			const result = injectM0M1Pi(state, db, messages as never, ["entry-0"]);
+
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(messages[0] as never)).toContain("seq zero body");
+			expect(textOf(messages[1] as never)).toContain(
+				"no new content since last materialization",
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("normalizes legacy cached max seq 0 to empty only with zero compartments", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-legacy-zero-empty-"));
+		try {
+			const state = piState("ses-pi-legacy-zero-empty", cwd);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_max_compartment_seq = 0 WHERE session_id = ?",
+			).run(state.sessionId);
+
+			expect(getCompartments(db, state.sessionId)).toHaveLength(0);
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+			const messages = [userMessage("hello", 10)];
+			const result = injectM0M1Pi(state, db, messages as never);
+
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(messages[0] as never)).toBe(
+				"<session-history></session-history>",
+			);
+			expect(textOf(messages[1] as never)).toContain(
+				"no new content since last materialization",
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("routes cached m[0] with any partial required marker through guarded rematerialize", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-partial-marker-"));
@@ -373,6 +444,49 @@ describe("injectM0M1Pi", () => {
 				value: true,
 				reason: "cache_invalid",
 			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+
+	it("rematerializes instead of reusing cached m[0] when compartment boundary is NULL", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-null-boundary-"));
+		try {
+			const state = piState("ses-pi-null-boundary", cwd);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-0",
+					endMessageId: "entry-0",
+					title: "Boundary",
+					content: "U: boundary turn\nboundary body",
+				},
+			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, [
+				"entry-0",
+			]);
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = NULL WHERE session_id = ?",
+			).run(state.sessionId);
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: true,
+				reason: "cache_invalid",
+			});
+			const messages = [userMessage("covered", 10), userMessage("keep", 11)];
+			const result = injectM0M1Pi(state, db, messages as never, [
+				"entry-0",
+				"keep",
+			]);
+
+			expect(result.m0Materialized).toBe(true);
+			expect(result.m0Reason).toBe("cache_invalid");
+			expect(result.skippedVisibleMessages).toBe(1);
+			expect(textOf(messages[2] as never)).toBe("keep");
 		} finally {
 			closeQuietly(db);
 		}
@@ -447,6 +561,51 @@ describe("injectM0M1Pi", () => {
 
 			expect(result.skippedVisibleMessages).toBe(1);
 			expect(textOf(messages[2] as never)).toBe("must stay");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+
+	it("falls back to cached m[0] when BEGIN IMMEDIATE error exposes only SQLITE_BUSY code", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-begin-busy-code-"));
+		try {
+			const state = piState("ses-pi-begin-busy-code", cwd);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "entry-0",
+					endMessageId: "entry-0",
+					title: "Busy Code",
+					content: "U: busy code turn\nbusy code fallback body",
+				},
+			]);
+			const originalExec = db.exec.bind(db);
+			db.exec = ((sql: string) => {
+				if (sql === "BEGIN IMMEDIATE") {
+					const error = new Error("writer unavailable") as Error & {
+						code: string;
+					};
+					error.code = "SQLITE_BUSY";
+					throw error;
+				}
+				return originalExec(sql);
+			}) as typeof db.exec;
+
+			const messages = [userMessage("hello", 10)];
+			const result = injectM0M1Pi(state, db, messages as never);
+
+			expect(result.m0Materialized).toBe(false);
+			expect(textOf(messages[0] as never)).toBe(
+				"<session-history></session-history>",
+			);
+			expect(textOf(messages[1] as never)).toContain(
+				"busy code fallback body",
+			);
 		} finally {
 			closeQuietly(db);
 		}
