@@ -83,10 +83,7 @@ export function pushNotification(
  *  Delivery is at-least-once (non-destructive return + prune-on-ack): a returned
  *  notification stays queued until a later call acks it via a higher
  *  `lastReceivedId`, so a lost poll response re-delivers on the next poll. */
-export function drainNotifications(
-    lastReceivedId = 0,
-    sessionId?: string,
-): RpcNotification[] {
+export function drainNotifications(lastReceivedId = 0, sessionId?: string): RpcNotification[] {
     const now = Date.now();
     lastDrainAtAny = now;
     if (sessionId !== undefined) lastDrainAtBySession.set(sessionId, now);
@@ -98,13 +95,11 @@ export function drainNotifications(
         // Prune only notifications THIS client both owns (session-matched) and has
         // acked (id <= lastReceivedId). Other sessions' notifications survive.
         queue = queue.filter(
-            (notification) =>
-                !(notification.id <= lastReceivedId && matchesClient(notification)),
+            (notification) => !(notification.id <= lastReceivedId && matchesClient(notification)),
         );
     }
     return queue.filter(
-        (notification) =>
-            notification.id > lastReceivedId && matchesClient(notification),
+        (notification) => notification.id > lastReceivedId && matchesClient(notification),
     );
 }
 

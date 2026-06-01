@@ -142,7 +142,12 @@ function computeTiers(
 
     return compartments.map((c, index) => {
         if (c.legacy === 1) return legacyTier(c);
-        return renderedTier(v2IndexByOriginalIndex.get(index) ?? 1, c.importance ?? 50, pressure, 0);
+        return renderedTier(
+            v2IndexByOriginalIndex.get(index) ?? 1,
+            c.importance ?? 50,
+            pressure,
+            0,
+        );
     });
 }
 

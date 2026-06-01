@@ -65,9 +65,10 @@ describe("computeM0BlockTokens", () => {
 
     test("cold start (no materialized m[0]) falls back to Σp1 from compartments", () => {
         const db = makeDb();
-		db.prepare(
-			"INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-		).run(SESSION_ID, 1, 1, 9, "m1", "m9", "Cold compartment", "some content body", Date.now());        const b = computeM0BlockTokens(db, SESSION_ID, {
+        db.prepare(
+            "INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ).run(SESSION_ID, 1, 1, 9, "m1", "m9", "Cold compartment", "some content body", Date.now());
+        const b = computeM0BlockTokens(db, SESSION_ID, {
             m0Text: "", // no materialized m[0] yet
             projectIdentity: undefined,
             injectionBudgetTokens: undefined,

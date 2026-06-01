@@ -50,16 +50,11 @@ describe("schema-fence null-DB contract", () => {
  * null). These assertions fail loudly if the guards are ever removed.
  */
 describe("dream-timer null-DB guards (static)", () => {
-    const source = readFileSync(
-        join(import.meta.dir, "dream-timer.ts"),
-        "utf8",
-    );
+    const source = readFileSync(join(import.meta.dir, "dream-timer.ts"), "utf8");
 
     test("defines the guarded open helper and uses it at both entry points", () => {
         expect(source).toContain("function openTimerDatabaseOrNull(");
-        expect(source).toContain(
-            'openTimerDatabaseOrNull("schedule timer registration")',
-        );
+        expect(source).toContain('openTimerDatabaseOrNull("schedule timer registration")');
         expect(source).toContain('openTimerDatabaseOrNull("maintenance tick")');
     });
 

@@ -127,19 +127,15 @@ describe("recomp message helpers", () => {
         // published "— Partial" rebuilt only a prefix: published===true and it is
         // NOT a Failed/Skipped heading, so !isRecompFailure would wrongly let it
         // run migration + declare "Complete" while tierless legacy rows remain.
-        expect(isRecompComplete("## Magic Recomp — Complete\n\nRebuilt 5")).toBe(
-            true,
-        );
+        expect(isRecompComplete("## Magic Recomp — Complete\n\nRebuilt 5")).toBe(true);
         expect(isRecompComplete("## Session Upgrade — Complete")).toBe(true);
         // The bug: Partial is published + not a failure, but must NOT be complete.
-        expect(
-            isRecompComplete("## Magic Recomp — Partial\n\nRemaining 40-99 not rebuilt"),
-        ).toBe(false);
+        expect(isRecompComplete("## Magic Recomp — Partial\n\nRemaining 40-99 not rebuilt")).toBe(
+            false,
+        );
         expect(isRecompFailure("## Magic Recomp — Partial\n\nx")).toBe(false);
         // Lease-busy no-op has no status suffix → neither complete nor failure.
-        expect(
-            isRecompComplete("## Magic Recomp\n\nHistorian is already running…"),
-        ).toBe(false);
+        expect(isRecompComplete("## Magic Recomp\n\nHistorian is already running…")).toBe(false);
         expect(isRecompComplete("## Magic Recomp — Failed\n\nx")).toBe(false);
     });
 

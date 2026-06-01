@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { renderDecayedCompartments, type DecayRenderCompartment } from "./decay-render";
+import { type DecayRenderCompartment, renderDecayedCompartments } from "./decay-render";
 
 function legacyCompartment(i: number): DecayRenderCompartment {
     return {

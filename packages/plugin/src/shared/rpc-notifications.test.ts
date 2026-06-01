@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-    drainNotifications,
-    isTuiConnected,
-    pushNotification,
-} from "./rpc-notifications";
+import { drainNotifications, isTuiConnected, pushNotification } from "./rpc-notifications";
 
 describe("rpc notifications", () => {
     test("keeps messages queued until the client acks their id", () => {

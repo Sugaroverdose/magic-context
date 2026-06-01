@@ -751,7 +751,6 @@ export function registerRpcHandlers(
     // lacked progress (left the sidebar stuck on a stale "failed"). One runner
     // closes both gaps permanently.
     const buildManagedCtx = async (
-        sessionId: string,
         db: NonNullable<ReturnType<typeof getDb>>,
     ): Promise<ManagedRecompContext> => {
         const { deriveHistorianChunkTokens, resolveHistorianContextLimit } = await import(
@@ -793,7 +792,7 @@ export function registerRpcHandlers(
             "../hooks/magic-context/send-session-notification"
         );
         log(`[rpc] recomp requested for session ${sessionId}`);
-        const ctx = await buildManagedCtx(sessionId, db);
+        const ctx = await buildManagedCtx(db);
         // Fire-and-forget; outcome is force-persisted so a multi-minute recomp's
         // result stays visible in scrollback instead of a 5s toast.
         void runManagedRecomp(ctx, sessionId)
@@ -823,7 +822,7 @@ export function registerRpcHandlers(
             "../hooks/magic-context/send-session-notification"
         );
         log(`[rpc] session-upgrade requested for session ${sessionId}`);
-        const ctx = await buildManagedCtx(sessionId, db);
+        const ctx = await buildManagedCtx(db);
         void runManagedUpgrade(ctx, sessionId)
             .then((message) => {
                 void sendIgnoredMessage(

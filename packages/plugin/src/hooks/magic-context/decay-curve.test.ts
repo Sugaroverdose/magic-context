@@ -125,7 +125,6 @@ describe("decay-curve — budget pressure", () => {
         expect(cost).toBeLessThan(budget * 1.3);
     });
 
-
     it("does not charge archived-tail compartments as rendered pressure", () => {
         const visible = Array.from({ length: 63 }, (_, k) => ({
             index: k + 1,
