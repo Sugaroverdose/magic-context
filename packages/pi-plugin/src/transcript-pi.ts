@@ -29,8 +29,9 @@
  *   - When no user message follows a run of toolResults (e.g. the
  *     conversation tail ends with assistant + tool_result), they
  *     surface as a synthetic message with role `"user"` to preserve
- *     transform invariants. The synthetic message's id is undefined so
- *     callers know not to persist tags against it.
+ *     transform invariants. The synthetic message gets a deterministic
+ *     `synth-user-<toolResultEntryId>` id so tags can bind to the tail
+ *     tool output across transform passes.
  *
  * This is the *only* shape normalization the adapter performs. Anything
  * else (compaction markers, ordinal tracking, session-fact rendering)
@@ -75,7 +76,7 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
-import { resolvePiStableId } from "./read-session-pi";
+import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
 // Importing from @earendil-works/pi-ai directly would couple the plugin
@@ -283,6 +284,7 @@ function buildTranscriptView(
 						sessionId,
 						toolResultRun,
 						markDirty,
+						entryIds,
 					),
 				);
 			}
@@ -391,18 +393,21 @@ function createUserTranscriptMessage(
 
 /**
  * Build a synthetic user message for a tool-result tail (toolResults
- * with no following user message). The transcript message has no stable
- * id; sentinel persistence callers must skip messages without ids.
+ * with no following user message). It uses the same synth-user- prefix
+ * convention as read-session-pi.ts, keyed by the first underlying
+ * toolResult entry id, so tail tool outputs have a stable tag owner but
+ * cannot collide with real SessionEntry ids.
  */
 function createSyntheticToolResultUserMessage(
 	working: PiAgentMessage[],
 	sessionId: string | undefined,
 	toolResultRun: { msg: PiToolResultMessage; index: number }[],
 	markDirty: (messageIndex: number) => void,
+	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	return {
 		info: {
-			id: undefined,
+			id: createSyntheticToolResultUserId(toolResultRun, entryIds),
 			role: "user",
 			sessionId,
 		},
@@ -424,6 +429,17 @@ function createSyntheticToolResultUserMessage(
 			return parts;
 		},
 	};
+}
+
+
+function createSyntheticToolResultUserId(
+	toolResultRun: { msg: PiToolResultMessage; index: number }[],
+	entryIds: readonly (string | undefined)[] | undefined,
+): string | undefined {
+	const first = toolResultRun[0];
+	if (first === undefined) return undefined;
+	const stableId = extractStableId(first.msg, first.index, entryIds);
+	return stableId === undefined ? undefined : `${SYNTH_USER_ID_PREFIX}${stableId}`;
 }
 
 function createAssistantTranscriptMessage(
@@ -484,6 +500,8 @@ function createPiUserStringPart(
 ): TranscriptPart {
 	return {
 		kind: "text",
+		// User text parts do not need per-part ids: tagTranscript keys them by
+		// the stable parent message id plus text ordinal.
 		id: undefined,
 		getText(): string | undefined {
 			const msg = working[messageIndex] as PiUserMessage | undefined;
@@ -525,6 +543,8 @@ function createPiUserArrayPart(
 	const kind: TranscriptPartKind = classifyContent(part);
 	return {
 		kind,
+		// User array parts are not tool/content units. Text is keyed by parent
+		// message id + ordinal; images remain non-droppable user payloads.
 		id: undefined,
 		getText(): string | undefined {
 			const current = (working[messageIndex] as PiUserMessage).content;
@@ -721,8 +741,11 @@ function createPiToolResultPart(
 ): TranscriptPart {
 	const msg = working[messageIndex] as PiToolResultMessage;
 	const part = msg.content[partIndex];
-	const kind: TranscriptPartKind =
-		part?.type === "image" ? "image" : "tool_result";
+	// Every block inside one Pi ToolResultMessage belongs to the same
+	// droppable tool-output unit. Expose images as tool_result (not image)
+	// so tagTranscript aggregates text + image blocks under msg.toolCallId
+	// and a single drop replaces the whole result.
+	const kind: TranscriptPartKind = "tool_result";
 	return {
 		kind,
 		id: msg.toolCallId,

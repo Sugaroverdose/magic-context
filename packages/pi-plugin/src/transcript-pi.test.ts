@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { createTagger } from "@magic-context/core/features/magic-context/tagger";
+import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
 	assistantMessage,
 	assistantToolCall,
+	createTestDb,
 	textOf,
 	toolResultMessage,
 	userMessage,
@@ -147,4 +151,81 @@ describe("createPiTranscript", () => {
 			"text",
 		]);
 	});
+	it("gives tail synthetic tool-result users a stable deterministic id", () => {
+		const makeTranscriptId = () => {
+			const messages = [
+				assistantToolCall("call-tail", "Read", { path: "tail.txt" }, 11),
+				toolResultMessage("call-tail", "tail output", 12),
+			];
+			const transcript = createPiTranscript(messages, "ses-transcript", [
+				"entry-assistant",
+				"entry-tool-result",
+			]);
+
+			return transcript.messages[1]?.info.id;
+		};
+
+		expect(makeTranscriptId()).toBe("synth-user-entry-tool-result");
+		expect(makeTranscriptId()).toBe(makeTranscriptId());
+	});
+
+	it("covers image and multi-block tool results with one droppable tag", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-image-tool-result";
+			const messages = [
+				assistantToolCall("call-image", "Read", { path: "image.png" }, 11),
+				{
+					role: "toolResult",
+					toolCallId: "call-image",
+					toolName: "Read",
+					content: [
+						{ type: "image", data: "base64-image", mimeType: "image/png" },
+						{ type: "text", text: "caption one" },
+						{ type: "text", text: "caption two" },
+					],
+					isError: false,
+					timestamp: 12,
+				},
+			];
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			const transcript = createPiTranscript(messages, sessionId, [
+				"entry-assistant",
+				"entry-tool-result",
+			]);
+
+			expect(transcript.messages[1]?.info.id).toBe(
+				"synth-user-entry-tool-result",
+			);
+			expect(transcript.messages[1]?.parts.map((part) => part.kind)).toEqual([
+				"tool_result",
+				"tool_result",
+				"tool_result",
+			]);
+
+			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
+			expect(targets.size).toBe(1);
+
+			const target = Array.from(targets.values())[0];
+			expect(target?.drop()).toBe("removed");
+			transcript.commit();
+
+			const output = transcript.getOutputMessages() as Array<{
+				content?: Array<{ type: string; text?: string }>;
+			}>;
+			expect(output[0]?.content?.[0]).toMatchObject({
+				type: "toolCall",
+				arguments: { __magic_context_dropped__: "[dropped §1§]" },
+			});
+			expect(output[1]?.content).toEqual([
+				{ type: "text", text: "[dropped §1§]" },
+				{ type: "text", text: "[dropped §1§]" },
+				{ type: "text", text: "[dropped §1§]" },
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 });
