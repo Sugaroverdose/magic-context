@@ -2152,30 +2152,52 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn lookup_memory_project_path(
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemoryMutationTarget {
+    project_path: String,
+    category: Option<String>,
+    status: Option<String>,
+}
+
+fn lookup_memory_mutation_target(
     conn: &Connection,
     memory_id: i64,
-) -> Result<String, rusqlite::Error> {
+) -> Result<MemoryMutationTarget, rusqlite::Error> {
     conn.query_row(
-        "SELECT project_path FROM memories WHERE id = ?1",
+        "SELECT project_path, category, status FROM memories WHERE id = ?1",
         params![memory_id],
-        |row| row.get(0),
+        |row| {
+            Ok(MemoryMutationTarget {
+                project_path: row.get(0)?,
+                category: row.get(1)?,
+                status: row.get(2)?,
+            })
+        },
     )
 }
 
-fn fetch_memory_project_paths(
+fn fetch_memory_mutation_targets(
     conn: &Connection,
     memory_ids: &[i64],
-) -> Result<HashMap<i64, String>, rusqlite::Error> {
+) -> Result<HashMap<i64, MemoryMutationTarget>, rusqlite::Error> {
     if memory_ids.is_empty() {
         return Ok(HashMap::new());
     }
 
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!("SELECT id, project_path FROM memories WHERE id IN ({placeholders})");
+    let sql = format!(
+        "SELECT id, project_path, category, status FROM memories WHERE id IN ({placeholders})"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(memory_ids.iter()), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            MemoryMutationTarget {
+                project_path: row.get(1)?,
+                category: row.get(2)?,
+                status: row.get(3)?,
+            },
+        ))
     })?;
 
     rows.collect::<Result<HashMap<_, _>, _>>()
@@ -2264,6 +2286,32 @@ fn bump_project_memory_epoch_for_identity(
     Ok(())
 }
 
+fn queue_memory_mutation(
+    tx: &Transaction<'_>,
+    project_path: &str,
+    mutation_type: &str,
+    target_memory_id: i64,
+    superseded_by_id: Option<i64>,
+    category: Option<&str>,
+    new_content: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "INSERT INTO memory_mutation_log
+           (project_path, mutation_type, target_memory_id, superseded_by_id, category, new_content, queued_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            project_path,
+            mutation_type,
+            target_memory_id,
+            superseded_by_id,
+            category,
+            new_content,
+            now_millis()
+        ],
+    )?;
+    Ok(())
+}
+
 fn bump_project_user_profile_version(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute(
         "INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
@@ -2326,8 +2374,16 @@ fn bump_session_facts_version_for_session(
 pub fn invalidate_all_memory_block_caches(conn: &Connection) -> Result<usize, rusqlite::Error> {
     conn.execute(
         "UPDATE session_meta
-         SET memory_block_cache = '', memory_block_ids = '', cached_m0_bytes = NULL
-         WHERE memory_block_cache != '' OR memory_block_ids != '' OR cached_m0_bytes IS NOT NULL",
+         SET memory_block_cache = '',
+             memory_block_ids = '',
+             cached_m0_bytes = NULL,
+             cached_m1_bytes = NULL,
+             cached_m0_max_memory_mutation_id = NULL
+         WHERE memory_block_cache != ''
+            OR memory_block_ids != ''
+            OR cached_m0_bytes IS NOT NULL
+            OR cached_m1_bytes IS NOT NULL
+            OR cached_m0_max_memory_mutation_id IS NOT NULL",
         [],
     )
 }
@@ -2337,18 +2393,36 @@ pub fn update_memory_status(
     memory_id: i64,
     new_status: &str,
 ) -> Result<(), rusqlite::Error> {
-    // Phase A: resolve the target identity before opening a write transaction.
-    let stored_path = lookup_memory_project_path(conn, memory_id)?;
-    let project_identity = normalize_stored_project_path(&stored_path);
+    // Phase A: resolve the target row before opening a write transaction.
+    let target = lookup_memory_mutation_target(conn, memory_id)?;
+    let is_restore = new_status == "active" && target.status.as_deref() == Some("archived");
+    let project_identity = if is_restore {
+        Some(normalize_stored_project_path(&target.project_path))
+    } else {
+        None
+    };
+    let is_archive = new_status == "archived" && target.status.as_deref() != Some("archived");
 
-    // Phase B: re-check the target row, mutate, and bump the scoped epoch in one tx.
+    // Phase B: re-check the target row, mutate, and queue/bump in one tx.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
     tx.execute(
         "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
         params![new_status, now_millis(), memory_id],
     )?;
-    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    if let Some(project_identity) = project_identity.as_deref() {
+        bump_project_memory_epoch_for_identity(&tx, project_identity)?;
+    } else if is_archive {
+        queue_memory_mutation(
+            &tx,
+            &target.project_path,
+            "archive",
+            memory_id,
+            None,
+            target.category.as_deref(),
+            None,
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -2358,14 +2432,13 @@ pub fn update_memory_content(
     memory_id: i64,
     new_content: &str,
 ) -> Result<(), rusqlite::Error> {
-    // Phase A: resolve the target identity before opening a write transaction.
-    let stored_path = lookup_memory_project_path(conn, memory_id)?;
-    let project_identity = normalize_stored_project_path(&stored_path);
+    // Phase A: resolve the target row before opening a write transaction.
+    let target = lookup_memory_mutation_target(conn, memory_id)?;
     let new_hash = normalize_hash(new_content);
 
-    // Phase B: re-check the target row, mutate, clear stale embeddings, and bump once.
+    // Phase B: re-check the target row, mutate, clear stale embeddings, and queue once.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
     tx.execute(
         "UPDATE memories SET content = ?1, normalized_hash = ?2, updated_at = ?3 WHERE id = ?4",
         params![new_content, new_hash, now_millis(), memory_id],
@@ -2374,20 +2447,39 @@ pub fn update_memory_content(
         "DELETE FROM memory_embeddings WHERE memory_id = ?1",
         params![memory_id],
     )?;
-    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    queue_memory_mutation(
+        &tx,
+        &target.project_path,
+        "update",
+        memory_id,
+        None,
+        target.category.as_deref(),
+        Some(new_content),
+    )?;
     tx.commit()?;
     Ok(())
 }
 
 pub fn delete_memory(conn: &mut Connection, memory_id: i64) -> Result<(), rusqlite::Error> {
-    // Phase A: resolve the target identity before opening a write transaction.
-    let stored_path = lookup_memory_project_path(conn, memory_id)?;
-    let project_identity = normalize_stored_project_path(&stored_path);
+    // Phase A: resolve the target row before opening a write transaction.
+    let target = lookup_memory_mutation_target(conn, memory_id)?;
 
-    // Phase B: re-check, bump before delete, then delete.
+    // Phase B: re-check, queue before delete, then delete.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    verify_memory_project_path_unchanged(&tx, memory_id, &stored_path)?;
-    bump_project_memory_epoch_for_identity(&tx, &project_identity)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
+    queue_memory_mutation(
+        &tx,
+        &target.project_path,
+        "delete",
+        memory_id,
+        None,
+        target.category.as_deref(),
+        None,
+    )?;
+    tx.execute(
+        "DELETE FROM memory_embeddings WHERE memory_id = ?1",
+        params![memory_id],
+    )?;
     tx.execute("DELETE FROM memories WHERE id = ?1", params![memory_id])?;
     tx.commit()?;
     Ok(())
@@ -2406,15 +2498,25 @@ pub fn bulk_update_memory_status(
     }
 
     // Phase A: one read round-trip for all target rows, then identity normalization lock-free.
-    let phase_a_paths = fetch_memory_project_paths(conn, memory_ids)?;
-    let phase_a_identities = normalize_memory_project_identities(&phase_a_paths);
+    let phase_a_targets = fetch_memory_mutation_targets(conn, memory_ids)?;
+    let phase_a_paths: HashMap<i64, String> = phase_a_targets
+        .iter()
+        .map(|(id, target)| (*id, target.project_path.clone()))
+        .collect();
+    let is_restore = new_status == "active";
+    let is_archive = new_status == "archived";
+    let phase_a_identities = if is_restore {
+        normalize_memory_project_identities(&phase_a_paths)
+    } else {
+        HashSet::new()
+    };
 
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql =
         format!("UPDATE memories SET status = ?, updated_at = ? WHERE id IN ({placeholders})");
     let now = now_millis();
 
-    // Phase B: bulk re-verify, bulk update, then bump each affected identity once.
+    // Phase B: bulk re-verify, bulk update, then queue per archive or bump per restore.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
     let affected = {
@@ -2427,8 +2529,26 @@ pub fn bulk_update_memory_status(
         }
         tx.execute(&sql, params_from_iter(params_vec))?
     };
-    for identity in &phase_a_identities {
-        bump_project_memory_epoch_for_identity(&tx, identity)?;
+    if is_restore {
+        for identity in &phase_a_identities {
+            bump_project_memory_epoch_for_identity(&tx, identity)?;
+        }
+    } else if is_archive {
+        for id in memory_ids {
+            if let Some(target) = phase_a_targets.get(id) {
+                if target.status.as_deref() != Some("archived") {
+                    queue_memory_mutation(
+                        &tx,
+                        &target.project_path,
+                        "archive",
+                        *id,
+                        None,
+                        target.category.as_deref(),
+                        None,
+                    )?;
+                }
+            }
+        }
     }
     tx.commit()?;
     Ok(affected)
@@ -2444,15 +2564,28 @@ pub fn bulk_delete_memory(
     }
 
     // Phase A: one read round-trip for all target rows, then identity normalization lock-free.
-    let phase_a_paths = fetch_memory_project_paths(conn, memory_ids)?;
-    let phase_a_identities = normalize_memory_project_identities(&phase_a_paths);
+    let phase_a_targets = fetch_memory_mutation_targets(conn, memory_ids)?;
+    let phase_a_paths: HashMap<i64, String> = phase_a_targets
+        .iter()
+        .map(|(id, target)| (*id, target.project_path.clone()))
+        .collect();
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
-    // Phase B: bulk re-verify, bump before delete, then delete.
+    // Phase B: bulk re-verify, queue one delete per memory, then delete.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     verify_bulk_memory_project_paths_unchanged(&tx, &phase_a_paths)?;
-    for identity in &phase_a_identities {
-        bump_project_memory_epoch_for_identity(&tx, identity)?;
+    for id in memory_ids {
+        if let Some(target) = phase_a_targets.get(id) {
+            queue_memory_mutation(
+                &tx,
+                &target.project_path,
+                "delete",
+                *id,
+                None,
+                target.category.as_deref(),
+                None,
+            )?;
+        }
     }
     {
         let sql = format!("DELETE FROM memory_embeddings WHERE memory_id IN ({placeholders})");

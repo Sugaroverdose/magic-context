@@ -82,7 +82,19 @@ fn create_schema(conn: &Connection) {
             session_facts_version INTEGER NOT NULL DEFAULT 0,
             memory_block_cache TEXT DEFAULT '',
             memory_block_ids TEXT DEFAULT '',
-            cached_m0_bytes BLOB
+            cached_m0_bytes BLOB,
+            cached_m1_bytes BLOB,
+            cached_m0_max_memory_mutation_id INTEGER
+        );
+        CREATE TABLE memory_mutation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_path TEXT NOT NULL,
+            mutation_type TEXT NOT NULL,
+            target_memory_id INTEGER NOT NULL,
+            superseded_by_id INTEGER,
+            category TEXT,
+            new_content TEXT,
+            queued_at INTEGER NOT NULL
         );
         CREATE TABLE tx_probe (value TEXT NOT NULL);",
     )
@@ -109,6 +121,29 @@ fn memory_epoch(conn: &Connection, project_path: &str) -> i64 {
     .unwrap_or(0)
 }
 
+fn mutation_log_rows(
+    conn: &Connection,
+) -> Vec<(String, String, i64, Option<String>, Option<String>)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_path, mutation_type, target_memory_id, category, new_content
+             FROM memory_mutation_log ORDER BY id",
+        )
+        .expect("prepare mutation log query");
+    stmt.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+        ))
+    })
+    .expect("query mutation log")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("collect mutation log")
+}
+
 fn user_profile_version(conn: &Connection, project_path: &str) -> i64 {
     conn.query_row(
         "SELECT project_user_profile_version FROM project_state WHERE project_path = ?1",
@@ -129,49 +164,128 @@ fn seed_project_state(conn: &Connection, project_path: &str, memory_epoch: i64, 
 }
 
 #[test]
-fn update_memory_status_bumps_only_target_git_project_epoch() {
+fn archive_memory_status_queues_mutation_without_epoch_bump() {
     let mut conn = make_db();
     let id = insert_memory(&conn, "git:project-a", "active");
+    seed_project_state(&conn, "git:project-a", 9, 0);
     seed_project_state(&conn, "git:unrelated", 7, 0);
 
     db::update_memory_status(&mut conn, id, "archived").expect("update status");
 
-    assert_eq!(memory_epoch(&conn, "git:project-a"), 1);
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 9);
     assert_eq!(memory_epoch(&conn, "git:unrelated"), 7);
+    assert_eq!(
+        mutation_log_rows(&conn),
+        vec![(
+            "git:project-a".to_string(),
+            "archive".to_string(),
+            id,
+            Some("CONSTRAINTS".to_string()),
+            None,
+        )]
+    );
 }
 
 #[test]
-fn bulk_update_memory_status_bumps_each_affected_project_once() {
+fn restore_memory_status_keeps_epoch_bump_without_mutation_log() {
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "archived");
+    seed_project_state(&conn, "git:project-a", 9, 0);
+
+    db::update_memory_status(&mut conn, id, "active").expect("restore status");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 10);
+    assert!(mutation_log_rows(&conn).is_empty());
+}
+
+#[test]
+fn bulk_archive_memory_status_queues_one_mutation_per_memory_without_epoch_bumps() {
     let mut conn = make_db();
     let a1 = insert_memory(&conn, "git:project-a", "active");
     let a2 = insert_memory(&conn, "git:project-a", "active");
     let b1 = insert_memory(&conn, "dir:bbbbbbbbbbbb", "active");
+    seed_project_state(&conn, "git:project-a", 4, 0);
+    seed_project_state(&conn, "dir:bbbbbbbbbbbb", 6, 0);
     seed_project_state(&conn, "git:unrelated", 3, 0);
 
     let affected =
         db::bulk_update_memory_status(&mut conn, &[a1, a2, b1], "archived").expect("bulk update");
 
     assert_eq!(affected, 3);
-    assert_eq!(memory_epoch(&conn, "git:project-a"), 1);
-    assert_eq!(memory_epoch(&conn, "dir:bbbbbbbbbbbb"), 1);
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 4);
+    assert_eq!(memory_epoch(&conn, "dir:bbbbbbbbbbbb"), 6);
     assert_eq!(memory_epoch(&conn, "git:unrelated"), 3);
+    assert_eq!(
+        mutation_log_rows(&conn),
+        vec![
+            (
+                "git:project-a".to_string(),
+                "archive".to_string(),
+                a1,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+            (
+                "git:project-a".to_string(),
+                "archive".to_string(),
+                a2,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+            (
+                "dir:bbbbbbbbbbbb".to_string(),
+                "archive".to_string(),
+                b1,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+        ]
+    );
 }
 
 #[test]
-fn bulk_delete_memories_bumps_only_affected_project_epochs() {
+fn bulk_delete_memories_queues_one_delete_per_memory_without_epoch_bumps() {
     let mut conn = make_db();
     let a1 = insert_memory(&conn, "git:project-a", "active");
     let a2 = insert_memory(&conn, "git:project-a", "active");
     let b1 = insert_memory(&conn, "git:project-b", "active");
     let other = insert_memory(&conn, "git:other", "active");
+    seed_project_state(&conn, "git:project-a", 2, 0);
+    seed_project_state(&conn, "git:project-b", 3, 0);
     seed_project_state(&conn, "git:other", 5, 0);
 
     let affected = db::bulk_delete_memory(&mut conn, &[a1, a2, b1]).expect("bulk delete");
 
     assert_eq!(affected, 3);
-    assert_eq!(memory_epoch(&conn, "git:project-a"), 1);
-    assert_eq!(memory_epoch(&conn, "git:project-b"), 1);
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 2);
+    assert_eq!(memory_epoch(&conn, "git:project-b"), 3);
     assert_eq!(memory_epoch(&conn, "git:other"), 5);
+    assert_eq!(
+        mutation_log_rows(&conn),
+        vec![
+            (
+                "git:project-a".to_string(),
+                "delete".to_string(),
+                a1,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+            (
+                "git:project-a".to_string(),
+                "delete".to_string(),
+                a2,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+            (
+                "git:project-b".to_string(),
+                "delete".to_string(),
+                b1,
+                Some("CONSTRAINTS".to_string()),
+                None,
+            ),
+        ]
+    );
     let remaining: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE id = ?1",
@@ -277,19 +391,19 @@ fn routine_memory_mutation_does_not_clear_memory_block_caches() {
     let id = insert_memory(&conn, "git:project-a", "active");
     conn.execute(
         "INSERT INTO session_meta
-           (session_id, session_facts_version, memory_block_cache, memory_block_ids, cached_m0_bytes)
-         VALUES ('s1', 0, 'cached-body', '1,2,3', X'010203')",
+           (session_id, session_facts_version, memory_block_cache, memory_block_ids, cached_m0_bytes, cached_m1_bytes, cached_m0_max_memory_mutation_id)
+         VALUES ('s1', 0, 'cached-body', '1,2,3', X'010203', X'040506', 42)",
         [],
     )
     .expect("insert session meta");
 
     db::update_memory_status(&mut conn, id, "archived").expect("update status");
 
-    let row: (String, String, Vec<u8>) = conn
+    let row: (String, String, Vec<u8>, Vec<u8>, i64) = conn
         .query_row(
-            "SELECT memory_block_cache, memory_block_ids, cached_m0_bytes FROM session_meta WHERE session_id = 's1'",
+            "SELECT memory_block_cache, memory_block_ids, cached_m0_bytes, cached_m1_bytes, cached_m0_max_memory_mutation_id FROM session_meta WHERE session_id = 's1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .expect("session cache row");
     assert_eq!(
@@ -297,7 +411,9 @@ fn routine_memory_mutation_does_not_clear_memory_block_caches() {
         (
             "cached-body".to_string(),
             "1,2,3".to_string(),
-            vec![1, 2, 3]
+            vec![1, 2, 3],
+            vec![4, 5, 6],
+            42,
         )
     );
 }
@@ -327,6 +443,51 @@ fn bulk_update_binds_status_as_value_and_ids_as_parameters() {
         .expect("untouched status");
     assert_eq!(stored, malicious_status);
     assert_eq!(untouched_status, "active");
+}
+
+#[test]
+fn update_memory_content_queues_update_without_epoch_bump() {
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+    seed_project_state(&conn, "git:project-a", 11, 0);
+
+    db::update_memory_content(&mut conn, id, "new dashboard content").expect("update content");
+
+    assert_eq!(memory_epoch(&conn, "git:project-a"), 11);
+    assert_eq!(
+        mutation_log_rows(&conn),
+        vec![(
+            "git:project-a".to_string(),
+            "update".to_string(),
+            id,
+            Some("CONSTRAINTS".to_string()),
+            Some("new dashboard content".to_string()),
+        )]
+    );
+}
+
+#[test]
+fn invalidate_all_memory_block_caches_clears_m0_m1_and_mutation_cursor() {
+    let conn = make_db();
+    conn.execute(
+        "INSERT INTO session_meta
+           (session_id, session_facts_version, memory_block_cache, memory_block_ids, cached_m0_bytes, cached_m1_bytes, cached_m0_max_memory_mutation_id)
+         VALUES ('s1', 0, 'cached-body', '1,2,3', X'010203', X'040506', 42)",
+        [],
+    )
+    .expect("insert session meta");
+
+    let affected = db::invalidate_all_memory_block_caches(&conn).expect("invalidate caches");
+
+    assert_eq!(affected, 1);
+    let row: (String, String, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>) = conn
+        .query_row(
+            "SELECT memory_block_cache, memory_block_ids, cached_m0_bytes, cached_m1_bytes, cached_m0_max_memory_mutation_id FROM session_meta WHERE session_id = 's1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .expect("session cache row");
+    assert_eq!(row, ("".to_string(), "".to_string(), None, None, None));
 }
 
 #[test]
@@ -371,7 +532,7 @@ fn raw_path_git_resolution_happens_before_immediate_write_transaction() {
         insert_memory(
             &conn,
             raw_project.path().to_str().expect("utf8 path"),
-            "active",
+            "archived",
         )
     };
 
@@ -403,7 +564,7 @@ fn raw_path_git_resolution_happens_before_immediate_write_transaction() {
         let mut conn = Connection::open(worker_db_path).expect("worker open");
         conn.pragma_update(None, "busy_timeout", 5000)
             .expect("busy timeout");
-        db::update_memory_status(&mut conn, memory_id, "archived").expect("worker update");
+        db::update_memory_status(&mut conn, memory_id, "active").expect("worker restore");
     });
 
     let started = Instant::now();
