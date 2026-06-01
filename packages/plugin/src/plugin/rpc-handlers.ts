@@ -4,7 +4,6 @@
  */
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
-import { getMemoriesByProject } from "../features/magic-context/memory/storage-memory";
 import {
     type ContextDatabase as Database,
     openDatabase,
@@ -21,17 +20,13 @@ import {
     resolveExecuteThresholdDetail,
 } from "../hooks/magic-context/event-resolvers";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
-import {
-    renderMemoryBlockV2,
-    trimMemoriesToBudgetV2,
-} from "../hooks/magic-context/inject-compartments";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
+import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
 import {
     findLastAssistantModelFromOpenCodeDb,
     openCodeDbExists,
     withReadOnlySessionDb,
 } from "../hooks/magic-context/read-session-db";
-import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import type { ManagedRecompContext } from "../hooks/magic-context/recomp-orchestrator";
 import {
     calibrateBuckets,
@@ -278,18 +273,11 @@ export function buildSidebarSnapshot(
             }
         }
 
-        // Token estimates via real Claude tokenizer (ai-tokenizer).
-        let compartmentTokens = 0;
-        const factTokens = 0;
-        let memoryTokens = 0;
-        // v2: compartments are DECAY-RENDERED — most render at a lower tier
-        // (p2/p3/p4) or drop past the archive boundary, so the actual injected
-        // <session-history> is far smaller than Σ(full p1 content). The true
-        // on-wire size is the <session-history> slice of the persisted m[0]
-        // snapshot (cached_m0_bytes). Measuring Σp1 instead overcounts the
-        // Compartments bucket AND starves Conversation to 0 via the
-        // `max(0, messagesBlockTokens − compartmentTokens)` clamp below
-        // (dogfood 2026-05-30, AFT: 545 compartments → Σp1 157K > 135K stream).
+        // Token estimates via real Claude tokenizer (ai-tokenizer). The m[0]
+        // per-block attribution (docs / user-profile / project-memory /
+        // session-history) is computed by the SHARED helper so the OpenCode
+        // sidebar and the Pi /ctx-status dialog can never diverge on what the
+        // categories are or how they're measured.
         const m0Bytes = meta?.cached_m0_bytes;
         const m0Text =
             m0Bytes instanceof Uint8Array
@@ -297,79 +285,17 @@ export function buildSidebarSnapshot(
                 : typeof m0Bytes === "string"
                   ? (m0Bytes as string)
                   : "";
-        // <project-docs> and <user-profile> also live in m[0] (stable
-        // scaffolding moved out of the system prompt in v2). They are part of
-        // messagesBlockTokens but are NOT conversation — surface them as their
-        // own buckets so they don't silently inflate Conversation.
-        let docsTokens = 0;
-        let profileTokens = 0;
-        const docsMatch = m0Text.match(/<project-docs>([\s\S]*?)<\/project-docs>/);
-        if (docsMatch) docsTokens = estimateTokens(docsMatch[0]);
-        const profileMatch = m0Text.match(/<user-profile>([\s\S]*?)<\/user-profile>/);
-        if (profileMatch) profileTokens = estimateTokens(profileMatch[0]);
-        // Memory bucket: measure the ACTUAL <project-memory> slice in m[0] (the v2
-        // wire render with id/category/importance attributes), not the legacy
-        // memory_block_cache (v1 "- content" shape, which under-counts the real
-        // injected cost). Falls back below to an on-demand v2 render when m[0]
-        // has no slice yet (cold start / pre-first-materialization).
-        let memoryFromM0 = false;
-        const memMatch = m0Text.match(/<project-memory>([\s\S]*?)<\/project-memory>/);
-        if (memMatch) {
-            memoryTokens = estimateTokens(memMatch[0]);
-            memoryFromM0 = true;
-        }
-        const histMatch = m0Text.match(/<session-history>([\s\S]*?)<\/session-history>/);
-        if (histMatch) {
-            // Real decayed render — count exactly what's on the wire.
-            compartmentTokens = estimateTokens(histMatch[0]);
-        } else {
-            // No materialized m[0] yet (brand-new / pre-first-materialization).
-            // Fall back to the Σp1 estimate so the bucket isn't blank on a cold
-            // session; it self-corrects to the decayed size on first render.
-            try {
-                const compRows = db
-                    .prepare<
-                        [string],
-                        {
-                            content: string;
-                            title: string;
-                            start_message: number;
-                            end_message: number;
-                        }
-                    >(
-                        "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
-                    )
-                    .all(sessionId);
-                for (const c of compRows) {
-                    compartmentTokens += estimateTokens(
-                        `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
-                    );
-                }
-            } catch {
-                /* compartments table may not exist */
-            }
-        }
-        // v2: facts are retired as a render source (promoted to memories), so
-        // they contribute 0 render tokens. factTokens stays 0 — kept in the
-        // breakdown shape for dashboard back-compat, not recomputed from the
-        // vestigial session_facts table.
-        // Fallback when m[0] has no <project-memory> slice yet (cold start /
-        // pre-first-materialization). Render on-demand with the SAME v2 path the
-        // injection uses (renderMemoryBlockV2 + trimMemoriesToBudgetV2) so the
-        // sidebar reading matches what WILL be injected, not the legacy v1 shape.
-        if (!memoryFromM0 && memoryBlockCount > 0 && projectIdentity) {
-            try {
-                const memories = getMemoriesByProject(db, projectIdentity, ["active", "permanent"]);
-                const selected = injectionBudgetTokens
-                    ? trimMemoriesToBudgetV2(sessionId, memories, injectionBudgetTokens).renderOrder
-                    : memories;
-                const block = renderMemoryBlockV2(selected);
-                memoryTokens = block ? estimateTokens(block) : 0;
-            } catch {
-                // Defensive: memory tables may not exist yet on a brand-new DB.
-                memoryTokens = 0;
-            }
-        }
+        const m0Blocks = computeM0BlockTokens(db, sessionId, {
+            m0Text,
+            projectIdentity,
+            injectionBudgetTokens,
+            memoryBlockCount,
+        });
+        const compartmentTokens = m0Blocks.compartmentTokens;
+        const factTokens = m0Blocks.factTokens;
+        const memoryTokens = m0Blocks.memoryTokens;
+        const docsTokens = m0Blocks.docsTokens;
+        const profileTokens = m0Blocks.profileTokens;
 
         let lastDreamerRunAt: number | null = null;
         if (projectIdentity) {

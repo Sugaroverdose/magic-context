@@ -692,6 +692,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		nudgeIntervalTokens: config.nudge_interval_tokens,
 		executeThresholdPercentage: config.execute_threshold_percentage,
 		historyBudgetPercentage: config.history_budget_percentage,
+		injectionBudgetTokens: config.memory?.injection_budget_tokens,
 		commitClusterTrigger: config.commit_cluster_trigger,
 		executeThresholdTokens: config.execute_threshold_tokens,
 		dreamer: {

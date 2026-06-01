@@ -54,17 +54,27 @@ const UPGRADE_REMINDER_TEXT = [
  *  Single source of truth shared with the upgrade gate in recomp-orchestrator. */
 export const NEEDS_UPGRADE_SQL = "(legacy = 1 OR p1 IS NULL OR p1 = '')";
 
-function hasLegacyCompartments(db: Database, sessionId: string): boolean {
+/**
+ * Count compartments that still need a v2 upgrade (pre-v2 `legacy=1` rows OR
+ * tierless `p1 IS NULL/''` rows from an interrupted/old partial build). Shared
+ * with the Pi /ctx-status dialog (Pi has no sidebar, so it surfaces upgrade
+ * status here) and the OpenCode upgrade gate. Returns 0 on any error.
+ */
+export function countCompartmentsNeedingUpgrade(db: Database, sessionId: string): number {
     try {
         const row = db
             .prepare(
                 `SELECT COUNT(*) AS count FROM compartments WHERE session_id = ? AND ${NEEDS_UPGRADE_SQL}`,
             )
             .get(sessionId) as { count?: number } | undefined;
-        return typeof row?.count === "number" && row.count > 0;
+        return typeof row?.count === "number" ? row.count : 0;
     } catch {
-        return false;
+        return 0;
     }
+}
+
+function hasLegacyCompartments(db: Database, sessionId: string): boolean {
+    return countCompartmentsNeedingUpgrade(db, sessionId) > 0;
 }
 
 /** Partial recomp staging from an INTERRUPTED upgrade — completed historian

@@ -10,10 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import {
-	getCompartments,
-	getSessionFacts,
-} from "@magic-context/core/features/magic-context/compartment-storage";
+import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
@@ -21,19 +18,25 @@ import { getNotes } from "@magic-context/core/features/magic-context/storage-not
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
+import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
 import { formatThresholdPercent } from "@magic-context/core/shared/format-threshold";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
+import { isPiRecompInFlight } from "../pi-recomp-runner";
 
+// Mirror packages/plugin/src/tui/slots/sidebar-content.tsx COLORS so the Pi
+// dialog and the OpenCode sidebar render the same category palette.
 const COLORS = {
-	system: "#c084fc",
-	compartments: "#60a5fa",
-	facts: "#fbbf24",
-	memories: "#34d399",
-	conversation: "#f87171",
-	toolCalls: "#fb923c",
-	toolDefs: "#f472b6",
+	system: "#c084fc", // Purple
+	docs: "#22d3ee", // Cyan — <project-docs>
+	compartments: "#60a5fa", // Blue
+	memories: "#34d399", // Green
+	profile: "#a3e635", // Lime — <user-profile>
+	conversation: "#f87171", // Red
+	toolCalls: "#fb923c", // Orange
+	toolDefs: "#f472b6", // Pink
 };
 
 /** Refresh cadence while dialog is open. */
@@ -48,6 +51,7 @@ export interface StatusDialogDeps {
 		| number
 		| { default: number; [modelKey: string]: number };
 	historyBudgetPercentage?: number;
+	injectionBudgetTokens?: number;
 	executeThresholdTokens?: {
 		default?: number;
 		[modelKey: string]: number | undefined;
@@ -93,9 +97,15 @@ interface StatusDialogDetail {
 	compartmentTokens: number;
 	factTokens: number;
 	memoryTokens: number;
+	docsTokens: number;
+	profileTokens: number;
 	conversationTokens: number;
 	toolCallTokens: number;
 	toolDefinitionTokens: number;
+	/** Compartments still needing a v2 upgrade (legacy or tierless). */
+	upgradeNeededCount: number;
+	/** A detached /ctx-recomp or /ctx-session-upgrade is running in background. */
+	recompInFlight: boolean;
 }
 
 export async function showStatusDialog(
@@ -260,9 +270,10 @@ function renderInner(
 	}
 	lines.push("");
 
-	// Quick counts + historian
+	// Quick counts + historian. v2: facts retired (promoted to memories), so the
+	// facts count is dropped from the line.
 	lines.push(
-		`Counts: ${s.compartmentCount} compartments · ${s.factCount} facts · ${s.memoryCount} memories (${s.memoryBlockCount} injected) · ${
+		`Counts: ${s.compartmentCount} compartments · ${s.memoryCount} memories (${s.memoryBlockCount} injected) · ${
 			s.sessionNoteCount + s.readySmartNoteCount
 		} notes`,
 	);
@@ -277,6 +288,18 @@ function renderInner(
 				: ""
 		}`,
 	);
+	// Upgrade status — Pi has no sidebar, so the recomp/upgrade state surfaces
+	// here. Shows when a detached recomp/upgrade is running, or when legacy/
+	// tierless compartments still need /ctx-session-upgrade.
+	if (s.recompInFlight) {
+		lines.push(`Upgrade: ${theme.fg("warning", "recomp/upgrade running…")}`);
+	} else if (s.upgradeNeededCount > 0) {
+		lines.push(
+			`Upgrade: ${theme.fg("warning", `${s.upgradeNeededCount} compartment${s.upgradeNeededCount === 1 ? "" : "s"} need upgrade`)} · run /ctx-session-upgrade`,
+		);
+	} else {
+		lines.push(`Upgrade: ${theme.fg("accent", "up to date")}`);
+	}
 	lines.push(`Pending drops: ${s.pendingOpsCount}`);
 	lines.push(
 		`Cache TTL: ${s.cacheTtl} · last response ${
@@ -365,24 +388,32 @@ export function buildPiStatusDetail(
 				? Math.round(inputTokens / (usagePercentage / 100))
 				: 0;
 
-	let compartmentTokens = 0;
 	const compartments = getCompartments(deps.db, sessionId);
-	for (const c of compartments) {
-		compartmentTokens += estimateTokens(
-			`<compartment start="${c.startMessage}" end="${c.endMessage}" title="${c.title}">\n${c.content}\n</compartment>\n`,
-		);
-	}
-	let factTokens = 0;
-	const facts = getSessionFacts(deps.db, sessionId);
-	for (const f of facts) factTokens += estimateTokens(`* ${f.content}\n`);
-
 	const metaRow = readSessionMetaRow(deps.db, sessionId);
-	const memoryCache = metaRow?.memory_block_cache;
-	const memoryTokens =
-		typeof memoryCache === "string" && memoryCache.length > 0
-			? estimateTokens(memoryCache)
-			: 0;
 	const memoryBlockCount = Number(metaRow?.memory_block_count ?? 0);
+
+	// v2 m[0] per-block attribution via the SHARED core helper so the Pi dialog
+	// renders byte-identical categories to OpenCode's sidebar (Docs / User
+	// Profile / Memories / Compartments measured from the real cached_m0 slice;
+	// Facts retired → 0). Falls back to Σp1 / on-demand v2 memory render cold.
+	const m0Bytes = metaRow?.cached_m0_bytes;
+	const m0Text =
+		m0Bytes instanceof Uint8Array
+			? Buffer.from(m0Bytes).toString("utf8")
+			: typeof m0Bytes === "string"
+				? m0Bytes
+				: "";
+	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
+		m0Text,
+		projectIdentity: deps.projectIdentity,
+		injectionBudgetTokens: deps.injectionBudgetTokens,
+		memoryBlockCount,
+	});
+	const compartmentTokens = m0Blocks.compartmentTokens;
+	const factTokens = m0Blocks.factTokens;
+	const memoryTokens = m0Blocks.memoryTokens;
+	const docsTokens = m0Blocks.docsTokens;
+	const profileTokens = m0Blocks.profileTokens;
 
 	// On Pi we don't persist system_prompt_tokens (no
 	// experimental.chat.system.transform hook). Compute it on demand from
@@ -446,6 +477,8 @@ export function buildPiStatusDetail(
 			compartmentTokens -
 			factTokens -
 			memoryTokens -
+			docsTokens -
+			profileTokens -
 			toolCallTokens -
 			toolDefinitionTokens,
 	);
@@ -487,7 +520,8 @@ export function buildPiStatusDetail(
 		inputTokens,
 		systemPromptTokens,
 		compartmentCount: compartments.length,
-		factCount: facts.length,
+		// v2: facts are retired as a render source (promoted to memories).
+		factCount: 0,
 		memoryCount: safeRead(
 			() => getMemoryCount(deps.db, deps.projectIdentity),
 			0,
@@ -545,9 +579,16 @@ export function buildPiStatusDetail(
 		compartmentTokens,
 		factTokens,
 		memoryTokens,
+		docsTokens,
+		profileTokens,
 		conversationTokens,
 		toolCallTokens,
 		toolDefinitionTokens,
+		upgradeNeededCount: safeRead(
+			() => countCompartmentsNeedingUpgrade(deps.db, sessionId),
+			0,
+		),
+		recompInFlight: isPiRecompInFlight(sessionId),
 	};
 }
 
@@ -572,12 +613,18 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
 		color: string;
 		detail?: string;
 	}> = [];
+	// Category order/labels/colors mirror OpenCode's sidebar
+	// (packages/plugin/src/tui/slots/sidebar-content.tsx) for cross-harness
+	// parity. v2: Facts is retired (promoted to memories); Docs and User Profile
+	// are their own m[0] buckets.
 	if (s.systemPromptTokens > 0)
 		segs.push({
 			label: "System",
 			tokens: s.systemPromptTokens,
 			color: COLORS.system,
 		});
+	if (s.docsTokens > 0)
+		segs.push({ label: "Docs", tokens: s.docsTokens, color: COLORS.docs });
 	if (s.compartmentTokens > 0)
 		segs.push({
 			label: "Compartments",
@@ -585,19 +632,18 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
 			color: COLORS.compartments,
 			detail: `(${s.compartmentCount})`,
 		});
-	if (s.factTokens > 0)
-		segs.push({
-			label: "Facts",
-			tokens: s.factTokens,
-			color: COLORS.facts,
-			detail: `(${s.factCount})`,
-		});
 	if (s.memoryTokens > 0)
 		segs.push({
 			label: "Memories",
 			tokens: s.memoryTokens,
 			color: COLORS.memories,
 			detail: `(${s.memoryBlockCount})`,
+		});
+	if (s.profileTokens > 0)
+		segs.push({
+			label: "User Profile",
+			tokens: s.profileTokens,
+			color: COLORS.profile,
 		});
 	if (s.conversationTokens > 0)
 		segs.push({
@@ -655,12 +701,13 @@ function readSessionMetaRow(db: ContextDatabase, sessionId: string) {
 			{
 				memory_block_cache: string | null;
 				memory_block_count: number | null;
+				cached_m0_bytes: Buffer | Uint8Array | string | null;
 				historian_failure_count: number | null;
 				historian_last_failure_at: number | null;
 				historian_last_error: string | null;
 			}
 		>(
-			"SELECT memory_block_cache, memory_block_count, historian_failure_count, historian_last_failure_at, historian_last_error FROM session_meta WHERE session_id = ?",
+			"SELECT memory_block_cache, memory_block_count, cached_m0_bytes, historian_failure_count, historian_last_failure_at, historian_last_error FROM session_meta WHERE session_id = ?",
 		)
 		.get(sessionId);
 }

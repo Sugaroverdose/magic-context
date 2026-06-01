@@ -26,6 +26,7 @@ export interface RegisterCtxStatusDeps {
 		| number
 		| { default: number; [modelKey: string]: number };
 	historyBudgetPercentage?: number;
+	injectionBudgetTokens?: number;
 	commitClusterTrigger?: { enabled: boolean; min_clusters: number };
 	executeThresholdTokens?: {
 		default?: number;
