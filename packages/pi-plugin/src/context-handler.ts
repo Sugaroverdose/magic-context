@@ -1400,50 +1400,54 @@ export function registerPiContextHandler(
 			const tMeta = performance.now();
 			const sessionMetaForUsage = getOrCreateSessionMeta(options.db, sessionId);
 			logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
-			if (
-				(isFirstContextPassForSession || modelChanged) &&
-				(sessionMetaForUsage.lastContextPercentage > 0 ||
-					sessionMetaForUsage.lastInputTokens > 0)
-			) {
-				const reason = isFirstContextPassForSession
-					? "first pass"
-					: `model switch ${previousModelKey} -> ${currentModelKey}`;
+			const usageReset = {
+				lastContextPercentage: 0,
+				lastInputTokens: 0,
+				observedSafeInputTokens: 0,
+				cacheAlertSent: false,
+			};
+			const hasStaleUsage =
+				sessionMetaForUsage.lastContextPercentage > 0 ||
+				sessionMetaForUsage.lastInputTokens > 0;
+			if (modelChanged) {
+				// Model change: clear UNCONDITIONALLY (not gated on stale usage).
+				// The reasoning watermark, historian failure/recovery state, and
+				// detected context limit were specific to the previous model and
+				// must be discarded so the new model gets a clean slate — even when
+				// the prior usage counters happen to read zero (e.g. a switch right
+				// after a reset). Mirrors OpenCode transform.ts model-change reset,
+				// which runs with no usage>0 guard.
 				sessionLog(
 					sessionId,
-					`transform: ${reason} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+					`transform: model switch ${previousModelKey} -> ${currentModelKey} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale model-specific state`,
 				);
-				// Usage-pressure fields are cleared on BOTH first pass and model
-				// change — stale percentage/tokens from a prior model or pre-restart
-				// state must not drive threshold checks before message_end refreshes.
-				const usageReset = {
-					lastContextPercentage: 0,
-					lastInputTokens: 0,
-					observedSafeInputTokens: 0,
-					cacheAlertSent: false,
-				};
-				if (modelChanged) {
-					// Model change ONLY: the reasoning watermark and historian
-					// failure/recovery state were specific to the previous model and
-					// must be discarded so the new model gets a clean slate.
-					updateSessionMeta(options.db, sessionId, {
-						...usageReset,
-						clearedReasoningThroughTag: 0,
-					});
-					clearHistorianFailureState(options.db, sessionId);
-					clearPersistedReasoningWatermark(options.db, sessionId);
-					clearDetectedContextLimit(options.db, sessionId);
-					clearEmergencyRecovery(options.db, sessionId);
-					sessionMetaForUsage.clearedReasoningThroughTag = 0;
-				} else {
-					// First pass after restart (same model): clear ONLY usage fields.
-					// historian-failure state and the reasoning watermark MUST be
-					// preserved — restart recovery uses the failure backoff, and
-					// clearing the reasoning watermark would resurface previously
-					// cleared reasoning (a cache bust + larger prompt). Mirrors
-					// OpenCode transform.ts first-pass reset ("Do NOT clear historian
-					// failure state here — restart recovery uses it").
-					updateSessionMeta(options.db, sessionId, usageReset);
-				}
+				updateSessionMeta(options.db, sessionId, {
+					...usageReset,
+					clearedReasoningThroughTag: 0,
+				});
+				clearHistorianFailureState(options.db, sessionId);
+				clearPersistedReasoningWatermark(options.db, sessionId);
+				clearDetectedContextLimit(options.db, sessionId);
+				clearEmergencyRecovery(options.db, sessionId);
+				sessionMetaForUsage.clearedReasoningThroughTag = 0;
+				sessionMetaForUsage.lastContextPercentage = 0;
+				sessionMetaForUsage.lastInputTokens = 0;
+				sessionMetaForUsage.observedSafeInputTokens = 0;
+				sessionMetaForUsage.cacheAlertSent = false;
+			} else if (isFirstContextPassForSession && hasStaleUsage) {
+				// First pass after restart (same model): clear ONLY usage fields,
+				// and only when there is stale usage to clear. historian-failure
+				// state and the reasoning watermark MUST be preserved — restart
+				// recovery uses the failure backoff, and clearing the reasoning
+				// watermark would resurface previously cleared reasoning (a cache
+				// bust + larger prompt). Mirrors OpenCode transform.ts first-pass
+				// reset ("Do NOT clear historian failure state here — restart
+				// recovery uses it").
+				sessionLog(
+					sessionId,
+					`transform: first pass reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+				);
+				updateSessionMeta(options.db, sessionId, usageReset);
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
 				sessionMetaForUsage.observedSafeInputTokens = 0;
@@ -1600,14 +1604,14 @@ export function registerPiContextHandler(
 			if (stableIdSchemeCutover) {
 				schedulerDecision = "execute";
 				signalPiPendingMaterialization(sessionId);
-				try {
-					setStrippedPlaceholderIds(options.db, sessionId, new Set());
-				} catch (err) {
-					sessionLog(
-						sessionId,
-						`stable-id cutover: failed to clear stripped_placeholder_ids (continuing): ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+				// Re-keying of stripped_placeholder_ids from pi-msg-* to real ids is
+				// done by the strip's own prune this pass (forceDiscovery + carried
+				// map → finalIds = idsToStrip ∩ presentIds, and stale pi-msg-* ids
+				// aren't in the real-id presentIds, so they're dropped atomically
+				// within the strip's persist). We deliberately do NOT pre-clear the
+				// set here: an early clear before the pass succeeds would lose the
+				// placeholder set on a mid-pass failure, and forceDiscovery keeps
+				// retrying every pass until the scheme stamps anyway.
 				sessionLog(
 					sessionId,
 					`stable-id scheme cutover: stored=${storedStableIdScheme} < current=${PI_STABLE_ID_SCHEME} — forcing execute+materialize this pass`,
@@ -1886,6 +1890,7 @@ export function registerPiContextHandler(
 					entryIdByRef: result.postCommitEntryIdByRef,
 					hasRecentReduceCall: hasRecentPiCtxReduceExecution(sessionId),
 					isCacheBustingPass: cacheBustingPass,
+					syntheticLeadingCount: result.syntheticLeadingCount,
 				});
 			} catch (err) {
 				sessionLog(
@@ -1925,6 +1930,7 @@ export function registerPiContextHandler(
 					// Same signal OpenCode uses to gate sticky-anchor GC
 					// (isCacheBustingPass = history-refresh OR work executed).
 					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
+					syntheticLeadingCount: result.syntheticLeadingCount,
 				});
 			} catch (err) {
 				sessionLog(
@@ -2702,6 +2708,13 @@ interface RunPipelineResult {
 	executedWorkThisPass: boolean;
 	/** Whether <session-history> was written into message[0]. */
 	historyInjected: boolean;
+	/**
+	 * Count of synthetic id-less messages injection prepended (the m[0]/m[1]
+	 * pair). Anchor-GC excludes these from its "all messages resolved"
+	 * denominator — they never resolve to a real entry id, so without this
+	 * exclusion `allResolved` is permanently false and pruning never runs.
+	 */
+	syntheticLeadingCount: number;
 	/** Aggregate counts for log parity with OpenCode. */
 	heuristicsResult: PiHeuristicCleanupResult | null;
 	injectionResult: PiInjectionResult | null;
@@ -3318,7 +3331,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		db: args.db,
 		sessionId: args.sessionId,
 		messages: args.messages,
-		isCacheBusting: args.isCacheBusting,
+		// Discovery/prune must fire on ANY byte-mutating pass, not just a
+		// history-refresh. `args.isCacheBusting` alone is history-refresh-only;
+		// OpenCode gates discovery on `shouldApplyPendingOps || shouldRunHeuristics`.
+		// `executedWorkThisPass` is Pi's equivalent superset (set by pending-ops
+		// application, heuristic drops, AND reasoning clearing) — every one of
+		// those mutates the wire, so it IS a cache-busting pass and discovering /
+		// pruning there is byte-safe. Without this, a placeholder created on a
+		// drop-only execute pass (no history refresh) would never be discovered.
+		isCacheBusting: args.isCacheBusting || executedWorkThisPass,
 		stableIdByRef: postCommitStableIdByRef,
 		// F4 cutover: when the stable-id scheme just changed, force rediscovery so
 		// previously-stripped placeholders get re-keyed under the new scheme this
@@ -3446,6 +3467,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		heuristicsExecuted,
 		executedWorkThisPass,
 		historyInjected: injectionResult?.injected ?? false,
+		syntheticLeadingCount: injectionResult?.syntheticLeadingCount ?? 0,
 		heuristicsResult,
 		injectionResult,
 		targetCount: targets.size,
@@ -3535,6 +3557,13 @@ function applyStickyTurnReminder(args: {
 	entryIdByRef?: ReadonlyMap<object, string> | null;
 	hasRecentReduceCall: boolean;
 	isCacheBustingPass: boolean;
+	/**
+	 * Count of synthetic id-less messages injection prepended (m[0]/m[1] pair).
+	 * Excluded from the `allResolved` denominator — they never resolve to a real
+	 * entry id, so without this every injected pass would have allResolved=false
+	 * and pruning would never run.
+	 */
+	syntheticLeadingCount?: number;
 }): PiAgentMessage[] {
 	const reminder = getPersistedStickyTurnReminder(args.db, args.sessionId);
 	if (!reminder) return args.messages;
@@ -3554,7 +3583,15 @@ function applyStickyTurnReminder(args: {
 	// (post-splice) messages — used to decide whether the anchored reminder
 	// message is still visible, instead of the stale positional `entryIds`.
 	const visibleResolvedIds = new Set<string>(messageIdByIndex.values());
-	const allResolved = messageIdByIndex.size === args.messages.length;
+	// "All REAL messages resolved" — exclude injection's synthetic id-less
+	// m[0]/m[1] prepends from the denominator. Those never resolve, so comparing
+	// against the raw length would leave allResolved permanently false on every
+	// injected pass and disable the guard's prune entirely.
+	const realMessageCount = Math.max(
+		0,
+		args.messages.length - (args.syntheticLeadingCount ?? 0),
+	);
+	const allResolved = messageIdByIndex.size === realMessageCount;
 	if (reminder.messageId) {
 		const reinjected = appendReminderToUserMessageByIdPi(
 			args.messages,
@@ -3631,6 +3668,11 @@ function applyNoteNudges(args: {
 	 * bytes could shift and bust the prompt cache.
 	 */
 	isCacheBusting: boolean;
+	/**
+	 * Count of synthetic id-less messages injection prepended (m[0]/m[1] pair).
+	 * Excluded from the anchor-GC `allResolved` denominator (see below).
+	 */
+	syntheticLeadingCount?: number;
 }): PiAgentMessage[] {
 	const { sessionId, db, messages, projectIdentity, entryIds, entryIdByRef } =
 		args;
@@ -3736,7 +3778,15 @@ function applyNoteNudges(args: {
 	// and wrongly prune its anchor).
 	if (args.isCacheBusting) {
 		const visibleIds = new Set<string>(messageIdByIndex.values());
-		const allResolved = messageIdByIndex.size === messages.length;
+		// "All REAL messages resolved" — exclude injection's synthetic id-less
+		// m[0]/m[1] prepends from the denominator (they never resolve to a real
+		// entry id). Without this, allResolved is permanently false on every
+		// injected pass and the prune never runs → unbounded anchor growth.
+		const realMessageCount = Math.max(
+			0,
+			messages.length - (args.syntheticLeadingCount ?? 0),
+		);
+		const allResolved = messageIdByIndex.size === realMessageCount;
 		if (allResolved && visibleIds.size > 0) {
 			pruneNoteNudgeAnchors(db, sessionId, visibleIds);
 			pruneAutoSearchHintDecisions(db, sessionId, visibleIds);

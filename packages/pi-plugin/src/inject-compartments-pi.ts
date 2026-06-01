@@ -510,6 +510,13 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 	m0Reason: string | null;
 	m0Bytes: number;
 	m1Bytes: number;
+	/**
+	 * Number of synthetic, id-less messages prepended at the FRONT of the array
+	 * by this injection (the m[0] + m[1] pair). These never resolve to a real
+	 * SessionEntry id, so downstream anchor-GC must exclude them from its
+	 * "all messages resolved" denominator or pruning never runs.
+	 */
+	syntheticLeadingCount: number;
 }
 
 function decodeCachedM0(value: Buffer | Uint8Array | null): string | null {
@@ -1329,6 +1336,8 @@ export function injectM0M1Pi(
 		m0Reason: decision.reason,
 		m0Bytes: m0.length,
 		m1Bytes: m1.length,
+		// prependM0M1Messages always unshifts exactly the m[0] + m[1] pair.
+		syntheticLeadingCount: 2,
 	};
 }
 

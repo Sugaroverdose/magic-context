@@ -1470,7 +1470,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				typeof outgoingSessionId === "string" &&
 				outgoingSessionId.length > 0
 			) {
-				clearPiM0Cache(db, outgoingSessionId, "session_before_switch");
+				// Clear ONLY the in-memory per-session maps (the actual leak that
+				// grows one entry per swap). Do NOT clear the durable DB m[0] cache
+				// here: session_before_switch is REVERSIBLE (the user can switch
+				// back), unlike OpenCode's session.deleted. The DB cache is bounded
+				// (one session_meta row per session) and self-invalidates via
+				// epoch/version/docs-hash checks in mustMaterializePi, so preserving
+				// it lets a switch-back reuse the cached prefix instead of forcing a
+				// full m[0] re-materialization (an avoidable prompt-cache bust).
 				clearPiSystemPromptSession(outgoingSessionId);
 				clearContextHandlerSession(outgoingSessionId);
 			}

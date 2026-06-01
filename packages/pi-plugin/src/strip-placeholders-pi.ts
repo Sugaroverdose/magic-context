@@ -41,7 +41,15 @@ function isDroppedOnlyText(text: string): boolean {
 function messageIsPlaceholderOnly(message: unknown): boolean {
 	if (!message || typeof message !== "object") return false;
 	const msg = message as { role?: unknown; content?: unknown };
-	if (msg.role !== "assistant" && msg.role !== "user") return false;
+	// Only assistant messages may be neutralized/removed. User-role messages
+	// anchor turn boundaries the AI SDK relies on to avoid merging consecutive
+	// assistants — removing one can collapse a boundary. Mirrors OpenCode's
+	// strip-content.ts ("Never neutralize user-role messages — they anchor turn
+	// boundaries"). In Pi's raw array, tool results carry role "toolResult"
+	// (synthetic tool-result user folds live only in the transcript view, never
+	// written back to this array), so genuine user prompts are the only user-role
+	// entries here — never all-[dropped] — making this a safe parity guard.
+	if (msg.role !== "assistant") return false;
 
 	if (typeof msg.content === "string") return isDroppedOnlyText(msg.content);
 	if (!Array.isArray(msg.content)) return false;

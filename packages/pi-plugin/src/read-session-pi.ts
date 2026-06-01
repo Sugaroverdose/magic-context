@@ -77,11 +77,15 @@ import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-se
  * entries is folded into a user turn (the toolResult→assistant transition). The
  * id is `${SYNTH_USER_ID_PREFIX}${firstRealToolResultEntryId}` — NOT a real
  * SessionEntry id. Pi's `getBranch()`/compaction replay matches against real
- * `entry.id`, and Pi never cuts a compaction boundary at a `toolResult` (the
- * kept tail must not start with an orphaned tool result), so any consumer that
- * needs a replay-safe real entry id (e.g. compaction `firstKeptEntryId`) must
- * detect this prefix and advance past it. Exported so those consumers share one
- * definition instead of re-deriving the `synth-user-` literal.
+ * `entry.id`, so any consumer that needs a replay-safe real entry id must detect
+ * this prefix and handle it — but the handling differs by consumer:
+ *   • compaction-boundary selection (`findFirstKeptEntryId`) DEFERS — it returns
+ *     null when the kept-start lands on a synthetic-user fold, so the marker is
+ *     re-tried next pass rather than cutting the tail at an orphaned toolResult.
+ *   • boundary trimming (`trimPiMessagesToBoundary`) RESOLVES — it strips the
+ *     prefix to recover the underlying real toolResult entry id and trims there.
+ * Exported so those consumers share one definition instead of re-deriving the
+ * `synth-user-` literal.
  */
 export const SYNTH_USER_ID_PREFIX = "synth-user-";
 

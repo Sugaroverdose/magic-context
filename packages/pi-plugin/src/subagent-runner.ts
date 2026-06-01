@@ -294,7 +294,16 @@ export class PiSubagentRunner implements SubagentRunner {
 			recordAccounting(result);
 			return result;
 		}
-		const args = buildArgs(options);
+		// Large prompts (e.g. a ~50K-token historian chunk ≈ 200 KB) overflow
+		// Linux's per-argv-entry limit (MAX_ARG_STRLEN, 128 KiB) and make spawn()
+		// fail with E2BIG. Above PROMPT_ARGV_MAX_BYTES, deliver the prompt via
+		// piped stdin (Pi's print mode concatenates stdin into the initial
+		// message) and omit the positional argv to avoid duplicating it.
+		const promptBytes = Buffer.byteLength(options.userMessage, "utf8");
+		const deliverViaStdin = promptBytes > PROMPT_ARGV_MAX_BYTES;
+		const args = buildArgs(options, {
+			omitPositionalMessage: deliverViaStdin,
+		});
 
 		// The model spec is `provider/model` — Pi accepts that directly via
 		// `--model provider/id` (no separate `--provider` flag needed). When a
@@ -335,13 +344,12 @@ export class PiSubagentRunner implements SubagentRunner {
 					// API key env vars, and PATH all flow through. The Pi
 					// CLI reads its own auth state from disk on startup.
 					env: process.env,
-					// We talk to the child only via stdout (JSON events).
-					// stdin is closed because print-mode reads piped stdin
-					// as additional message content — we already pass the
-					// user message via argv. stderr captured for error
-					// diagnostics if spawn fails or the model bails out
-					// before producing the final assistant message.
-					stdio: ["ignore", "pipe", "pipe"],
+					// stdout = JSON events; stderr = diagnostics. stdin is a pipe
+					// ONLY on the large-prompt path (we write the message then end
+					// it); otherwise it stays closed because the message rides in
+					// argv and print-mode would otherwise block reading an open,
+					// idle stdin.
+					stdio: [deliverViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
 				});
 			} catch (error) {
 				settle({
@@ -365,6 +373,20 @@ export class PiSubagentRunner implements SubagentRunner {
 			}
 
 			emitProgress({ type: "spawned", argv: args, pid: child.pid });
+
+			// Large-prompt path: feed the message through stdin, then close it so
+			// Pi's print-mode stdin read resolves (it waits for EOF). Guarded by
+			// child.stdin presence (only opened when deliverViaStdin). A write
+			// failure (e.g. child already exited) is swallowed — the normal
+			// exit/timeout handling reports the real failure reason.
+			if (deliverViaStdin && child.stdin) {
+				try {
+					child.stdin.end(options.userMessage, "utf8");
+				} catch {
+					// child may have exited before we could write; exit/stderr
+					// handlers below surface the actual failure.
+				}
+			}
 
 			// Capture stderr so we can attach it to error reasons. Pi prints
 			// unrecoverable errors (auth failures, network) here before the
@@ -762,12 +784,31 @@ function isFallbackEligible(reason: string): boolean {
 }
 
 /**
+ * Max bytes we will pass as the positional message argv argument. Linux caps a
+ * SINGLE argv entry at MAX_ARG_STRLEN (128 KiB); a historian chunk clamps to
+ * ~50K tokens (~200 KB), which overflows that limit and makes spawn() fail with
+ * E2BIG on Linux. Above this threshold the prompt is delivered via piped stdin
+ * instead (Pi's print mode concatenates stdin into the initial message — see
+ * buildInitialMessage), and the positional arg is omitted to avoid duplication.
+ * Set well below 128 KiB for multibyte/encoding headroom.
+ */
+export const PROMPT_ARGV_MAX_BYTES = 96 * 1024;
+
+/**
  * Build the argv for one `pi --print --mode json` invocation.
  *
  * Argument ordering matters: print mode treats positional args as
  * messages, so the user prompt must come last.
+ *
+ * When `omitPositionalMessage` is set, the user prompt is NOT appended as a
+ * positional — the caller delivers it via piped stdin instead (large-prompt
+ * path; see PROMPT_ARGV_MAX_BYTES). Pi concatenates stdin + positional, so the
+ * positional MUST be omitted when piping or the prompt would be duplicated.
  */
-export function buildArgs(options: SubagentRunOptions): string[] {
+export function buildArgs(
+	options: SubagentRunOptions,
+	opts?: { omitPositionalMessage?: boolean },
+): string[] {
 	const args: string[] = [
 		"--print",
 		"--mode",
@@ -867,7 +908,12 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 	// Pi 0.7x parses print-mode prompts after all known flags without needing
 	// a `--` sentinel; newer builds hard-fail on that sentinel as an unknown
 	// option, so pass the prompt directly.
-	args.push(options.userMessage);
+	//
+	// Omitted on the large-prompt path: the caller pipes the message via stdin
+	// (Pi concatenates stdin + positional, so including both would duplicate it).
+	if (!opts?.omitPositionalMessage) {
+		args.push(options.userMessage);
+	}
 
 	return args;
 }

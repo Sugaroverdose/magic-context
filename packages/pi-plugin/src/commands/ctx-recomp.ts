@@ -159,6 +159,30 @@ export function registerCtxRecompCommand(
 					},
 					parsed.kind === "partial" ? { range: parsed.range } : {},
 				);
+				if (result.published) {
+					// Stage the native compaction marker + refresh signals
+					// SYNCHRONOUSLY right after publish, BEFORE the async
+					// sendCtxStatusMessage below. queueAndApplyPiRecompMarker
+					// persists pending state durably before applying, so once
+					// entered the marker survives a crash; staging it ahead of the
+					// async status send closes the publish→stage yield window where
+					// a crash would drop the marker. (Impact is bounded regardless:
+					// trimPiMessagesToBoundary trims the wire every pass independent
+					// of the native marker, and the next incremental publish
+					// re-stages a covering marker — so a lost marker only lags the
+					// JSONL native boundary, never the model-visible context.)
+					//
+					// Mirrors OpenCode `hook.ts:477-480`: recomp publishes fresh
+					// compartments + queues drops for the rebuilt range. Without
+					// these signals the next pass would render stale
+					// `<session-history>` until usage crossed execute, and the
+					// queued drops would sit in `pending_ops` until 85%
+					// force-materialization. Not signaled on the catch path — a
+					// failed recomp didn't publish anything to refresh.
+					queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
+					signalPiHistoryRefresh(sessionId);
+					signalPiPendingMaterialization(sessionId);
+				}
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",
 					text: result.message,
@@ -167,19 +191,6 @@ export function registerCtxRecompCommand(
 				if (!result.published) {
 					return;
 				}
-				// Mirrors OpenCode `hook.ts:477-480`: recomp publishes
-				// fresh compartments + queues drops for the rebuilt
-				// range. Without these signals the next pass would
-				// render stale `<session-history>` until usage crossed
-				// execute, and the queued drops would sit in
-				// `pending_ops` until 85% force-materialization.
-				//
-				// We do NOT signal these on the catch path — a failed
-				// recomp didn't publish anything, so there's nothing
-				// for the next pass to refresh.
-				queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
-				signalPiHistoryRefresh(sessionId);
-				signalPiPendingMaterialization(sessionId);
 			} catch (error) {
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",

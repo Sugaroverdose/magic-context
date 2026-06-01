@@ -76,7 +76,6 @@ import {
 	validateHistorianOutput,
 	validateStoredCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
-import { cleanupHistorianStateFile } from "@magic-context/core/hooks/magic-context/historian-state-file";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
@@ -209,7 +208,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 	};
 
 	updateSessionMeta(db, sessionId, { compartmentInProgress: true });
-	let stateFilePath: string | undefined;
 
 	// historian_runs telemetry (migration v24) — recorded ONCE in finally so every
 	// exit path is logged. Best-effort. Mirrors the OpenCode incremental runner.
@@ -911,9 +909,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		} catch {
 			/* telemetry must not break compaction */
 		}
-		// Best-effort cleanup of the temp state file written when existing
-		// state exceeded the inline threshold. Safe with undefined.
-		cleanupHistorianStateFile(stateFilePath);
 	}
 }
 
