@@ -751,8 +751,23 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     // Poll for server→TUI messages: toasts and dialog requests.
     // Single poller because consumeTuiMessages() is destructive (deletes consumed rows).
     const messagePoller = setInterval(() => {
-        void consumeTuiMessages().then((messages) => {
+        // Scope the drain to the TUI's active session so notifications tagged for
+        // a different session (served by the same RPC process) are not consumed
+        // here. The client-side sessionId guard below is defense-in-depth in case
+        // an older server ignores the param and returns cross-session items.
+        const activeSessionId = getSessionId(api)
+        void consumeTuiMessages(activeSessionId ?? undefined).then((messages) => {
             for (const msg of messages) {
+                // Drop any action/dialog whose sessionId doesn't match this TUI's
+                // active session (session-less/global notifications still apply).
+                if (
+                    msg.type === "action" &&
+                    msg.sessionId &&
+                    activeSessionId &&
+                    msg.sessionId !== activeSessionId
+                ) {
+                    continue
+                }
                 if (msg.type === "toast") {
                     const p = msg.payload
                     api.ui.toast({

@@ -875,8 +875,18 @@ export function registerRpcHandlers(
 
     rpcServer.handle("pending-notifications", async (params) => {
         const lastReceivedId = Number(params.lastReceivedId ?? 0);
+        // Scope drain to the TUI's active session so a notification tagged for a
+        // different session (e.g. an upgrade dialog triggered by another client
+        // sharing this process) is never delivered here. sessionId is optional
+        // for back-compat: an older TUI that omits it falls back to the previous
+        // unscoped behavior.
+        const sessionId =
+            typeof params.sessionId === "string" && params.sessionId.length > 0
+                ? params.sessionId
+                : undefined;
         const notifications = drainNotifications(
             Number.isFinite(lastReceivedId) ? lastReceivedId : 0,
+            sessionId,
         );
         return { messages: notifications } as unknown as Record<string, unknown>;
     });

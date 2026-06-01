@@ -308,12 +308,16 @@ export async function markAnnounced(): Promise<boolean> {
 }
 
 /** Poll for pending server→TUI notifications via RPC. */
-export async function consumeTuiMessages(): Promise<TuiMessage[]> {
+export async function consumeTuiMessages(sessionId?: string): Promise<TuiMessage[]> {
     if (!rpcClient) return [];
     try {
         const result = await rpcClient.call<{ messages: RpcNotificationMessage[] }>(
             "pending-notifications",
-            { lastReceivedId: lastReceivedNotificationId },
+            // Pass the TUI's active session so the server only drains
+            // notifications scoped to it (or global ones). Without this, a
+            // notification for another session served by the same process (e.g.
+            // OpenCode Desktop on the same project) could surface here.
+            { lastReceivedId: lastReceivedNotificationId, sessionId },
         );
         const messages = result.messages ?? [];
         for (const message of messages) {
