@@ -30,6 +30,53 @@ import {
  * folded-toolResult boundaries — returning null — so we never stage an
  * unmatchable synthetic marker).
  */
+/**
+ * Stage the Pi compaction marker WITHOUT applying it, then signal a deferred
+ * history refresh so the next transform pass (at a turn boundary) drains and
+ * applies it via the pipeline's deferred-marker path.
+ *
+ * Used by the DETACHED recomp/upgrade runs: applying the marker eagerly
+ * (`appendCompaction`) mutates `getBranch()` immediately, which from a
+ * background task could land mid-turn. Staging + deferred drain mirrors the
+ * background historian's `onPublished` (signalPiDeferredHistoryRefresh /
+ * signalPiDeferredMaterialization) so the marker materializes only on the next
+ * cache-busting pass, never mid-turn. No-ops safely when the boundary can't be
+ * resolved to a replay-safe entry id (same guards as the eager path).
+ */
+export function stagePiRecompMarker(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	ctx: unknown;
+}): void {
+	const readBranchEntries = resolvePiReadBranchEntries(args.ctx);
+	if (!readBranchEntries) return;
+
+	const compartments = getCompartments(args.db, args.sessionId);
+	const last = compartments[compartments.length - 1];
+	if (!last) return;
+
+	let firstKeptEntryId: string | null = null;
+	try {
+		firstKeptEntryId = findFirstKeptEntryId(
+			readBranchEntries(),
+			last.endMessage,
+		);
+	} catch {
+		firstKeptEntryId = null;
+	}
+	if (!firstKeptEntryId || last.endMessageId.length === 0) return;
+
+	setPendingPiCompactionMarkerState(args.db, args.sessionId, {
+		firstKeptEntryId,
+		endMessageId: last.endMessageId,
+		ordinal: last.endMessage,
+		tokensBefore: 0,
+		summary: buildPiCompactionSummary(compartments),
+		publishedAt: Date.now(),
+	});
+	signalPiDeferredHistoryRefresh(args.sessionId);
+}
+
 export function queueAndApplyPiRecompMarker(args: {
 	db: ContextDatabase;
 	sessionId: string;

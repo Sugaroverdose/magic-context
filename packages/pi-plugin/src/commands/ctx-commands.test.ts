@@ -6,6 +6,7 @@ import { initializeDatabase } from "@magic-context/core/features/magic-context/s
 import { queuePendingOp } from "@magic-context/core/features/magic-context/storage-ops";
 import { insertTag } from "@magic-context/core/features/magic-context/storage-tags";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { awaitInFlightRecomps } from "../pi-recomp-runner";
 import { registerCtxDreamCommand } from "./ctx-dream";
 import { registerCtxFlushCommand } from "./ctx-flush";
 import { registerCtxRecompCommand } from "./ctx-recomp";
@@ -291,8 +292,13 @@ describe("Pi Magic Context commands", () => {
 		});
 
 		const ctx = createCtx("ses-budget");
+		// First call shows the confirmation warning; second call confirms and
+		// spawns the DETACHED recomp. The recomp now runs in the background
+		// (parity with OpenCode), so await the in-flight run before asserting
+		// what prompt the historian actually received.
 		await handlers.get("ctx-recomp")?.("", ctx);
 		await handlers.get("ctx-recomp")?.("", ctx);
+		await awaitInFlightRecomps();
 
 		expect(promptText).toContain("[1] U: message 1");
 		expect(promptText).not.toContain("[2] A: message 2");

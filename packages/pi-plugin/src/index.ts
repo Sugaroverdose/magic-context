@@ -112,6 +112,7 @@ import {
 } from "./dreamer";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
+import { awaitInFlightRecomps } from "./pi-recomp-runner";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -1456,6 +1457,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			await withTimeout(awaitInFlightHistorians(), SHUTDOWN_DRAIN_MS);
 		} catch (err) {
 			warn("shutdown: historian drain threw:", err);
+		}
+		try {
+			await withTimeout(awaitInFlightRecomps(), SHUTDOWN_DRAIN_MS);
+		} catch (err) {
+			warn("shutdown: recomp drain threw:", err);
 		}
 		try {
 			await withTimeout(awaitInFlightDreamers(), SHUTDOWN_DRAIN_MS);

@@ -6,7 +6,6 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import {
 	contextualizeUpgradeReason,
 	extractRecompReason,
@@ -17,15 +16,16 @@ import { describeError } from "@magic-context/core/shared/error-message";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
-	signalPiHistoryRefresh,
-	signalPiPendingMaterialization,
+	signalPiDeferredHistoryRefresh,
+	signalPiDeferredMaterialization,
 } from "../context-handler";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { runPiMemoryMigration } from "../pi-memory-migration";
 import { createPiHistorianClient } from "../pi-recomp-client-shared";
-import { queueAndApplyPiRecompMarker } from "../pi-recomp-marker";
+import { stagePiRecompMarker } from "../pi-recomp-marker";
+import { isPiRecompInFlight, spawnPiRecompRun } from "../pi-recomp-runner";
 import { readPiSessionMessages } from "../read-session-pi";
-import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
+import { updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
 /**
@@ -73,6 +73,15 @@ export function registerCtxSessionUpgradeCommand(
 					title: "/ctx-session-upgrade",
 					text: "## Session Upgrade\n\nUnavailable because `historian.model` is not configured.",
 					level: "error",
+				});
+				return;
+			}
+
+			if (isPiRecompInFlight(sessionId)) {
+				sendCtxStatusMessage(pi, {
+					title: "/ctx-session-upgrade",
+					text: "## Session Upgrade\n\nAn upgrade or recomp is already running for this session in the background. Wait for it to finish, then try again.",
+					level: "warning",
 				});
 				return;
 			}
@@ -153,17 +162,28 @@ export function registerCtxSessionUpgradeCommand(
 					return;
 				}
 				// Compartments current but project memories never migrated — run
-				// migration only.
+				// migration only. Detached so the single migration LLM call doesn't
+				// block the Pi REPL either (parity with the full-recomp path below).
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-session-upgrade",
 					text: "## Session Upgrade\n\nCompartments are already current. Re-organizing project memories. This may take a while.",
 					level: "info",
 				});
-				const summary = await runMigration();
-				sendCtxStatusMessage(pi, {
-					title: "/ctx-session-upgrade",
-					text: ["## Session Upgrade — Complete", "", summary].join("\n"),
-					level: "info",
+				spawnPiRecompRun({
+					sessionId,
+					provider: {
+						readMessages: () => readPiSessionMessages(ctx),
+					} satisfies RawMessageProvider,
+					onStatusChange: () =>
+						updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd }),
+					work: async () => {
+						const summary = await runMigration();
+						sendCtxStatusMessage(pi, {
+							title: "/ctx-session-upgrade",
+							text: ["## Session Upgrade — Complete", "", summary].join("\n"),
+							level: "info",
+						});
+					},
 				});
 				return;
 			}
@@ -177,133 +197,137 @@ export function registerCtxSessionUpgradeCommand(
 			const provider = {
 				readMessages: () => readPiSessionMessages(ctx),
 			} satisfies RawMessageProvider;
-			const unregister = setRawMessageProvider(sessionId, provider);
-			setMagicContextRecompActive(sessionId, true);
-			updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd });
 
-			try {
-				// Step 1 — compartment upgrade via full recomp.
-				const recompResult = await executeContextRecompWithResult(
-					{
-						client: createPiHistorianClient({
-							runner: deps.runner,
-							model: deps.historianModel,
-							fallbackModels: deps.historianFallbacks,
-							timeoutMs: deps.historianTimeoutMs,
-							thinkingLevel: deps.historianThinkingLevel,
+			// Detached: the upgrade (multi-pass recomp + memory migration) runs in
+			// the background so the Pi REPL stays responsive (parity with OpenCode's
+			// `void runManagedUpgrade`). The command handler returns right after the
+			// "Rebuilding…" ack above. Provider registration, the `recomp`
+			// status-line flag, shutdown-drain tracking, and cleanup are owned by
+			// spawnPiRecompRun.
+			spawnPiRecompRun({
+				sessionId,
+				provider,
+				onStatusChange: () =>
+					updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd }),
+				work: async () => {
+					// Step 1 — compartment upgrade via full recomp.
+					const recompResult = await executeContextRecompWithResult(
+						{
+							client: createPiHistorianClient({
+								runner: deps.runner,
+								model: deps.historianModel as string,
+								fallbackModels: deps.historianFallbacks,
+								timeoutMs: deps.historianTimeoutMs,
+								thinkingLevel: deps.historianThinkingLevel,
+								directory: ctx.cwd,
+								accountingSessionId: sessionId,
+								systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+								notify: (text) =>
+									sendCtxStatusMessage(pi, {
+										title: "/ctx-session-upgrade",
+										text,
+										level: "info",
+									}),
+							}) as never,
+							db: deps.db,
+							sessionId,
+							historianChunkTokens: deps.historianChunkTokens,
 							directory: ctx.cwd,
-							accountingSessionId: sessionId,
-							systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
-							notify: (text) =>
-								sendCtxStatusMessage(pi, {
-									title: "/ctx-session-upgrade",
-									text,
-									level: "info",
-								}),
-						}) as never,
-						db: deps.db,
-						sessionId,
-						historianChunkTokens: deps.historianChunkTokens,
-						directory: ctx.cwd,
-						historianTimeoutMs: deps.historianTimeoutMs,
-						memoryEnabled: deps.memoryEnabled,
-						autoPromote: deps.autoPromote,
-						// Embedding substrate: without this the recomp publish path
-						// no-ops embedAndStoreCompartments on an unregistered project,
-						// leaving rebuilt compartments with NULL p1_embedding (dropped
-						// from ctx_search / dreamer linkage). Parity with OpenCode.
-						ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
-						// Recomp-runner model chain (parity with OpenCode
-						// recomp-orchestrator): configured fallbacks + the session's
-						// own model as the last-ditch retry, so an empty/invalid-but-
-						// HTTP-200 historian primary escalates instead of failing.
-						fallbackModels: deps.historianFallbacks,
-						fallbackModelId: sessionMainModel,
-					},
-					{},
-				);
-
-				// Gate migration + "Complete" on `published` — the GROUND TRUTH
-				// that recomp actually rebuilt compartments (parity with OpenCode
-				// runManagedUpgrade). A recomp can no-op WITHOUT a "— Failed/Skipped"
-				// heading (lease/activeRuns guard returns "Historian already
-				// running…"), which isRecompFailure misses. Running migration +
-				// declaring Complete on a skipped recomp leaves tierless rows but
-				// migrated memories + a project-wide cache-bust from the epoch bump
-				// (dogfood 2026-05-30, AFT false-complete under concurrent processes).
-				// Require a POSITIVE full-success ("— Complete"), not merely the
-				// absence of a Failed/Skipped heading: a published "— Partial"
-				// rebuilt only a prefix (published===true, not a failure heading),
-				// and running migration + declaring Complete on it would migrate
-				// memories while leaving tierless legacy rows. Mirrors OpenCode's
-				// recomp-orchestrator gate.
-				if (
-					!recompResult.published ||
-					!isRecompComplete(recompResult.message)
-				) {
-					const reason = contextualizeUpgradeReason(
-						isRecompFailure(recompResult.message)
-							? extractRecompReason(recompResult.message)
-							: `Compartments were not fully rebuilt: ${extractRecompReason(recompResult.message)}`,
+							historianTimeoutMs: deps.historianTimeoutMs,
+							memoryEnabled: deps.memoryEnabled,
+							autoPromote: deps.autoPromote,
+							// Embedding substrate: without this the recomp publish path
+							// no-ops embedAndStoreCompartments on an unregistered project,
+							// leaving rebuilt compartments with NULL p1_embedding (dropped
+							// from ctx_search / dreamer linkage). Parity with OpenCode.
+							ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
+							// Recomp-runner model chain (parity with OpenCode
+							// recomp-orchestrator): configured fallbacks + the session's
+							// own model as the last-ditch retry, so an empty/invalid-but-
+							// HTTP-200 historian primary escalates instead of failing.
+							fallbackModels: deps.historianFallbacks,
+							fallbackModelId: sessionMainModel,
+						},
+						{},
 					);
+
+					// Gate migration + "Complete" on `published` — the GROUND TRUTH
+					// that recomp actually rebuilt compartments (parity with OpenCode
+					// runManagedUpgrade). A recomp can no-op WITHOUT a "— Failed/Skipped"
+					// heading (lease/activeRuns guard returns "Historian already
+					// running…"), which isRecompFailure misses. Running migration +
+					// declaring Complete on a skipped recomp leaves tierless rows but
+					// migrated memories + a project-wide cache-bust from the epoch bump
+					// (dogfood 2026-05-30, AFT false-complete under concurrent processes).
+					// Require a POSITIVE full-success ("— Complete"), not merely the
+					// absence of a Failed/Skipped heading: a published "— Partial"
+					// rebuilt only a prefix (published===true, not a failure heading),
+					// and running migration + declaring Complete on it would migrate
+					// memories while leaving tierless legacy rows. Mirrors OpenCode's
+					// recomp-orchestrator gate.
+					if (
+						!recompResult.published ||
+						!isRecompComplete(recompResult.message)
+					) {
+						const reason = contextualizeUpgradeReason(
+							isRecompFailure(recompResult.message)
+								? extractRecompReason(recompResult.message)
+								: `Compartments were not fully rebuilt: ${extractRecompReason(recompResult.message)}`,
+						);
+						sendCtxStatusMessage(pi, {
+							title: "/ctx-session-upgrade",
+							text: `## Session Upgrade — Incomplete\n\n${reason}`,
+							level: "error",
+						});
+						return;
+					}
+
+					// DEFERRED staging (background-safe): stage the native marker as a
+					// pending blob + signal a DEFERRED history refresh so the next
+					// transform pass (at a turn boundary) drains and applies it. The
+					// detached run must NOT apply the marker eagerly (appendCompaction
+					// mutates getBranch immediately, which from a background task could
+					// land mid-turn) nor use the eager history/materialization signals
+					// — those would force a materialization on whatever pass is
+					// running, possibly mid-turn, busting the cache. Mirrors the
+					// background historian's onPublished (signalPiDeferred*).
+					//
+					// Isolated in its own try/catch: marker staging is best-effort (the
+					// next incremental historian pass re-stages a covering marker), so a
+					// throw here must NOT skip the refresh signals, the memory
+					// migration, or the "Complete" message below — recomp already
+					// published.
+					try {
+						stagePiRecompMarker({ db: deps.db, sessionId, ctx });
+					} catch (markerError) {
+						sessionLog(
+							sessionId,
+							`pi /ctx-session-upgrade marker staging failed (non-fatal, recomp already published): ${describeError(markerError).brief}`,
+						);
+					}
+
+					signalPiDeferredHistoryRefresh(sessionId);
+					signalPiDeferredMaterialization(sessionId);
+
+					// Step 2 — memory migration (once per project, idempotent).
+					const migrationSummary = await runMigration();
+
 					sendCtxStatusMessage(pi, {
 						title: "/ctx-session-upgrade",
-						text: `## Session Upgrade — Incomplete\n\n${reason}`,
-						level: "error",
+						text: [
+							"## Session Upgrade — Complete",
+							"",
+							upgradableCount > 0
+								? `Rebuilt ${upgradableCount} legacy compartment${upgradableCount === 1 ? "" : "s"} into the v2 format.`
+								: "Rebuilt this session's compartments into the v2 format.",
+							migrationSummary ? `\n${migrationSummary}` : "",
+							"",
+							recompResult.message,
+						].join("\n"),
+						level: "info",
 					});
-					return;
-				}
-
-				// Advance the Pi native compaction marker to the rebuilt boundary
-				// so getBranch() trims the pre-upgrade branch. Without this the
-				// upgrade republishes compartments but the entire pre-upgrade JSONL
-				// branch stays visible and grows unbounded until a later incremental
-				// historian pass advances the marker. Shared with /ctx-recomp.
-				//
-				// Isolated in its own try/catch: marker staging is best-effort (the
-				// next incremental historian pass re-stages a covering marker), so a
-				// throw here must NOT skip the refresh signals, the memory migration,
-				// or the "Complete" message below — the recomp already published.
-				try {
-					queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
-				} catch (markerError) {
-					sessionLog(
-						sessionId,
-						`pi /ctx-session-upgrade marker staging failed (non-fatal, recomp already published): ${describeError(markerError).brief}`,
-					);
-				}
-
-				signalPiHistoryRefresh(sessionId);
-				signalPiPendingMaterialization(sessionId);
-
-				// Step 2 — memory migration (once per project, idempotent).
-				const migrationSummary = await runMigration();
-
-				sendCtxStatusMessage(pi, {
-					title: "/ctx-session-upgrade",
-					text: [
-						"## Session Upgrade — Complete",
-						"",
-						upgradableCount > 0
-							? `Rebuilt ${upgradableCount} legacy compartment${upgradableCount === 1 ? "" : "s"} into the v2 format.`
-							: "Rebuilt this session's compartments into the v2 format.",
-						migrationSummary ? `\n${migrationSummary}` : "",
-						"",
-						recompResult.message,
-					].join("\n"),
-					level: "info",
-				});
-			} catch (error) {
-				sendCtxStatusMessage(pi, {
-					title: "/ctx-session-upgrade",
-					text: `## Session Upgrade — Failed\n\n${describeError(error).brief}`,
-					level: "error",
-				});
-			} finally {
-				setMagicContextRecompActive(sessionId, false);
-				updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd });
-				unregister();
-			}
+				},
+			});
 		},
 	});
 }

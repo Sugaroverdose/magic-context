@@ -188,6 +188,30 @@ OpenCode gates m[1] recompute on `isCacheBustingPass` (`shouldApplyPendingOps ||
 
 ---
 
+## 11b. Recomp / upgrade run detached in the background (mechanism differs, behaviour matches)
+
+`/ctx-recomp` and `/ctx-session-upgrade` run DETACHED on both harnesses — the
+REPL/TUI stays responsive while the multi-pass historian recomp runs — but the
+mechanism differs because the process models differ:
+
+- **OpenCode** runs `void runManagedRecomp(...)` / `void runManagedUpgrade(...)`
+  in its separate server process; the TUI client keeps accepting input and shows
+  a live progress bar via RPC polling.
+- **Pi** is a single-process REPL where the command handler IS the turn, so an
+  inline `await` froze all input. Pi instead spawns the recomp via
+  `spawnPiRecompRun` (mirroring `spawnPiHistorianRun`): the handler returns
+  immediately after the ack message, the run is tracked in an in-flight map for
+  `session_shutdown` drain, and progress surfaces through `[ctx-status]`
+  messages + the `recomp` status-line flag.
+
+Because Pi's recomp runs in the background (not inside the user's turn), its
+post-publish signals are the DEFERRED variants (`signalPiDeferredHistoryRefresh`
+/ `signalPiDeferredMaterialization`) and the compaction marker is STAGED (pending
+blob + deferred drain), never applied eagerly — exactly like the background
+historian's `onPublished`. Eager signals / eager marker apply would force a
+materialization (or mutate `getBranch()`) on whatever transform pass is running,
+possibly mid-turn, busting the cache.
+
 ## 11. Work-metrics: Pi folds the in-memory wire array; OpenCode computes lazily in RPC
 
 The TUI/status "work metrics" (new-work / total-input tokens) are a display-only

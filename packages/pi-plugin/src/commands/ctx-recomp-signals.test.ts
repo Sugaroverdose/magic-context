@@ -5,20 +5,19 @@ import { join } from "node:path";
 /**
  * Regression coverage for the `/ctx-recomp` post-completion signal contract.
  *
- * The bug: Pi `/ctx-recomp` published rebuilt compartments + queued drops
- * via the shared core, but did NOT signal the post-publish state to
- * the next pipeline pass. OpenCode's `hook.ts:477-480` passes
- * `onInjectionCacheCleared` to `executeContextRecomp` which does both
- * `historyRefresh` + `pendingMaterialization`. Without these, Pi
- * users would see a fresh recomp's drops sit in `pending_ops` until
- * usage crossed 85% force-materialization, and the live `<session-history>`
- * block would render the old compartments until the next natural
- * cache-busting turn.
+ * Pi `/ctx-recomp` runs DETACHED (background) so the single-process REPL stays
+ * responsive — parity with OpenCode's `void runManagedRecomp`. Because it runs
+ * in the background (not inside the user's turn), the post-publish signals MUST
+ * be the DEFERRED variants (`signalPiDeferredHistoryRefresh` /
+ * `signalPiDeferredMaterialization`), exactly like the background historian's
+ * `onPublished`. The eager variants would force a materialization on whatever
+ * transform pass happens to be running — possibly mid-turn — busting the cache.
+ * The deferred signals stage the work so the next cache-busting pass at a turn
+ * boundary drains it.
  *
- * Compressor cooldown is also reset because the freshly rebuilt
- * compartments may legitimately need compression on the next
- * opportunity, but the in-memory cooldown timer would block the
- * compressor from picking them up inside its 10-min window.
+ * These signals fire only when the recomp actually published, and they live
+ * inside the detached `work()` body (which spawnPiRecompRun owns the try/catch
+ * for), not on a failure path.
  */
 
 const PATH = join(import.meta.dir, "ctx-recomp.ts");
@@ -29,31 +28,34 @@ const codeOnly = SRC.split("\n")
 	.join("\n");
 
 describe("/ctx-recomp post-completion signal contract", () => {
-	test("calls signalPiHistoryRefresh after successful recomp", () => {
-		expect(codeOnly).toContain("signalPiHistoryRefresh(sessionId)");
+	test("runs detached via spawnPiRecompRun (non-blocking REPL)", () => {
+		expect(codeOnly).toContain("spawnPiRecompRun(");
 	});
 
-	test("calls signalPiPendingMaterialization after successful recomp", () => {
-		expect(codeOnly).toContain("signalPiPendingMaterialization(sessionId)");
+	test("uses DEFERRED history-refresh signal (background-safe)", () => {
+		expect(codeOnly).toContain("signalPiDeferredHistoryRefresh(sessionId)");
 	});
 
-	test("signal block lives BEFORE the catch — failed recomps don't fire signals", () => {
-		// The order matters: we don't want a failed recomp to refresh
-		// `<session-history>` cache when nothing actually changed in
-		// the compartment store. Verify the signal CALLS (not the
-		// imports) appear inside the `try` block and not the catch /
-		// finally blocks. Match the call form `signalPi…(sessionId)`
-		// so we skip the import line.
-		const tryStart = codeOnly.indexOf("try {");
-		const catchStart = codeOnly.indexOf("} catch (error)");
-		const finallyStart = codeOnly.indexOf("} finally {");
-		expect(tryStart).toBeGreaterThan(-1);
-		expect(catchStart).toBeGreaterThan(tryStart);
-		const signalCallIdx = codeOnly.indexOf(
-			"signalPiPendingMaterialization(sessionId)",
+	test("uses DEFERRED materialization signal (background-safe)", () => {
+		expect(codeOnly).toContain("signalPiDeferredMaterialization(sessionId)");
+	});
+
+	test("does NOT use the eager signals (would materialize mid-turn from background)", () => {
+		expect(codeOnly).not.toContain("signalPiHistoryRefresh(sessionId)");
+		expect(codeOnly).not.toContain("signalPiPendingMaterialization(sessionId)");
+	});
+
+	test("signals fire only inside the published branch, not unconditionally", () => {
+		const publishedGate = codeOnly.indexOf("if (result.published)");
+		const deferredSignal = codeOnly.indexOf(
+			"signalPiDeferredMaterialization(sessionId)",
 		);
-		expect(signalCallIdx).toBeGreaterThan(tryStart);
-		expect(signalCallIdx).toBeLessThan(catchStart);
-		expect(signalCallIdx).toBeLessThan(finallyStart);
+		expect(publishedGate).toBeGreaterThan(-1);
+		expect(deferredSignal).toBeGreaterThan(publishedGate);
+	});
+
+	test("stages the marker (deferred) instead of applying it eagerly", () => {
+		expect(codeOnly).toContain("stagePiRecompMarker(");
+		expect(codeOnly).not.toContain("queueAndApplyPiRecompMarker(");
 	});
 });

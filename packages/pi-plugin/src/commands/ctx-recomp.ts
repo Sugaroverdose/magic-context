@@ -8,19 +8,19 @@ import {
 	snapRangeToCompartments,
 } from "@magic-context/core/hooks/magic-context/compartment-runner-partial-recomp";
 import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { describeError } from "@magic-context/core/shared/error-message";
-import { sessionLog } from '@magic-context/core/shared/logger';
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
-	signalPiHistoryRefresh,
-	signalPiPendingMaterialization,
+	signalPiDeferredHistoryRefresh,
+	signalPiDeferredMaterialization,
 } from "../context-handler";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { createPiHistorianClient } from "../pi-recomp-client-shared";
-import { queueAndApplyPiRecompMarker } from "../pi-recomp-marker";
+import { stagePiRecompMarker } from "../pi-recomp-marker";
+import { isPiRecompInFlight, spawnPiRecompRun } from "../pi-recomp-runner";
 import { readPiSessionMessages } from "../read-session-pi";
-import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
+import { updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
 interface RecompConfirmation {
@@ -101,6 +101,15 @@ export function registerCtxRecompCommand(
 				return;
 			}
 
+			if (isPiRecompInFlight(sessionId)) {
+				sendCtxStatusMessage(pi, {
+					title: "/ctx-recomp",
+					text: "## Magic Recomp\n\nA recomp or upgrade is already running for this session in the background. Wait for it to finish, then try again.",
+					level: "warning",
+				});
+				return;
+			}
+
 			confirmationBySession.delete(sessionId);
 			sendCtxStatusMessage(pi, {
 				title: "/ctx-recomp",
@@ -114,118 +123,86 @@ export function registerCtxRecompCommand(
 			const provider = {
 				readMessages: () => readPiSessionMessages(ctx),
 			} satisfies RawMessageProvider;
-			const unregister = setRawMessageProvider(sessionId, provider);
-			setMagicContextRecompActive(sessionId, true);
-			updateStatusLine(ctx, {
-				db: deps.db,
-				projectIdentity: ctx.cwd,
-			});
-			try {
-				const result = await executeContextRecompWithResult(
-					{
-						client: createPiHistorianClient({
-							runner: deps.runner,
-							model: deps.historianModel,
-							systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
-							fallbackModels: deps.historianFallbacks,
-							timeoutMs: deps.historianTimeoutMs,
-							thinkingLevel: deps.historianThinkingLevel,
-							directory: ctx.cwd,
-							accountingSessionId: sessionId,
-							notify: (text) => {
-								sendCtxStatusMessage(pi, {
-									title: "/ctx-recomp",
-									text,
-									level: inferLevel(text),
-								});
-							},
-						}) as never,
-						db: deps.db,
-						sessionId,
-						historianChunkTokens: deps.historianChunkTokens,
-						directory: ctx.cwd,
-						historianTimeoutMs: deps.historianTimeoutMs,
-						memoryEnabled: deps.memoryEnabled,
-						autoPromote: deps.autoPromote,
-						// Embedding substrate: register before the recomp publish path
-						// calls embedAndStoreCompartments, else rebuilt rows keep NULL
-						// p1_embedding (dropped from ctx_search / dreamer linkage).
-						ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
-						// Recomp-runner model chain parity with OpenCode: configured
-						// fallbacks + the session's own model as last-ditch retry.
-						fallbackModels: deps.historianFallbacks,
-						fallbackModelId: ctx.model
-							? `${ctx.model.provider}/${ctx.model.id}`
-							: undefined,
-					},
-					parsed.kind === "partial" ? { range: parsed.range } : {},
-				);
-				if (result.published) {
-					// Stage the native compaction marker + refresh signals
-					// SYNCHRONOUSLY right after publish, BEFORE the async
-					// sendCtxStatusMessage below. queueAndApplyPiRecompMarker
-					// persists pending state durably before applying, so once
-					// entered the marker survives a crash; staging it ahead of the
-					// async status send closes the publish→stage yield window where
-					// a crash would drop the marker. (Impact is bounded regardless:
-					// trimPiMessagesToBoundary trims the wire every pass independent
-					// of the native marker, and the next incremental publish
-					// re-stages a covering marker — so a lost marker only lags the
-					// JSONL native boundary, never the model-visible context.)
-					//
-					// Wrapped in its own try/catch: a throw in marker staging must
-					// NOT bubble to the outer catch, which would send "Failed" for a
-					// recomp that ALREADY published successfully. The publish is the
-					// ground truth; marker staging is best-effort (a lost marker is
-					// re-staged by the next incremental publish, and the wire is
-					// trimmed regardless).
-					//
-					// Mirrors OpenCode `hook.ts:477-480`: recomp publishes fresh
-					// compartments + queues drops for the rebuilt range. Without
-					// these signals the next pass would render stale
-					// `<session-history>` until usage crossed execute, and the
-					// queued drops would sit in `pending_ops` until 85%
-					// force-materialization. Not signaled on the catch path — a
-					// failed recomp didn't publish anything to refresh.
-					try {
-						queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
-					} catch (markerError) {
-						sessionLog(
+
+			// Detached: the recomp runs in the background so the Pi REPL stays
+			// responsive (parity with OpenCode's `void runManagedRecomp`). The
+			// command handler returns right after this call. Provider registration,
+			// the `recomp` status-line flag, shutdown-drain tracking, and cleanup
+			// are owned by spawnPiRecompRun.
+			spawnPiRecompRun({
+				sessionId,
+				provider,
+				onStatusChange: () =>
+					updateStatusLine(ctx, { db: deps.db, projectIdentity: ctx.cwd }),
+				work: async () => {
+					const result = await executeContextRecompWithResult(
+						{
+							client: createPiHistorianClient({
+								runner: deps.runner,
+								model: deps.historianModel as string,
+								systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+								fallbackModels: deps.historianFallbacks,
+								timeoutMs: deps.historianTimeoutMs,
+								thinkingLevel: deps.historianThinkingLevel,
+								directory: ctx.cwd,
+								accountingSessionId: sessionId,
+								notify: (text) => {
+									sendCtxStatusMessage(pi, {
+										title: "/ctx-recomp",
+										text,
+										level: inferLevel(text),
+									});
+								},
+							}) as never,
+							db: deps.db,
 							sessionId,
-							`/ctx-recomp: post-publish marker staging failed (recomp already published; continuing): ${describeError(markerError).brief}`,
-						);
+							historianChunkTokens: deps.historianChunkTokens,
+							directory: ctx.cwd,
+							historianTimeoutMs: deps.historianTimeoutMs,
+							memoryEnabled: deps.memoryEnabled,
+							autoPromote: deps.autoPromote,
+							// Embedding substrate: register before the recomp publish
+							// path calls embedAndStoreCompartments, else rebuilt rows
+							// keep NULL p1_embedding (dropped from ctx_search / dreamer).
+							ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
+							// Recomp-runner model chain parity with OpenCode: configured
+							// fallbacks + the session's own model as last-ditch retry.
+							fallbackModels: deps.historianFallbacks,
+							fallbackModelId: ctx.model
+								? `${ctx.model.provider}/${ctx.model.id}`
+								: undefined,
+						},
+						parsed.kind === "partial" ? { range: parsed.range } : {},
+					);
+					if (result.published) {
+						// DEFERRED staging (background-safe): stage the native marker
+						// as a pending blob + signal a DEFERRED history refresh so the
+						// next transform pass (at a turn boundary) drains and applies
+						// it. The detached run must NOT apply the marker eagerly
+						// (appendCompaction mutates getBranch immediately, which from a
+						// background task could land mid-turn) nor use the eager
+						// history/materialization signals — those would force a
+						// materialization on whatever pass is running, possibly
+						// mid-turn, busting the cache. Mirrors the background
+						// historian's onPublished (signalPiDeferred*).
+						try {
+							stagePiRecompMarker({ db: deps.db, sessionId, ctx });
+						} catch (markerError) {
+							sessionLog(
+								sessionId,
+								`/ctx-recomp: marker staging failed (recomp already published; continuing): ${describeError(markerError).brief}`,
+							);
+						}
+						signalPiDeferredHistoryRefresh(sessionId);
+						signalPiDeferredMaterialization(sessionId);
 					}
-					// Refresh signals MUST fire whenever the recomp published, even
-					// if marker staging threw above — they drive the next pass's
-					// <session-history> rebuild + queued-drop materialization, which
-					// are independent of the native compaction marker. Keeping them
-					// inside the marker try (as before) would skip them on a marker
-					// throw, leaving stale history until usage crossed execute.
-					signalPiHistoryRefresh(sessionId);
-					signalPiPendingMaterialization(sessionId);
-				}
-				sendCtxStatusMessage(pi, {
-					title: "/ctx-recomp",
-					text: result.message,
-					level: inferLevel(result.message),
-				});
-				if (!result.published) {
-					return;
-				}
-			} catch (error) {
-				sendCtxStatusMessage(pi, {
-					title: "/ctx-recomp",
-					text: `## Magic Recomp — Failed\n\n${describeError(error).brief}`,
-					level: "error",
-				});
-			} finally {
-				setMagicContextRecompActive(sessionId, false);
-				updateStatusLine(ctx, {
-					db: deps.db,
-					projectIdentity: ctx.cwd,
-				});
-				unregister();
-			}
+					sendCtxStatusMessage(pi, {
+						title: "/ctx-recomp",
+						text: result.message,
+						level: inferLevel(result.message),
+					});
+				},
+			});
 		},
 	});
 }
