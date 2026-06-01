@@ -1055,12 +1055,18 @@ export function materializeM0Pi(
 			state.sessionId,
 		);
 
-		db.exec("COMMIT");
+		// Persist the frozen trim boundary INSIDE the materialize transaction,
+		// BEFORE COMMIT. If written after COMMIT, a crash in the window leaves a
+		// fresh m[0]/maxCompartmentSeq paired with a stale (or null) boundary, so
+		// the next pass trims against the wrong point (under/over-trim). Atomic
+		// with the m[0] bytes + markers is the only correct placement.
 		setCachedBoundary(
 			db,
 			state.sessionId,
 			snapshotMarkers.lastBaselineEndMessageId,
 		);
+
+		db.exec("COMMIT");
 	} catch (error) {
 		try {
 			db.exec("ROLLBACK");
