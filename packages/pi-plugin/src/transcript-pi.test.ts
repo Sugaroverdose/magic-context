@@ -228,4 +228,51 @@ describe("createPiTranscript", () => {
 		}
 	});
 
+	it("truncates mixed tool-result image blocks into stable text sentinels", () => {
+		const messages = [
+			assistantToolCall("call-image", "Read", { path: "image.png" }, 11),
+			{
+				role: "toolResult",
+				toolCallId: "call-image",
+				toolName: "Read",
+				content: [
+					{ type: "image", data: "base64-image", mimeType: "image/png" },
+					{ type: "text", text: "caption" },
+				],
+				isError: false,
+				timestamp: 12,
+			},
+		];
+		const transcript = createPiTranscript(messages, "ses-truncated-image", [
+			"entry-assistant",
+			"entry-tool-result",
+		]);
+		const toolResultParts = transcript.messages[1]?.parts ?? [];
+
+		for (const part of toolResultParts) {
+			expect(part.setToolOutput("[truncated]")).toBe(true);
+		}
+		transcript.commit();
+		const output = transcript.getOutputMessages() as Array<{
+			content?: Array<{ type: string; text?: string }>;
+		}>;
+		const firstApplication = JSON.stringify(output[1]?.content);
+
+		expect(output[1]?.content).toEqual([
+			{ type: "text", text: "[truncated]" },
+			{ type: "text", text: "[truncated]" },
+		]);
+
+		const replay = createPiTranscript(output as never, "ses-truncated-image", [
+			"entry-assistant",
+			"entry-tool-result",
+		]);
+		for (const part of replay.messages[1]?.parts ?? []) {
+			part.setToolOutput("[truncated]");
+		}
+		replay.commit();
+
+		expect(JSON.stringify(output[1]?.content)).toBe(firstApplication);
+	});
+
 });
