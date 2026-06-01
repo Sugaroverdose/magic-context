@@ -431,7 +431,6 @@ function createSyntheticToolResultUserMessage(
 	};
 }
 
-
 function createSyntheticToolResultUserId(
 	toolResultRun: { msg: PiToolResultMessage; index: number }[],
 	entryIds: readonly (string | undefined)[] | undefined,
@@ -439,7 +438,9 @@ function createSyntheticToolResultUserId(
 	const first = toolResultRun[0];
 	if (first === undefined) return undefined;
 	const stableId = extractStableId(first.msg, first.index, entryIds);
-	return stableId === undefined ? undefined : `${SYNTH_USER_ID_PREFIX}${stableId}`;
+	return stableId === undefined
+		? undefined
+		: `${SYNTH_USER_ID_PREFIX}${stableId}`;
 }
 
 function createAssistantTranscriptMessage(
@@ -743,7 +744,6 @@ function createPiToolResultPart(
 	markDirty: (messageIndex: number) => void,
 ): TranscriptPart {
 	const msg = working[messageIndex] as PiToolResultMessage;
-	const part = msg.content[partIndex];
 	// Every block inside one Pi ToolResultMessage belongs to the same
 	// droppable tool-output unit. Expose images as tool_result (not image)
 	// so tagTranscript aggregates text + image blocks under msg.toolCallId

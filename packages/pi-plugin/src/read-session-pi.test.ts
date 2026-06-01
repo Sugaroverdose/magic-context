@@ -2,7 +2,11 @@
 
 import { describe, expect, it } from "bun:test";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
-import { convertEntriesToRawMessages, findLastModelKeyFromBranch, isMidTurnPi } from './read-session-pi';
+import {
+	convertEntriesToRawMessages,
+	findLastModelKeyFromBranch,
+	isMidTurnPi,
+} from "./read-session-pi";
 
 describe("isMidTurnPi", () => {
 	it("is mid-turn when the latest assistant stopReason is toolUse", () => {
@@ -385,7 +389,9 @@ describe("findLastModelKeyFromBranch", () => {
 
 	it("ignores malformed model_change entries (missing provider/modelId)", () => {
 		expect(
-			findLastModelKeyFromBranch([{ type: "model_change", provider: "openai" }]),
+			findLastModelKeyFromBranch([
+				{ type: "model_change", provider: "openai" },
+			]),
 		).toBeUndefined();
 		expect(findLastModelKeyFromBranch([])).toBeUndefined();
 		expect(findLastModelKeyFromBranch(null)).toBeUndefined();

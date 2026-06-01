@@ -1,4 +1,3 @@
-import { sessionLog } from '@magic-context/core/shared/logger';
 import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -8,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage";
 import type { SubagentKind } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type {
 	SubagentProgressEvent,
 	SubagentRunner,
