@@ -1400,15 +1400,14 @@ export function registerPiContextHandler(
 			const tMeta = performance.now();
 			const sessionMetaForUsage = getOrCreateSessionMeta(options.db, sessionId);
 			logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
+			// Model change invalidates the safe-token baseline + alert state too
+			// (new model, new limits), so it clears all four pressure fields.
 			const usageReset = {
 				lastContextPercentage: 0,
 				lastInputTokens: 0,
 				observedSafeInputTokens: 0,
 				cacheAlertSent: false,
 			};
-			const hasStaleUsage =
-				sessionMetaForUsage.lastContextPercentage > 0 ||
-				sessionMetaForUsage.lastInputTokens > 0;
 			if (modelChanged) {
 				// Model change: clear UNCONDITIONALLY (not gated on stale usage).
 				// The reasoning watermark, historian failure/recovery state, and
@@ -1434,24 +1433,30 @@ export function registerPiContextHandler(
 				sessionMetaForUsage.lastInputTokens = 0;
 				sessionMetaForUsage.observedSafeInputTokens = 0;
 				sessionMetaForUsage.cacheAlertSent = false;
-			} else if (isFirstContextPassForSession && hasStaleUsage) {
-				// First pass after restart (same model): clear ONLY usage fields,
-				// and only when there is stale usage to clear. historian-failure
-				// state and the reasoning watermark MUST be preserved — restart
-				// recovery uses the failure backoff, and clearing the reasoning
-				// watermark would resurface previously cleared reasoning (a cache
-				// bust + larger prompt). Mirrors OpenCode transform.ts first-pass
-				// reset ("Do NOT clear historian failure state here — restart
-				// recovery uses it").
+			} else if (
+				isFirstContextPassForSession &&
+				sessionMetaForUsage.lastContextPercentage > 0
+			) {
+				// First pass after restart (same model): clear ONLY the two stale
+				// pressure fields. Gate on lastContextPercentage>0 (matches OpenCode
+				// transform.ts first-pass). historian-failure state and the
+				// reasoning watermark MUST be preserved — restart recovery uses the
+				// failure backoff, and clearing the reasoning watermark would
+				// resurface previously cleared reasoning (a cache bust + larger
+				// prompt). observedSafeInputTokens and cacheAlertSent are ALSO
+				// preserved: the model is unchanged, so the learned safe-input
+				// baseline still holds across the restart (OpenCode preserves it
+				// too — only lastContextPercentage/lastInputTokens are cleared).
 				sessionLog(
 					sessionId,
 					`transform: first pass reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
-				updateSessionMeta(options.db, sessionId, usageReset);
+				updateSessionMeta(options.db, sessionId, {
+					lastContextPercentage: 0,
+					lastInputTokens: 0,
+				});
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
-				sessionMetaForUsage.observedSafeInputTokens = 0;
-				sessionMetaForUsage.cacheAlertSent = false;
 			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
@@ -1899,9 +1904,17 @@ export function registerPiContextHandler(
 				);
 			}
 
+			// Rolling nudge inserts exactly one id-less synthetic assistant
+			// message when it fires. Track it via the array-length delta so the
+			// note-nudge anchor-GC denominator below can exclude it too —
+			// otherwise the extra unresolved synthetic keeps allResolved false and
+			// the GC never prunes. (Sticky reminder above runs BEFORE the nudge, so
+			// it correctly excludes only the m[0]/m[1] prepends.)
+			let rollingNudgeSyntheticCount = 0;
 			if (nudgerFn && options.nudge) {
 				try {
 					const tNudge = performance.now();
+					const beforeLen = outputMessages.length;
 					outputMessages = applyRollingNudge({
 						sessionId,
 						db: options.db,
@@ -1909,6 +1922,10 @@ export function registerPiContextHandler(
 						ctx,
 						nudgerFn,
 					});
+					rollingNudgeSyntheticCount = Math.max(
+						0,
+						outputMessages.length - beforeLen,
+					);
 					logTransformTiming(sessionId, "applyContextNudge", tNudge);
 				} catch (err) {
 					sessionLog(
@@ -1930,7 +1947,11 @@ export function registerPiContextHandler(
 					// Same signal OpenCode uses to gate sticky-anchor GC
 					// (isCacheBustingPass = history-refresh OR work executed).
 					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
-					syntheticLeadingCount: result.syntheticLeadingCount,
+					// All id-less synthetic injections present in outputMessages: the
+					// m[0]/m[1] prepends PLUS the rolling-nudge synthetic (if it
+					// fired this pass). Excluded from the anchor-GC denominator.
+					syntheticLeadingCount:
+						result.syntheticLeadingCount + rollingNudgeSyntheticCount,
 				});
 			} catch (err) {
 				sessionLog(
@@ -3673,8 +3694,11 @@ function applyNoteNudges(args: {
 	 */
 	isCacheBusting: boolean;
 	/**
-	 * Count of synthetic id-less messages injection prepended (m[0]/m[1] pair).
-	 * Excluded from the anchor-GC `allResolved` denominator (see below).
+	 * Count of ALL id-less synthetic messages present in `messages` — the
+	 * m[0]/m[1] prepends plus the rolling-nudge synthetic if it fired this pass.
+	 * Excluded from the anchor-GC `allResolved` denominator (see below) since none
+	 * of them resolve to a real entry id. Position is irrelevant; only the count
+	 * matters for the denominator.
 	 */
 	syntheticLeadingCount?: number;
 }): PiAgentMessage[] {

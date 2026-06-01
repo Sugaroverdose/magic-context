@@ -602,8 +602,20 @@ function getCachedMarkers(
 		meta.cachedM0MaxCompartmentSeq,
 		compartments,
 	);
-	const lastBaselineEndMessageId = getCachedBoundary(db, state.sessionId);
-	if (maxCompartmentSeq >= 0 && lastBaselineEndMessageId === null) return null;
+	const cachedBoundary = getCachedBoundary(db, state.sessionId);
+	// Invalidate a null cached boundary ONLY when the live snapshot actually has
+	// a usable boundary — i.e. the cache is genuinely stale (a boundary appeared
+	// since it was written). An empty `end_message_id` on the latest compartment
+	// is a LEGITIMATE state (schema default ''; OpenCode degrades to "inject
+	// without visible-prefix trimming"), so a materialize can correctly persist a
+	// null boundary. Rejecting that every pass caused a re-materialize loop for
+	// legacy / partially-upgraded sessions. When the live snapshot also has no
+	// usable boundary, reuse the cache and let findCompartmentBoundaryForSnapshot
+	// degrade to no-trim.
+	const liveBoundary = lastBaselineEndMessageId(compartments);
+	if (maxCompartmentSeq >= 0 && cachedBoundary === null && liveBoundary !== null) {
+		return null;
+	}
 	return {
 		maxCompartmentSeq,
 		maxMemoryId: meta.cachedM0MaxMemoryId,
@@ -614,7 +626,9 @@ function getCachedMarkers(
 		sessionFactsVersion: meta.cachedM0SessionFactsVersion,
 		materializedAt: meta.cachedM0MaterializedAt,
 		upgradeState: meta.cachedM0UpgradeState,
-		lastBaselineEndMessageId,
+		// The boundary that was persisted WITH these cached m[0] bytes (may be
+		// null for a legitimately-boundaryless baseline — see the guard above).
+		lastBaselineEndMessageId: cachedBoundary,
 	};
 }
 
@@ -684,9 +698,16 @@ function readCurrentMarkersFromCompartments(
 export function mustMaterializePi(
 	state: PiM0M1State,
 	db: ContextDatabase,
+	currentCompartmentsOverride?: readonly PiCompartment[],
 ): PiMaterializeDecision {
 	const meta = getOrCreateSessionMeta(db, state.sessionId);
-	const currentCompartments = getCompartments(db, state.sessionId);
+	// Accept a caller-provided snapshot so the materialize decision and the
+	// subsequent cached-marker reload in injectM0M1Pi normalize against the SAME
+	// compartment set. Re-reading here (when the caller already read) opened a
+	// TOCTOU where a count change between the decision and the reload could flip
+	// markers to null and escape to the unguarded re-materialize path.
+	const currentCompartments =
+		currentCompartmentsOverride ?? getCompartments(db, state.sessionId);
 	const current = readCurrentMarkersFromCompartments(db, state, currentCompartments);
 	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
 	// Keep invalid cached baselines on the guarded materialize path. The
@@ -1247,7 +1268,12 @@ export function injectM0M1Pi(
 	piMessages: PiAgentMessage[],
 	entryIds?: readonly (string | undefined)[],
 ): PiM0M1InjectionResult {
-	let decision = mustMaterializePi(state, db);
+	// One compartment snapshot for the WHOLE decision: the materialize decision
+	// and every cached-marker reload below normalize against this same set, so a
+	// concurrent count change can't flip markers to null mid-decision and escape
+	// the guarded fallback (TOCTOU).
+	const currentCompartments = getCompartments(db, state.sessionId);
+	let decision = mustMaterializePi(state, db, currentCompartments);
 	let m0: string;
 	let markers: PiM0SnapshotMarkers | null;
 	let materialized = false;
@@ -1267,7 +1293,7 @@ export function injectM0M1Pi(
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
 			const meta = getOrCreateSessionMeta(db, state.sessionId);
 			const cached = decodeCachedM0(meta.cachedM0Bytes);
-			const cachedMarkers = getCachedMarkers(db, state);
+			const cachedMarkers = getCachedMarkers(db, state, currentCompartments);
 			if (cached && cachedMarkers) {
 				// Prefer reusing the cached baseline (matches OpenCode): a sibling
 				// process mutated state mid-materialization; serving the slightly
@@ -1299,7 +1325,7 @@ export function injectM0M1Pi(
 	} else {
 		const meta = getOrCreateSessionMeta(db, state.sessionId);
 		m0 = decodeCachedM0(meta.cachedM0Bytes) ?? "";
-		markers = getCachedMarkers(db, state);
+		markers = getCachedMarkers(db, state, currentCompartments);
 		if (!m0 || !markers) {
 			decision = { value: true, reason: "cache_invalid" };
 			const result = materializeM0PiWithRetry(state, db);

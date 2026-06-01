@@ -492,6 +492,47 @@ describe("injectM0M1Pi", () => {
 		}
 	});
 
+	it("reuses cached m[0] (no rematerialize loop) when the compartment is legitimately boundaryless", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-empty-boundary-"));
+		try {
+			const state = piState("ses-pi-empty-boundary", cwd);
+			// A compartment with EMPTY end_message_id is a legitimate state (schema
+			// default ''; OpenCode degrades to no-trim). Materialize persists a null
+			// boundary for it — which must NOT then be treated as stale-cache and
+			// force a rematerialize every pass.
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "",
+					endMessageId: "",
+					title: "Boundaryless",
+					content: "U: turn\nbody",
+				},
+			]);
+			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, []);
+
+			// Cached boundary is null (the compartment has no usable end id), and the
+			// LIVE snapshot is also boundaryless → cache is valid, not stale.
+			expect(mustMaterializePi(state, db).value).toBe(false);
+
+			// And a second injection pass reuses the cache (no materialize) and
+			// degrades to no-trim rather than looping.
+			const result = injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				[],
+			);
+			expect(result.m0Materialized).toBe(false);
+			expect(result.skippedVisibleMessages).toBe(0);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("retries instead of losing seq-0 compartment published during materialization", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-seq0-race-"));

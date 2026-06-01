@@ -10,6 +10,7 @@ import {
 import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { describeError } from "@magic-context/core/shared/error-message";
+import { sessionLog } from '@magic-context/core/shared/logger';
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
 	signalPiHistoryRefresh,
@@ -172,6 +173,13 @@ export function registerCtxRecompCommand(
 					// re-stages a covering marker — so a lost marker only lags the
 					// JSONL native boundary, never the model-visible context.)
 					//
+					// Wrapped in its own try/catch: a throw in marker staging must
+					// NOT bubble to the outer catch, which would send "Failed" for a
+					// recomp that ALREADY published successfully. The publish is the
+					// ground truth; marker staging is best-effort (a lost marker is
+					// re-staged by the next incremental publish, and the wire is
+					// trimmed regardless).
+					//
 					// Mirrors OpenCode `hook.ts:477-480`: recomp publishes fresh
 					// compartments + queues drops for the rebuilt range. Without
 					// these signals the next pass would render stale
@@ -179,9 +187,16 @@ export function registerCtxRecompCommand(
 					// queued drops would sit in `pending_ops` until 85%
 					// force-materialization. Not signaled on the catch path — a
 					// failed recomp didn't publish anything to refresh.
-					queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
-					signalPiHistoryRefresh(sessionId);
-					signalPiPendingMaterialization(sessionId);
+					try {
+						queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
+						signalPiHistoryRefresh(sessionId);
+						signalPiPendingMaterialization(sessionId);
+					} catch (markerError) {
+						sessionLog(
+							sessionId,
+							`/ctx-recomp: post-publish marker/signal staging failed (recomp already published; continuing): ${describeError(markerError).brief}`,
+						);
+					}
 				}
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",

@@ -376,14 +376,21 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			// Large-prompt path: feed the message through stdin, then close it so
 			// Pi's print-mode stdin read resolves (it waits for EOF). Guarded by
-			// child.stdin presence (only opened when deliverViaStdin). A write
-			// failure (e.g. child already exited) is swallowed — the normal
-			// exit/timeout handling reports the real failure reason.
+			// child.stdin presence (only opened when deliverViaStdin).
 			if (deliverViaStdin && child.stdin) {
+				// A pipe failure (child exited early / was terminated mid-write)
+				// surfaces as an async "error" event on the stream, NOT via the
+				// try/catch around .end(). Without a listener, an EPIPE would
+				// become an unhandled 'error' that can crash the host process.
+				// Attach the no-throw listener BEFORE writing; the real failure
+				// reason is reported by the exit/stderr/timeout handlers below.
+				child.stdin.on("error", () => {
+					// EPIPE / destroyed-stream: non-fatal runner noise.
+				});
 				try {
 					child.stdin.end(options.userMessage, "utf8");
 				} catch {
-					// child may have exited before we could write; exit/stderr
+					// Synchronous throw (e.g. already-destroyed stream); exit/stderr
 					// handlers below surface the actual failure.
 				}
 			}
