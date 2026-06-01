@@ -10,6 +10,7 @@ class FakeTagger implements Tagger {
     private nextTag = 1;
     private toolTags = new Map<string, number>();
     readonly owners: string[] = [];
+    readonly byteSizes = new Map<number, number>();
 
     assignTag(): number {
         return this.nextTag++;
@@ -23,13 +24,14 @@ class FakeTagger implements Tagger {
         _sessionId: string,
         callId: string,
         ownerMsgId: string,
-        _byteSize: number,
+        byteSize: number,
     ): number {
         const key = `${ownerMsgId}\0${callId}`;
         const existing = this.toolTags.get(key);
         if (existing !== undefined) return existing;
         const tag = this.nextTag++;
         this.toolTags.set(key, tag);
+        this.byteSizes.set(tag, byteSize);
         this.owners.push(ownerMsgId);
         return tag;
     }
@@ -98,6 +100,44 @@ class TestPart implements TranscriptPart {
 class ThrowingToolOutputPart extends TestPart {
     setToolOutput(): boolean {
         throw new Error("setToolOutput on assistant part");
+    }
+}
+
+class NonTextToolResultPart extends TestPart {
+    constructor(
+        id: string,
+        readonly content: unknown,
+    ) {
+        super("tool_result", id, "");
+    }
+
+    getText(): string | undefined {
+        return undefined;
+    }
+
+    setText(): boolean {
+        return false;
+    }
+}
+
+class FakeDb {
+    readonly byteSizeUpdates: Array<{ byteSize: number; sessionId: string; tagNumber: number }> =
+        [];
+
+    prepare(sql: string): { run: (...args: unknown[]) => void } {
+        return {
+            run: (...args: unknown[]) => {
+                if (!sql.startsWith("UPDATE tags SET byte_size =")) return;
+                const [byteSize, sessionId, tagNumber] = args;
+                if (
+                    typeof byteSize === "number" &&
+                    typeof sessionId === "string" &&
+                    typeof tagNumber === "number"
+                ) {
+                    this.byteSizeUpdates.push({ byteSize, sessionId, tagNumber });
+                }
+            },
+        };
     }
 }
 
@@ -178,5 +218,63 @@ describe("tagTranscript tool aggregation", () => {
         expect(toolUse.getText()).toBe(`[dropped §${tag}§]`);
         expect(firstResult.getText()).toBe(`[dropped §${tag}§]`);
         expect(secondResult.getText()).toBe(`[dropped §${tag}§]`);
+    });
+
+    it("pairs a reused callId result with the nearest previous unresolved owner", () => {
+        const tagger = new FakeTagger();
+        const olderUse = new TestPart("tool_use", "read:reused", '{"file":"older"}');
+        const nearestUse = new TestPart("tool_use", "read:reused", '{"file":"nearest"}');
+        const result = new TestPart("tool_result", "read:reused", "nearest result");
+        const transcript: Transcript = {
+            harness: "pi",
+            messages: [
+                { info: { id: "assistant-old", role: "assistant" }, parts: [olderUse] },
+                { info: { id: "assistant-near", role: "assistant" }, parts: [nearestUse] },
+                { info: { id: "user-result", role: "user" }, parts: [result] },
+            ],
+            commit() {},
+        };
+
+        const { targets } = tagTranscript("session-1", transcript, tagger, {} as ContextDatabase);
+
+        const olderTag = tagger.getToolTag("session-1", "read:reused", "assistant-old");
+        const nearestTag = tagger.getToolTag("session-1", "read:reused", "assistant-near");
+        expect(olderTag).toBeDefined();
+        expect(nearestTag).toBeDefined();
+        expect(olderTag).not.toBe(nearestTag);
+
+        expect(targets.get(nearestTag ?? -1)?.drop()).toBe("removed");
+        expect(olderUse.getText()).toBe('{"file":"older"}');
+        expect(nearestUse.getText()).toBe(`[dropped §${nearestTag}§]`);
+        expect(result.getText()).toBe(`[dropped §${nearestTag}§]`);
+    });
+
+    it("accounts non-text tool_result content when ranking tool output byte size", () => {
+        const tagger = new FakeTagger();
+        const db = new FakeDb();
+        const toolUse = new TestPart("tool_use", "read:image", "{}");
+        const caption = new TestPart("tool_result", "read:image", "c");
+        const image = new NonTextToolResultPart("read:image", {
+            type: "image",
+            data: "x".repeat(512),
+            mediaType: "image/png",
+        });
+        const transcript: Transcript = {
+            harness: "pi",
+            messages: [
+                { info: { id: "assistant-1", role: "assistant" }, parts: [toolUse] },
+                { info: { id: "user-1", role: "user" }, parts: [caption, image] },
+            ],
+            commit() {},
+        };
+
+        tagTranscript("session-1", transcript, tagger, db as unknown as ContextDatabase);
+
+        const tag = tagger.getToolTag("session-1", "read:image", "assistant-1");
+        expect(tag).toBeDefined();
+        expect(tagger.byteSizes.get(tag ?? -1)).toBe(2);
+        expect(db.byteSizeUpdates).toHaveLength(1);
+        expect(db.byteSizeUpdates[0]?.tagNumber).toBe(tag);
+        expect(db.byteSizeUpdates[0]?.byteSize).toBeGreaterThan(512);
     });
 });

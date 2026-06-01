@@ -204,6 +204,7 @@ export function tagTranscript(
 
                 const callId = part.id;
                 const text = part.getText() ?? "";
+                const toolByteSize = getToolPartByteSize(part, text);
                 const meta = part.getToolMetadata();
 
                 if (typeof callId !== "string" || callId.length === 0) {
@@ -233,12 +234,10 @@ export function tagTranscript(
                     ) {
                         existingKey = activeToolResultRun.aggregateKey;
                     } else {
-                        existingKey = pendingKeys.find((key) => {
-                            const aggregate = toolAggregates.get(key);
-                            return !aggregate?.occurrences.some(
-                                (occ) => occ.kind === "tool_result",
-                            );
-                        });
+                        existingKey = findLastUnresolvedToolAggregateKey(
+                            pendingKeys,
+                            toolAggregates,
+                        );
                     }
                 }
                 const aggregateKey: string = existingKey ?? makeToolCompositeKey(messageId, callId);
@@ -252,10 +251,9 @@ export function tagTranscript(
                         part,
                         kind: part.kind,
                     });
-                    const newByteSize = byteSize(text);
-                    if (newByteSize > existing.maxByteSize) {
-                        existing.maxByteSize = newByteSize;
-                        updateTagByteSize(db, sessionId, existing.tagId, newByteSize);
+                    if (toolByteSize > existing.maxByteSize) {
+                        existing.maxByteSize = toolByteSize;
+                        updateTagByteSize(db, sessionId, existing.tagId, toolByteSize);
                     }
                     if (existing.toolName === null && meta.toolName) {
                         existing.toolName = meta.toolName;
@@ -280,6 +278,11 @@ export function tagTranscript(
                         buildAggregateTarget(existing.tagId, existing.occurrences),
                     );
                     if (part.kind === "tool_result") {
+                        markToolAggregateResolved(
+                            callId,
+                            aggregateKey,
+                            openToolAggregateKeysByCallId,
+                        );
                         activeToolResultRun = { callId, aggregateKey };
                     }
                 } else {
@@ -290,7 +293,7 @@ export function tagTranscript(
                         sessionId,
                         callId,
                         messageId,
-                        byteSize(text),
+                        toolByteSize,
                         db,
                         0,
                         meta.toolName ?? null,
@@ -306,7 +309,7 @@ export function tagTranscript(
                                 kind: part.kind,
                             },
                         ],
-                        maxByteSize: byteSize(text),
+                        maxByteSize: toolByteSize,
                         toolName: meta.toolName ?? null,
                         inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
                     };
@@ -322,6 +325,11 @@ export function tagTranscript(
                     }
                     targets.set(tagId, buildAggregateTarget(tagId, aggregate.occurrences));
                     if (part.kind === "tool_result") {
+                        markToolAggregateResolved(
+                            callId,
+                            aggregateKey,
+                            openToolAggregateKeysByCallId,
+                        );
                         activeToolResultRun = { callId, aggregateKey };
                     }
                 }
@@ -331,6 +339,69 @@ export function tagTranscript(
     }
 
     return { targets };
+}
+
+function findLastUnresolvedToolAggregateKey(
+    pendingKeys: string[],
+    toolAggregates: Map<string, ToolAggregate & { tagId: number }>,
+): string | undefined {
+    for (let i = pendingKeys.length - 1; i >= 0; i -= 1) {
+        const key = pendingKeys[i];
+        if (key === undefined) continue;
+        const aggregate = toolAggregates.get(key);
+        if (aggregate === undefined) continue;
+        if (!aggregate.occurrences.some((occ) => occ.kind === "tool_result")) {
+            return key;
+        }
+    }
+    return undefined;
+}
+
+function markToolAggregateResolved(
+    callId: string,
+    aggregateKey: string,
+    openToolAggregateKeysByCallId: Map<string, string[]>,
+): void {
+    const pendingKeys = openToolAggregateKeysByCallId.get(callId);
+    if (pendingKeys === undefined) return;
+    const nextPendingKeys = pendingKeys.filter((key) => key !== aggregateKey);
+    if (nextPendingKeys.length === 0) {
+        openToolAggregateKeysByCallId.delete(callId);
+        return;
+    }
+    openToolAggregateKeysByCallId.set(callId, nextPendingKeys);
+}
+
+function getToolPartByteSize(part: TranscriptPart, text: string): number {
+    const textByteSize = byteSize(text);
+    if (textByteSize > 0 || part.kind !== "tool_result") return textByteSize;
+    return getNonTextToolResultByteSize(part);
+}
+
+function getNonTextToolResultByteSize(part: TranscriptPart): number {
+    const record = isRecord(part) ? part : undefined;
+    const content =
+        record?.content ??
+        record?.rawContent ??
+        record?.rawPart ??
+        record?.part ??
+        record?.data ??
+        record?.image ??
+        record?.source;
+    const serialized = safeJsonStringify(content ?? part);
+    return serialized === undefined ? 0 : byteSize(serialized);
+}
+
+function safeJsonStringify(value: unknown): string | undefined {
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return undefined;
+    }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
 }
 
 interface TagTextPartArgs {
@@ -403,6 +474,7 @@ function tagToolPart(args: TagToolPartArgs): void {
     const stableId = args.part.id;
     const contentId = stableId ?? `${args.messageId}:t${args.partIndex}`;
     const text = args.part.getText() ?? "";
+    const toolByteSize = getToolPartByteSize(args.part, text);
     const meta = args.part.getToolMetadata();
     // v3.3.1 Layer C: synthetic ownership for the no-callId Pi
     // fallback. Owner == callId == contentId. The composite key
@@ -414,7 +486,7 @@ function tagToolPart(args: TagToolPartArgs): void {
         args.sessionId,
         contentId,
         contentId,
-        byteSize(text),
+        toolByteSize,
         args.db,
         0,
         meta.toolName ?? null,
