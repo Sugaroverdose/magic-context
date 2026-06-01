@@ -13,6 +13,7 @@ import {
 	isRecompFailure,
 } from "@magic-context/core/hooks/magic-context/recomp-orchestrator";
 import { describeError } from "@magic-context/core/shared/error-message";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
 	signalPiHistoryRefresh,
@@ -248,7 +249,19 @@ export function registerCtxSessionUpgradeCommand(
 				// upgrade republishes compartments but the entire pre-upgrade JSONL
 				// branch stays visible and grows unbounded until a later incremental
 				// historian pass advances the marker. Shared with /ctx-recomp.
-				queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
+				//
+				// Isolated in its own try/catch: marker staging is best-effort (the
+				// next incremental historian pass re-stages a covering marker), so a
+				// throw here must NOT skip the refresh signals, the memory migration,
+				// or the "Complete" message below — the recomp already published.
+				try {
+					queueAndApplyPiRecompMarker({ db: deps.db, sessionId, ctx });
+				} catch (markerError) {
+					sessionLog(
+						sessionId,
+						`pi /ctx-session-upgrade marker staging failed (non-fatal, recomp already published): ${describeError(markerError).brief}`,
+					);
+				}
 
 				signalPiHistoryRefresh(sessionId);
 				signalPiPendingMaterialization(sessionId);

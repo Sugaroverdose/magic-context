@@ -162,6 +162,26 @@ stamps on send.
 
 ---
 
+## 9. Cleared reasoning keeps its original signature (matches OpenCode)
+
+When Magic Context clears an aged reasoning/thinking block, it rewrites the
+thinking text to a `[cleared]` placeholder but **preserves the original
+`thinkingSignature`/`thoughtSignature`**. This is INTENTIONAL and byte-for-byte
+matches OpenCode's shipped `clearOldReasoning` (`strip-content.ts`), which runs
+in production against Anthropic.
+
+- Pi: `reasoning-replay-pi.ts` `setPiThinkingCleared` keeps the signature.
+- OpenCode: `clearOldReasoning` keeps the signature.
+
+Why it does NOT cause provider rejection: the cleared block is replayed only to
+the SAME provider that produced the signature, and the signature still matches
+the (now-placeholder) block's position in the assistant turn. Stripping the
+signature would be MORE likely to trigger a rejection, not less. Do not "fix"
+this by nulling the signature — that diverges from the shipped OpenCode behavior
+and removes the provider's own integrity token.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

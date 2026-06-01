@@ -1201,7 +1201,13 @@ export function renderM1Pi(
 			newMemories,
 			Math.max(1, Math.floor(memoryBudget * 0.25)),
 		).renderOrder;
-		sections.push(renderMemoryBlockV2(trimmedNewMemories, "new-memories"));
+		// Guard against an empty wrapper: if the budget trims every new memory to
+		// zero, renderMemoryBlockV2 would emit an empty <new-memories></new-memories>
+		// shell, which both wastes a (tiny) m[1] block and diverges from OpenCode's
+		// renderM1 (which guards with `if (block)`). Only push when content remains.
+		if (trimmedNewMemories.length > 0) {
+			sections.push(renderMemoryBlockV2(trimmedNewMemories, "new-memories"));
+		}
 	}
 
 	// new-user-profile delta: when the global user-profile version advanced since
@@ -1328,10 +1334,28 @@ export function injectM0M1Pi(
 		markers = getCachedMarkers(db, state, currentCompartments);
 		if (!m0 || !markers) {
 			decision = { value: true, reason: "cache_invalid" };
-			const result = materializeM0PiWithRetry(state, db);
-			m0 = result.m0;
-			markers = result.snapshotMarkers;
-			materialized = true;
+			try {
+				const result = materializeM0PiWithRetry(state, db);
+				m0 = result.m0;
+				markers = result.snapshotMarkers;
+				materialized = true;
+			} catch (error) {
+				if (!(error instanceof PiMaterializeContentionError)) throw error;
+				// Cache was already invalid (no usable cached m[0]/markers to reuse)
+				// AND we lost the materialize lock to a sibling process. Dropping
+				// injection would lose the whole history block, so render a fresh
+				// non-persisted m[0] as a last resort — the next pass re-materializes
+				// and persists. Mirrors the no-cached-fallback branch of the primary
+				// materialize path above.
+				const fresh = renderFreshM0PiNonPersisted(state, db);
+				m0 = fresh.m0;
+				markers = fresh.snapshotMarkers;
+				contentionExhausted = true;
+				logSession(
+					state.sessionId,
+					"pi m[0] cache_invalid materialization contention exhausted; rendered fresh non-persisted m[0]",
+				);
+			}
 		}
 	}
 

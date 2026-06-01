@@ -292,7 +292,17 @@ export class PiSubagentRunner implements SubagentRunner {
 				error: "pi subagent aborted by caller",
 				durationMs: Date.now() - startTime,
 			};
-			recordAccounting(result);
+			// Same best-effort contract as settle(): accounting must never throw
+			// out of the return path (a DB write failure here would propagate to
+			// the caller as a spurious spawn error). Telemetry is best-effort.
+			try {
+				recordAccounting(result);
+			} catch (err) {
+				sessionLog(
+					options.accountingSessionId ?? "subagent",
+					`subagent accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 			return result;
 		}
 		// Large prompts (e.g. a ~50K-token historian chunk ≈ 200 KB) overflow
@@ -423,6 +433,11 @@ export class PiSubagentRunner implements SubagentRunner {
 				}
 				emitProgress({ type: "stderr", chunk: text });
 			});
+			// A pipe 'error' (EPIPE/ECONNRESET on the child's stderr, e.g. child
+			// died mid-write) emits on the stream; with no listener Node rethrows
+			// it as an unhandled exception and crashes the HOST process. Swallow
+			// it — child death is already handled via 'close'/'error' on the child.
+			child.stderr?.on("error", () => {});
 
 			// Track the final assistant text from `agent_end`. We don't
 			// resolve eagerly on `agent_end` — we wait for child exit so
@@ -455,6 +470,10 @@ export class PiSubagentRunner implements SubagentRunner {
 				});
 				return;
 			}
+			// Same host-crash guard as stderr: an unguarded 'error' on the stdout
+			// pipe (child died mid-stream) would rethrow as an unhandled exception.
+			// readline does not attach its own error listener to the input stream.
+			child.stdout.on("error", () => {});
 			const rl = createInterface({
 				input: child.stdout,
 				crlfDelay: Number.POSITIVE_INFINITY,

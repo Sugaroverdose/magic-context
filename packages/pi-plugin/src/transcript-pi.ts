@@ -652,10 +652,11 @@ function createPiAssistantPart(
 					// Non-serializable args still need to be replaceable.
 				}
 				const newContent = current.slice();
+				// Spread the existing part so optional fields (thoughtSignature)
+				// survive the rewrite — some providers reject a tool call whose
+				// signature was stripped on re-send. Only `arguments` changes.
 				newContent[partIndex] = {
-					type: "toolCall",
-					id: p.id,
-					name: p.name,
+					...p,
 					arguments: replacementArgs,
 				};
 				working[messageIndex] = {
@@ -714,10 +715,12 @@ function createPiAssistantPart(
 			const existing = current[partIndex];
 			const newContent = current.slice();
 			if (existing && existing.type === "toolCall") {
+				// Spread the existing part so optional fields (thoughtSignature)
+				// survive the sentinel rewrite — the toolCall shell must stay a
+				// faithful, provider-acceptable function_call/tool_use; only the
+				// bulk `arguments` payload is reduced to the marker.
 				newContent[partIndex] = {
-					type: "toolCall",
-					id: existing.id,
-					name: existing.name,
+					...existing,
 					arguments: { __magic_context_dropped__: sentinelText },
 				};
 			} else {

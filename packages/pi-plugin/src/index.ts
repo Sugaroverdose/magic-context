@@ -850,9 +850,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// the marker would then sit undrained (the drain is signal-driven, and
 				// startup-only rehydration never re-fires). Re-signal here when this
 				// session has a durable pending marker so the next pass drains it.
+				//
+				// Gate on the same APIs the drain itself requires
+				// (sessionManager.appendCompaction + getBranch): when they're
+				// unavailable the drain skips-and-PRESERVES the signal, so
+				// re-signaling every turn would force materialization repeatedly
+				// with no way to make progress (a per-turn cache bust). Only re-arm
+				// when the marker can actually be applied.
 				try {
-					const pending = getPendingPiCompactionMarkerState(db, sessionId);
-					if (pending) {
+					const smForDrain = sm as {
+						appendCompaction?: unknown;
+						getBranch?: unknown;
+					};
+					const canDrain =
+						typeof smForDrain.appendCompaction === "function" &&
+						typeof smForDrain.getBranch === "function";
+					if (canDrain && getPendingPiCompactionMarkerState(db, sessionId)) {
 						signalPiDeferredHistoryRefresh(sessionId);
 						signalPiPendingMaterialization(sessionId);
 					}

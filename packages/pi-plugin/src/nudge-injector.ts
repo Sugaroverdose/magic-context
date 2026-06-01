@@ -97,7 +97,11 @@ function createAssistantNudgeMessage(
 		model: latestAssistant?.model ?? "magic-context/nudge",
 		usage: latestAssistant?.usage ?? createZeroUsage(),
 		stopReason: "stop",
-		timestamp: Date.now(),
+		// Deterministic timestamp: this synthetic message is re-created on every
+		// pass (it is not persisted back to source), so Date.now() would differ
+		// pass-to-pass. Inherit the latest assistant's stable timestamp (0 when
+		// none) so the injected message is byte-identical across defer passes.
+		timestamp: latestAssistant?.timestamp ?? 0,
 	} satisfies PiAssistantMessage;
 }
 
