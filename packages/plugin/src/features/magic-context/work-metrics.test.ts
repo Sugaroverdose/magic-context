@@ -12,7 +12,11 @@ import {
 
 function createOpenCodeFixture(): Database {
     const db = new Database(":memory:");
-    db.exec("CREATE TABLE message (session_id TEXT, time_created INTEGER, data TEXT)");
+    // id auto-fills in insertion order; the oracle SQL orders by (time_created, id),
+    // so unique timestamps keep insertion order here.
+    db.exec(
+        "CREATE TABLE message (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, time_created INTEGER, data TEXT)",
+    );
     return db;
 }
 
@@ -194,6 +198,44 @@ describe("work metrics", () => {
         const b = computeOpenCodeWorkMetricsIncremental(db, "ses", a.carry);
         expect(b.metrics).toEqual(a.metrics);
         expect(b.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+    });
+
+    test("same-timestamp rows: oracle SQL and incremental fold agree on (time_created, id) order", () => {
+        // Rows sharing a time_created must be ordered deterministically by id in
+        // BOTH paths, or the LAG/phase windows diverge from the fold. Insert out
+        // of id order at a single timestamp to exercise the tiebreaker.
+        const db = createIncrementalFixture();
+        insertWithId(db, "m3", "ses", 5, "build", 80, 3);
+        insertWithId(db, "m1", "ses", 5, "build", 100, 1);
+        insertWithId(db, "m4", "ses", 5, "build", 120, 4);
+        insertWithId(db, "m2", "ses", 5, "build", 200, 2);
+
+        const oracle = computeOpenCodeWorkMetrics(db, "ses");
+        const { metrics } = computeOpenCodeWorkMetricsIncremental(
+            db,
+            "ses",
+            emptyWorkMetricsCarry(),
+        );
+        // The fold reads rows ORDER BY time_created, id → m1(100) m2(200) m3(80) m4(120).
+        // deltas: 100 + 100 + 0 + 40 = 240; +lastOutput 4 = 244. peaks: 200 + 120 = 320.
+        expect(oracle).toEqual({ newWorkTokens: 244, totalInputTokens: 320 });
+        expect(metrics).toEqual(oracle);
+    });
+
+    test("same-timestamp resume across polls equals a full scan", () => {
+        // A watermark landing mid-tie must resume correctly: split a tied-ts
+        // group across two polls and confirm the second poll matches the oracle.
+        const db = createIncrementalFixture();
+        insertWithId(db, "m1", "ses", 5, "build", 100, 1);
+        insertWithId(db, "m2", "ses", 5, "build", 200, 2);
+        const carry = emptyWorkMetricsCarry();
+        const first = computeOpenCodeWorkMetricsIncremental(db, "ses", carry);
+        expect(first.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
+
+        insertWithId(db, "m3", "ses", 5, "build", 80, 3);
+        insertWithId(db, "m4", "ses", 5, "build", 120, 4);
+        const second = computeOpenCodeWorkMetricsIncremental(db, "ses", first.carry);
+        expect(second.metrics).toEqual(computeOpenCodeWorkMetrics(db, "ses"));
     });
 
     test("live OpenCode smoke targets stay within 1%", () => {

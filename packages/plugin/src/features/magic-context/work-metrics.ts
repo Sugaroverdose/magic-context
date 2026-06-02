@@ -28,6 +28,7 @@ WITH ordered AS (
   SELECT
     json_extract(data, '$.agent') AS agent,
     time_created,
+    id,
     COALESCE(json_extract(data, '$.tokens.input'), 0)
       + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
       + COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS cur_prompt,
@@ -37,7 +38,7 @@ WITH ordered AS (
       + COALESCE(json_extract(data, '$.tokens.cache.read'), 0)
       + COALESCE(json_extract(data, '$.tokens.cache.write'), 0),
       1, 0
-    ) OVER (PARTITION BY json_extract(data, '$.agent') ORDER BY time_created) AS prev_prompt
+    ) OVER (PARTITION BY json_extract(data, '$.agent') ORDER BY time_created, id) AS prev_prompt
   FROM message
   WHERE session_id = ?
     AND json_extract(data, '$.role') = 'assistant'
@@ -45,14 +46,14 @@ WITH ordered AS (
 ),
 deltas AS (
   SELECT agent, MAX(0, cur_prompt - prev_prompt) AS delta, cur_output,
-         ROW_NUMBER() OVER (PARTITION BY agent ORDER BY time_created DESC) AS rn
+         ROW_NUMBER() OVER (PARTITION BY agent ORDER BY time_created DESC, id DESC) AS rn
   FROM ordered
 ),
 flagged AS (
   SELECT
-    agent, cur_prompt, prev_prompt, time_created,
+    agent, cur_prompt, prev_prompt, time_created, id,
     SUM(CASE WHEN cur_prompt < prev_prompt THEN 1 ELSE 0 END)
-      OVER (PARTITION BY agent ORDER BY time_created
+      OVER (PARTITION BY agent ORDER BY time_created, id
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS phase_id
   FROM ordered
 ),

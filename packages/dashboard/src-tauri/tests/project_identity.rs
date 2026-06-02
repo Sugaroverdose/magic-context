@@ -181,12 +181,17 @@ fn strict_non_git_directory_returns_not_git_repo() {
 }
 
 #[test]
-fn strict_missing_directory_returns_unknown() {
+fn strict_missing_directory_returns_path_inaccessible() {
+    // A missing/unreachable directory is a DETERMINISTIC failure (same path
+    // always reproduces it), so it classifies as PathInaccessible and is a
+    // cacheable dir: fallback — distinct from transient classes (git
+    // missing/timeout/permission/unknown) which must not be cached. Mirrors the
+    // TS resolver's "Unable to access project directory" → directory fallback.
     let dir = tempfile::tempdir().expect("tempdir");
     let missing = dir.path().join("does-not-exist");
     assert_eq!(
         resolve_project_identity_strict(&missing),
-        Err(IdentityErrorClass::Unknown)
+        Err(IdentityErrorClass::PathInaccessible)
     );
 }
 

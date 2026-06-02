@@ -66,10 +66,29 @@ pub fn logical_absolute(input: &Path, cwd: &Path) -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityErrorClass {
     NotGitRepo,
+    /// The directory does not exist / is not reachable. Deterministic: the same
+    /// missing path always yields the same `dir:` fallback, so it is safe to
+    /// cache (mirrors the TS "Unable to access project directory" fallback).
+    PathInaccessible,
     GitMissing,
     GitTimeout,
     PermissionDenied,
     Unknown,
+}
+
+impl IdentityErrorClass {
+    /// Whether this failure is DETERMINISTIC (same input always reproduces it),
+    /// so a `dir:` fallback may be cached. Transient classes (git binary
+    /// missing, timeout, permission, unknown spawn/wait failures) must NOT be
+    /// cached — a retry could resolve the real `git:` identity. This mirrors the
+    /// TS resolver, which only falls back for `not_git_repo` + inaccessible-path
+    /// and never caches transient failures.
+    fn is_deterministic_fallback(self) -> bool {
+        matches!(
+            self,
+            IdentityErrorClass::NotGitRepo | IdentityErrorClass::PathInaccessible
+        )
+    }
 }
 
 pub fn resolve_project_identity_strict(directory: &Path) -> Result<String, IdentityErrorClass> {
@@ -79,7 +98,7 @@ pub fn resolve_project_identity_strict(directory: &Path) -> Result<String, Ident
     // If the cwd itself is missing, the git spawn would also return NotFound; distinguish
     // that from a missing git binary before classifying the spawn error.
     if !canonical.exists() {
-        return Err(IdentityErrorClass::Unknown);
+        return Err(IdentityErrorClass::PathInaccessible);
     }
 
     let mut child = Command::new("git")
@@ -150,23 +169,37 @@ pub fn resolve_project_identity<P: AsRef<Path>>(directory: P) -> String {
         }
     }
 
-    let identity = match resolve_project_identity_strict(&canonical) {
-        Ok(identity) => identity,
-        Err(IdentityErrorClass::NotGitRepo) => directory_fallback(&canonical),
-        Err(error) => {
-            eprintln!(
-                "[dashboard] resolve_project_identity error {:?} on {:?}",
-                error, canonical
-            );
-            directory_fallback(&canonical)
+    match resolve_project_identity_strict(&canonical) {
+        Ok(identity) => {
+            if let Ok(mut cache) = cache().write() {
+                cache.insert(canonical, identity.clone());
+            }
+            identity
         }
-    };
-
-    if let Ok(mut cache) = cache().write() {
-        cache.insert(canonical, identity.clone());
+        Err(error) => {
+            let fallback = directory_fallback(&canonical);
+            // Only cache the fallback for DETERMINISTIC failures (not-git /
+            // inaccessible path). Transient failures (git missing/timeout/
+            // permission/unknown) return the fallback UNCACHED so a later call
+            // can still resolve the real `git:` identity once the transient
+            // condition clears — caching here would pin a wrong `dir:` identity
+            // for the whole process and mis-group the project in the UI. This
+            // matches the TS resolver's fallback/propagation policy (the
+            // dashboard degrades to a fallback instead of throwing because it is
+            // a read-only viewer that must still render something).
+            if error.is_deterministic_fallback() {
+                if let Ok(mut cache) = cache().write() {
+                    cache.insert(canonical, fallback.clone());
+                }
+            } else {
+                eprintln!(
+                    "[dashboard] resolve_project_identity transient error {:?} on {:?} (uncached fallback)",
+                    error, canonical
+                );
+            }
+            fallback
+        }
     }
-
-    identity
 }
 
 fn directory_fallback(path: &Path) -> String {
@@ -221,5 +254,30 @@ mod tests {
         let identity = resolve_project_identity(dir.path());
         assert!(identity.starts_with("dir:"), "{identity}");
         assert_eq!(identity.len(), 16);
+    }
+
+    #[test]
+    fn only_deterministic_failures_are_cacheable() {
+        // Mirrors the TS resolver: not-git and inaccessible-path are
+        // deterministic (cacheable `dir:` fallback); transient failures
+        // (git missing/timeout/permission/unknown) must NOT be cached so a
+        // retry can still resolve the real `git:` identity.
+        assert!(IdentityErrorClass::NotGitRepo.is_deterministic_fallback());
+        assert!(IdentityErrorClass::PathInaccessible.is_deterministic_fallback());
+        assert!(!IdentityErrorClass::GitMissing.is_deterministic_fallback());
+        assert!(!IdentityErrorClass::GitTimeout.is_deterministic_fallback());
+        assert!(!IdentityErrorClass::PermissionDenied.is_deterministic_fallback());
+        assert!(!IdentityErrorClass::Unknown.is_deterministic_fallback());
+    }
+
+    #[test]
+    fn inaccessible_path_classifies_deterministically() {
+        let missing = std::env::temp_dir().join("mc-nonexistent-проект-xyz-987654321");
+        let err = resolve_project_identity_strict(&missing).unwrap_err();
+        assert_eq!(err, IdentityErrorClass::PathInaccessible);
+        // Deterministic → resolve_project_identity returns a cached dir: fallback.
+        clear_cache_for_tests();
+        let identity = resolve_project_identity(&missing);
+        assert!(identity.starts_with("dir:"), "{identity}");
     }
 }
