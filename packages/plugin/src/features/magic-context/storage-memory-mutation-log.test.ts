@@ -112,4 +112,37 @@ describe("storage-memory-mutation-log", () => {
         expect(getMemoryMutationsForRender(database, "/repo/a", first.id, [10])).toEqual([]);
         expect(getMemoryMutationsForRender(database, "/repo/a", 0, [])).toEqual([]);
     });
+
+    // Audit finding #12: render coalescing is "newest mutation-log id per target",
+    // with no terminal-state precedence. If a memory rendered in m[0] is archived
+    // and then later updated (update does NOT gate on status), the update row has
+    // the higher id and WINS — the m[1] <memory-updates> delta shows the memory as
+    // present/updated even though the canonical table state is archived. This
+    // characterization test documents the CURRENT behavior so we can decide
+    // whether archive/delete should take precedence over a later update before
+    // changing it.
+    test("CURRENT BEHAVIOR: a later update outranks an earlier archive (no terminal precedence)", () => {
+        const database = makeDb();
+        queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "archive",
+            targetMemoryId: 10,
+            queuedAt: 100,
+        });
+        const update = queueMemoryMutation(database, {
+            projectPath: "/repo/a",
+            mutationType: "update",
+            targetMemoryId: 10,
+            category: "PROJECT_RULES",
+            newContent: "resurrected content",
+            queuedAt: 200,
+        });
+
+        // Memory 10 was rendered in m[0] (active at materialization), then archived,
+        // then updated. Newest-by-id wins → the render shows the UPDATE, not the archive.
+        const rows = getMemoryMutationsForRender(database, "/repo/a", 0, [10]);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toEqual(update);
+        expect(rows[0]?.mutationType).toBe("update"); // archive is masked
+    });
 });

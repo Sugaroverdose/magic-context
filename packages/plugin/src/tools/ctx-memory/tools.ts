@@ -431,6 +431,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
+                // NOTE: merge intentionally does NOT enforce single-project
+                // ownership (unlike update/delete/archive). Cross-identity
+                // consolidation is a supported dreamer capability — the loop
+                // below supersedes each source under ITS OWN project identity and
+                // queues a per-project supersede-delta row, so every affected
+                // project's m[1] reconciles correctly. See the "merging across
+                // identities" test. Do not add an ownership guard here.
 
                 const category =
                     getValidatedCategory(args.category) ?? sourceMemories[0]?.category ?? null;

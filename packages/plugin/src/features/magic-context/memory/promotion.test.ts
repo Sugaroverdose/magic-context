@@ -11,6 +11,7 @@ const mockLog = mock(() => {});
 
 mock.module("./embedding", () => ({
     embedText: mockEmbedText,
+    embedTextForProject: mockEmbedText,
     getEmbeddingModelId: () => "mock:model",
 }));
 
@@ -20,9 +21,14 @@ mock.module("../../../shared/logger", () => ({
     getLogFilePath: () => "/tmp/test.log",
 }));
 
-const { getMemoryByHash, getMemoryById, getMemoryCount, insertMemory } = await import(
-    "./storage-memory"
-);
+const {
+    archiveMemory,
+    getMemoryByHash,
+    getMemoryById,
+    getMemoryCount,
+    getMemoriesByProject,
+    insertMemory,
+} = await import("./storage-memory");
 const { promoteSessionFactsToMemory } = await import("./promotion");
 
 let db: Database | null = null;
@@ -356,6 +362,41 @@ describe("promotion", () => {
                         message.includes("This write will fail"),
                 ),
             ).toBe(true);
+        });
+    });
+
+    // Audit finding #13: getMemoryByHash does NOT filter by status, so a
+    // re-observed fact whose prior instance was archived matches the archived
+    // row, bumps its seen_count, and is NOT revived (stays archived/invisible).
+    // This characterization test documents the CURRENT behavior so we can decide
+    // whether revival-on-re-observation is wanted before changing it.
+    describe("#given a previously-archived fact is re-observed", () => {
+        it("CURRENT BEHAVIOR: dedupe matches the archived row and does not revive it", () => {
+            db = makeMemoryDatabase();
+            const content = "Use SQLite for cross-session memory";
+            const hash = computeNormalizedHash(content);
+
+            // 1) Promote, then archive (e.g. dreamer archived it as stale).
+            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+                { category: "ARCHITECTURE_DECISIONS", content },
+            ]);
+            const original = getMemoryByHash(db, "/repo/project", "ARCHITECTURE_DECISIONS", hash);
+            expect(original).not.toBeNull();
+            archiveMemory(db, original!.id);
+            expect(getMemoryById(db, original!.id)?.status).toBe("archived");
+
+            // 2) Historian re-observes the same fact in a later session.
+            promoteSessionFactsToMemory(db, "ses-2", "/repo/project", [
+                { category: "ARCHITECTURE_DECISIONS", content },
+            ]);
+
+            // The archived row's seen_count is bumped; no new active row inserted.
+            const same = getMemoryById(db, original!.id);
+            expect(same?.status).toBe("archived"); // NOT revived
+            expect(same?.seenCount).toBe(2); // re-observation counted
+            expect(getMemoryCount(db, "/repo/project")).toBe(1); // no duplicate insert
+            // → the re-observed fact is invisible to active rendering despite recurrence.
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
     });
 });
