@@ -38,8 +38,14 @@ function formatTaskLabel(name: string): string {
   return name === "smart-notes" ? "smart notes" : name;
 }
 
+// Show input/output directly rather than a single "total". The total summed
+// cache_read across every agentic turn, which re-counts the same cached prefix
+// once per turn (~95-98% of the figure) and read as absurd usage (millions).
+// input + output are the meaningful fresh-token figures; the hover tooltip
+// still carries the full breakdown including cache_read/write.
 function formatTaskTokens(task: DreamRunTask): string {
-  return task.tokens ? task.tokens.total.toLocaleString() : "—";
+  if (!task.tokens) return "—";
+  return `input: ${task.tokens.input.toLocaleString()} · output: ${task.tokens.output.toLocaleString()}`;
 }
 
 function formatTaskOutput(task: DreamRunTask, run: DreamRun): string {

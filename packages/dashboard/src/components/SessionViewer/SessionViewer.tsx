@@ -396,8 +396,7 @@ export default function SessionViewer() {
     (subagentInvocations() ?? []).filter((row) =>
       row.subagent === "historian" || row.subagent === "historian_editor" || row.subagent === "recomp",
     );
-  const totalInvocationTokens = (row: SubagentInvocation) =>
-    row.input_tokens + row.output_tokens + row.cache_read_tokens + row.cache_write_tokens;
+
   const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
   const [keyFiles] = createResource(
     () => sessionDetail()?.project_path ?? null,
@@ -1727,7 +1726,8 @@ export default function SessionViewer() {
                         <td>{row.status}</td>
                         <td>{row.ended_at ? `${Math.max(0, row.ended_at - row.started_at).toLocaleString()}ms` : "—"}</td>
                         <td title={`in ${row.input_tokens.toLocaleString()} · out ${row.output_tokens.toLocaleString()} · cache ${row.cache_read_tokens.toLocaleString()}/${row.cache_write_tokens.toLocaleString()}`}>
-                          {totalInvocationTokens(row).toLocaleString()}
+                          input: {row.input_tokens.toLocaleString()} · output:{" "}
+                          {row.output_tokens.toLocaleString()}
                         </td>
                         <td>{row.error ?? "—"}</td>
                       </tr>
@@ -1820,8 +1820,11 @@ export default function SessionViewer() {
                     {(row) => (
                       <tr>
                         <td>{row.subagent}</td>
-                        <td>
-                          {(row.total_input + row.total_output + row.total_cache_read + row.total_cache_write).toLocaleString()} tokens · {row.invocations} calls
+                        <td
+                          title={`cache ${row.total_cache_read.toLocaleString()}/${row.total_cache_write.toLocaleString()}`}
+                        >
+                          input: {row.total_input.toLocaleString()} · output:{" "}
+                          {row.total_output.toLocaleString()} · {row.invocations} calls
                         </td>
                       </tr>
                     )}
