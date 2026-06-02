@@ -199,8 +199,8 @@ describe("pi cache stability", () => {
                 magicContextConfig: {
                     ctx_reduce_enabled: false,
                     execute_threshold_percentage: 90,
-                    experimental: {
-                        caveman_text_compression: { enabled: true, min_chars: 40 },
+                    caveman_text_compression: { enabled: true, min_chars: 40 },
+                    memory: {
                         auto_search: { enabled: false },
                         git_commit_indexing: { enabled: false },
                     },

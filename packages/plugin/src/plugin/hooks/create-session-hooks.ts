@@ -61,7 +61,12 @@ export function createSessionHooks(args: {
                 commit_cluster_trigger: pluginConfig.commit_cluster_trigger,
                 // Issue #53: per-agent system-prompt injection opt-out.
                 system_prompt_injection: pluginConfig.system_prompt_injection,
-                experimental: pluginConfig.experimental,
+                // Graduated from experimental.* — temporal_awareness and caveman
+                // are top-level; auto_search now rides inside `memory` (passed
+                // above), and git_commit_indexing is consumed at the dream-timer
+                // level in index.ts, not per-session.
+                temporal_awareness: pluginConfig.temporal_awareness,
+                caveman_text_compression: pluginConfig.caveman_text_compression,
             },
         }),
     };

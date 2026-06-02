@@ -49,7 +49,6 @@ import { createNudgePlacementStore, createTransform } from "./transform";
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
 
 import { checkCompactionMarkerConsistency } from "./compaction-marker-manager";
-import { executeContextRecomp } from "./compartment-runner";
 import {
     createChatMessageHook,
     createCommandExecuteBeforeHook,
@@ -95,6 +94,12 @@ export interface MagicContextDeps {
             /** When true, historian/recomp auto-promote eligible session facts
              *  to project memories. When false, promotion is skipped. Issue #44. */
             auto_promote?: boolean;
+            /** Graduated from experimental.auto_search; now memory-scoped. */
+            auto_search?: {
+                enabled: boolean;
+                score_threshold: number;
+                min_prompt_chars: number;
+            };
         };
         embedding?: {
             provider?: "local" | "openai-compatible" | "off";
@@ -106,18 +111,10 @@ export interface MagicContextDeps {
          *  the inline type so legacy tests/callers don't have to construct it;
          *  Zod's .default() guarantees it's present in real loaded configs. */
         system_prompt_injection?: { enabled: boolean; skip_signatures: string[] };
-        experimental?: {
-            temporal_awareness?: boolean;
-            git_commit_indexing?: { enabled: boolean; since_days: number; max_commits: number };
-            auto_search?: {
-                enabled: boolean;
-                score_threshold: number;
-                min_prompt_chars: number;
-            };
-            caveman_text_compression?: {
-                enabled: boolean;
-                min_chars: number;
-            };
+        temporal_awareness?: boolean;
+        caveman_text_compression?: {
+            enabled: boolean;
+            min_chars: number;
         };
     };
 }
@@ -404,15 +401,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalUserMemories: dreamerConfig?.user_memories?.enabled,
         experimentalPinKeyFiles: dreamerConfig?.pin_key_files?.enabled ?? false,
         experimentalPinKeyFilesTokenBudget: dreamerConfig?.pin_key_files?.token_budget,
-        experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
+        experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         liveModelBySession,
         sessionDirectoryBySession,
-        autoSearch: deps.config.experimental?.auto_search?.enabled
+        autoSearch: deps.config.memory?.auto_search?.enabled
             ? {
                   enabled: true,
-                  scoreThreshold: deps.config.experimental.auto_search.score_threshold,
-                  minPromptChars: deps.config.experimental.auto_search.min_prompt_chars,
+                  scoreThreshold: deps.config.memory?.auto_search.score_threshold,
+                  minPromptChars: deps.config.memory?.auto_search.min_prompt_chars,
                   directory: deps.directory,
                   ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
               }
@@ -422,11 +419,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // avoid wiring the feature at all when ctx_reduce is on so the
         // transform deps stay clean.
         cavemanTextCompression:
-            ctxReduceEnabled === false &&
-            deps.config.experimental?.caveman_text_compression?.enabled === true
+            ctxReduceEnabled === false && deps.config.caveman_text_compression?.enabled === true
                 ? {
                       enabled: true,
-                      minChars: deps.config.experimental.caveman_text_compression.min_chars ?? 500,
+                      minChars: deps.config.caveman_text_compression.min_chars ?? 500,
                   }
                 : undefined,
     });
@@ -621,14 +617,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
         experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,
-        experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
+        experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         // Caveman text compression only runs when ctx_reduce_enabled === false
         // (gated in transform.ts and in hook.ts cavemanTextCompression wiring above).
         // Mirror that gate here so the prompt warning never appears in modes where
         // caveman won't actually compress anything.
         experimentalCavemanTextCompression:
-            ctxReduceEnabled === false &&
-            deps.config.experimental?.caveman_text_compression?.enabled === true,
+            ctxReduceEnabled === false && deps.config.caveman_text_compression?.enabled === true,
     });
     const systemPromptHashHandler = systemPromptHash.handler;
 

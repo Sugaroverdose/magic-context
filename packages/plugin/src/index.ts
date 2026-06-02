@@ -179,11 +179,11 @@ const plugin: Plugin = async (ctx) => {
                           min_reads: pluginConfig.dreamer.pin_key_files.min_reads,
                       }
                     : undefined,
-            gitCommitIndexing: pluginConfig.experimental?.git_commit_indexing?.enabled
+            gitCommitIndexing: pluginConfig.memory.git_commit_indexing?.enabled
                 ? {
                       enabled: true,
-                      since_days: pluginConfig.experimental.git_commit_indexing.since_days,
-                      max_commits: pluginConfig.experimental.git_commit_indexing.max_commits,
+                      since_days: pluginConfig.memory.git_commit_indexing.since_days,
+                      max_commits: pluginConfig.memory.git_commit_indexing.max_commits,
                   }
                 : undefined,
             ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,

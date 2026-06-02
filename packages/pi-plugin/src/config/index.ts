@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
+import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
 import {
 	type MagicContextConfig,
 	MagicContextConfigSchema,
@@ -147,8 +148,16 @@ function parsePiConfig(
 	warnings: string[];
 } {
 	const preMigrationWarnings: string[] = [];
-	const migrated = migrateLegacyAgentEnabledInMemory(
+	const agentMigrated = migrateLegacyAgentEnabledInMemory(
 		rawConfig,
+		preMigrationWarnings,
+	);
+	// Relocate graduated experimental.* keys (temporal_awareness, caveman →
+	// top-level; auto_search, git_commit_indexing → memory.*; user_memories,
+	// pin_key_files → dreamer.*). Shared with OpenCode so both harnesses preserve
+	// a user's opt-in/opt-out across the upgrade.
+	const migrated = migrateLegacyExperimental(
+		agentMigrated,
 		preMigrationWarnings,
 	);
 	const parsed = MagicContextConfigSchema.safeParse(migrated);

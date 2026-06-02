@@ -795,6 +795,57 @@ export async function runDoctor(
                 fixed++;
             }
 
+            // Relocate graduated feature flags out of the (retired) experimental.*
+            // namespace to their new homes:
+            //   - temporal_awareness / caveman_text_compression → top-level keys
+            //   - auto_search / git_commit_indexing → memory.* (recall features)
+            // We preserve the user's explicit values so opt-ins/opt-outs survive;
+            // the destination wins when a user has already started graduating,
+            // merging sub-fields so partial settings aren't dropped.
+            const relocateGraduated = (
+                key: string,
+                dest: Record<string, unknown>,
+                destLabel: string,
+            ): void => {
+                if (!experimental || !(key in experimental)) return;
+                const oldValue = experimental[key];
+                const existing = dest[key];
+                if (existing === undefined) {
+                    dest[key] = oldValue;
+                } else if (
+                    typeof oldValue === "object" &&
+                    oldValue !== null &&
+                    typeof existing === "object" &&
+                    existing !== null
+                ) {
+                    dest[key] = {
+                        ...(oldValue as Record<string, unknown>),
+                        ...(existing as Record<string, unknown>),
+                    };
+                }
+                delete experimental[key];
+                mcChanged = true;
+                log.success(`Migrated experimental.${key} → ${destLabel}${key} (graduated)`);
+                fixed++;
+            };
+            if (experimental) {
+                relocateGraduated("temporal_awareness", mcConfig, "");
+                relocateGraduated("caveman_text_compression", mcConfig, "");
+                const memoryDest = (mcConfig.memory as Record<string, unknown> | undefined) ?? {};
+                relocateGraduated("auto_search", memoryDest, "memory.");
+                relocateGraduated("git_commit_indexing", memoryDest, "memory.");
+                if (Object.keys(memoryDest).length > 0) {
+                    mcConfig.memory = memoryDest;
+                }
+                // The experimental.* namespace is fully retired; drop the now-empty
+                // block so it does not linger as obsolete clutter. (Accepts the loss
+                // of the block's anchored header comment — the block no longer exists.)
+                if (Object.keys(experimental).length === 0 && "experimental" in mcConfig) {
+                    delete mcConfig.experimental;
+                    mcChanged = true;
+                }
+            }
+
             // Remove `compartment_token_budget` — replaced by auto-derivation from
             // main/historian model context in later versions. The value is no longer
             // read; leaving it in config is harmless but misleading.

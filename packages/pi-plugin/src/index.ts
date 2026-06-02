@@ -421,7 +421,7 @@ function resolveNudgeFromConfig(
 function resolveAutoSearchFromConfig(
 	config: MagicContextConfig,
 ): PiAutoSearchHandlerOptions {
-	const auto = config.experimental?.auto_search;
+	const auto = config.memory.auto_search;
 	const enabled = auto?.enabled ?? false;
 	return {
 		enabled,
@@ -616,11 +616,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			autoDropToolAge: config.auto_drop_tool_age,
 			dropToolStructure: config.drop_tool_structure,
 			caveman:
-				config.ctx_reduce_enabled === false &&
-				config.experimental?.caveman_text_compression
+				config.ctx_reduce_enabled === false && config.caveman_text_compression
 					? {
-							enabled: config.experimental.caveman_text_compression.enabled,
-							minChars: config.experimental.caveman_text_compression.min_chars,
+							enabled: config.caveman_text_compression.enabled,
+							minChars: config.caveman_text_compression.min_chars,
 						}
 					: undefined,
 			// Forward the user's clear_reasoning_age. Pi previously hardcoded
@@ -633,7 +632,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// memories shared with OpenCode show up here automatically.
 		injection: {
 			injectionBudgetTokens: config.memory.injection_budget_tokens,
-			temporalAwareness: config.experimental?.temporal_awareness === true,
+			temporalAwareness: config.temporal_awareness === true,
 			keyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,
 			keyFilesTokenBudget:
 				config.dreamer?.pin_key_files?.token_budget ?? 10_000,
@@ -662,7 +661,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	info(
 		autoSearchConfig.enabled
 			? `registered auto-search hint (threshold=${autoSearchConfig.scoreThreshold}, minChars=${autoSearchConfig.minPromptChars})`
-			: "registered auto-search hint: DISABLED (experimental.auto_search.enabled=false)",
+			: "registered auto-search hint: DISABLED (memory.auto_search.enabled=false)",
 	);
 
 	// Register the /ctx-aug slash command. Sidekick config is read straight
@@ -771,7 +770,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// useless on Pi.
 			embeddingConfig: config.embedding,
 			memoryEnabled: config.memory.enabled,
-			gitCommitIndexing: config.experimental.git_commit_indexing,
+			gitCommitIndexing: config.memory.git_commit_indexing,
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 		info(
@@ -961,11 +960,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				ctxReduceEnabled: config.ctx_reduce_enabled,
 				dreamerEnabled: isDreamerRunnable(config),
 				dropToolStructure: config.drop_tool_structure,
-				temporalAwarenessEnabled:
-					config.experimental?.temporal_awareness ?? false,
+				temporalAwarenessEnabled: config.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
 					config.ctx_reduce_enabled === false &&
-					config.experimental?.caveman_text_compression?.enabled === true,
+					config.caveman_text_compression?.enabled === true,
 				// Stable user memories rendered as <user-profile> — dreamer
 				// promotes recurring observations into this set, then the
 				// system prompt surfaces them across all sessions in the

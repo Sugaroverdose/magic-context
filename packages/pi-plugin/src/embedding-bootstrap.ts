@@ -24,7 +24,7 @@ export async function ensureProjectRegisteredFromPiDirectory(
 
 	const features: EmbeddingFeatures = {
 		memoryEnabled: detailed.config.memory.enabled,
-		gitCommitEnabled: detailed.config.experimental.git_commit_indexing.enabled,
+		gitCommitEnabled: detailed.config.memory.git_commit_indexing.enabled,
 	};
 	registerProjectEmbeddingAndMaybeWipe(
 		db,

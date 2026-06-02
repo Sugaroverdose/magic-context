@@ -239,6 +239,52 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         // No warning, no disruption.
         expect(result.configWarnings).toBeUndefined();
     });
+
+    it("temporal_awareness and memory.auto_search default ON; git_commit_indexing and caveman default OFF", () => {
+        const result = loadWithUserConfig(JSON.stringify({ enabled: true }));
+        expect(result.temporal_awareness).toBe(true);
+        expect(result.memory.auto_search.enabled).toBe(true);
+        expect(result.memory.git_commit_indexing.enabled).toBe(false);
+        expect(result.caveman_text_compression.enabled).toBe(false);
+    });
+
+    it("relocates legacy experimental.* graduated keys to top-level + memory.* (run-doctor warning)", () => {
+        const config = JSON.stringify({
+            experimental: {
+                temporal_awareness: false,
+                auto_search: { enabled: false },
+                git_commit_indexing: { enabled: true, since_days: 30 },
+                caveman_text_compression: { enabled: true, min_chars: 800 },
+            },
+        });
+        const result = loadWithUserConfig(config);
+        // Explicit user values survive the relocation (opt-outs/opt-ins preserved).
+        expect(result.temporal_awareness).toBe(false);
+        expect(result.caveman_text_compression.enabled).toBe(true);
+        expect(result.caveman_text_compression.min_chars).toBe(800);
+        // auto_search + git_commit_indexing land under memory.*
+        expect(result.memory.auto_search.enabled).toBe(false);
+        expect(result.memory.git_commit_indexing.enabled).toBe(true);
+        expect(result.memory.git_commit_indexing.since_days).toBe(30);
+        const warnings = result.configWarnings?.join("\n") ?? "";
+        expect(warnings).toContain("experimental.temporal_awareness");
+        expect(warnings).toContain('"memory.auto_search"');
+        expect(warnings).toContain('"memory.git_commit_indexing"');
+    });
+
+    it("memory.* graduated key wins over a legacy experimental.* duplicate (sub-fields merge)", () => {
+        const config = JSON.stringify({
+            experimental: {
+                git_commit_indexing: { enabled: false, since_days: 99, max_commits: 500 },
+            },
+            memory: { git_commit_indexing: { enabled: true } },
+        });
+        const result = loadWithUserConfig(config);
+        // memory.* (graduated) enabled wins; missing sub-fields fill from old block.
+        expect(result.memory.git_commit_indexing.enabled).toBe(true);
+        expect(result.memory.git_commit_indexing.since_days).toBe(99);
+        expect(result.memory.git_commit_indexing.max_commits).toBe(500);
+    });
 });
 
 describe("loadPluginConfig — legacy agent enabled migration", () => {

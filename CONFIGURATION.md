@@ -503,13 +503,15 @@ When enabled, dreamer analyzes which files each session's agent reads most frequ
 - `token_budget`: maximum total tokens for all pinned files combined (2000–30000, default 10000). Files are selected by a knapsack solver to fit within this budget.
 - `min_reads`: minimum number of full-file reads before a file is considered for pinning (2–20, default 4). Lower values are more aggressive but risk pinning task-specific files.
 
-## Experimental Features
+## History & Recall Features
 
-### `experimental.temporal_awareness`
+> These four features graduated out of the old `experimental.*` namespace. `temporal_awareness` and `caveman_text_compression` are now top-level keys; `auto_search` and `git_commit_indexing` moved under `memory.*`. The `doctor` command relocates legacy `experimental.*` configs automatically and preserves any user-set values. **`temporal_awareness` and `memory.auto_search` are now ON by default** — set them `false` to opt out.
+
+### `temporal_awareness`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.temporal_awareness` | `boolean` | `false` |
+| `temporal_awareness` | `boolean` | `true` |
 
 When enabled, Magic Context surfaces wall-clock time to the agent in two cache-safe ways:
 
@@ -520,15 +522,15 @@ Lets agents reason correctly about workflow pacing, log durations, build times, 
 
 **Cache safety.** Markers are idempotent by regex detection and derive from static message timestamps — re-running the injector on any transform pass produces the same output, so enabling the flag busts cache once (on the first pass after flip) and then stays stable. Historian input is untouched.
 
-### `experimental.git_commit_indexing`
+### `memory.git_commit_indexing`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.git_commit_indexing.enabled` | `boolean` | `false` |
-| `experimental.git_commit_indexing.since_days` | `number` | `365` |
-| `experimental.git_commit_indexing.max_commits` | `number` | `2000` |
+| `memory.git_commit_indexing.enabled` | `boolean` | `false` |
+| `memory.git_commit_indexing.since_days` | `number` | `365` |
+| `memory.git_commit_indexing.max_commits` | `number` | `2000` |
 
-When enabled, Magic Context indexes HEAD git commits (skipping merges) from the project and makes them searchable through `ctx_search`. Commits are embedded using the configured embedding provider, so semantic search surfaces "when did we change the X pattern" or "why did we pick Y over Z" queries.
+Opt-in (default off; independent of `memory.enabled`). When enabled, Magic Context indexes HEAD git commits (skipping merges) from the project and makes them searchable through `ctx_search`. Commits are embedded using the configured embedding provider, so semantic search surfaces "when did we change the X pattern" or "why did we pick Y over Z" queries.
 
 - **HEAD only, no merges.** Abandoned experiments on feature branches don't pollute search; merged work becomes reachable from HEAD anyway.
 - **Windowed.** Only commits from the last `since_days` days are indexed (default 365). Older commits exit the window and are evicted when the project cap is exceeded.
@@ -537,15 +539,15 @@ When enabled, Magic Context indexes HEAD git commits (skipping merges) from the 
 - **Non-blocking.** Initial sweep runs at startup; incremental tick runs every 15 minutes from the dream timer. The sweep skips already-indexed SHAs.
 - **ctx_search integration.** Results appear as a `git_commit` source alongside `memory`, `session_fact`, and `message_history`. Each result carries the SHA, short SHA, author, and commit timestamp.
 
-### `experimental.auto_search`
+### `memory.auto_search`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.auto_search.enabled` | `boolean` | `false` |
-| `experimental.auto_search.score_threshold` | `number` | `0.55` |
-| `experimental.auto_search.min_prompt_chars` | `number` | `20` |
+| `memory.auto_search.enabled` | `boolean` | `true` |
+| `memory.auto_search.score_threshold` | `number` | `0.6` |
+| `memory.auto_search.min_prompt_chars` | `number` | `20` |
 
-When enabled, Magic Context runs a background `ctx_search` on each new user message and, when a strong match is found, appends a compact "vague recall" hint to that user message. The hint surfaces highly compressed fragments from the best matches so the agent can decide whether to run `ctx_search` for the full content.
+On by default (independent of `memory.enabled` — it can still surface conversation/git hints with the memory store off; set `enabled: false` to opt out). Magic Context runs a background `ctx_search` on each new user message and, when a strong match is found, appends a compact "vague recall" hint to that user message. The hint surfaces highly compressed fragments from the best matches so the agent can decide whether to run `ctx_search` for the full content.
 
 The hint looks like:
 
@@ -565,7 +567,7 @@ Run ctx_search to retrieve full context if relevant.
 
 **Parameters:**
 
-- `score_threshold`: minimum top-hit cosine score for the hint to fire (0.3–0.95, default 0.55). More permissive than direct injection because false-positive cost is small — the agent ignores irrelevant hints. Lowered from 0.65 → 0.55 in v0.14 after the v0.14 visible-memory hard filter removed the biggest noise source.
+- `score_threshold`: minimum top-hit cosine score for the hint to fire (0.3–0.95, default 0.6). More permissive than direct injection because false-positive cost is small — the agent ignores irrelevant hints.
 - `min_prompt_chars`: minimum user message length to trigger auto-search (default 20). Short prompts like "yes" or "ok" don't get a hint.
 
 **Suppression rules.** The hint is not appended when:
@@ -579,12 +581,12 @@ Run ctx_search to retrieve full context if relevant.
 
 **Tokens.** Hints are hard-capped at ~200 tokens (3 fragments × ~20-40 tokens each plus framing). Well under the cost of full-content injection (~500+ tokens), while still giving the agent enough signal to decide whether to search.
 
-### `experimental.caveman_text_compression`
+### `caveman_text_compression`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.caveman_text_compression.enabled` | `boolean` | `false` |
-| `experimental.caveman_text_compression.min_chars` | `number` | `500` |
+| `caveman_text_compression.enabled` | `boolean` | `false` |
+| `caveman_text_compression.min_chars` | `number` | `500` |
 
 **Only active when `ctx_reduce_enabled: false`.** This is the opt-in successor to agent-driven text dropping for users who run without the `ctx_reduce` tool. When the flag is on, each execute-threshold heuristic pass caveman-compresses long user and assistant text parts in place based on their position in the eligible tag window.
 
@@ -637,13 +639,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
   "auto_drop_tool_age": 50,
   "drop_tool_structure": true,
   "history_budget_percentage": 0.15,
-  "compaction_markers": true,
-  "compressor": {
-    "enabled": true,
-    "min_compartment_ratio": 1000,
-    "max_merge_depth": 5,
-    "cooldown_ms": 600000
-  },
+  "temporal_awareness": true,
 
   "historian": {
     "model": "github-copilot/gpt-5.4",
@@ -651,11 +647,12 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
   },
 
   "dreamer": {
-    "enabled": true,
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "schedule": "02:00-06:00",
-    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"]
+    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"],
+    "user_memories": { "enabled": true },
+    "pin_key_files": { "enabled": true, "token_budget": 10000, "min_reads": 4 }
   },
 
   "embedding": {
@@ -665,26 +662,15 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
   "memory": {
     "enabled": true,
     "injection_budget_tokens": 4000,
-    "auto_promote": true
+    "auto_promote": true,
+    "auto_search": { "enabled": true, "score_threshold": 0.6, "min_prompt_chars": 20 },
+    "git_commit_indexing": { "enabled": false, "since_days": 365, "max_commits": 2000 }
   },
 
   "sidekick": {
-    "enabled": true,
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "timeout_ms": 30000
-  },
-
-  "experimental": {
-    "user_memories": {
-      "enabled": false,
-      "promotion_threshold": 3
-    },
-    "pin_key_files": {
-      "enabled": false,
-      "token_budget": 10000,
-      "min_reads": 4
-    }
   }
 }
 ```

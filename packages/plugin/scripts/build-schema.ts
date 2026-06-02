@@ -302,97 +302,32 @@ function buildSchema(): Record<string, unknown> {
                     "Background compressor configuration — merges older compartments with caveman-style compression when the history block exceeds its budget.",
             },
 
-            experimental: {
+            temporal_awareness: {
+                type: "boolean",
+                default: true,
+                description:
+                    "Inject HTML gap-time comments between messages (e.g. <!-- +12m -->) so the agent knows how much time elapsed between turns. Compartment start/end dates are also rendered in <session-history>. Graduated from experimental.temporal_awareness; on by default (set false to opt out).",
+            },
+            caveman_text_compression: {
                 type: "object",
                 properties: {
-                    temporal_awareness: {
+                    enabled: {
                         type: "boolean",
                         default: false,
                         description:
-                            "Inject HTML gap-time comments between messages (e.g. <!-- +12m -->) so the agent knows how much time elapsed between turns. Compartment start/end dates are also rendered in <session-history>.",
+                            "Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%).",
                     },
-                    git_commit_indexing: {
-                        type: "object",
-                        properties: {
-                            enabled: {
-                                type: "boolean",
-                                default: false,
-                                description: "Index HEAD git commits for ctx_search (git_commit source).",
-                            },
-                            since_days: {
-                                type: "number",
-                                minimum: 1,
-                                default: 365,
-                                description: "How far back to index commits (in days).",
-                            },
-                            max_commits: {
-                                type: "number",
-                                minimum: 100,
-                                maximum: 10000,
-                                default: 2000,
-                                description: "Maximum number of commits to index.",
-                            },
-                        },
-                        additionalProperties: false,
-                        default: { enabled: false, since_days: 365, max_commits: 2000 },
-                        description: "Index git commits so ctx_search can retrieve them.",
-                    },
-                    auto_search: {
-                        type: "object",
-                        properties: {
-                            enabled: {
-                                type: "boolean",
-                                default: false,
-                                description:
-                                    "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories or commits are found.",
-                            },
-                            min_prompt_chars: {
-                                type: "number",
-                                minimum: 5,
-                                default: 20,
-                                description: "Skip auto-search for user messages shorter than this character count.",
-                            },
-                            score_threshold: {
-                                type: "number",
-                                minimum: 0,
-                                maximum: 1,
-                                default: 0.6,
-                                description: "Minimum similarity score for a result to appear in the hint.",
-                            },
-                        },
-                        additionalProperties: false,
-                        default: { enabled: false, min_prompt_chars: 20, score_threshold: 0.6 },
-                        description: "Auto-search hint injection on eligible user turns.",
-                    },
-                    caveman_text_compression: {
-                        type: "object",
-                        properties: {
-                            enabled: {
-                                type: "boolean",
-                                default: false,
-                                description:
-                                    "Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%).",
-                            },
-                            min_chars: {
-                                type: "number",
-                                minimum: 50,
-                                default: 500,
-                                description: "Minimum text length (chars) before caveman compression is applied to a part.",
-                            },
-                        },
-                        additionalProperties: false,
-                        default: { enabled: false, min_chars: 500 },
-                        description: "Deterministic caveman-style text compression for ctx_reduce_enabled=false sessions.",
+                    min_chars: {
+                        type: "number",
+                        minimum: 50,
+                        default: 500,
+                        description: "Minimum text length (chars) before caveman compression is applied to a part.",
                     },
                 },
                 additionalProperties: false,
-                default: {
-                    temporal_awareness: false,
-                    git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
-                    auto_search: { enabled: false, min_prompt_chars: 20, score_threshold: 0.6 },
-                    caveman_text_compression: { enabled: false, min_chars: 500 },
-                },
-                description: "Experimental features — gated behind flags, may change between releases.",
+                default: { enabled: false, min_chars: 500 },
+                description:
+                    "Deterministic caveman-style text compression for ctx_reduce_enabled=false sessions. Graduated from experimental.caveman_text_compression; opt-in, default off.",
             },
 
             historian: {
@@ -567,6 +502,62 @@ function buildSchema(): Record<string, unknown> {
                         default: 3,
                         description:
                             "Retrieval count threshold for promoting memory to permanent status",
+                    },
+                    auto_search: {
+                        type: "object",
+                        properties: {
+                            enabled: {
+                                type: "boolean",
+                                default: true,
+                                description:
+                                    "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled.",
+                            },
+                            score_threshold: {
+                                type: "number",
+                                minimum: 0.3,
+                                maximum: 0.95,
+                                default: 0.6,
+                                description: "Minimum similarity score for a result to appear in the hint.",
+                            },
+                            min_prompt_chars: {
+                                type: "number",
+                                minimum: 5,
+                                maximum: 500,
+                                default: 20,
+                                description: "Skip auto-search for user messages shorter than this character count.",
+                            },
+                        },
+                        additionalProperties: false,
+                        default: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
+                        description: "Auto-search hint injection on eligible user turns.",
+                    },
+                    git_commit_indexing: {
+                        type: "object",
+                        properties: {
+                            enabled: {
+                                type: "boolean",
+                                default: false,
+                                description:
+                                    "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled.",
+                            },
+                            since_days: {
+                                type: "number",
+                                minimum: 7,
+                                maximum: 3650,
+                                default: 365,
+                                description: "How far back to index commits (in days).",
+                            },
+                            max_commits: {
+                                type: "number",
+                                minimum: 100,
+                                maximum: 20000,
+                                default: 2000,
+                                description: "Maximum number of commits to index.",
+                            },
+                        },
+                        additionalProperties: false,
+                        default: { enabled: false, since_days: 365, max_commits: 2000 },
+                        description: "Index git commits so ctx_search can retrieve them.",
                     },
                 },
                 additionalProperties: false,

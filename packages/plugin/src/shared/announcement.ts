@@ -23,19 +23,18 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.21.7";
+export const ANNOUNCEMENT_VERSION = "0.22.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Pi parity sweep: 44 audit findings fixed, including a critical SHIP-BLOCKER where /ctx-flush did not drain the pending Pi compaction queue.",
-    "Pi historian recovery fix: empty/no-op historian returns now clear emergency recovery so sessions cannot loop forever at 95%.",
-    "trimPiMessagesToBoundary now sweeps non-contiguous tool-result orphans, fixing provider 400s after compaction in long Pi sessions.",
-    "Hidden subagent tool isolation: historian, dreamer, and sidekick can no longer spawn subagents or run unsafe tools.",
-    "TUI sidebar and /ctx-status header now show execute threshold inline: '47.5% / 65%' on the left, '475K / 1.0M' on the right.",
-    "doctor --issue now caps GitHub issue bodies at ~60KB with a dedicated 'Recent errors' section so reports stay submittable.",
+    "NOW ON BY DEFAULT — Temporal awareness: the agent sees elapsed-time markers (e.g. +2h 15m) between messages and dated compartments, so it knows how long ago things happened. Opt out with temporal_awareness: false.",
+    "NOW ON BY DEFAULT — Auto-search hints: each turn a background ctx_search whispers a compact 'vague recall' when something relevant exists in your memories, past conversation, or git history. No full content injected. Opt out with memory.auto_search.enabled: false.",
+    "Experimental features graduated to stable config: temporal_awareness and caveman_text_compression are now top-level keys; auto_search and git_commit_indexing moved under memory.* . Run `doctor` to migrate old experimental.* settings (your opt-ins/opt-outs are preserved).",
+    "git_commit_indexing (make project history semantically searchable) stays opt-in — enable with memory.git_commit_indexing.enabled: true.",
+    "Audit hardening across both harnesses: memory config-bypass fix, supersede-delta cache-stability fixes, and dashboard correctness fixes.",
 ];
 
 /**

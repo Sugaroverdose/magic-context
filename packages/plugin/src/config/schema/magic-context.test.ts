@@ -70,22 +70,10 @@ describe("MagicContextConfigSchema", () => {
                     enabled: true,
                     skip_signatures: ["<!-- magic-context: skip -->"],
                 },
-                experimental: {
-                    temporal_awareness: false,
-                    git_commit_indexing: {
-                        enabled: false,
-                        since_days: 365,
-                        max_commits: 2000,
-                    },
-                    auto_search: {
-                        enabled: false,
-                        score_threshold: 0.6,
-                        min_prompt_chars: 20,
-                    },
-                    caveman_text_compression: {
-                        enabled: false,
-                        min_chars: 500,
-                    },
+                temporal_awareness: false,
+                caveman_text_compression: {
+                    enabled: false,
+                    min_chars: 500,
                 },
                 embedding: {
                     provider: "openai-compatible",
@@ -98,6 +86,16 @@ describe("MagicContextConfigSchema", () => {
                     injection_budget_tokens: 4000,
                     auto_promote: true,
                     retrieval_count_promotion_threshold: 3,
+                    auto_search: {
+                        enabled: false,
+                        score_threshold: 0.6,
+                        min_prompt_chars: 20,
+                    },
+                    git_commit_indexing: {
+                        enabled: false,
+                        since_days: 365,
+                        max_commits: 2000,
+                    },
                 },
                 sidekick: {
                     disable: false,

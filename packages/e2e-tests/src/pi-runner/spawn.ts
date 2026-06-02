@@ -156,15 +156,16 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     protected_tags: 1,
     execute_threshold_percentage: 40,
     history_budget_percentage: 0.15,
-    memory: { enabled: true, auto_promote: false },
+    memory: {
+      enabled: true,
+      auto_promote: false,
+      auto_search: { enabled: false },
+      git_commit_indexing: { enabled: false },
+    },
     embedding: { provider: "off" },
     historian: { model: "" },
     dreamer: { disable: true },
     sidekick: { disable: true },
-    experimental: {
-      auto_search: { enabled: false },
-      git_commit_indexing: { enabled: false },
-    },
     ...(opts.magicContextConfig ?? {}),
   };
   writeFileSync(join(env.agentDir, "magic-context.jsonc"), JSON.stringify(magicContext, null, 2));

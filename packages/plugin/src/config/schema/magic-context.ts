@@ -212,49 +212,28 @@ export interface MagicContextConfig {
          */
         skip_signatures: string[];
     };
-    experimental: {
-        /** Inject elapsed-time markers between user messages and date ranges on
-         *  compartments so the agent has a wall-clock sense of the session. */
-        temporal_awareness: boolean;
-        /** Index git commit messages from HEAD into a new ctx_search source so
-         *  agents can recall recent regressions, fixes, and decisions from
-         *  commit history without running git log manually. */
-        git_commit_indexing: {
-            enabled: boolean;
-            /** Days of history to index (default: 365) */
-            since_days: number;
-            /** Max commits kept per project; oldest evicted (default: 2000) */
-            max_commits: number;
-        };
-        /** Appends a compact hint to new user messages when ctx_search finds
-         *  highly-related memories, facts, or git commits. Does NOT inject
-         *  full content — just vague fragments that nudge the agent to run
-         *  ctx_search for full context if relevant. */
-        auto_search: {
-            enabled: boolean;
-            /** Top hit score must exceed this threshold for the hint to fire. */
-            score_threshold: number;
-            /** Minimum user message length in characters (skip short prompts). */
-            min_prompt_chars: number;
-        };
-        /**
-         * Age-tier caveman compression for long user/assistant text parts.
-         *
-         * Only active when `ctx_reduce_enabled: false`. Buckets eligible
-         * (outside-protected-tail) messages into four age tiers by tag
-         * position — oldest 20% → ultra, next 20% → full, next 20% → lite,
-         * newest 40% → untouched — and rewrites the text part in place.
-         * Always compresses from the original source (source_contents), so
-         * tier shifts produce the same result as if the target depth were
-         * applied directly to the original text.
-         *
-         * Disabled by default because it rewrites agent-visible history.
-         */
-        caveman_text_compression: {
-            enabled: boolean;
-            /** Text parts shorter than this (characters) are left untouched. */
-            min_chars: number;
-        };
+    /** Inject elapsed-time markers between user messages and date ranges on
+     *  compartments so the agent has a wall-clock sense of the session.
+     *  Graduated from `experimental.temporal_awareness`; default: true. */
+    temporal_awareness: boolean;
+    /**
+     * Age-tier caveman compression for long user/assistant text parts.
+     * Graduated from `experimental.caveman_text_compression`; opt-in, default off.
+     *
+     * Only active when `ctx_reduce_enabled: false`. Buckets eligible
+     * (outside-protected-tail) messages into four age tiers by tag
+     * position — oldest 20% → ultra, next 20% → full, next 20% → lite,
+     * newest 40% → untouched — and rewrites the text part in place.
+     * Always compresses from the original source (source_contents), so
+     * tier shifts produce the same result as if the target depth were
+     * applied directly to the original text.
+     *
+     * Disabled by default because it rewrites agent-visible history.
+     */
+    caveman_text_compression: {
+        enabled: boolean;
+        /** Text parts shorter than this (characters) are left untouched. */
+        min_chars: number;
     };
     embedding: EmbeddingConfig;
     memory: {
@@ -262,6 +241,32 @@ export interface MagicContextConfig {
         injection_budget_tokens: number;
         auto_promote: boolean;
         retrieval_count_promotion_threshold: number;
+        /** Appends a compact hint to new user messages when ctx_search finds
+         *  highly-related memories, conversation, or git commits. Does NOT
+         *  inject full content — just vague fragments that nudge the agent to
+         *  run ctx_search for full context if relevant. Graduated from
+         *  `experimental.auto_search`; enabled by default. Independent of
+         *  `memory.enabled` — it can still surface conversation/git hints when
+         *  the memory store is off. */
+        auto_search: {
+            enabled: boolean;
+            /** Top hit score must exceed this threshold for the hint to fire. */
+            score_threshold: number;
+            /** Minimum user message length in characters (skip short prompts). */
+            min_prompt_chars: number;
+        };
+        /** Index git commit messages from HEAD into a new ctx_search source so
+         *  agents can recall recent regressions, fixes, and decisions from
+         *  commit history without running git log manually. Graduated from
+         *  `experimental.git_commit_indexing`; opt-in, default off. Independent
+         *  of `memory.enabled`. */
+        git_commit_indexing: {
+            enabled: boolean;
+            /** Days of history to index (default: 365) */
+            since_days: number;
+            /** Max commits kept per project; oldest evicted (default: 2000) */
+            max_commits: number;
+        };
     };
     sidekick?: SidekickConfig;
 }
@@ -376,60 +381,26 @@ export const MagicContextConfigSchema = z
             provider: "local",
             model: DEFAULT_LOCAL_EMBEDDING_MODEL,
         }),
-        /** Experimental features — gated behind flags, may change between releases.
-         *  Note: user_memories and pin_key_files graduated to top-level `dreamer.*` in v0.14. */
-        experimental: z
+        /** Inject wall-clock gap markers (<!-- +Xm -->) between user messages
+         *  where > 5 min elapsed since the previous message, and add start/end
+         *  date attributes on compartments. Gives the agent a sense of session
+         *  pacing and "how long ago" across multi-day sessions.
+         *  Graduated from `experimental.temporal_awareness`; default: true (set
+         *  false to opt out). */
+        temporal_awareness: z.boolean().default(true),
+        /** Age-tier caveman compression for long user/assistant text parts. Only
+         *  active when ctx_reduce_enabled is false. Oldest 20% of eligible tags
+         *  (outside protected tail) go to ultra, next 20% to full, next 20% to
+         *  lite, newest 40% untouched. Graduated from
+         *  `experimental.caveman_text_compression`; opt-in, default off (lossy). */
+        caveman_text_compression: z
             .object({
-                /** Inject wall-clock gap markers (<!-- +Xm -->) between user messages
-                 *  where > 5 min elapsed since the previous message, and add start/end
-                 *  date attributes on compartments. Gives the agent a sense of session
-                 *  pacing and "how long ago" across multi-day sessions. Default: false. */
-                temporal_awareness: z.boolean().default(false),
-                /** Index git commit messages from HEAD into ctx_search. Commits
-                 *  become a 4th searchable source alongside memories, facts, and
-                 *  session history. Default: false. */
-                git_commit_indexing: z
-                    .object({
-                        enabled: z.boolean().default(false),
-                        /** Days of HEAD history to index (min: 7, max: 3650, default: 365) */
-                        since_days: z.number().min(7).max(3650).default(365),
-                        /** Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) */
-                        max_commits: z.number().min(100).max(20000).default(2000),
-                    })
-                    .default({ enabled: false, since_days: 365, max_commits: 2000 }),
-                /** Auto-search hint: transform-time ctx_search on each new user
-                 *  message; when top hit clears the threshold, append a compact
-                 *  <ctx-search-hint> block of vague fragments to that user message.
-                 *  Does NOT inject full content. Default: false. */
-                auto_search: z
-                    .object({
-                        enabled: z.boolean().default(false),
-                        /** Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.60) */
-                        score_threshold: z.number().min(0.3).max(0.95).default(0.6),
-                        /** Skip hint when user message is shorter than this (min: 5, max: 500, default: 20) */
-                        min_prompt_chars: z.number().min(5).max(500).default(20),
-                    })
-                    .default({ enabled: false, score_threshold: 0.6, min_prompt_chars: 20 }),
-                /** Age-tier caveman compression for long user/assistant text
-                 *  parts. Only active when ctx_reduce_enabled is false.
-                 *  Oldest 20% of eligible tags (outside protected tail) go to
-                 *  ultra, next 20% to full, next 20% to lite, newest 40%
-                 *  untouched. Default: disabled. */
-                caveman_text_compression: z
-                    .object({
-                        enabled: z.boolean().default(false),
-                        /** Text parts shorter than this (characters) stay untouched.
-                         *  Min 100, max 10000. Default: 500. */
-                        min_chars: z.number().min(100).max(10000).default(500),
-                    })
-                    .default({ enabled: false, min_chars: 500 }),
+                enabled: z.boolean().default(false),
+                /** Text parts shorter than this (characters) stay untouched.
+                 *  Min 100, max 10000. Default: 500. */
+                min_chars: z.number().min(100).max(10000).default(500),
             })
-            .default({
-                temporal_awareness: false,
-                git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
-                auto_search: { enabled: false, score_threshold: 0.6, min_prompt_chars: 20 },
-                caveman_text_compression: { enabled: false, min_chars: 500 },
-            }),
+            .default({ enabled: false, min_chars: 500 }),
         /** Cross-session memory configuration */
         memory: z
             .object({
@@ -441,12 +412,43 @@ export const MagicContextConfigSchema = z
                 auto_promote: z.boolean().default(true),
                 /** retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3) */
                 retrieval_count_promotion_threshold: z.number().min(1).default(3),
+                /** Auto-search hint: transform-time ctx_search on each new user
+                 *  message; when the top hit clears the threshold, append a compact
+                 *  <ctx-search-hint> block of vague fragments to that user message.
+                 *  Does NOT inject full content. Graduated from
+                 *  `experimental.auto_search`; enabled by default (set
+                 *  `enabled: false` to opt out). Independent of `memory.enabled`. */
+                auto_search: z
+                    .object({
+                        enabled: z.boolean().default(true),
+                        /** Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.60) */
+                        score_threshold: z.number().min(0.3).max(0.95).default(0.6),
+                        /** Skip hint when user message is shorter than this (min: 5, max: 500, default: 20) */
+                        min_prompt_chars: z.number().min(5).max(500).default(20),
+                    })
+                    .default({ enabled: true, score_threshold: 0.6, min_prompt_chars: 20 }),
+                /** Index git commit messages from HEAD into ctx_search. Commits
+                 *  become a 4th searchable source alongside memories and session
+                 *  history. Graduated from `experimental.git_commit_indexing`;
+                 *  opt-in, default off (per-project embedding cost). Independent of
+                 *  `memory.enabled`. */
+                git_commit_indexing: z
+                    .object({
+                        enabled: z.boolean().default(false),
+                        /** Days of HEAD history to index (min: 7, max: 3650, default: 365) */
+                        since_days: z.number().min(7).max(3650).default(365),
+                        /** Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) */
+                        max_commits: z.number().min(100).max(20000).default(2000),
+                    })
+                    .default({ enabled: false, since_days: 365, max_commits: 2000 }),
             })
             .default({
                 enabled: true,
                 injection_budget_tokens: 4000,
                 auto_promote: true,
                 retrieval_count_promotion_threshold: 3,
+                auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
+                git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
             }),
         /** Optional sidekick agent configuration for session-start memory retrieval */
         sidekick: SidekickConfigSchema,

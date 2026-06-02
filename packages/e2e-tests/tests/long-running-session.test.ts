@@ -61,8 +61,10 @@ beforeAll(async () => {
             execute_threshold_percentage: 20,
             protected_tags: 1,
             auto_drop_tool_age: 10,
-            memory: { enabled: true, auto_promote: false, injection_budget_tokens: 500 },
-            experimental: {
+            memory: {
+                enabled: true,
+                auto_promote: false,
+                injection_budget_tokens: 500,
                 auto_search: { enabled: true, score_threshold: 0.1, min_prompt_chars: 12 },
                 git_commit_indexing: { enabled: false },
             },

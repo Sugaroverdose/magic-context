@@ -112,7 +112,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 				`[pi-subagent] registered tools: ctx_search, ctx_memory` +
 					` (ctx_note/ctx_expand omitted: --no-session child;` +
 					` memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
-					` git_commits=${cfg.experimental.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
+					` git_commits=${cfg.memory.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
 			);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
