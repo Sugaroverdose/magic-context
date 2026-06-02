@@ -11,14 +11,19 @@ pub fn get_dashboard_schema_warning(state: State<'_, AppState>) -> Option<i64> {
     state.dashboard_schema_warning_version()
 }
 
-#[tauri::command]
+// `(async)` runs this synchronous body on a worker thread instead of the
+// webview main thread. get_projects is heavy (a GROUP BY over the full
+// opencode.db plus a recursive Pi session-dir scan), so on the main thread it
+// froze the UI for ~1-2s on every History re-entry. There are no await points,
+// so the borrowed `State` lifetime is fine.
+#[tauri::command(async)]
 pub fn get_projects(state: State<'_, AppState>) -> Result<Vec<db::ProjectInfo>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_projects(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_memories(
     state: State<'_, AppState>,
     project: Option<String>,
@@ -42,7 +47,7 @@ pub fn get_memories(
     .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_memory_stats(
     state: State<'_, AppState>,
     project: Option<String>,
@@ -52,7 +57,7 @@ pub fn get_memory_stats(
     db::get_memory_stats(&conn, project.as_deref()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_memory_status(
     state: State<'_, AppState>,
     memory_id: i64,
@@ -63,7 +68,7 @@ pub fn update_memory_status(
     db::update_memory_status(&mut conn, memory_id, &status).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_memory_content(
     state: State<'_, AppState>,
     memory_id: i64,
@@ -74,14 +79,14 @@ pub fn update_memory_content(
     db::update_memory_content(&mut conn, memory_id, &content).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_memory(state: State<'_, AppState>, memory_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_memory(&mut conn, memory_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn bulk_update_memory_status(
     state: State<'_, AppState>,
     memory_ids: Vec<i64>,
@@ -92,7 +97,7 @@ pub fn bulk_update_memory_status(
     db::bulk_update_memory_status(&mut conn, &memory_ids, &status).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn bulk_delete_memory(
     state: State<'_, AppState>,
     memory_ids: Vec<i64>,
@@ -104,24 +109,24 @@ pub fn bulk_delete_memory(
 
 // ── Session commands ────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_sessions(state: State<'_, AppState>) -> Result<Vec<db::SessionSummary>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_sessions(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sessions(filter: Option<db::SessionFilter>) -> Vec<db::SessionRow> {
     db::list_all_sessions(filter.unwrap_or_default())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_sessions_paged(filter: Option<db::SessionFilter>) -> db::PagedSessions {
     db::list_sessions_paged(filter.unwrap_or_default())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_detail(
     state: State<'_, AppState>,
     harness: String,
@@ -137,7 +142,7 @@ pub fn get_session_detail(
         .ok_or_else(|| format!("session not found: {session_id}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_cache_events(
     harness: String,
     session_id: String,
@@ -149,7 +154,7 @@ pub fn get_session_cache_events(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_cache_events_by_turns(
     harness: String,
     session_id: String,
@@ -165,7 +170,7 @@ pub fn get_session_cache_events_by_turns(
 
 /// Lazy fetch for the Messages tab; see `db::get_session_messages` for why
 /// this is split from `get_session_detail`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_messages(
     harness: String,
     session_id: String,
@@ -174,7 +179,7 @@ pub fn get_session_messages(
     db::get_session_messages(harness, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_subagent_invocations(
     state: State<'_, AppState>,
     session_id: String,
@@ -184,7 +189,7 @@ pub fn get_subagent_invocations(
     db::get_subagent_invocations(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_subagent_totals_by_subagent(
     state: State<'_, AppState>,
     session_id: String,
@@ -194,7 +199,7 @@ pub fn get_subagent_totals_by_subagent(
     db::get_subagent_totals_by_subagent(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_project_key_files(
     state: State<'_, AppState>,
     project_path: String,
@@ -204,12 +209,12 @@ pub fn get_project_key_files(
     db::get_project_key_files(&conn, &project_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn enumerate_projects() -> Vec<db::ProjectRow> {
     db::enumerate_projects()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn enumerate_memory_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<db::ProjectRow>, String> {
@@ -218,7 +223,7 @@ pub fn enumerate_memory_projects(
     db::enumerate_memory_projects(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_compartments(
     state: State<'_, AppState>,
     session_id: String,
@@ -228,7 +233,7 @@ pub fn get_compartments(
     db::get_compartments(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_facts(
     state: State<'_, AppState>,
     session_id: String,
@@ -238,7 +243,7 @@ pub fn get_session_facts(
     db::get_session_facts(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_notes(
     state: State<'_, AppState>,
     session_id: String,
@@ -248,7 +253,7 @@ pub fn get_session_notes(
     db::get_session_notes(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_smart_notes(
     state: State<'_, AppState>,
     project_path: String,
@@ -258,7 +263,7 @@ pub fn get_smart_notes(
     db::get_smart_notes(&conn, &project_path).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_session_fact(
     state: State<'_, AppState>,
     fact_id: i64,
@@ -270,7 +275,7 @@ pub fn update_session_fact(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_session_fact(state: State<'_, AppState>, fact_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
@@ -278,7 +283,7 @@ pub fn delete_session_fact(state: State<'_, AppState>, fact_id: i64) -> Result<(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_note(
     state: State<'_, AppState>,
     note_id: i64,
@@ -290,7 +295,7 @@ pub fn update_note(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_note(state: State<'_, AppState>, note_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
@@ -298,7 +303,7 @@ pub fn delete_note(state: State<'_, AppState>, note_id: i64) -> Result<(), Strin
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dismiss_note(state: State<'_, AppState>, note_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
@@ -306,7 +311,7 @@ pub fn dismiss_note(state: State<'_, AppState>, note_id: i64) -> Result<(), Stri
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_meta(
     state: State<'_, AppState>,
     session_id: String,
@@ -316,7 +321,7 @@ pub fn get_session_meta(
     db::get_session_meta(&conn, &session_id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_context_token_breakdown(
     state: State<'_, AppState>,
     session_id: String,
@@ -328,21 +333,21 @@ pub fn get_context_token_breakdown(
 
 // ── Dreamer commands ────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_dream_queue(state: State<'_, AppState>) -> Result<Vec<db::DreamQueueEntry>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_dream_queue(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_dream_state(state: State<'_, AppState>) -> Result<Vec<db::DreamStateEntry>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_dream_state(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_dream_runs(
     state: State<'_, AppState>,
     project_path: Option<String>,
@@ -353,7 +358,7 @@ pub fn get_dream_runs(
     db::get_dream_runs(&conn, project_path.as_deref(), limit.unwrap_or(20))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn enqueue_dream(
     state: State<'_, AppState>,
     project_path: String,
@@ -366,20 +371,20 @@ pub fn enqueue_dream(
 
 // ── Log commands ────────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_log_entries(max_lines: Option<usize>) -> Vec<log_parser::LogEntry> {
     let log_path = log_parser::resolve_log_path();
     log_parser::read_log_tail(&log_path, max_lines.unwrap_or(500))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_cache_events(max_lines: Option<usize>) -> Vec<log_parser::CacheEvent> {
     let log_path = log_parser::resolve_log_path();
     let entries = log_parser::read_log_tail(&log_path, max_lines.unwrap_or(2000));
     log_parser::extract_cache_events(&entries)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_cache_stats(
     max_lines: Option<usize>,
     limit: Option<usize>,
@@ -390,7 +395,7 @@ pub fn get_session_cache_stats(
     log_parser::aggregate_session_cache_stats(&events, limit.unwrap_or(5))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_cache_events_from_db(
     limit: Option<usize>,
     since_timestamp: Option<i64>,
@@ -398,14 +403,14 @@ pub fn get_cache_events_from_db(
     db::get_cache_events_from_db(limit.unwrap_or(200), since_timestamp)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_session_cache_stats_from_db(limit: Option<usize>) -> Vec<db::SessionCacheStats> {
     db::get_session_cache_stats_from_db(limit.unwrap_or(5))
 }
 
 // ── Config commands ─────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_config(source: String, project_path: Option<String>) -> config::ConfigFile {
     match source.as_str() {
         "project" => {
@@ -420,7 +425,7 @@ pub fn get_config(source: String, project_path: Option<String>) -> config::Confi
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_config(source: String, content: String) -> Result<(), String> {
     let path = match source.as_str() {
         "user" => config::resolve_user_config_path(),
@@ -429,12 +434,12 @@ pub fn save_config(source: String, content: String) -> Result<(), String> {
     config::write_config(&path, &content)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_project_configs() -> Vec<config::ProjectConfigEntry> {
     config::discover_project_configs()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_project_config(project_path: String, content: String) -> Result<(), String> {
     let path = config::resolve_project_config_path(&project_path);
 
@@ -649,7 +654,7 @@ pub async fn test_embedding_endpoint(
 
 // ── User Memory commands ────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_user_memories(
     state: State<'_, AppState>,
     status: Option<String>,
@@ -659,7 +664,7 @@ pub fn get_user_memories(
     db::get_user_memories(&conn, status.as_deref()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_user_memory_candidates(
     state: State<'_, AppState>,
 ) -> Result<Vec<db::UserMemoryCandidate>, String> {
@@ -668,28 +673,28 @@ pub fn get_user_memory_candidates(
     db::get_user_memory_candidates(&conn).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dismiss_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::dismiss_user_memory(&mut conn, id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_user_memory(&mut conn, id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_user_memory_candidate(&conn, id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn promote_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
@@ -698,7 +703,7 @@ pub fn promote_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Res
 
 // ── Health commands ─────────────────────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
     match state.get_db_path() {
         Ok(path) => db::get_db_health(&path),

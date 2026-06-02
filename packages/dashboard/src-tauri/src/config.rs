@@ -79,13 +79,13 @@ pub fn write_config(path: &PathBuf, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_pi_config() -> Result<ConfigFileResponse, String> {
     let path = resolve_pi_config_path();
     Ok(read_config(&path, "pi"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_pi_config(content: String) -> Result<(), String> {
     let path = resolve_pi_config_path();
     write_config(&path, &content)

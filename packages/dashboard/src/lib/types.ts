@@ -89,7 +89,6 @@ export interface SessionRow {
   title: string;
   project_identity: string;
   project_display: string;
-  message_count: number;
   last_activity_ms: number;
   is_subagent: boolean;
 }

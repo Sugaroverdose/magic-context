@@ -808,8 +808,6 @@ export default function SessionViewer() {
                         </Show>
                       </div>
                       <div class="card-meta">
-                        <span>{session.message_count} messages</span>
-                        <span>·</span>
                         <span>{session.project_display}</span>
                         <span>·</span>
                         <span>Last active: {formatRelativeTime(session.last_activity_ms)}</span>

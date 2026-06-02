@@ -228,7 +228,6 @@ pub struct SessionRow {
     pub title: String,
     pub project_identity: String,
     pub project_display: String,
-    pub message_count: u32,
     pub last_activity_ms: i64,
     pub is_subagent: bool,
 }
@@ -2628,14 +2627,15 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     let Ok(conn) = open_readonly(&opencode_db_path) else {
         return Vec::new();
     };
+    // No message-table join: the session list does not show a message count, and
+    // joining/grouping the 300k+ row `message` table per call was the dominant
+    // cost (a multi-hundred-ms scan that froze the UI on every History entry).
+    // `session.time_updated` is the session's own last-activity timestamp.
     let Ok(mut stmt) = conn.prepare(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
-                COUNT(m.id) AS message_count,
-                COALESCE(MAX(m.time_created), 0) AS last_activity
+                s.time_updated AS last_activity
          FROM session s
-         LEFT JOIN project p ON p.id = s.project_id
-         LEFT JOIN message m ON m.session_id = s.id
-         GROUP BY s.id, s.title, p.name, p.worktree",
+         LEFT JOIN project p ON p.id = s.project_id",
     ) else {
         return Vec::new();
     };
@@ -2652,8 +2652,7 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         let title: String = row.get(1)?;
         let project_name: String = row.get(2)?;
         let worktree: String = row.get(3)?;
-        let message_count: i64 = row.get(4)?;
-        let last_activity_ms: i64 = row.get(5)?;
+        let last_activity_ms: i64 = row.get(4)?;
         let identity = resolve_project_identity(&worktree);
         let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false);
         Ok(SessionRow {
@@ -2666,7 +2665,6 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
             } else {
                 project_name
             },
-            message_count: message_count.max(0) as u32,
             last_activity_ms,
             is_subagent,
         })
@@ -2696,7 +2694,6 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
                 title: clean_pi_title(meta.session_name, &meta.first_message),
                 project_identity,
                 project_display: basename(&meta.cwd),
-                message_count: meta.message_count,
                 last_activity_ms: meta.modified,
                 is_subagent,
             }
@@ -3951,7 +3948,6 @@ mod list_sessions_paged_tests {
                 }
                 .to_string(),
                 project_display: "Project".to_string(),
-                message_count: idx as u32,
                 last_activity_ms: (1000 - idx) as i64,
                 is_subagent: idx % 4 == 0,
             })
