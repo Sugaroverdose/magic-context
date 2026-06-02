@@ -40,16 +40,30 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     upgrade_reminded_at: "NULL AS upgrade_reminded_at",
 };
 
+// Per-connection memo of the resolved projection SQL. getOrCreateSessionMeta is
+// on the hot transform path (many calls per pass), and the old code ran
+// `PRAGMA table_info(session_meta)` + rebuilt the ~50-column list on EVERY
+// call. The schema shape is fixed for a connection's lifetime — ensureColumn
+// and migrations run only inside initializeDatabase/runMigrations at startup,
+// before any getOrCreateSessionMeta call — so the projection never changes
+// after init and is safe to cache per Database (same pattern as the prepared-
+// statement WeakMaps in compartment-storage.ts).
+const sessionMetaSelectColumnsCache = new WeakMap<Database, string>();
+
 function getSessionMetaSelectColumns(db: Database): string {
+    const cached = sessionMetaSelectColumnsCache.get(db);
+    if (cached !== undefined) return cached;
     const existingColumns = new Set(
         (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
             (column) => column.name,
         ),
     );
-    return SESSION_META_SELECT_COLUMNS.map((column) => {
+    const projection = SESSION_META_SELECT_COLUMNS.map((column) => {
         if (existingColumns.has(column)) return column;
         return SESSION_META_FALLBACK_SELECTS[column] ?? `0 AS ${column}`;
     }).join(", ");
+    sessionMetaSelectColumnsCache.set(db, projection);
+    return projection;
 }
 
 export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {

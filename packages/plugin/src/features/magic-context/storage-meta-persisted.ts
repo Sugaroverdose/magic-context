@@ -469,6 +469,13 @@ function casUpdateJsonArrayColumn<T>(
     mutate: (current: T[]) => T[] | null,
     options?: { ensureRow?: boolean },
 ): boolean {
+    // Runtime allow-set guard. `column` is string-interpolated into SELECT/
+    // UPDATE SQL below; the TS union is the only compile-time guard, so a
+    // future JS-interop or untyped caller could otherwise inject SQL. Throw on
+    // any column outside the known set so interpolation is always safe.
+    if (column !== "note_nudge_anchors" && column !== "auto_search_hint_decisions") {
+        throw new Error(`casUpdateJsonArrayColumn: refusing unknown column "${column}"`);
+    }
     if (options?.ensureRow === false) {
         const exists = db.prepare("SELECT 1 FROM session_meta WHERE session_id = ?").get(sessionId);
         if (!exists) return true;

@@ -203,23 +203,30 @@ export function indexMessagesAfterOrdinal(
     const now = Date.now();
     let inserted = 0;
 
-    // Skip the bulk SELECT of existing-messageIds. The watermark
-    // semantics already encode "every ordinal <= lastIndexedOrdinal has
-    // been processed", so any message above the watermark is, by
-    // definition, not yet indexed. The old Set-based dedup loaded every
-    // indexed messageId for the session into memory inside a write
-    // transaction (~30k+ rows for long sessions) which both wasted
-    // memory and held the writer lock long enough to cause SQLITE_BUSY
-    // on concurrent transforms.
+    // Cross-process dedup is the WATERMARK, re-read INSIDE a BEGIN IMMEDIATE
+    // transaction — NOT a UNIQUE constraint. message_history_fts is a plain
+    // FTS5 virtual table; FTS5 cannot enforce UNIQUE(session_id, message_id)
+    // (the columns are UNINDEXED), so a duplicate insert is silently accepted,
+    // never raised — the old try/catch on SQLITE_CONSTRAINT_UNIQUE could never
+    // fire. The caller reads `lastIndexedOrdinal` OUTSIDE any transaction, so
+    // under WAL two processes reconciling the same session could both read
+    // watermark=0 and double-insert every row (and bloat the FTS table).
     //
-    // Defense-in-depth: the table has UNIQUE(session_id, message_id),
-    // so a stray duplicate insert is rejected at the SQL layer. The
-    // outer transaction makes the whole pass atomic, so a partial
-    // failure rolls back cleanly.
-    db.transaction(() => {
+    // BEGIN IMMEDIATE takes the writer lock up front, so the second process
+    // serializes behind the first (busy_timeout makes it wait). We then re-read
+    // the watermark inside the lock: whatever the first process already indexed
+    // is reflected, so the second skips those ordinals and inserts nothing
+    // duplicate. The bulk SELECT of existing message-ids is still avoided (it
+    // held the writer lock too long on ~30k-row sessions).
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        // Re-read under the lock: another process may have advanced the
+        // watermark between the caller's out-of-transaction read and now.
+        const effectiveWatermark = Math.max(lastIndexedOrdinal, getLastIndexedOrdinal(db, sessionId));
         const insertMessage = getInsertMessageStatement(db);
         for (const message of messages) {
-            if (message.ordinal <= lastIndexedOrdinal) {
+            if (message.ordinal <= effectiveWatermark) {
                 continue;
             }
             if (message.role !== "user" && message.role !== "assistant") {
@@ -229,24 +236,23 @@ export function indexMessagesAfterOrdinal(
             if (content.length === 0) {
                 continue;
             }
+            insertMessage.run(sessionId, message.ordinal, message.id, message.role, content);
+            inserted++;
+        }
+        // Never regress a higher watermark a concurrent writer may have set.
+        const newWatermark = Math.max(effectiveWatermark, finalWatermark);
+        getUpsertIndexStatement(db).run(sessionId, newWatermark, now, getHarness());
+        db.exec("COMMIT");
+        committed = true;
+    } finally {
+        if (!committed) {
             try {
-                insertMessage.run(sessionId, message.ordinal, message.id, message.role, content);
-                inserted++;
-            } catch (error) {
-                // UNIQUE-constraint violations are expected in rare cases
-                // where a prior partial reconciliation indexed this row
-                // without advancing the watermark. Treat them as "already
-                // indexed" and continue. Any other SqliteError still
-                // propagates so we don't mask schema/IO bugs.
-                const e = error as { code?: unknown; message?: unknown };
-                const isUnique =
-                    e?.code === "SQLITE_CONSTRAINT_UNIQUE" ||
-                    (typeof e?.message === "string" && /UNIQUE/.test(e.message));
-                if (!isUnique) throw error;
+                db.exec("ROLLBACK");
+            } catch {
+                // already rolled back / no active transaction
             }
         }
-        getUpsertIndexStatement(db).run(sessionId, finalWatermark, now, getHarness());
-    })();
+    }
     return inserted;
 }
 

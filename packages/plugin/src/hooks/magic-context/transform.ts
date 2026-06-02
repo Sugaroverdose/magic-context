@@ -1051,7 +1051,23 @@ export function createTransform(deps: TransformDeps) {
         // Google-Vertex-Anthropic may need the workaround if they hit
         // merged-assistant scenarios; broaden the gate then.
         const tMergeStrip = performance.now();
-        const liveProviderID = deps.liveModelBySession?.get(sessionId)?.providerID;
+        // Provider resolution for the anthropic-only strip. The live map is the
+        // primary source, but on a cold post-restart pass the seeding assistant
+        // (which carries providerID) may not be in the visible window yet, so
+        // the map can be empty here even though the session IS anthropic — and
+        // the strip would be skipped, letting interleaved thinking reach
+        // Anthropic and 400. Fall back to the same OpenCode-DB last-assistant
+        // recovery the budget path uses (and re-seed the map). We must NOT
+        // treat unknown-provider as anthropic: that would trigger the OPPOSITE
+        // 400 ("reasoning_content is missing") on a Kimi/Moonshot cold start.
+        let liveProviderID = deps.liveModelBySession?.get(sessionId)?.providerID;
+        if (liveProviderID === undefined) {
+            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+            if (recovered) {
+                liveProviderID = recovered.providerID;
+                deps.liveModelBySession?.set(sessionId, recovered);
+            }
+        }
         const strippedMergedReasoning = stripReasoningFromMergedAssistants(
             messages,
             liveProviderID,

@@ -452,6 +452,21 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // plugin's lifetime (Finding #3).
         onSessionDeleted: (sessionId: string) => {
             systemPromptHash.clearSession(sessionId);
+            // Prune every per-session map this hook closure owns. These
+            // accumulate one entry per session for the plugin process lifetime
+            // (which can span days/weeks across many sessions and subagents);
+            // without this, a long-lived process leaks memory steadily. Some
+            // maps are shared via liveSessionState — clearing on the terminal
+            // session.deleted event is correct since the session is gone.
+            lastHeuristicsTurnId.delete(sessionId);
+            commitSeenLastPass.delete(sessionId);
+            variantBySession.delete(sessionId);
+            liveModelBySession.delete(sessionId);
+            agentBySession.delete(sessionId);
+            sessionDirectoryBySession.delete(sessionId);
+            recompProgressBySession.delete(sessionId);
+            recentReduceBySession.delete(sessionId);
+            toolUsageSinceUserTurn.delete(sessionId);
         },
     });
 
