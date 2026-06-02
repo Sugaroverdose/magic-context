@@ -477,6 +477,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         void processDreamQueue({
             db,
             client: deps.client,
+            // Run in the directory this hook instance owns, not a stale sibling
+            // checkout resolved from the shared git:<sha> identity map.
+            sessionDirectoryOverride: deps.directory,
             tasks: dreaming.tasks,
             taskTimeoutMinutes: dreaming.task_timeout_minutes,
             maxRuntimeMinutes: dreaming.max_runtime_minutes,

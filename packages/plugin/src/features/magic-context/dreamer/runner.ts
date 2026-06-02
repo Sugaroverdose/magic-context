@@ -36,9 +36,15 @@ import { insertDreamRun } from "./storage-dream-runs";
 import { getDreamState, setDreamState } from "./storage-dream-state";
 import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 
-// Intentional: keyed by project identity (e.g. "git:<sha>"), not filesystem path.
-// Multiple checkouts of the same repo overwrite each other; the last-active checkout wins.
-// Acceptable for v1 since multi-checkout dreaming is an edge case.
+// Keyed by project identity (e.g. "git:<sha>"), not filesystem path. Two
+// worktrees/clones of the same repo collapse to the same identity, so in a
+// single process this map's entry for that identity is "last-registered wins"
+// — it can point at a different checkout than the one draining the queue. This
+// map is only a FALLBACK now: production drain callers pass their own
+// `sessionDirectoryOverride` (the directory of the project THIS process owns),
+// so the dequeued entry always runs in a live checkout the draining process
+// actually registered, never a stale sibling-checkout path. See
+// processDreamQueue's sessionDirectoryOverride.
 const dreamProjectDirectories = new Map<string, string>();
 const CIRCUIT_BREAKER_THRESHOLD = 3;
 
@@ -1329,6 +1335,17 @@ export async function processDreamQueue(args: {
      */
     projectIdentity?: string;
     /**
+     * Filesystem directory of the project THIS draining process owns. Because
+     * project identity collapses worktrees/clones to one `git:<sha>`, resolving
+     * the execution directory from the shared in-memory map can pick a stale
+     * sibling checkout ("last-registered wins"). The drain caller always knows
+     * its own live directory, so passing it here guarantees the dream runs in a
+     * checkout this process actually registered. Paired with projectIdentity
+     * (the queue filter), so the dequeued entry is guaranteed to be this
+     * project's. Falls back to the map (then the identity string) when omitted.
+     */
+    sessionDirectoryOverride?: string;
+    /**
      * Resolved Dreamer fallback chain. See `runDream` for semantics. Callers
      * compute via `resolveFallbackChain(DREAMER_AGENT, pluginConfig.dreamer?.fallback_models)`.
      */
@@ -1342,7 +1359,12 @@ export async function processDreamQueue(args: {
         return null;
     }
 
-    const projectDirectory = resolveDreamSessionDirectory(entry.projectIdentity);
+    // Prefer the draining caller's own directory (the project THIS process
+    // owns). The dequeue filter (projectIdentity) guarantees entry belongs to
+    // this project, so the override is the correct live checkout — not a stale
+    // sibling-worktree path the shared identity map might resolve to.
+    const projectDirectory =
+        args.sessionDirectoryOverride ?? resolveDreamSessionDirectory(entry.projectIdentity);
     log(
         `[dreamer] dequeued project ${entry.projectIdentity} (dir=${projectDirectory}), starting dream run`,
     );

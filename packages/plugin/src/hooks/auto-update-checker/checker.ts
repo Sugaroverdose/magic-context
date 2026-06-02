@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -239,6 +239,16 @@ export function updatePinnedVersion(
     try {
         if (!existsSync(configPath)) return false;
 
+        // Validate the version before substituting it verbatim into the user's
+        // config. newVersion comes from the npm registry envelope (Zod-parsed as
+        // a shape, but not as semver), so a malformed/crafted value must never
+        // reach the JSONC. Accept a strict semver core with optional prerelease
+        // and build metadata (e.g. 1.2.3, 1.2.3-beta.1, 1.2.3+build.5).
+        if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(newVersion)) {
+            warn(`[auto-update-checker] Refusing to pin invalid version "${newVersion}"`);
+            return false;
+        }
+
         const content = readFileSync(configPath, "utf-8");
         const newEntry = `${PACKAGE_NAME}@${newVersion}`;
         const escapedOldEntry = oldEntry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -252,7 +262,14 @@ export function updatePinnedVersion(
         const updatedContent = content.replace(entryRegex, `$1${newEntry}$1`);
         if (updatedContent === content) return false;
 
-        writeFileSync(configPath, updatedContent, "utf-8");
+        // Atomic write: stage to a temp file in the same directory then rename.
+        // A direct writeFileSync that crashes mid-write would truncate the
+        // user's OpenCode config (which holds all their plugin/model settings).
+        // rename is atomic on the same filesystem, so a crash leaves either the
+        // old or the new file intact — never a half-written one.
+        const tmpPath = `${configPath}.mc-tmp-${process.pid}`;
+        writeFileSync(tmpPath, updatedContent, "utf-8");
+        renameSync(tmpPath, configPath);
         log(`[auto-update-checker] Updated ${configPath}: ${oldEntry} → ${newEntry}`);
         return true;
     } catch (err) {

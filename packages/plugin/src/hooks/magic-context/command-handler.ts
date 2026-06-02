@@ -323,6 +323,9 @@ async function executeDreaming(
               // project's queue entry, never accidentally pick up another
               // host's enqueued work that is sitting at the queue head.
               projectIdentity: deps.dreamer.projectPath,
+              // Run in this command's own checkout, not a stale sibling
+              // worktree resolved from the shared git:<sha> identity map.
+              sessionDirectoryOverride: deps.dreamer.directory,
               fallbackModels: deps.dreamer.fallbackModels,
           });
 

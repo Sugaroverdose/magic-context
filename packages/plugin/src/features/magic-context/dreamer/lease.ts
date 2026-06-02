@@ -34,8 +34,36 @@ export function peekLeaseHolderAndExpiry(db: Database, expectedHolder: string): 
     return Number.isFinite(expiry) && expiry >= Date.now();
 }
 
+// The lease spans three dream_state rows (holder/heartbeat/expiry), so it can't
+// be a single-statement CAS like compartment-lease.ts. Instead each mutation
+// runs under BEGIN IMMEDIATE: the write lock is taken at BEGIN time (not at the
+// first write, as the deferred BEGIN that db.transaction() emits would), so the
+// read-then-write is atomic across the OpenCode+Pi processes that share this
+// SQLite file. Without IMMEDIATE, two processes could both read isLeaseActive()
+// = false under WAL snapshot isolation and both write — double-acquiring the
+// lease and spawning duplicate dreamer workers. busy_timeout (set in
+// initializeDatabase) makes the loser wait rather than throw SQLITE_BUSY.
+function runImmediate<T>(db: Database, body: () => T): T {
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        const result = body();
+        db.exec("COMMIT");
+        committed = true;
+        return result;
+    } finally {
+        if (!committed) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // already rolled back / no active transaction
+            }
+        }
+    }
+}
+
 export function acquireLease(db: Database, holderId: string): boolean {
-    return db.transaction(() => {
+    return runImmediate(db, () => {
         if (isLeaseActive(db)) {
             const existingHolder = getLeaseHolder(db);
             if (existingHolder && existingHolder !== holderId) {
@@ -48,11 +76,11 @@ export function acquireLease(db: Database, holderId: string): boolean {
         setDreamState(db, LEASE_HEARTBEAT_KEY, String(now));
         setDreamState(db, LEASE_EXPIRY_KEY, String(now + LEASE_DURATION_MS));
         return true;
-    })();
+    });
 }
 
 export function renewLease(db: Database, holderId: string): boolean {
-    return db.transaction(() => {
+    return runImmediate(db, () => {
         if (getLeaseHolder(db) !== holderId || !isLeaseActive(db)) {
             return false;
         }
@@ -61,11 +89,11 @@ export function renewLease(db: Database, holderId: string): boolean {
         setDreamState(db, LEASE_HEARTBEAT_KEY, String(now));
         setDreamState(db, LEASE_EXPIRY_KEY, String(now + LEASE_DURATION_MS));
         return true;
-    })();
+    });
 }
 
 export function releaseLease(db: Database, holderId: string): void {
-    db.transaction(() => {
+    runImmediate(db, () => {
         if (getLeaseHolder(db) !== holderId) {
             return;
         }
@@ -73,5 +101,5 @@ export function releaseLease(db: Database, holderId: string): void {
         deleteDreamState(db, LEASE_HOLDER_KEY);
         deleteDreamState(db, LEASE_HEARTBEAT_KEY);
         deleteDreamState(db, LEASE_EXPIRY_KEY);
-    })();
+    });
 }

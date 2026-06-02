@@ -151,10 +151,16 @@ describe("auto-update-checker/checker", () => {
             const readSpy = spyOn(fs, "readFileSync").mockReturnValue(
                 '{\n  // plugins\n  "plugin": ["@cortexkit/opencode-magic-context@0.15.5"]\n}',
             );
-            const writes: string[] = [];
+            const writes: Array<{ path: string; data: string }> = [];
             const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(
-                (_path: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView) => {
-                    writes.push(String(data));
+                (path: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView) => {
+                    writes.push({ path: String(path), data: String(data) });
+                },
+            );
+            const renames: Array<{ from: string; to: string }> = [];
+            const renameSpy = spyOn(fs, "renameSync").mockImplementation(
+                (from: fs.PathLike, to: fs.PathLike) => {
+                    renames.push({ from: String(from), to: String(to) });
                 },
             );
             const { updatePinnedVersion } = await freshCheckerImport();
@@ -166,8 +172,38 @@ describe("auto-update-checker/checker", () => {
                     "0.15.6",
                 ),
             ).toBe(true);
-            expect(writes[0]).toContain('"@cortexkit/opencode-magic-context@0.15.6"');
-            expect(writes[0]).toContain("// plugins");
+            // Atomic write: staged to a temp file in the same dir, then renamed
+            // onto the real config path.
+            expect(writes[0]?.data).toContain('"@cortexkit/opencode-magic-context@0.15.6"');
+            expect(writes[0]?.data).toContain("// plugins");
+            expect(writes[0]?.path).not.toBe("/config/opencode.jsonc");
+            expect(writes[0]?.path).toContain("/config/opencode.jsonc.mc-tmp-");
+            expect(renames[0]).toEqual({ from: writes[0]!.path, to: "/config/opencode.jsonc" });
+
+            existsSpy.mockRestore();
+            readSpy.mockRestore();
+            writeSpy.mockRestore();
+            renameSpy.mockRestore();
+        });
+
+        test("refuses to pin an invalid (non-semver) version and writes nothing", async () => {
+            const existsSpy = spyOn(fs, "existsSync").mockReturnValue(true);
+            const readSpy = spyOn(fs, "readFileSync").mockReturnValue(
+                '{\n  "plugin": ["@cortexkit/opencode-magic-context@0.15.5"]\n}',
+            );
+            const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
+            const { updatePinnedVersion } = await freshCheckerImport();
+
+            for (const bad of ["latest", "0.15", "1.2.3; rm -rf", '0.15.6"]} evil', ""]) {
+                expect(
+                    updatePinnedVersion(
+                        "/config/opencode.jsonc",
+                        "@cortexkit/opencode-magic-context@0.15.5",
+                        bad,
+                    ),
+                ).toBe(false);
+            }
+            expect(writeSpy).not.toHaveBeenCalled();
 
             existsSpy.mockRestore();
             readSpy.mockRestore();

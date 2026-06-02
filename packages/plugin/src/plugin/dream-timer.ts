@@ -240,6 +240,9 @@ async function sweepProject(
             experimentalUserMemories: reg.experimentalUserMemories,
             experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
             projectIdentity: reg.projectIdentity,
+            // Run in the checkout THIS registration owns, not whatever sibling
+            // worktree last registered the shared git:<sha> identity.
+            sessionDirectoryOverride: reg.directory,
             fallbackModels: resolveFallbackChain(DREAMER_AGENT, reg.dreamerConfig.fallback_models),
         });
     } catch (error) {
