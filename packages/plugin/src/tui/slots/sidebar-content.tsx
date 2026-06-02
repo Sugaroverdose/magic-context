@@ -81,6 +81,9 @@ interface TokenSegment {
 const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
     snapshot: SidebarSnapshot
+    // Collapsed mode renders only the proportional bar (no per-category legend
+    // rows) so the sidebar shrinks to the progress bar + a few summary lines.
+    collapsed?: boolean
 }) => {
     // The bar is rendered as a flex row of colored boxes, each with
     // flexGrow=tokens and flexBasis=0. opentui distributes the parent
@@ -232,25 +235,27 @@ const TokenBreakdown = (props: {
                 ))}
             </box>
 
-            {/* Legend rows */}
-            <box flexDirection="column" marginTop={0}>
-                {segments().map((seg) => {
-                    const pct = ((seg.tokens / totalTokens()) * 100).toFixed(0)
-                    return (
-                        <box
-                            key={seg.key}
-                            width="100%"
-                            flexDirection="row"
-                            justifyContent="space-between"
-                        >
-                            <text fg={seg.color}>{seg.label}</text>
-                            <text fg={props.theme.textMuted}>
-                                {compactTokens(seg.tokens)} ({pct}%)
-                            </text>
-                        </box>
-                    )
-                })}
-            </box>
+            {/* Legend rows — suppressed in collapsed mode (bar only) */}
+            {!props.collapsed && (
+                <box flexDirection="column" marginTop={0}>
+                    {segments().map((seg) => {
+                        const pct = ((seg.tokens / totalTokens()) * 100).toFixed(0)
+                        return (
+                            <box
+                                key={seg.key}
+                                width="100%"
+                                flexDirection="row"
+                                justifyContent="space-between"
+                            >
+                                <text fg={seg.color}>{seg.label}</text>
+                                <text fg={props.theme.textMuted}>
+                                    {compactTokens(seg.tokens)} ({pct}%)
+                                </text>
+                            </box>
+                        )
+                    })}
+                </box>
+            )}
         </box>
     )
 }
@@ -366,6 +371,10 @@ const SidebarContent = (props: {
     theme: TuiThemeCurrent
 }) => {
     const [snapshot, setSnapshot] = createSignal<SidebarSnapshot | null>(null)
+    // Collapsed view: progress bar + 3 summary lines (Historian / Memories /
+    // Status), no per-category legend or section grid. In-memory only (resets
+    // to expanded on TUI restart), mirroring the native MCP sidebar toggle.
+    const [collapsed, setCollapsed] = createSignal(false)
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     // Self-sustaining poll while a recomp/upgrade is running. Recomp work
     // happens in CHILD sessions whose message events are filtered out of the
@@ -590,11 +599,18 @@ const SidebarContent = (props: {
             paddingLeft={1}
             paddingRight={1}
         >
-            {/* Header */}
-            <box flexDirection="row" justifyContent="space-between" alignItems="center">
+            {/* Header: triangle toggle + badge + version. Clicking the row
+                collapses/expands the panel (mirrors OpenCode's native MCP
+                sidebar section and AFT's sidebar). */}
+            <box
+                flexDirection="row"
+                justifyContent="space-between"
+                alignItems="center"
+                onMouseDown={() => setCollapsed((x) => !x)}
+            >
                 <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.accent}>
                     <text fg={props.theme.background}>
-                        <b>Magic Context</b>
+                        <b>{collapsed() ? "▶ " : "▼ "}Magic Context</b>
                     </text>
                 </box>
                 <text fg={props.theme.textMuted}>v{packageJson.version}</text>
@@ -622,10 +638,49 @@ const SidebarContent = (props: {
                             </text>
                         </box>
                     )}
-                    <TokenBreakdown theme={props.theme} snapshot={s()!} />
+                    <TokenBreakdown theme={props.theme} snapshot={s()!} collapsed={collapsed()} />
                 </box>
             )}
 
+            {/* Collapsed view — progress bar (above) + 3 summary lines:
+                Historian (with compartment count), Memories (injected/total),
+                Status (Q=queued ops, N=session notes). */}
+            {collapsed() && (
+                <box width="100%" flexDirection="column" marginTop={1}>
+                    <box width="100%" flexDirection="row" justifyContent="space-between">
+                        <text fg={props.theme.text}>
+                            <b>Historian (C:{s()?.compartmentCount ?? 0})</b>
+                        </text>
+                        {s()?.historianRunning ? (
+                            <text fg={props.theme.warning}>comparting ⟳</text>
+                        ) : (
+                            <text fg={props.theme.textMuted}>idle</text>
+                        )}
+                    </box>
+                    <StatRow
+                        theme={props.theme}
+                        label="Memories"
+                        value={
+                            (s()?.memoryBlockCount ?? 0) > 0
+                                ? `${s()!.memoryBlockCount}/${s()?.memoryCount ?? 0}`
+                                : String(s()?.memoryCount ?? 0)
+                        }
+                        accent
+                    />
+                    <StatRow
+                        theme={props.theme}
+                        label="Status"
+                        value={`Q:${s()?.pendingOpsCount ?? 0} N:${s()?.sessionNoteCount ?? 0}`}
+                    />
+                    {s()?.recompProgress && (
+                        <RecompProgressSection theme={props.theme} progress={s()!.recompProgress!} />
+                    )}
+                </box>
+            )}
+
+            {/* Expanded view — full section grid. */}
+            {!collapsed() && (
+                <>
             {/* Historian section */}
             <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
                 <text fg={props.theme.text}>
@@ -730,6 +785,8 @@ const SidebarContent = (props: {
                         value={compactTokens(s()!.totalInputTokens ?? 0)}
                         dim
                     />
+                </>
+            )}
                 </>
             )}
         </box>
