@@ -283,12 +283,11 @@ export default function SessionViewer() {
   const [cacheActivated, setCacheActivated] = createSignal(false);
   // Cap the Cache Hit Timeline to the most-recent N events so long sessions
   // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
+  // NOTE: the cacheTimelineBars memo lives AFTER the cacheEvents resource is
+  // declared — createMemo runs eagerly on creation, so referencing the
+  // `const [cacheEvents] = createResource(...)` from above the declaration hits
+  // the temporal dead zone ("Cannot access 'cacheEvents' before initialization").
   const [cacheTimelineLimit, setCacheTimelineLimit] = createSignal(200);
-  const cacheTimelineBars = createMemo(() => {
-    const all = cacheEvents() ?? [];
-    const limit = cacheTimelineLimit();
-    return all.length > limit ? all.slice(-limit) : all;
-  });
   createEffect(() => {
     // Reset activation state whenever the selected session changes (or is
     // cleared). Re-running depends on `selectedSession()` reactivity.
@@ -328,6 +327,12 @@ export default function SessionViewer() {
       return getSessionCacheEvents(selected.harness, selected.sessionId);
     },
   );
+  // Most-recent N events for the timeline (see cacheTimelineLimit above).
+  const cacheTimelineBars = createMemo(() => {
+    const all = cacheEvents() ?? [];
+    const limit = cacheTimelineLimit();
+    return all.length > limit ? all.slice(-limit) : all;
+  });
 
   const [subagentInvocations] = createResource(detailKey, async (selected) => {
     if (!selected) return [];
