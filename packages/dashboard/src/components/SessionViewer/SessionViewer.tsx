@@ -281,6 +281,14 @@ export default function SessionViewer() {
   // changes.
   const [messagesActivated, setMessagesActivated] = createSignal(false);
   const [cacheActivated, setCacheActivated] = createSignal(false);
+  // Cap the Cache Hit Timeline to the most-recent N events so long sessions
+  // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
+  const [cacheTimelineLimit, setCacheTimelineLimit] = createSignal(200);
+  const cacheTimelineBars = createMemo(() => {
+    const all = cacheEvents() ?? [];
+    const limit = cacheTimelineLimit();
+    return all.length > limit ? all.slice(-limit) : all;
+  });
   createEffect(() => {
     // Reset activation state whenever the selected session changes (or is
     // cleared). Re-running depends on `selectedSession()` reactivity.
@@ -2200,10 +2208,34 @@ export default function SessionViewer() {
                       }}
                     >
                       <span>Cache Hit Timeline</span>
-                      <span>{cacheEvents()?.length ?? 0} events</span>
+                      <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                        <span>
+                          {(cacheEvents()?.length ?? 0) > cacheTimelineBars().length
+                            ? `last ${cacheTimelineBars().length} of ${cacheEvents()?.length ?? 0} events`
+                            : `${cacheTimelineBars().length} events`}
+                        </span>
+                        <select
+                          value={String(cacheTimelineLimit())}
+                          onChange={(e) => setCacheTimelineLimit(Number(e.currentTarget.value))}
+                          style={{
+                            "font-size": "11px",
+                            background: "var(--bg-secondary)",
+                            color: "var(--text-secondary)",
+                            border: "1px solid var(--border)",
+                            "border-radius": "4px",
+                            padding: "1px 4px",
+                            cursor: "pointer",
+                          }}
+                          title="Number of most-recent events to show"
+                        >
+                          <For each={[200, 400, 600]}>
+                            {(n) => <option value={String(n)}>{n}</option>}
+                          </For>
+                        </select>
+                      </div>
                     </div>
                     <div class="chart-bars">
-                      <For each={cacheEvents() ?? []}>
+                      <For each={cacheTimelineBars()}>
                         {(event) => {
                           const ratio = () => cacheHitRatio(event);
                           return (

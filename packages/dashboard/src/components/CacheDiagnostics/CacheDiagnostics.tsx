@@ -48,6 +48,9 @@ export default function CacheDiagnostics() {
   const [hideSubagents, setHideSubagents] = createSignal(true);
   const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
   const [expandedTurns, setExpandedTurns] = createSignal<Set<string>>(new Set());
+  // Cap the timeline to the most-recent N steps so long sessions (1000+ steps)
+  // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
+  const [timelineLimit, setTimelineLimit] = createSignal(200);
 
   interface CacheTurn {
     turnId: string;
@@ -355,10 +358,18 @@ export default function CacheDiagnostics() {
   // Per-step events for the Cache Hit Timeline bars, oldest→newest so the
   // chart reads left-to-right chronologically. One bar per API round-trip
   // (step) so mid-turn busts are individually visible instead of being
-  // absorbed into a turn's final-step hit ratio.
-  const timelineEvents = createMemo(() =>
+  // absorbed into a turn's final-step hit ratio. Capped to the most-recent
+  // `timelineLimit` steps (the chart's right edge is "now"), so a long session
+  // shows a readable window instead of 1000+ hairline bars.
+  const sortedTimelineEvents = createMemo(() =>
     [...filteredEvents()].sort((a, b) => a.timestamp - b.timestamp),
   );
+  const totalTimelineSteps = createMemo(() => sortedTimelineEvents().length);
+  const timelineEvents = createMemo(() => {
+    const all = sortedTimelineEvents();
+    const limit = timelineLimit();
+    return all.length > limit ? all.slice(-limit) : all;
+  });
 
   const cacheTurns = createMemo(() => {
     const turns: CacheTurn[] = [];
@@ -602,7 +613,31 @@ export default function CacheDiagnostics() {
               }}
             >
               <span>Cache Hit Timeline</span>
-              <span>{timelineEvents().length} steps</span>
+              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                <span>
+                  {totalTimelineSteps() > timelineEvents().length
+                    ? `last ${timelineEvents().length} of ${totalTimelineSteps()} steps`
+                    : `${timelineEvents().length} steps`}
+                </span>
+                <select
+                  value={String(timelineLimit())}
+                  onChange={(e) => setTimelineLimit(Number(e.currentTarget.value))}
+                  style={{
+                    "font-size": "11px",
+                    background: "var(--bg-secondary)",
+                    color: "var(--text-secondary)",
+                    border: "1px solid var(--border)",
+                    "border-radius": "4px",
+                    padding: "1px 4px",
+                    cursor: "pointer",
+                  }}
+                  title="Number of most-recent steps to show"
+                >
+                  <For each={[200, 400, 600]}>
+                    {(n) => <option value={String(n)}>{n}</option>}
+                  </For>
+                </select>
+              </div>
             </div>
             {/* Per-STEP bars (one bar per API round-trip), not per-turn. Turn
                 aggregation hid mid-turn busts inside a turn's final-step hit
