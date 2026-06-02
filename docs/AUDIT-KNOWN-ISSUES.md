@@ -68,6 +68,17 @@ silently override curation. Revival happens only through an explicit restore
 (which bumps the project epoch). Accepted; locked by a characterization test in
 `promotion.test.ts`.
 
+### A6b. `ctx_memory delete` archives rather than hard-deletes
+
+`tools.ts` — the `delete` action calls `archiveMemory` (soft delete: sets
+`status='archived'`) and queues a `delete` mutation-log row, then returns
+`"Archived memory [ID: N]."`. This is a deliberate data-safety choice: a memory
+the agent "deletes" is recoverable via restore, and hard-deletion is reserved
+for explicit dashboard bulk-delete. The return text honestly says "Archived,"
+not "Deleted," so there is no misleading success semantic. The mutation-type is
+`delete` (vs `archive`) only to distinguish agent-intent in the log; both render
+as "removed" in m[1]. Do not change `delete` to a hard `DELETE`.
+
 ### A6. Deferred-materialization signal can be consumed mid-turn
 
 Both harnesses include the deferred-materialization signal in

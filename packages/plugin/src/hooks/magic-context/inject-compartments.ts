@@ -1720,10 +1720,17 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
-            if (options.state.cachedM0Bytes) {
+            if (options.state.cachedM0Bytes && options.state.cachedM1Bytes) {
                 // Preferred fallback: reuse the cached baseline. A sibling process
                 // mutated state mid-materialization; serving the slightly stale
                 // cached m[0]/m[1] pair this pass is correct and the next pass retries.
+                // Require BOTH byte buffers: reusing m[0] alone would later hit
+                // replayCachedM1 with no m[1] and throw RenderM1InvalidMarkersError
+                // (which propagates out and drops injection entirely). The
+                // partial-cache state (m[0] set, m[1] null) is reachable after a
+                // prior fresh-fallback pass set in-memory m[0] without persisting
+                // m[1]; in that case fall through to the fresh-render branch below,
+                // which renders a complete m[0]/m[1] pair.
                 contentionExhausted = true;
                 options.state.snapshotMarkers =
                     options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);

@@ -832,6 +832,42 @@ describe("m[0]/m[1] materialization", () => {
         expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
     });
 
+    it("injectM0M1 does not throw on contention when m[0] is cached but m[1] is missing (partial-cache state)", () => {
+        // Regression: the contention-reuse guard checked only cachedM0Bytes. A
+        // prior fresh-fallback pass sets in-memory cachedM0Bytes WITHOUT
+        // persisting cachedM1Bytes — so a subsequent contention pass entered the
+        // reuse branch, then replayCachedM1 threw RenderM1InvalidMarkersError
+        // (m[1] null) and propagated out, dropping injection entirely. The fix
+        // requires BOTH buffers to reuse; the partial state falls through to the
+        // fresh-render branch, which produces a complete m[0]/m[1] pair.
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        const state = readStateFromMeta();
+        // Partial cache: m[0] present in memory, m[1] absent.
+        state.cachedM0Bytes = Buffer.from("<session-history>stale</session-history>", "utf8");
+        state.cachedM1Bytes = null;
+        const messages = [userMessage("m1", "hello")];
+
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            beforePhase3ForTest: () => {
+                queueM0Mutation(db, {
+                    sessionId: SESSION_ID,
+                    mutationType: "compartment_merge",
+                });
+            },
+        });
+
+        // Must NOT throw, and must still inject a complete history block.
+        expect(result.injected).toBe(true);
+        expect(renderedText(messages[0])).toContain("<session-history>");
+    });
+
     it("fresh-render contention fallback freezes materializedAt (stable across passes, not live Date.now())", () => {
         // Regression for the round-5 CRITICAL: the fresh-render fallback fed the
         // m[1] memory-expiry cutoff from live Date.now(), so two consecutive

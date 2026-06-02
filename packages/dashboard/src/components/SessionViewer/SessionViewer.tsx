@@ -127,6 +127,10 @@ function sessionFilterKey(filter: SessionFilter): string {
     harness: filter.harness ?? null,
     project_identity: filter.project_identity ?? null,
     search: filter.search ?? null,
+    // Must be part of the key: the subagent toggle changes which rows the
+    // server returns, so omitting it would serve stale cached rows from the
+    // other toggle state on the same harness/project/search.
+    is_subagent: filter.is_subagent ?? null,
   });
 }
 
@@ -624,7 +628,10 @@ export default function SessionViewer() {
     () => sessionDetail(),
     async (detail) => {
       if (!detail) return [];
-      const project = detail.project_path ?? detail.project_identity;
+      // Smart notes are stored under the resolved project IDENTITY
+      // (git:<sha> / dir:<hash>), not the raw cwd. Query by identity first;
+      // raw project_path only as a legacy fallback for pre-identity rows.
+      const project = detail.project_identity ?? detail.project_path;
       if (!project) return [];
       return getSmartNotes(project);
     },

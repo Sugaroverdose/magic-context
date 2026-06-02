@@ -2347,7 +2347,12 @@ pub fn update_memory_status(
 ) -> Result<(), rusqlite::Error> {
     // Phase A: resolve the target row before opening a write transaction.
     let target = lookup_memory_mutation_target(conn, memory_id)?;
-    let is_restore = new_status == "active" && target.status.as_deref() == Some("archived");
+    // A restore is any archived -> injectable-status transition. Both `active`
+    // and `permanent` re-enter the m[0] baseline, so both must bump the epoch to
+    // invalidate cached m[0]; gating only on `active` left archived->permanent
+    // restores rendering stale baselines.
+    let is_restore = target.status.as_deref() == Some("archived")
+        && (new_status == "active" || new_status == "permanent");
     let project_identity = if is_restore {
         Some(normalize_stored_project_path(&target.project_path))
     } else {
@@ -2455,7 +2460,10 @@ pub fn bulk_update_memory_status(
         .iter()
         .map(|(id, target)| (*id, target.project_path.clone()))
         .collect();
-    let is_restore = new_status == "active";
+    // Both `active` and `permanent` re-enter the m[0] baseline, so a bulk
+    // status change INTO either counts as a restore for epoch-bump purposes
+    // (matches update_memory_status). Per-row prior status is re-checked below.
+    let is_restore = new_status == "active" || new_status == "permanent";
     let is_archive = new_status == "archived";
     let phase_a_identities = if is_restore {
         normalize_memory_project_identities(&phase_a_paths)
