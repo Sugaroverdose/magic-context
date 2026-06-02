@@ -97,9 +97,32 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
     );
     mkdirSync(targetDbDir, { recursive: true });
 
-    // Copy main DB + WAL/SHM sidecars. WAL mode keeps uncheckpointed writes in
-    // -wal; if the OpenCode plugin was running when the user upgraded, real
-    // data could be in -wal only. Same for -shm shared memory metadata.
+    // Fold the legacy WAL into the main DB FIRST so the copied target is one
+    // crash-consistent file. Copying .db/-wal/-shm as three separate files is
+    // not atomic: if a legacy process is concurrently writing (or the -wal/-shm
+    // are mid-update), the three snapshots can be mutually inconsistent and the
+    // target opens corrupt or loses recent writes. wal_checkpoint(TRUNCATE)
+    // writes all committed WAL frames back into the main file and empties the
+    // WAL, after which the .db alone is complete. Best-effort: if the checkpoint
+    // fails (legacy locked by a live writer), we still fall back to copying all
+    // three sidecars below.
+    try {
+        const legacyDb = new Database(legacyDbPath);
+        try {
+            legacyDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        } finally {
+            closeQuietly(legacyDb);
+        }
+    } catch (error) {
+        log(
+            `[magic-context] legacy WAL checkpoint before copy failed (continuing with sidecar copy): ${getErrorMessage(error)}`,
+        );
+    }
+
+    // Copy main DB + WAL/SHM sidecars. After a successful checkpoint the -wal is
+    // empty and the .db is self-contained, but we still copy the sidecars in
+    // case the checkpoint was skipped (legacy locked) so uncheckpointed writes
+    // aren't lost.
     for (const suffix of ["", "-wal", "-shm"]) {
         const src = `${legacyDbPath}${suffix}`;
         const dst = join(targetDbDir, `context.db${suffix}`);

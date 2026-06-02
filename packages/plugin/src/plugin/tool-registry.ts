@@ -72,7 +72,7 @@ export function createToolRegistry(args: {
                   protectedTags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
               })
             : {}),
-        ...createCtxExpandTools(),
+        ...createCtxExpandTools({ db }),
         ...createCtxNoteTools({
             db,
             dreamerEnabled: isDreamerRunnable(pluginConfig),

@@ -72,9 +72,22 @@ export async function readGitCommits(
     directory: string,
     options: ReadGitCommitsOptions = {},
 ): Promise<GitCommit[]> {
+    // Guard against argument injection: a `branch` value beginning with `-`
+    // would be parsed as a git OPTION (not a revision) since it sits ahead of
+    // the format/since flags below. No shell is involved (execFile), so this
+    // was never command injection — but the exported contract invites future
+    // untrusted `branch` callers. We can't use a `--` separator here because
+    // git treats everything after `--` as a PATHSPEC, not a revision, so we
+    // validate instead. (`HEAD`, `main`, `refs/heads/x`, `a1b2c3d` all pass.)
+    const revision = options.branch ?? "HEAD";
+    if (revision.startsWith("-")) {
+        throw new Error(
+            `readGitCommits: refusing revision that looks like an option: "${revision}"`,
+        );
+    }
     const args = [
         "log",
-        options.branch ?? "HEAD",
+        revision,
         "--no-merges",
         `--max-count=${options.maxCommits ?? DEFAULT_MAX_COMMITS}`,
         `--format=%H${FIELD_SEPARATOR}%s${FIELD_SEPARATOR}%ae${FIELD_SEPARATOR}%ct${FIELD_SEPARATOR}%b${RECORD_SEPARATOR}`,

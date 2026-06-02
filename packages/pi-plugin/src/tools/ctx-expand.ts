@@ -18,6 +18,7 @@
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	readSessionChunk,
@@ -58,7 +59,7 @@ export interface CtxExpandToolDeps {
 }
 
 export function createCtxExpandTool(
-	_deps: CtxExpandToolDeps,
+	deps: CtxExpandToolDeps,
 ): ToolDefinition<typeof ParamsSchema> {
 	return {
 		name: "ctx_expand",
@@ -88,6 +89,24 @@ export function createCtxExpandTool(
 				return err("Error: no active Pi session.");
 			}
 
+			// Clamp to the last compartment boundary (parity with OpenCode +
+			// ctx_search): messages after it are the live tail already visible
+			// to the agent, so re-expanding them wastes output tokens. -1 = no
+			// compartments yet → nothing compacted, so don't clamp.
+			const lastCompartmentEnd = getLastCompartmentEndMessage(
+				deps.db,
+				sessionId,
+			);
+			if (lastCompartmentEnd >= 0 && params.start > lastCompartmentEnd) {
+				return ok(
+					`Range ${params.start}-${params.end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`,
+				);
+			}
+			const effectiveEnd =
+				lastCompartmentEnd >= 0
+					? Math.min(params.end, lastCompartmentEnd)
+					: params.end;
+
 			// Register the Pi raw-message provider for THIS sessionId
 			// for the duration of the single readSessionChunk call.
 			// `setRawMessageProvider` returns an unregister function so
@@ -102,7 +121,7 @@ export function createCtxExpandTool(
 					sessionId,
 					CTX_EXPAND_TOKEN_BUDGET,
 					params.start,
-					params.end + 1, // readSessionChunk uses exclusive end
+					effectiveEnd + 1, // readSessionChunk uses exclusive end
 				);
 
 				if (!chunk.text || chunk.messageCount === 0) {
@@ -118,10 +137,10 @@ export function createCtxExpandTool(
 				lines.push("");
 				lines.push(chunk.text);
 
-				if (chunk.endIndex < params.end) {
+				if (chunk.endIndex < effectiveEnd) {
 					lines.push("");
 					lines.push(
-						`Truncated at message ${chunk.endIndex} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${chunk.endIndex + 1} end=${params.end} for more.`,
+						`Truncated at message ${chunk.endIndex} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${chunk.endIndex + 1} end=${effectiveEnd} for more.`,
 					);
 				}
 

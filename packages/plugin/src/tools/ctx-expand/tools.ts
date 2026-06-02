@@ -1,9 +1,15 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
+import type { ContextDatabase } from "../../features/magic-context/storage";
 import { readSessionChunk } from "../../hooks/magic-context/read-session-chunk";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import type { CtxExpandArgs } from "./types";
 
-function createCtxExpandTool(): ToolDefinition {
+export interface CtxExpandToolDeps {
+    db: ContextDatabase;
+}
+
+function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
     return tool({
         description: CTX_EXPAND_DESCRIPTION,
         args: {
@@ -21,11 +27,23 @@ function createCtxExpandTool(): ToolDefinition {
                 return "Error: start and end must be positive integers with start <= end.";
             }
 
+            // Clamp the range to the last compartment boundary, mirroring
+            // ctx_search: anything after that boundary is the live tail the
+            // agent already sees in context, so re-reading it just burns output
+            // tokens and duplicates visible content. -1 means "no compartments
+            // yet" → nothing is compacted, so don't clamp.
+            const lastCompartmentEnd = getLastCompartmentEndMessage(deps.db, sessionId);
+            if (lastCompartmentEnd >= 0 && args.start > lastCompartmentEnd) {
+                return `Range ${args.start}-${args.end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`;
+            }
+            const effectiveEnd =
+                lastCompartmentEnd >= 0 ? Math.min(args.end, lastCompartmentEnd) : args.end;
+
             const chunk = readSessionChunk(
                 sessionId,
                 CTX_EXPAND_TOKEN_BUDGET,
                 args.start,
-                args.end + 1, // readSessionChunk uses exclusive end
+                effectiveEnd + 1, // readSessionChunk uses exclusive end
             );
 
             if (!chunk.text || chunk.messageCount === 0) {
@@ -39,10 +57,10 @@ function createCtxExpandTool(): ToolDefinition {
             lines.push("");
             lines.push(chunk.text);
 
-            if (chunk.endIndex < args.end) {
+            if (chunk.endIndex < effectiveEnd) {
                 lines.push("");
                 lines.push(
-                    `Truncated at message ${chunk.endIndex} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${chunk.endIndex + 1} end=${args.end} for more.`,
+                    `Truncated at message ${chunk.endIndex} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${chunk.endIndex + 1} end=${effectiveEnd} for more.`,
                 );
             }
 
@@ -51,8 +69,8 @@ function createCtxExpandTool(): ToolDefinition {
     });
 }
 
-export function createCtxExpandTools(): Record<string, ToolDefinition> {
+export function createCtxExpandTools(deps: CtxExpandToolDeps): Record<string, ToolDefinition> {
     return {
-        ctx_expand: createCtxExpandTool(),
+        ctx_expand: createCtxExpandTool(deps),
     };
 }

@@ -84,9 +84,11 @@ export function clearKeyFilesCacheForSession(sessionId: string): void {
     cachedKeyFilesBySession.delete(sessionId);
 }
 
-function isUnderProject(projectPath: string, absPath: string): boolean {
-    const root = realpathSync(projectPath);
-    return absPath.startsWith(root + sep) || absPath === root;
+// `projectRoot` must already be a realpath-resolved root (resolve once per
+// build, not per row — see buildKeyFilesBlock). The containment check itself is
+// unchanged; only the redundant per-row realpathSync(projectPath) was hoisted.
+function isUnderResolvedRoot(projectRoot: string, absPath: string): boolean {
+    return absPath.startsWith(projectRoot + sep) || absPath === projectRoot;
 }
 
 export function buildKeyFilesBlock(
@@ -100,6 +102,19 @@ export function buildKeyFilesBlock(
     const rows = readCurrentKeyFiles(db, projectPath);
     if (rows.length === 0) return null;
 
+    // Resolve the project-root realpath ONCE — it is loop-invariant. The old
+    // code re-ran realpathSync(projectPath) inside isUnderProject for every row
+    // (one extra syscall per key file, every cache-busting pass). If the root
+    // itself can't be resolved, fall back to the raw path for the prefix check
+    // (a missing/unresolvable root yields no containment matches, which is the
+    // safe direction — rows get flagged missing rather than wrongly trusted).
+    let projectRoot: string;
+    try {
+        projectRoot = realpathSync(projectPath);
+    } catch {
+        projectRoot = projectPath;
+    }
+
     for (const row of rows) {
         if (row.staleReason !== null) continue;
 
@@ -108,7 +123,7 @@ export function buildKeyFilesBlock(
         try {
             const absPath = join(projectPath, row.path);
             const real = realpathSync(absPath);
-            if (!isUnderProject(projectPath, real)) {
+            if (!isUnderResolvedRoot(projectRoot, real)) {
                 nextStale = "missing";
                 observed = true;
             } else {

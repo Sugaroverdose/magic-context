@@ -82,9 +82,19 @@ async function acquireModelLoadLock(lockPath: string): Promise<() => Promise<voi
                 continue;
             }
             if (Date.now() - waitStart > MAX_LOCK_WAIT_MS) {
-                log("[magic-context] embedding-load lock wait exceeded, proceeding without lock");
-                // Return a no-op release — we never acquired the lock.
-                return async () => {};
+                // Do NOT proceed without the lock. A genuinely stuck holder is
+                // already reclaimed by the STALE_LOCK_MS takeover above (the
+                // lock's heartbeat stops if its process died), so reaching this
+                // branch means a LEGITIMATE slow model load is still running in
+                // another process — exactly when an unsynchronized
+                // createPipeline() here would reintroduce the onnxruntime
+                // double-free native crash (issue #21) the lock exists to
+                // prevent. Fail this init attempt instead; the caller catches,
+                // sets pipeline=null, and the lazy fallback retries on a later
+                // pass once the holder finishes.
+                throw new Error(
+                    `[magic-context] embedding-load lock wait exceeded ${MAX_LOCK_WAIT_MS}ms; another process is still loading the model. Skipping this init attempt to avoid an unsynchronized native load.`,
+                );
             }
             await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
         }

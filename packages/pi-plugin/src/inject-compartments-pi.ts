@@ -1824,14 +1824,21 @@ export function injectM0M1Pi(
 	// (`executedWorkThisPass`) where m[1] was freshly recomputed; defer passes
 	// replay persisted bytes and must never live-read/refold. A large count of
 	// pending memory mutations also forces a refold as a safety valve.
+	// Absolute floor for the ratio test (parity with OpenCode): m0 defaults to a
+	// tiny empty-body placeholder on early sessions, so `m0.length > 0` never
+	// excludes it and 15% of a tiny string is trivially exceeded — forcing a
+	// materialize every cache-busting pass. Only apply the ratio once m[0] is a
+	// real baseline. The memoryUpdateCount branch is size-independent and stays.
+	const M0_DRIFT_RATIO_FLOOR = 2_000;
 	if (
 		!materialized &&
 		!contentionExhausted &&
 		m1Recomputed &&
 		recomputeM1ThisPass &&
-		m0.length > 0 &&
 		(memoryUpdateCount > 40 ||
-			(m1 !== PI_M1_PLACEHOLDER && m1.length > m0.length * 0.15))
+			(m1 !== PI_M1_PLACEHOLDER &&
+				m0.length >= M0_DRIFT_RATIO_FLOOR &&
+				m1.length > m0.length * 0.15))
 	) {
 		decision = { value: true, reason: "drift" };
 		try {

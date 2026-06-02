@@ -1838,14 +1838,23 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     // fires at +15% budget drift if no natural hard bust occurred"). Run this
     // only on cache-busting passes where m[1] was freshly recomputed; defer
     // passes replay persisted bytes and must never live-read/refold.
+    // Absolute floor for the ratio test: m0Text defaults to M0_EMPTY_BODY
+    // (~35 chars) on an early/empty session, so the old `m0Text.length > 0`
+    // guard never excluded the placeholder and 15% of a tiny string is
+    // trivially exceeded — triggering materializeWithRetry every cache-busting
+    // pass for no benefit. Only apply the ratio test once m[0] is a real
+    // baseline (compartments/docs/profile present). The memoryUpdateCount
+    // branch is size-independent (supersede-delta drift) and stays unguarded.
+    const M0_DRIFT_RATIO_FLOOR = 2_000;
     if (
         !rematerialized &&
         !contentionExhausted &&
         m1Recomputed &&
         options.isCacheBustingPass &&
-        m0Text.length > 0 &&
         (memoryUpdateCount > 40 ||
-            (m1Text !== M1_EMPTY_PLACEHOLDER && m1Text.length > m0Text.length * 0.15))
+            (m1Text !== M1_EMPTY_PLACEHOLDER &&
+                m0Text.length >= M0_DRIFT_RATIO_FLOOR &&
+                m1Text.length > m0Text.length * 0.15))
     ) {
         try {
             const refolded = materializeWithRetry(options);
