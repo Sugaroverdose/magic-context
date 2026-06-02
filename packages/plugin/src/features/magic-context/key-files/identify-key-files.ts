@@ -334,7 +334,14 @@ export function validateLlmOutput(
         }
         if (typeof file.path !== "string" || file.path.length === 0)
             throw new KeyFilesValidationError("bad path");
-        if (file.path.startsWith("/") || file.path.includes(".."))
+        // Segment-aware traversal guard (not substring): reject `/abs` and any
+        // path segment equal to "..", but allow legitimate names like
+        // `types..d.ts`. isRelativeProjectFile below is the authoritative
+        // symlink-safe containment check.
+        if (
+            file.path.startsWith("/") ||
+            file.path.split(/[/\\]/).some((segment) => segment === "..")
+        )
             throw new KeyFilesValidationError(`escape: ${file.path}`);
         // Enforce the prompt's doc/lockfile ban in code — the persisted key-files
         // set is injected into every future prompt, so an off-prompt or injected

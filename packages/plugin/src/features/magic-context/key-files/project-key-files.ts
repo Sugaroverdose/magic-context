@@ -228,7 +228,12 @@ export function deleteOrphanProjectKeyFiles(db: Database, now = Date.now()): num
 }
 
 export function isRelativeProjectFile(projectPath: string, relativePath: string): boolean {
-    if (!relativePath || relativePath.startsWith("/") || relativePath.includes("..")) return false;
+    // Segment-aware traversal guard: reject only a path SEGMENT equal to ".."
+    // (real traversal), not the substring — filenames like `types..d.ts` or
+    // `foo..bar.ts` are legitimate. The authoritative defense is the realpath +
+    // containment check below (symlink-safe); this is just a cheap pre-filter.
+    if (!relativePath || relativePath.startsWith("/")) return false;
+    if (relativePath.split(/[/\\]/).some((segment) => segment === "..")) return false;
     try {
         const root = realpathSync(projectPath);
         const absPath = resolve(projectPath, relativePath);

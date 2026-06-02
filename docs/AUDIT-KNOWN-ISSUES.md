@@ -183,6 +183,47 @@ effective behavior as OpenCode. Pi's lingering system-prompt refresh on Dreamer
 commit is a near-no-op in v2 (guidance text doesn't change), not an extra m[1]
 bust. Accepted on both harnesses.
 
+### A12. Contention fresh-fallback renders m[0] with `materializedAt = 0`
+
+When `materializeM0` loses the lock AND there is no cached baseline to reuse,
+`renderFreshM0NonPersisted` renders a fresh, non-persisted m[0]/m[1] pair with
+`materializedAt = state.cachedM0MaterializedAt ?? 0` (i.e. 0 on a true cold
+fallback). A `materializedAt` of 0 disables m[1] expiry-cutoff filtering for
+that one pass, so an un-cached fallback pass can render a slightly different
+memory set than the eventually-persisted baseline — a single-pass prompt-cache
+discontinuity at the exact moment of cross-process contention. It is
+deterministic and cache-stable *across consecutive* fallback passes (the value
+is frozen, not live `Date.now()` — that was a real round-5 bug, since fixed) and
+self-heals on the next pass that wins the lock. The cost is one cache miss under
+a rare race, not corruption. Accepted; mirrors Pi.
+
+### A13. `computeBudgetPressureTwoPass` is exported but only used in tests
+
+`decay-curve.ts` exports `computeBudgetPressureTwoPass` (two-pass pressure for
+very tight <8K budgets). Production rendering uses the single-pass
+`computeBudgetPressure`; the two-pass variant currently has only test callers.
+It is kept (not deleted) because it is the documented, council-validated
+tight-budget path and the decay curve's tier-cost math may need it if history
+budgets shrink. Not dead code to prune reflexively — it is a validated reserve
+helper with locked invariant tests.
+
+> **Dead-surface note (v1 render path / `session_facts` / `plugin-messages.ts`):**
+> the v1 `prepareCompartmentInjection` / `renderCompartmentInjection` path,
+> vestigial `session_facts`, and `plugin-messages.ts` are documented dead in v2
+> but still present. They are mutually gated against the v2 m[0]/m[1] path and
+> not a live bug. Removing them is a deliberate standalone cleanup PR (with its
+> own audit), NOT an opportunistic mid-batch delete — the v1 path still writes
+> `memory_block_ids`, so deleting it carelessly could change behavior if the
+> gating ever regressed. Tracked for a focused removal.
+
+> **Coverage note (missing co-located migration tests):** migrations v14
+> (project_key_files), v15 (deferred_execute_state), v19 (compartment_state_lease),
+> v23 (compartment_events), v24 (historian_runs) lack the co-located
+> `migrations-v<N>.test.ts` that STRUCTURE.md mandates. The schema is exercised
+> indirectly (fresh-DB shape + feature tests), so this is a coverage gap, not a
+> known defect. Prioritize v14/v15 (key-files + boundary-execution) when paying
+> this down.
+
 ## Growing-data factors (bounded or slow; future cleanup)
 
 These are intentionally listed so a future cleanup/maintenance task can address

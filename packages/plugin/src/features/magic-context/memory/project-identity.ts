@@ -21,6 +21,11 @@ import path from "node:path";
 // call is acceptable vs threading async through all callers of resolveProjectIdentity.
 const GIT_TIMEOUT_MS = 5_000;
 const identityCache = new Map<string, string>();
+// Cached `dir:` fallbacks for directories that have NO `.git` entry. We only
+// cache the no-`.git` case: once a `.git` appears we must re-resolve every call
+// so the identity flips to the stable `git:<root>` the moment a first commit
+// lands (otherwise project memories/state split across the first-commit
+// boundary). Real git repos never reach this cache — they hit `identityCache`.
 const directoryFallbackCache = new Map<string, string>();
 
 /**
@@ -284,7 +289,14 @@ export function resolveProjectIdentity(directory: string): string {
     const canonical = path.resolve(directory);
     const cachedFallback = directoryFallbackCache.get(canonical);
     if (cachedFallback !== undefined) {
-        return cachedFallback;
+        // Serve the cached `dir:` fallback only while the directory still has no
+        // `.git`. If a repo appeared since we cached, drop it and re-resolve so
+        // the identity can flip to the stable `git:<root>` (covers the common
+        // "scratch dir later `git init` + first commit" case).
+        if (!hasGitDir(canonical)) {
+            return cachedFallback;
+        }
+        directoryFallbackCache.delete(canonical);
     }
 
     try {
@@ -292,10 +304,27 @@ export function resolveProjectIdentity(directory: string): string {
     } catch (error) {
         if (error instanceof ProjectIdentityError && shouldUseDirectoryFallback(error)) {
             const fallback = directoryFallback(canonical);
-            directoryFallbackCache.set(canonical, fallback);
+            // Only cache when there is genuinely no `.git`. An empty repo (`.git`
+            // present, no commit yet → not_git_repo) is intentionally NOT cached,
+            // so the next call re-resolves and flips to `git:` as soon as the
+            // first commit lands.
+            if (!hasGitDir(canonical)) {
+                directoryFallbackCache.set(canonical, fallback);
+            }
             return fallback;
         }
         throw error;
+    }
+}
+
+/** Cheap probe: does `<dir>/.git` exist (a repo may have appeared since we
+ *  cached a `dir:` fallback)? Any stat error means "still no git". */
+function hasGitDir(canonical: string): boolean {
+    try {
+        statSync(path.join(canonical, ".git"));
+        return true;
+    } catch {
+        return false;
     }
 }
 

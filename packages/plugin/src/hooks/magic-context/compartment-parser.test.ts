@@ -179,6 +179,47 @@ describe("parseCompartmentOutput — events (v2, stored not rendered)", () => {
         expect(parsed.events).toEqual([]);
     });
 
+    it("anchors at_compartment as a 1-based index into the EMITTED compartment list (discard-last contract)", () => {
+        // The incremental runner's discard-last filter keeps an event iff
+        // `atCompartment <= persistedCompartments.length` (compartment-runner-incremental.ts).
+        // That is ONLY correct if at_compartment is a 1-based index into the
+        // emitted compartment list. This test pins that contract: if the parser
+        // ever changed to 0-based or absolute message ordinals, the filter would
+        // silently mis-classify events and this assertion would break first.
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="5" title="first" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
+<compartment start="6" end="9" title="second (provisional tail)" importance="50"><p1>a</p1><p2>b</p2><p3>c</p3><p4/></compartment>
+</compartments>
+<events>
+<causal_incident at_compartment="1">
+<summary>anchored to the first (kept) compartment</summary>
+<disposition>fixed</disposition>
+</causal_incident>
+<causal_incident at_compartment="2">
+<summary>anchored to the second (discarded tail) compartment</summary>
+<disposition>fixed</disposition>
+</causal_incident>
+</events>
+</output>`);
+        expect(parsed.events).toHaveLength(2);
+        // First event anchors to emitted compartment #1 (1-based).
+        expect(parsed.events[0].atCompartment).toBe(1);
+        // Second anchors to emitted compartment #2.
+        expect(parsed.events[1].atCompartment).toBe(2);
+
+        // Simulate discard-last keeping only the first compartment (k=1 persisted).
+        const persistedLength = 1;
+        const publishable = parsed.events.filter(
+            (e) => e.atCompartment == null || e.atCompartment <= persistedLength,
+        );
+        // The event on the discarded tail (#2) is dropped; the kept-compartment
+        // event (#1) survives.
+        expect(publishable).toHaveLength(1);
+        expect(publishable[0].fields.summary).toContain("first");
+    });
+
     it("does not mis-read fact categories or compartments as events", () => {
         const parsed = parseCompartmentOutput(`
 <output>
