@@ -79,21 +79,45 @@ PLUGIN_DIR="packages/plugin"
 PI_DIR="packages/pi-plugin"
 CLI_DIR="packages/cli"
 
+# Run `bun test` for a package and gate on a TRUE pass, not just "no fail line".
+#
+# Bun has a known post-completion panic on large suites: every test passes and
+# the full summary prints, but the process then exits non-zero. We must tolerate
+# THAT specific case without becoming fail-open. The old gate (`|| true` + grep
+# for "N fail") passed on a panic before any tests ran, a harness timeout, a
+# zero-tests-collected run, or any Bun output-format change — all of which a
+# release must block on.
+#
+# Robust gate: require BOTH (a) a positive "<n> pass" completion line AND
+# (b) zero "<n> fail". If the exit code is 0 we trust it directly; if non-zero
+# we only accept it when the pass/fail summary proves the suite actually ran
+# and was green (the Bun-panic case).
+run_package_tests() {
+  local label="$1" dir="$2" output status
+  echo "  [$label] bun test..."
+  output=$(bun test --cwd "$dir" 2>&1)
+  status=$?
+  echo "$output"
+  if echo "$output" | grep -qE "[1-9][0-9]* fail"; then
+    echo "Error: $label tests failed (fail count > 0)"
+    exit 1
+  fi
+  if ! echo "$output" | grep -qE "[1-9][0-9]* pass"; then
+    echo "Error: $label tests produced no passing-test summary (crash, timeout, or zero tests collected)"
+    exit 1
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "  [$label] note: tests passed but Bun exited $status (known post-completion panic) — tolerated"
+  fi
+}
+
 echo "  [plugin] bun lint..."
 bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Plugin lint failed"; exit 1; }
 
 echo "  [plugin] bun typecheck..."
 bun run --cwd "$PLUGIN_DIR" typecheck 2>&1 || { echo "Error: Plugin typecheck failed"; exit 1; }
 
-echo "  [plugin] bun test..."
-# Bun has a known panic crash after tests complete (https://github.com/oven-sh/bun/issues/XXXXX).
-# All tests pass but the process exits non-zero. Check output for failures instead of exit code.
-TEST_OUTPUT=$(bun test --cwd "$PLUGIN_DIR" 2>&1 || true)
-echo "$TEST_OUTPUT"
-if echo "$TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
-  echo "Error: Plugin tests failed"
-  exit 1
-fi
+run_package_tests "plugin" "$PLUGIN_DIR"
 
 echo "  [plugin] bun build..."
 bun run --cwd "$PLUGIN_DIR" build 2>&1 || { echo "Error: Plugin build failed"; exit 1; }
@@ -107,13 +131,7 @@ bun run --cwd "$PI_DIR" lint 2>&1 || { echo "Error: Pi-plugin lint failed"; exit
 echo "  [pi-plugin] bun typecheck..."
 bun run --cwd "$PI_DIR" typecheck 2>&1 || { echo "Error: Pi-plugin typecheck failed"; exit 1; }
 
-echo "  [pi-plugin] bun test..."
-PI_TEST_OUTPUT=$(bun test --cwd "$PI_DIR" 2>&1 || true)
-echo "$PI_TEST_OUTPUT"
-if echo "$PI_TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
-  echo "Error: Pi-plugin tests failed"
-  exit 1
-fi
+run_package_tests "pi-plugin" "$PI_DIR"
 
 echo "  [pi-plugin] bun build..."
 bun run --cwd "$PI_DIR" build 2>&1 || { echo "Error: Pi-plugin build failed"; exit 1; }
@@ -124,13 +142,7 @@ bun run --cwd "$CLI_DIR" lint 2>&1 || { echo "Error: CLI lint failed"; exit 1; }
 echo "  [cli] bun typecheck..."
 bun run --cwd "$CLI_DIR" typecheck 2>&1 || { echo "Error: CLI typecheck failed"; exit 1; }
 
-echo "  [cli] bun test..."
-CLI_TEST_OUTPUT=$(bun test --cwd "$CLI_DIR" 2>&1 || true)
-echo "$CLI_TEST_OUTPUT"
-if echo "$CLI_TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
-  echo "Error: CLI tests failed"
-  exit 1
-fi
+run_package_tests "cli" "$CLI_DIR"
 
 echo "  [cli] bun build..."
 bun run --cwd "$CLI_DIR" build 2>&1 || { echo "Error: CLI build failed"; exit 1; }

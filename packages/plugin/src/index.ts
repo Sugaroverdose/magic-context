@@ -15,6 +15,7 @@ import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-pro
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
 import {
+    getSchemaFenceRejection,
     isDatabasePersisted,
     openDatabase,
     setSqlitePragmaConfig,
@@ -218,6 +219,24 @@ const plugin: Plugin = async (ctx) => {
         // event handler may still retry this refresh once when it detects an
         // obviously bad cache value, but normal operation is one-shot.
         void refreshModelLimitsFromApi(ctx.client);
+    }
+
+    // Schema-fence warning for Desktop mode. If openDatabase() fail-closed
+    // because the shared DB is newer than this build supports (cross-harness
+    // partial upgrade), the user otherwise sees Magic Context silently stop
+    // working. Surface a clear, actionable message. (TUI/Pi see the log line;
+    // Desktop has no dialog surface, so this ignored-message path covers it.)
+    {
+        const fence = getSchemaFenceRejection();
+        if (fence) {
+            void import("./plugin/conflict-warning-hook").then(({ sendSchemaFenceWarning }) =>
+                sendSchemaFenceWarning(
+                    ctx.client as unknown as Record<string, unknown>,
+                    ctx.directory,
+                    fence,
+                ),
+            );
+        }
     }
 
     // Conflict warning / cleanup for Desktop mode.

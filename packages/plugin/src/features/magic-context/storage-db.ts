@@ -20,6 +20,22 @@ const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
+// Last schema-fence rejection, recorded so startup can surface a user-facing
+// message (not just a log line). When OpenCode and Pi share context.db and one
+// harness auto-updates first, it migrates the DB to a newer schema; the lagging
+// harness's older binary then refuses to open the DB (fail-closed) and silently
+// disables ALL of Magic Context until it too updates. The null openDatabase()
+// return has no Database handle to key a WeakMap on, so we stash the detail in
+// a module global the plugin entrypoint reads after a failed/empty open.
+let lastSchemaFenceRejection: { persistedVersion: number; supportedVersion: number } | null = null;
+
+export function getSchemaFenceRejection(): {
+    persistedVersion: number;
+    supportedVersion: number;
+} | null {
+    return lastSchemaFenceRejection;
+}
+
 export const LATEST_SUPPORTED_VERSION = 26;
 
 export interface OpenDatabaseOptions {
@@ -151,6 +167,7 @@ export function enforceSchemaFence(
     if (persistedVersion <= latestSupportedVersion) {
         return true;
     }
+    lastSchemaFenceRejection = { persistedVersion, supportedVersion: latestSupportedVersion };
     log(
         `[magic-context] storage fatal: refusing to open ${dbPath}; database schema v${persistedVersion} is newer than this binary supports (max v${latestSupportedVersion}). Upgrade Magic Context/OpenCode/Pi before writing to this cache.`,
     );

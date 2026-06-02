@@ -15,6 +15,7 @@ import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Magic Context is disabled due to conflicting configuration:";
+const SCHEMA_FENCE_MARKER = "⚠️ Magic Context is disabled — database is newer than this version";
 const ENABLED_MARKER = "✨ Magic Context is now enabled";
 const TUI_SETUP_MARKER = "📊 Magic Context sidebar configured";
 const ANNOUNCEMENT_MARKER = "✨ Magic Context — what's new in";
@@ -479,6 +480,55 @@ export async function sendTuiSetupNotification(
             // best-effort
         }
     }, 1000);
+}
+
+/**
+ * Desktop schema-fence warning. When OpenCode and Pi share context.db and one
+ * harness auto-updates first, it migrates the DB to a newer schema; the lagging
+ * harness then fail-closes and disables ALL of Magic Context. Previously this
+ * was log-only, so the user just saw the plugin silently stop working. Surface
+ * a clear ignored message telling them what happened and how to fix it. No
+ * auto-remove: this is a real blocking state the user must act on (update the
+ * lagging harness), unlike the transient TUI-setup notice.
+ */
+export async function sendSchemaFenceWarning(
+    client: unknown,
+    directory: string,
+    detail: { persistedVersion: number; supportedVersion: number },
+): Promise<void> {
+    const { sessionId } = getDesktopState(directory);
+    if (!sessionId) return;
+
+    const text = [
+        `${SCHEMA_FENCE_MARKER}`,
+        "",
+        `The shared Magic Context database was upgraded to schema v${detail.persistedVersion} by a`,
+        `newer build (OpenCode and Pi share one database). This build only supports`,
+        `up to v${detail.supportedVersion}, so it has fail-closed to avoid corrupting the cache.`,
+        "",
+        "Update Magic Context on this harness (or update OpenCode/Pi) to the latest",
+        "version, then restart. Your data is safe — nothing is disabled permanently.",
+    ].join("\n");
+
+    try {
+        const c = client as {
+            session?: {
+                prompt?: (input: unknown) => unknown;
+                promptAsync?: (input: unknown) => unknown;
+            };
+        };
+        const promptInput = {
+            path: { id: sessionId },
+            body: { noReply: true, parts: [{ type: "text", text, ignored: true }] },
+        };
+        if (typeof c.session?.prompt === "function") {
+            await Promise.resolve(c.session.prompt(promptInput));
+        } else if (typeof c.session?.promptAsync === "function") {
+            await c.session.promptAsync(promptInput);
+        }
+    } catch {
+        return;
+    }
 }
 
 /**

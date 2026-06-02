@@ -250,6 +250,28 @@ materialization through its own path, so today's upgrade flow is covered.)
 
 ---
 
+## Schema-fence rejection surface
+
+When the shared cross-harness `context.db` is migrated to a schema newer than
+this binary supports, `openDatabase()` fail-closes (returns null) and the plugin
+disables itself. Both harnesses log the reason. The **user-facing** surface
+differs by necessity:
+
+- **OpenCode** sends an ignored chat message via `sendSchemaFenceWarning`
+  (Desktop has no visible console, so a silent disable would be invisible to the
+  user). Gated on `getSchemaFenceRejection()`.
+- **Pi** emits a terminal `warn()` only. Pi's fence check runs at extension
+  init, before any session `ctx`/`ctx.ui` exists (it early-returns before
+  registering hooks), and Pi always runs in a terminal where the log line is
+  directly visible — so the OpenCode "invisible disable" failure mode does not
+  apply. Adding a chat-surface warning would require deferring the fence check
+  past hook registration, which contradicts fail-closed-before-any-work.
+
+Same effective behavior (fail closed + tell the user); different delivery
+because only OpenCode Desktop can hide the log.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or
