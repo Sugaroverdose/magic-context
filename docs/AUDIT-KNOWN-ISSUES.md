@@ -269,3 +269,62 @@ auditor re-finding one adds no new information.
 - **Dashboard token breakdown** is still v1-shaped (no Docs/User-Profile buckets;
   reads the legacy `memory_block_cache`) — a display divergence from the TUI
   sidebar's v2 breakdown.
+
+### A14. Vestigial `session_facts` / `plugin_messages` tables
+
+Both are documented as retired (facts are promoted memories; the plugin-message
+bus is superseded by RPC) but are still created on every DB, migrated, and
+deleted in `clearSession`. `getSessionFactsVersion` returns a hard-coded `0` and
+the `sessionFactsVersion` branch in `mustMaterialize` is kept inert-safe but
+never fires; no module imports `plugin-messages.ts` at runtime. Dropping them is
+a schema migration that should be gated on the minimum supported TUI version no
+longer polling the old bus — deferred to avoid a migration during active
+dogfooding. No correctness impact; the inert branch is a no-op.
+
+### A15. In-session memory mutations have no dedicated cache-bust signal
+
+A non-additive `ctx_memory` mutation (delete/update/archive/merge) queues a
+`memory_mutation_log` row but does not itself schedule a cache-busting pass — the
+`<memory-updates>` delta recomputes on the next cache-bust triggered by other
+work. This is the intended supersede-delta eventual-consistency tradeoff (the
+whole point is to NOT hard-bust m[0] on every memory edit). Delete visibility is
+therefore delayed until the next natural bust. Accepted by design; see the m[1]
+memory-mutation note in ARCHITECTURE.md.
+
+### A16. Session-scoped queries don't include the `harness` discriminator
+
+`harness` columns exist on session-scoped tables, but session-scoped reads key on
+`session_id` alone — the code relies on OpenCode and Pi session IDs never
+colliding in practice (different id formats). If they ever did collide,
+session-scoped state could alias across harnesses. Accepted as latent; revisit
+only if a shared ID scheme is introduced.
+
+### A17. `materializeM0` runs two over-budget guards for the same budget
+
+`renderM0` escalates `decayPressureMultiplier` (up to 3×, re-rendering m[0] each
+iteration) while `renderDecayedCompartments` independently demotes oldest-first.
+Both use the same unified estimator and converge deterministically, so there is
+no cache-stability risk — only redundant compute on very large histories. An
+observation, not a defect; consolidate only if materialize latency becomes a
+concern.
+
+### A18. Legacy V5 key-files path ships alongside active V6
+
+The old per-session `session_meta.key_files` storage + candidate/heuristic
+selection remains while the live Dreamer path uses V6 `runKeyFilesTask` +
+project-scoped `project_key_files`. Drift-prone duplication in a path-containment
+subsystem. Removing/hard-isolating V5 is worthwhile but risky to do casually in a
+security-sensitive area; deferred to a focused change. (The V6 validator's
+candidate-set + doc-exclusion enforcement was added this round — see the
+key-files trust fix.)
+
+### A19. No byte-equivalence parity test for Pi's `inject-compartments-pi`
+
+Pi re-implements parts of m[0]/m[1] rendering (`resolvePiStableId`,
+`SYNTH_USER_ID_PREFIX`) while sharing hash/mutation/trim helpers from
+`@magic-context/core`. `mustMaterialize` must produce byte-identical m[0]
+decisions across harnesses or caches diverge. Parity is currently enforced by
+PARITY.md discipline + nine rounds of cross-harness audits rather than an
+automated equivalence test. A test feeding identical DB state through both paths
+and asserting byte-identical m[0] is a worthwhile future addition; the divergence
+risk is documented, not unguarded.

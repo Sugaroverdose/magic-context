@@ -999,6 +999,17 @@ const MIGRATIONS: Migration[] = [
     },
 ];
 
+/**
+ * Highest version in the MIGRATIONS array. `LATEST_SUPPORTED_VERSION` in
+ * storage-db.ts (the schema-fence ceiling) MUST equal this — a stale ceiling
+ * makes the DB refuse to open after the new migration applies (a real bug the
+ * project hit during v2 work). A unit test asserts the two stay in lockstep.
+ */
+export const LATEST_MIGRATION_VERSION: number = MIGRATIONS.reduce(
+    (max, m) => Math.max(max, m.version),
+    0,
+);
+
 function ensureMigrationsTable(db: Database): void {
     db.exec(`
 		CREATE TABLE IF NOT EXISTS schema_migrations (

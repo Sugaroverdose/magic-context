@@ -679,6 +679,9 @@ function getMaxMemoryId(db: Database, projectPath: string | undefined): number {
 // The m[0] snapshot keeps a sessionFactsVersion field for shape stability, but
 // it is pinned to 0 so fact changes never drive m[0] re-materialization —
 // rendered bytes no longer depend on session_facts. (Avoids wasted rebuilds.)
+// session_facts is a retired table (facts are promoted memories now); this
+// branch is kept inert-safe but never fires. Do NOT rewire facts through here.
+// See docs/AUDIT-KNOWN-ISSUES.md A14 (vestigial table, drop gated on min TUI).
 function getSessionFactsVersion(_db: Database, _sessionId: string): number {
     return 0;
 }
