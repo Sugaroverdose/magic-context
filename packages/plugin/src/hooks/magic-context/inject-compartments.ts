@@ -629,13 +629,40 @@ function numberFromRow(row: unknown, key: string): number {
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+// Sentinel for "no compartments yet". Must be < 0 so it is distinct from the
+// first real compartment, which is sequence 0. readNewCompartments filters
+// `sequence > maxSeq`, so an empty session must report -1 for the first
+// compartment (seq 0) to be included in m[1]; and `mustMaterialize` must see
+// -1 (empty) -> 0 (first publish) as a CHANGE so the first compartment is
+// folded into m[0]. Using 0 for "empty" made the first compartment invisible
+// (0 === 0 = no refold, and `sequence > 0` excluded it). Mirrors Pi's
+// EMPTY_MAX_COMPARTMENT_SEQ.
+const EMPTY_MAX_COMPARTMENT_SEQ = -1;
+
 function getMaxCompartmentSeq(db: Database, sessionId: string): number {
     const row = cachedStatement(
         maxCompartmentSeqStatements,
         db,
-        "SELECT COALESCE(MAX(sequence), 0) AS s FROM compartments WHERE session_id = ?",
+        "SELECT COALESCE(MAX(sequence), -1) AS s FROM compartments WHERE session_id = ?",
     ).get(sessionId);
+    // The query returns -1 (EMPTY_MAX_COMPARTMENT_SEQ) for an empty session and
+    // the real max sequence (>= 0) otherwise.
     return numberFromRow(row, "s");
+}
+
+/**
+ * Reinterpret a legacy persisted `0` watermark as "empty" when — and only
+ * when — the session genuinely has no compartments. Builds before the seq=0
+ * fix persisted `0` for empty sessions; comparing that against the new -1
+ * sentinel would force one spurious materialize. Guarded against the live
+ * compartment count so a real seq-0 compartment keeps `0` as its watermark.
+ * Mirrors Pi's normalizeCachedMaxCompartmentSeq.
+ */
+function normalizeCachedMaxCompartmentSeq(db: Database, sessionId: string, stored: number): number {
+    if (stored === 0 && getMaxCompartmentSeq(db, sessionId) === EMPTY_MAX_COMPARTMENT_SEQ) {
+        return EMPTY_MAX_COMPARTMENT_SEQ;
+    }
+    return stored;
 }
 
 function getMaxMemoryId(db: Database, projectPath: string | undefined): number {
@@ -736,7 +763,20 @@ export function mustMaterialize(args: {
     if (args.state.cachedM0ProjectUserProfileVersion !== current.projectUserProfileVersion) {
         return { value: true, reason: "project_user_profile_version" };
     }
-    if (args.state.cachedM0MaxCompartmentSeq !== current.maxCompartmentSeq) {
+    // Normalize a legacy stored 0 to the empty sentinel so an empty session whose
+    // cache predates the seq=0 fix doesn't compare 0 (legacy empty) against the
+    // first real compartment (seq 0) incorrectly — and so an empty→first-publish
+    // transition (-1 → 0) is correctly seen as a CHANGE that folds the first
+    // compartment into m[0].
+    const cachedMaxSeq =
+        args.state.cachedM0MaxCompartmentSeq === null
+            ? null
+            : normalizeCachedMaxCompartmentSeq(
+                  args.db,
+                  args.sessionId,
+                  args.state.cachedM0MaxCompartmentSeq,
+              );
+    if (cachedMaxSeq !== current.maxCompartmentSeq) {
         return { value: true, reason: "max_compartment_seq" };
     }
     // NOTE: maxMemoryId is deliberately NOT a materialization trigger. New

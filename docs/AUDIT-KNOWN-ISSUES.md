@@ -117,6 +117,50 @@ the prompt cache (the exact bug fixed by freezing the cutoff). TTL precision is
 sacrificed for byte-stable replay; the memory drops on the next cache-busting
 pass. Do not add an expiry trigger to `mustMaterialize`.
 
+### A9. Key-files render last-known-good content for one pass when disk drifts
+
+`key-files-block.ts` — the render loop emits every stored `project_key_files`
+row regardless of its `staleReason` (or a freshness check that just detected
+drift); the freshness check only skips re-*checking* an already-stale row, never
+re-*rendering* it, and the stale flag is flushed AFTER the render. So a file that
+was deleted or content-drifted on disk still renders its last-known-good stored
+content for one pass, then corrects on the next key-file refresh. This is the
+documented design (ARCHITECTURE.md: "Injection renders only stored DB content.
+Disk drift queues a CAS-protected stale update and never changes the bytes
+already being rendered; stale writes do not bump the version because they do not
+affect `<key-files>` output."). Skipping stale rows at render time would change
+the rendered bytes every time a pinned file changed mid-session — the exact m[0]
+cache bust the design avoids. Accepted.
+
+### A10. ctx_memory non-additive mutations don't reselect or reorder m[0]
+
+`tools.ts` — `delete`/`update`/`archive`/`merge` route through
+`queueMemoryMutation` (supersede-delta m[1] rows), NOT a `project_memory_epoch`
+bump, so they deliberately do not re-materialize m[0]. Two consequences are
+within this accepted tradeoff:
+- **Freed budget isn't reclaimed immediately.** After an archive/delete frees
+  injection budget, a memory that was previously trimmed out of m[0] is not
+  pulled back in until the next natural m[0] materialization. Reclaiming it
+  would require re-materializing m[0] = a cache bust on a routine mutation.
+- **Status-promotion reordering lags.** `merge` can promote the canonical to
+  `permanent` (if any source was permanent); since selection is permanent-first
+  only under budget pressure, the reorder doesn't take effect in m[0] until the
+  next materialization. The canonical stays present throughout; only its
+  trim-priority is briefly stale, and only under budget pressure.
+Both self-heal on the next hard bust. This is the supersede-delta design: m[1]
+deltas express add/remove/update, not reselection/reordering, precisely so
+routine memory edits don't bust the m[0] prefix. (The dashboard differs — it
+bumps the epoch on status changes — because an external editor cannot otherwise
+signal a running session; see the dashboard's own path.) Accepted.
+
+> **A8 addendum (materialize-boundary cutoff):** within a single `materializeM0`,
+> the m[0] baseline memories are read with a `Date.now()` expiry cutoff a sub-ms
+> before `materializedAt` is stamped, so a memory expiring in that window can
+> render in m[0] one cycle past its TTL. This is the same TTL-precision-at-the-
+> boundary tradeoff A8 already accepts (m[0] stays internally consistent and the
+> memory drops on the next materialization); m[1]'s `id > maxMemoryId` filter
+> prevents any double-render. Not a separate bug.
+
 ## Growing-data factors (bounded or slow; future cleanup)
 
 These are intentionally listed so a future cleanup/maintenance task can address

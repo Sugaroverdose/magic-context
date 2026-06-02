@@ -1015,10 +1015,12 @@ export async function runDream(args: {
     const memoryChanges = {
         written: countNewIds(memoryCountsBefore.ids, memoryCountsAfter.ids),
         deleted: countNewIds(memoryCountsAfter.ids, memoryCountsBefore.ids),
-        archived: Math.max(
-            0,
-            countNewIds(memoryCountsBefore.archivedIds, memoryCountsAfter.archivedIds) - merged,
-        ),
+        // archivedIds already EXCLUDES merged/superseded rows — getMemoryCountsByStatus
+        // routes a memory with superseded_by_memory_id into mergedIds and never into
+        // archivedIds (the two sets are disjoint). So the archived delta is already
+        // merge-free; subtracting `merged` again double-counted and under-reported
+        // archived (often to zero).
+        archived: countNewIds(memoryCountsBefore.archivedIds, memoryCountsAfter.archivedIds),
         merged,
     };
     const persistedMemoryChanges = Object.values(memoryChanges).some((value) => value > 0)

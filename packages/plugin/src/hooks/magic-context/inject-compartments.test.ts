@@ -483,6 +483,51 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe("max_compartment_seq");
     });
 
+    it("mustMaterialize detects the FIRST compartment (sequence 0) published after an empty materialize", () => {
+        // Regression for the seq=0 collision: an empty session materialized m[0]
+        // with maxCompartmentSeq sentinel; publishing the first compartment at
+        // sequence 0 must be seen as a CHANGE so it folds into m[0]. The old code
+        // stored 0 for "empty" too, so 0 === 0 left the first compartment invisible
+        // (never refolded into m[0], and excluded from m[1] by `sequence > 0`).
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+        // First compartment for this session — sequence 0.
+        replaceAllCompartmentState(
+            db,
+            SESSION_ID,
+            [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m1",
+                    endMessageId: "m1",
+                    title: "First",
+                    content: "First summary",
+                },
+            ],
+            [],
+        );
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).reason,
+        ).toBe("max_compartment_seq");
+    });
+
     it("mustMaterialize detects a new m0_mutation_log entry by monotonic id", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
@@ -593,7 +638,9 @@ describe("m[0]/m[1] materialization", () => {
         expect(Buffer.from(row.cached_m1_bytes as Buffer).toString("utf8")).toBe(result.m1Text);
         expect(row.cached_m0_project_memory_epoch).toBe(0);
         expect(row.cached_m0_project_user_profile_version).toBe(0);
-        expect(row.cached_m0_max_compartment_seq).toBe(0);
+        // Empty session: maxCompartmentSeq is the empty sentinel (-1), not 0, so
+        // the first compartment (sequence 0) is correctly detected as a change.
+        expect(row.cached_m0_max_compartment_seq).toBe(-1);
         expect(row.cached_m0_max_memory_id).toBe(0);
         expect(row.cached_m0_max_mutation_id).toBe(0);
         expect(row.cached_m0_max_memory_mutation_id).toBe(0);
@@ -774,7 +821,8 @@ describe("m[0]/m[1] materialization", () => {
         expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
         expect(state.cachedM1Bytes).toBeInstanceOf(Buffer);
         expect(state.cachedM0ProjectMemoryEpoch).toBe(0);
-        expect(state.cachedM0MaxCompartmentSeq).toBe(0);
+        // Empty session: maxCompartmentSeq is the empty sentinel (-1), not 0.
+        expect(state.cachedM0MaxCompartmentSeq).toBe(-1);
         expect(state.cachedM0MaxMutationId).toBe(0);
         expect(state.cachedM0MaxMemoryMutationId).toBe(0);
         expect(state.cachedM0ProjectDocsHash).toBe("");

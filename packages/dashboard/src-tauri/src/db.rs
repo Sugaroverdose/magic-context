@@ -1676,17 +1676,29 @@ fn resolve_paths_for_memory_filter(
     conn: &Connection,
     project_filter: &str,
 ) -> Result<Vec<String>, rusqlite::Error> {
-    // Pull every distinct stored memory project_path. The set is small (one
-    // per project that ever wrote memories), so the cost is bounded by the
-    // number of distinct projects, not memories.
-    let mut stmt = conn.prepare("SELECT DISTINCT project_path FROM memories")?;
+    resolve_paths_for_table_filter(conn, "memories", project_filter)
+}
+
+/// Resolve a project-identity filter (`git:<sha>` / `dir:<hash>`) to the set of
+/// raw `project_path` values stored in `table` that normalize to the same
+/// identity. The plugin writes rows under the resolved identity, but legacy
+/// rows, symlinked, or non-canonical paths may be stored differently — so a
+/// literal `WHERE project_path = ?` misses them. This mirrors the memories
+/// path-resolution so key-files and smart-notes group the same way the Memories
+/// tab does. Falls back to the raw filter when nothing matches (legacy behavior).
+fn resolve_paths_for_table_filter(
+    conn: &Connection,
+    table: &str,
+    project_filter: &str,
+) -> Result<Vec<String>, rusqlite::Error> {
+    // `table` is a fixed internal literal (never user input), so interpolating
+    // it into the DISTINCT query is safe. The set is small (one row per project
+    // that ever wrote to the table), bounded by project count, not row count.
+    let mut stmt = conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
     let all_paths: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Resolve each stored path to an identity and keep the ones that match
-    // the requested filter. `resolve_project_identity` caches results so
-    // repeated calls are cheap.
     let normalized_filter = normalize_stored_project_path(project_filter);
     let mut matched: Vec<String> = all_paths
         .into_iter()
@@ -1694,9 +1706,8 @@ fn resolve_paths_for_memory_filter(
         .collect();
 
     if matched.is_empty() {
-        // No stored path resolves to this identity. Treat the incoming value
-        // as a legacy raw path filter for backward compatibility — same as
-        // pre-fix behavior, which only worked when frontend sent raw paths.
+        // No stored path resolves to this identity. Treat the incoming value as
+        // a legacy raw path filter for backward compatibility.
         matched.push(project_filter.to_string());
     }
     Ok(matched)
@@ -2866,21 +2877,35 @@ pub fn get_project_key_files(
     conn: &Connection,
     project_path: &str,
 ) -> Result<Vec<KeyFileRow>, rusqlite::Error> {
-    let version: i64 = conn
-        .query_row(
-            "SELECT version FROM project_key_files_version WHERE project_path = ?1",
-            [project_path],
+    // Resolve the identity filter to the set of stored project_path values so
+    // symlinked / non-canonical / legacy raw paths still match (mirrors the
+    // memories path resolution).
+    let paths = resolve_paths_for_table_filter(conn, "project_key_files", project_path)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let version: i64 = {
+        let placeholders = build_in_placeholders(paths.len(), 1);
+        let params = rusqlite::params_from_iter(paths.iter());
+        conn.query_row(
+            &format!(
+                "SELECT COALESCE(MAX(version), 0) FROM project_key_files_version \
+                 WHERE project_path IN ({placeholders})"
+            ),
+            params,
             |row| row.get(0),
         )
-        .unwrap_or(0);
-    let mut stmt = conn.prepare(
+        .unwrap_or(0)
+    };
+    let placeholders = build_in_placeholders(paths.len(), 1);
+    let mut stmt = conn.prepare(&format!(
         "SELECT project_path, path, content, content_hash, local_token_estimate,
                 generated_at, generated_by_model, generation_config_hash, stale_reason
            FROM project_key_files
-          WHERE project_path = ?1
-          ORDER BY generated_at DESC, path ASC",
-    )?;
-    let rows = stmt.query_map([project_path], |row| {
+          WHERE project_path IN ({placeholders})
+          ORDER BY generated_at DESC, path ASC"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
         Ok(KeyFileRow {
             project_path: row.get(0)?,
             path: row.get(1)?,
@@ -3401,14 +3426,22 @@ pub fn get_smart_notes(
     conn: &Connection,
     project_path: &str,
 ) -> Result<Vec<Note>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    // Smart notes are stored under the resolved project identity; resolve the
+    // filter to all stored paths that normalize to it so symlinked / legacy raw
+    // paths still surface (mirrors the memories + key-files path resolution).
+    let paths = resolve_paths_for_table_filter(conn, "notes", project_path)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = build_in_placeholders(paths.len(), 1);
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, type, status, content, session_id, project_path, surface_condition,
                 created_at, updated_at, last_checked_at, ready_at, ready_reason
          FROM notes
-         WHERE project_path = ?1 AND type = 'smart' AND status != 'dismissed'
-         ORDER BY created_at ASC",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![project_path], |row| {
+         WHERE project_path IN ({placeholders}) AND type = 'smart' AND status != 'dismissed'
+         ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
         Ok(Note {
             id: row.get(0)?,
             note_type: row.get(1)?,
