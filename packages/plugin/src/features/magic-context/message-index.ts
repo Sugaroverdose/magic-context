@@ -223,7 +223,10 @@ export function indexMessagesAfterOrdinal(
     try {
         // Re-read under the lock: another process may have advanced the
         // watermark between the caller's out-of-transaction read and now.
-        const effectiveWatermark = Math.max(lastIndexedOrdinal, getLastIndexedOrdinal(db, sessionId));
+        const effectiveWatermark = Math.max(
+            lastIndexedOrdinal,
+            getLastIndexedOrdinal(db, sessionId),
+        );
         const insertMessage = getInsertMessageStatement(db);
         for (const message of messages) {
             if (message.ordinal <= effectiveWatermark) {

@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { $ } from "bun";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
-import { initializeDatabase } from "../storage-db";
 import { runMigrations } from "../migrations";
+import { initializeDatabase } from "../storage-db";
 import { acquireLease, getLeaseHolder, isLeaseActive, releaseLease, renewLease } from "./lease";
 
 function makeDb(path = ":memory:"): Database {
