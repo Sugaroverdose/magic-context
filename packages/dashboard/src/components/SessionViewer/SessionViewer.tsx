@@ -111,6 +111,14 @@ type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" |
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
+// Module-level SWR cache for the project dropdown. `get_projects` is heavy (a
+// GROUP BY over the full opencode.db plus a recursive Pi session-dir walk), and
+// the whole panel unmounts on tab switch (App.tsx uses <Show>, not CSS hide),
+// so without this the dropdown's createResource re-fires and blocks ~1-2s on
+// every History re-entry. Surviving unmount lets the resource seed from the
+// last result (instant) and refresh in the background. Mirrors sessionsCache.
+let cachedProjects: Awaited<ReturnType<typeof getProjects>> = [];
+
 const sessionsCache = new Map<string, SessionRow[]>();
 const sessionsTotalCache = new Map<string, number>();
 
@@ -154,7 +162,16 @@ export default function SessionViewer() {
   const [editingNote, setEditingNote] = createSignal<number | null>(null);
   const [editNoteContent, setEditNoteContent] = createSignal("");
 
-  const [projects] = createResource(getProjects);
+  const [projects] = createResource(
+    async () => {
+      const fresh = await getProjects();
+      cachedProjects = fresh;
+      return fresh;
+    },
+    // Seed from the last result so the dropdown renders instantly on re-entry
+    // while the fetch above refreshes in the background (SWR).
+    { initialValue: cachedProjects },
+  );
   const setProjectFilter = (value: string) => {
     setProjectFilterSignal(value);
     try {
