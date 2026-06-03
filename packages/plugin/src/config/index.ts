@@ -250,10 +250,24 @@ function parsePluginConfig(
     // Build a patched copy of rawConfig, replacing invalid fields with undefined
     // so Zod fills in defaults on the second parse.
     const errorPaths = new Set<string>();
+    // Collect any custom Zod messages per top-level key so a field with an
+    // explanatory `.max(..., "why")` / `.refine(..., "why")` message surfaces the
+    // reason to the user instead of a bare "invalid value" (e.g. issue #111's
+    // execute_threshold cache-safety explanation). Only non-default Zod messages
+    // are kept — the generic "Too big"/"Invalid input" boilerplate adds nothing.
+    const customMessagesByKey = new Map<string, string>();
+    const GENERIC_ZOD_PREFIXES = ["Too big", "Too small", "Invalid input", "Invalid", "Expected"];
     for (const issue of parsed.error.issues) {
         const topKey = issue.path[0];
         if (topKey !== undefined) {
-            errorPaths.add(String(topKey));
+            const key = String(topKey);
+            errorPaths.add(key);
+            const msg = issue.message;
+            if (msg && !GENERIC_ZOD_PREFIXES.some((p) => msg.startsWith(p))) {
+                if (!customMessagesByKey.has(key)) {
+                    customMessagesByKey.set(key, msg);
+                }
+            }
         }
     }
 
@@ -274,8 +288,9 @@ function parsePluginConfig(
             // substitution may have already expanded secrets into rawConfig.
             delete patched[key];
             const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
+            const reason = customMessagesByKey.get(key);
             warnings.push(
-                `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultVal)}.`,
+                `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultVal)}.${reason ? ` ${reason}` : ""}`,
             );
         }
     }

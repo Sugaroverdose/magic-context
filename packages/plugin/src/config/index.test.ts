@@ -180,6 +180,20 @@ describe("loadPluginConfig — secret redaction", () => {
         // `number 5` is the human-friendly safe render.
         expect(combined).toMatch(/number 5/);
     });
+
+    it("rejects execute_threshold_percentage > 80 with the cache-safety explanation (issue #111)", () => {
+        const config = JSON.stringify({
+            execute_threshold_percentage: 85, // above cap (80)
+        });
+
+        const result = loadWithUserConfig(config);
+        const warnings = result.configWarnings ?? [];
+        const combined = warnings.join("\n");
+
+        expect(combined).toContain("execute_threshold_percentage");
+        // The custom message explains WHY, not just "too big".
+        expect(combined).toContain("capped at 80% for cache safety");
+    });
 });
 
 describe("loadPluginConfig — experimental graduation migration", () => {

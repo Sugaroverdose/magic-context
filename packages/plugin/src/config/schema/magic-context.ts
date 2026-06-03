@@ -5,6 +5,14 @@ import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_NUDGE_INTERVAL_TOKENS = 10_000;
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
+// Explains WHY execute_threshold is hard-capped at 80% (not just "too big").
+// A single agent step can be large enough to overflow the context window before
+// Magic Context can compact between turns; staying at/below 80% leaves headroom
+// to absorb that and compact safely instead of falling back to OpenCode's native
+// compaction (far harder to recover from). 80% also sits below the 85% emergency
+// and 95% block-and-recover bands, which are tuned around it.
+export const EXECUTE_THRESHOLD_CAP_MESSAGE =
+    "execute_threshold is capped at 80% for cache safety: a single large agent step can overflow the context window before Magic Context can compact between turns, forcing OpenCode's native compaction (hard to recover from). 80% also leaves headroom below the 85%/95% emergency bands. Use a value between 20 and 80.";
 export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
@@ -349,10 +357,10 @@ export const MagicContextConfigSchema = z
             ),
         execute_threshold_percentage: z
             .union([
-                z.number().min(20).max(80),
+                z.number().min(20).max(80, EXECUTE_THRESHOLD_CAP_MESSAGE),
                 z
-                    .object({ default: z.number().min(20).max(80) })
-                    .catchall(z.number().min(20).max(80)),
+                    .object({ default: z.number().min(20).max(80, EXECUTE_THRESHOLD_CAP_MESSAGE) })
+                    .catchall(z.number().min(20).max(80, EXECUTE_THRESHOLD_CAP_MESSAGE)),
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
             .describe(

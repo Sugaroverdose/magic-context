@@ -270,9 +270,24 @@ export function resolveExecuteThresholdDetail(
 
     // Cap at 80% — higher values create a gap between execute_threshold and
     // forceMaterialization (85%) where shouldRunHeuristics fires on defer
-    // passes without isCacheBustingPass, causing unguarded cache busts.
+    // passes without isCacheBustingPass, causing unguarded cache busts. (Config
+    // load normally rejects >80 via zod, but a runtime-derived value can still
+    // exceed it, so we clamp + warn here too.)
+    const cappedPercentage = Math.min(resolved, MAX_EXECUTE_THRESHOLD);
+    if (cappedPercentage < resolved) {
+        const dedupeKey = `pct|${options?.sessionId ?? "__global__"}|${modelKey ?? "__default__"}|${resolved}`;
+        if (!clampWarnSeen.has(dedupeKey)) {
+            clampWarnSeen.add(dedupeKey);
+            const msg = `execute_threshold clamped ${resolved}% → ${MAX_EXECUTE_THRESHOLD}% for ${modelKey ?? "default"} (capped for cache safety; a large step can overflow before compaction, and 80% stays below the 85%/95% emergency bands)`;
+            if (options?.sessionId) {
+                sessionLog(options.sessionId, `WARN: ${msg}`);
+            } else {
+                log(`[magic-context] WARN: ${msg}`);
+            }
+        }
+    }
     return {
-        percentage: Math.min(resolved, MAX_EXECUTE_THRESHOLD),
+        percentage: cappedPercentage,
         mode: "percentage",
         matchedKey,
     };
