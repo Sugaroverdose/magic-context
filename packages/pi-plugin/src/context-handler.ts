@@ -56,7 +56,9 @@ import {
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	type ContextDatabase,
+	adoptFallbackTagMessageId,
 	clearPendingPiCompactionMarkerStateIf,
+	findAdoptableFallbackTags,
 	getActiveTagsBySession,
 	getHistorianFailureState,
 	getPendingOps,
@@ -1223,6 +1225,85 @@ function firstPiTextContent(content: unknown): string | null {
 		}
 	}
 	return null;
+}
+
+/**
+ * Build a `messageId → fingerprint` map from the RAW pre-transform messages,
+ * keyed by the stable id each message resolves to this pass. Captured before
+ * `runPipeline` mutates text (temporal markers, §N§ prefix, caveman) so the
+ * fingerprint is byte-stable across the fallback-pass (in-flight) and the
+ * real-id-pass (settled) — the invariant tag adoption depends on. The
+ * fingerprint is persisted on the tag row at creation; only message-typed
+ * entries get one (tool tags are out of scope).
+ */
+function buildEntryFingerprintMap(
+	messages: readonly PiAgentMessage[],
+	resolveStableId: (msg: unknown, index: number) => string | undefined,
+): Map<string, string> {
+	const map = new Map<string, string>();
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		const id = resolveStableId(msg, i);
+		if (!id) continue;
+		const fp = piMessageEntryFingerprint(msg);
+		if (fp) map.set(id, fp);
+	}
+	return map;
+}
+
+/**
+ * Pi fallback-tag adoption pre-pass. Runs BEFORE tagging. For each message that
+ * now resolves to a REAL SessionEntry id this pass, find the tag(s) created for
+ * the same message under its earlier `pi-msg-*` fallback id (matched by raw
+ * fingerprint) and migrate them onto the real id — so the message keeps its
+ * tag_number (hence §N§ and all per-tag state) instead of getting a fresh tag
+ * and drifting. Per-part, uniqueness-guarded, race-safe; any miss degrades to a
+ * fresh allocation in `tagTranscript`. No-op for messages that are already on a
+ * real id or have no fallback predecessor.
+ */
+function adoptPiFallbackTags(
+	db: ContextDatabase,
+	sessionId: string,
+	tagger: Tagger,
+	fingerprintById: ReadonlyMap<string, string>,
+): void {
+	for (const [realMessageId, fingerprint] of fingerprintById) {
+		// Only real ids can be adoption targets; a pi-msg-* id has no fallback
+		// predecessor to migrate from.
+		if (realMessageId.startsWith("pi-msg-")) continue;
+		const candidates = findAdoptableFallbackTags(db, sessionId, fingerprint);
+		if (candidates.length === 0) continue;
+		// Group candidates by their fallback message base id (strip the :pN
+		// suffix). A unique base means exactly one fallback message carried this
+		// fingerprint → safe to adopt; duplicates (same fingerprint on >1
+		// fallback message) are ambiguous → skip, let tagTranscript allocate
+		// fresh.
+		const baseIds = new Set<string>();
+		for (const c of candidates) {
+			const m = /^(.*):p\d+$/.exec(c.messageId);
+			baseIds.add(m ? m[1] : c.messageId);
+		}
+		if (baseIds.size !== 1) continue;
+		for (const c of candidates) {
+			const ordinalMatch = /:p(\d+)$/.exec(c.messageId);
+			if (!ordinalMatch) continue;
+			const realContentId = `${realMessageId}:p${ordinalMatch[1]}`;
+			const migrated = adoptFallbackTagMessageId(
+				db,
+				sessionId,
+				c.tagNumber,
+				c.messageId,
+				realContentId,
+			);
+			if (migrated) {
+				// Drop the stale fallback alias, bind the real key — so the
+				// subsequent tagTranscript exact-key lookup hits the migrated
+				// tag and does NOT allocate a fresh one.
+				tagger.unbindTag(sessionId, c.messageId);
+				tagger.bindTag(sessionId, realContentId, c.tagNumber);
+			}
+		}
+	}
 }
 
 /**
@@ -2889,6 +2970,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
 	// ctx_reduce_enabled is false, in which case prefixes are skipped
 	// but DB-side tag IDs still get created so drops continue to work).
+	//
+	// Pi-only fallback-tag adoption: the newest (in-flight) message is tagged
+	// under an unstable pi-msg-* fallback id on the pass it is newest (its real
+	// SessionEntry id isn't resolvable yet), then resolves to its real id one
+	// pass later. Build a raw-message fingerprint map (BEFORE tagging mutates
+	// text) and migrate any fallback-id tag onto the real id up front, so the
+	// message keeps its tag_number/§N§ instead of getting a fresh tag. No-op for
+	// OpenCode (this path is Pi-only) and for messages already on a real id.
+	const entryFingerprintByMessageId = buildEntryFingerprintMap(
+		args.messages as PiAgentMessage[],
+		stableIdResolver,
+	);
+	adoptPiFallbackTags(
+		args.db,
+		args.sessionId,
+		args.tagger,
+		entryFingerprintByMessageId,
+	);
 	const tTag = performance.now();
 	const { targets } = tagTranscript(
 		args.sessionId,
@@ -2897,6 +2996,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.db,
 		{
 			skipPrefixInjection: !args.ctxReduceEnabled,
+			entryFingerprintByMessageId,
 		},
 	);
 	logTransformTiming(args.sessionId, "tagMessages", tTag);
