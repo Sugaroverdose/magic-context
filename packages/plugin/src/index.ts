@@ -153,6 +153,12 @@ const plugin: Plugin = async (ctx) => {
     // when the rest of the runtime is disabled by config or conflicts.
     const storageDir = getMagicContextStorageDir();
 
+    // Per-instance process-resident handles, hoisted to function scope so the
+    // server.instance.disposed cleanup (wired into the event handler below, which
+    // is returned outside this block) can stop them.
+    let rpcServer: MagicContextRpcServer | null = null;
+    let stopDreamTimerRegistration: (() => void) | undefined;
+
     // Start independent dream schedule timer at plugin level (not inside hooks)
     // so overnight dreaming works even when the user isn't chatting.
     if (pluginConfig.enabled) {
@@ -189,11 +195,11 @@ const plugin: Plugin = async (ctx) => {
                 : undefined,
             ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         };
-        await startDreamScheduleTimer(timerRegistration);
+        stopDreamTimerRegistration = await startDreamScheduleTimer(timerRegistration);
 
         // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus).
         // `storageDir` is hoisted above so the auto-update checker can also use it.
-        const rpcServer = new MagicContextRpcServer(storageDir, ctx.directory);
+        rpcServer = new MagicContextRpcServer(storageDir, ctx.directory);
         registerRpcHandlers(rpcServer, {
             directory: ctx.directory,
             config: pluginConfig,
@@ -332,6 +338,11 @@ const plugin: Plugin = async (ctx) => {
     // captures the correct owner for each flight.
     let lastChatContext: { providerID: string; modelID: string; agentName: string } | null = null;
 
+    // Identity of the project THIS plugin instance serves. Used to match
+    // server.instance.disposed events to our own instance (Desktop runs many
+    // instances per process; each is disposed independently).
+    const ownProjectIdentity = resolveProjectIdentity(ctx.directory);
+
     return {
         tool: tools,
         event: createEventHandler({
@@ -344,6 +355,37 @@ const plugin: Plugin = async (ctx) => {
                 // across every concurrent plugin instance on the machine.
                 storageDir,
             }),
+            // Orderly cleanup of THIS instance's process-resident resources when
+            // OpenCode disposes it (server.instance.disposed). Desktop runs many
+            // instances in one process, each disposed independently, so we only
+            // act when the disposed directory resolves to OUR project identity —
+            // tearing down a sibling instance's RPC server / dream timer would
+            // break still-live sessions. We deliberately do NOT dispose the
+            // native ONNX embedding session here: forcing onnxruntime-node's
+            // destructor on teardown makes the Bun N-API exit crash worse, not
+            // better (tracked upstream at oven-sh/bun#30291). The OS reclaims
+            // that memory on exit anyway.
+            onInstanceDisposed: (disposedDirectory: string) => {
+                if (resolveProjectIdentity(disposedDirectory) !== ownProjectIdentity) return;
+                try {
+                    autoUpdateAbort.abort();
+                } catch {
+                    // best-effort
+                }
+                try {
+                    stopDreamTimerRegistration?.();
+                } catch {
+                    // best-effort
+                }
+                try {
+                    rpcServer?.stop();
+                } catch {
+                    // best-effort
+                }
+                log(
+                    "[magic-context] instance disposed — stopped RPC server, dream timer, auto-update",
+                );
+            },
         }),
         "experimental.chat.messages.transform": createMessagesTransformHandler({
             magicContext: hooks.magicContext,
