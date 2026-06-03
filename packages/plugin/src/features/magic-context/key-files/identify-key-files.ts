@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { DREAMER_AGENT } from "../../../agents/dreamer";
 import { estimateTokens } from "../../../hooks/magic-context/read-session-formatting";
 import type { PluginContext } from "../../../plugin/types";
@@ -114,13 +114,21 @@ export function getKeyFileCandidates(
     const maxPerFileTokens = Math.min(tokenBudget / 2, 5000);
     // Filter to files within the project directory — long-running sessions may have
     // read files from other repos, which should not be pinned as key files.
-    const projectPrefix = projectDirectory ? `${projectDirectory.replace(/\/$/, "")}/` : undefined;
-    return stats.filter(
-        (s) =>
-            s.latestReadTokens > 0 &&
-            s.latestReadTokens <= maxPerFileTokens &&
-            (!projectPrefix || s.filePath.startsWith(projectPrefix)),
-    );
+    // Use the authoritative realpath + segment-aware containment check
+    // (isRelativeProjectFile), NOT a naive string prefix: a bare `startsWith`
+    // is not symlink-safe, not case-normalized, and not segment-aware, so an
+    // out-of-project path could be seeded into the Dreamer prompt before the
+    // commit-time validator runs. isRelativeProjectFile takes a project-relative
+    // path, so convert the absolute read path first and reject anything that
+    // resolves outside the project root.
+    return stats.filter((s) => {
+        if (!(s.latestReadTokens > 0 && s.latestReadTokens <= maxPerFileTokens)) {
+            return false;
+        }
+        if (!projectDirectory) return true;
+        const rel = isAbsolute(s.filePath) ? relative(projectDirectory, s.filePath) : s.filePath;
+        return isRelativeProjectFile(projectDirectory, rel);
+    });
 }
 
 /**

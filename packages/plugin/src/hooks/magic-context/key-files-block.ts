@@ -151,7 +151,13 @@ export function buildKeyFilesBlock(
     const blocks: string[] = [];
     let used = 0;
     for (const row of rows) {
-        if (used + row.localTokenEstimate > config.tokenBudget) break;
+        // fit/skip, not break: rows arrive in `generated_at DESC, path ASC`
+        // order (effectively alphabetical, since a Dreamer pass stamps one
+        // generated_at), NOT importance order. A `break` on the first overflow
+        // would let one large alphabetically-early file suppress smaller later
+        // files that would have fit. `continue` greedily fills the budget with
+        // whatever fits (same knapsack fill the memory trim uses).
+        if (used + row.localTokenEstimate > config.tokenBudget) continue;
         blocks.push(
             `  <key-file path="${escapeXmlAttr(row.path)}">\n${escapeXmlContent(row.content)}\n  </key-file>`,
         );

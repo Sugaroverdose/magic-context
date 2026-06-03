@@ -12,7 +12,8 @@ const { runMigrations } = await import("../migrations");
 const { acquireLease, getLeaseHolder, isLeaseActive, releaseLease, renewLease } = await import(
     "./lease"
 );
-const { ensureDreamQueueTable, enqueueDream } = await import("./queue");
+const { ensureDreamQueueTable, enqueueDream, clearStaleEntries, hasActiveDreamLease } =
+    await import("./queue");
 const { processDreamQueue, registerDreamProjectDirectory, runDream } = await import("./runner");
 const { getDreamRuns } = await import("./storage-dream-runs");
 const { getDreamState, setDreamState } = await import("./storage-dream-state");
@@ -115,6 +116,53 @@ describe("dreamer", () => {
             nowSpy.mockReturnValue(122_001);
             expect(acquireLease(db, "holder-b")).toBe(true);
             expect(getLeaseHolder(db)).toBe("holder-b");
+            nowSpy.mockRestore();
+        });
+    });
+
+    describe("clearStaleEntries", () => {
+        it("scopes the delete to the given project, leaving other projects' rows", () => {
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+            const old = Date.now() - 10 * 60 * 60 * 1000; // 10h ago (stale)
+            db.prepare(
+                "INSERT INTO dream_queue (project_path, reason, enqueued_at, started_at) VALUES (?, 'r', ?, ?)",
+            ).run("proj-a", old, old);
+            db.prepare(
+                "INSERT INTO dream_queue (project_path, reason, enqueued_at, started_at) VALUES (?, 'r', ?, ?)",
+            ).run("proj-b", old, old);
+
+            // Scoped reap removes only proj-a; proj-b (possibly another host's
+            // still-running row) survives.
+            const removed = clearStaleEntries(db, 60 * 60 * 1000, "proj-a");
+            expect(removed).toBe(1);
+            const remaining = db
+                .prepare("SELECT project_path FROM dream_queue ORDER BY project_path")
+                .all() as Array<{ project_path: string }>;
+            expect(remaining.map((r) => r.project_path)).toEqual(["proj-b"]);
+        });
+
+        it("hasActiveDreamLease gates reaping a healthy long-running dream's own row", () => {
+            db = createTestDb();
+            ensureDreamQueueTable(db);
+            const nowSpy = spyOn(Date, "now");
+            nowSpy.mockReturnValue(1_000_000);
+            // A live lease exists (renewing dream); its queue row started long ago.
+            expect(acquireLease(db, "holder-live")).toBe(true);
+            const longAgo = 1_000_000 - 10 * 60 * 60 * 1000;
+            db.prepare(
+                "INSERT INTO dream_queue (project_path, reason, enqueued_at, started_at) VALUES (?, 'r', ?, ?)",
+            ).run("proj-live", longAgo, longAgo);
+
+            // Caller's contract: skip reaping while the lease is active.
+            expect(hasActiveDreamLease(db)).toBe(true);
+            if (!hasActiveDreamLease(db)) {
+                clearStaleEntries(db, 60 * 60 * 1000, "proj-live");
+            }
+            const count = (
+                db.prepare("SELECT COUNT(*) AS c FROM dream_queue").get() as { c: number }
+            ).c;
+            expect(count).toBe(1); // own row NOT deleted mid-run
             nowSpy.mockRestore();
         });
     });

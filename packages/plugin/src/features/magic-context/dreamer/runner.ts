@@ -29,6 +29,7 @@ import {
     clearStaleEntries,
     dequeueNext,
     getEntryRetryCount,
+    hasActiveDreamLease,
     removeDreamEntry,
     resetDreamEntry,
 } from "./queue";
@@ -1351,9 +1352,14 @@ export async function processDreamQueue(args: {
      */
     fallbackModels?: readonly string[];
 }): Promise<DreamRunResult | null> {
-    // Use configured max runtime + 30min buffer for stale threshold instead of hardcoded 2h
+    // Use configured max runtime + 30min buffer for stale threshold instead of hardcoded 2h.
+    // Only reap when no live lease exists — a healthy long-running dream renews its lease and
+    // would otherwise have its own queue row deleted mid-run. Scope to this project so the
+    // cross-process shared queue doesn't reap another host's still-running rows.
     const maxRuntimeMs = args.maxRuntimeMinutes * 60 * 1000;
-    clearStaleEntries(args.db, maxRuntimeMs + 30 * 60 * 1000);
+    if (!hasActiveDreamLease(args.db)) {
+        clearStaleEntries(args.db, maxRuntimeMs + 30 * 60 * 1000, args.projectIdentity);
+    }
     const entry = dequeueNext(args.db, args.projectIdentity);
     if (!entry) {
         return null;

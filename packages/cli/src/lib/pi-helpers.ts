@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { findOnPath } from "./find-on-path";
 
 export interface PiBinaryInfo {
     path: string;
@@ -29,27 +30,13 @@ export function getStaticModels(): string[] {
     return [...STATIC_MODELS];
 }
 
-function commandExists(command: string, args: string[]): string | null {
-    try {
-        const output = execFileSync(command, args, {
-            encoding: "utf-8",
-            stdio: ["ignore", "pipe", "ignore"],
-        }).trim();
-        return output || null;
-    } catch {
-        return null;
-    }
-}
-
 export function detectPiBinary(): PiBinaryInfo | null {
-    const fromPath =
-        process.platform === "win32"
-            ? commandExists("where", ["pi"])
-            : commandExists("which", ["pi"]);
-    if (fromPath) {
-        const first = fromPath.split(/\r?\n/).find(Boolean);
-        if (first) return { path: first, source: "path" };
-    }
+    // Node-only PATH walker, not which/where: shelling out fails in
+    // Alpine/slim/Nix/bunx sandboxes that lack those binaries (same reason the
+    // OpenCode detector switched to findOnPath). findOnPath handles platform
+    // extensions (.cmd/.exe) and X_OK checks internally.
+    const fromPath = findOnPath("pi");
+    if (fromPath) return { path: fromPath, source: "path" };
 
     const homeCandidate =
         process.platform === "win32"

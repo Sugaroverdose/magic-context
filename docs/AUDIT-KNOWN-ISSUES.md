@@ -270,16 +270,31 @@ auditor re-finding one adds no new information.
   reads the legacy `memory_block_cache`) — a display divergence from the TUI
   sidebar's v2 breakdown.
 
-### A14. Vestigial `session_facts` / `plugin_messages` tables
+### A14. Vestigial `session_facts` / `plugin_messages` / `user_memory_candidates` tables
 
-Both are documented as retired (facts are promoted memories; the plugin-message
-bus is superseded by RPC) but are still created on every DB, migrated, and
-deleted in `clearSession`. `getSessionFactsVersion` returns a hard-coded `0` and
-the `sessionFactsVersion` branch in `mustMaterialize` is kept inert-safe but
-never fires; no module imports `plugin-messages.ts` at runtime. Dropping them is
-a schema migration that should be gated on the minimum supported TUI version no
-longer polling the old bus — deferred to avoid a migration during active
-dogfooding. No correctness impact; the inert branch is a no-op.
+These are documented as retired/latent (facts are promoted memories; the
+plugin-message bus is superseded by RPC; `user_memories` defaults off) but are
+still created on every DB, migrated, and deleted in `clearSession`.
+`getSessionFactsVersion` returns a hard-coded `0` and the `sessionFactsVersion`
+branch in `mustMaterialize` is kept inert-safe but never fires; no module imports
+`plugin-messages.ts` at runtime. Dropping the truly-dead ones is a schema
+migration that should be gated on the minimum supported TUI version no longer
+polling the old bus — deferred to avoid a migration during active dogfooding. No
+correctness impact; the inert branch is a no-op.
+
+**Audit clarification — these ARE created on fresh installs.** They are created
+by **migrations** (`plugin_messages` v2; `user_memory_candidates` + `user_memories`
+v3; `session_facts` via `initializeDatabase`), NOT all by `initializeDatabase`.
+`openDatabase` runs `initializeDatabase(db)` **then `runMigrations(db)`** on every
+open, and a fresh DB has `getCurrentVersion()===0` so it applies ALL v1–v26
+migrations. So `clearSession`'s DELETEs against these tables never throw on a
+fresh install — verified empirically and locked by the
+`clearSession runs on a fresh DB` regression test in `storage-db.test.ts` (asserts
+every one of the ~16 tables `clearSession` touches exists fresh). A repeated audit
+claim that "`clearSession` rolls back on fresh DBs because table X is never
+created" is a **false positive**: it assumes fresh installs build schema from
+`initializeDatabase` alone and skip migrations, which is not how `openDatabase`
+works.
 
 ### A15. In-session memory mutations have no dedicated cache-bust signal
 
@@ -328,3 +343,46 @@ PARITY.md discipline + nine rounds of cross-harness audits rather than an
 automated equivalence test. A test feeding identical DB state through both paths
 and asserting byte-identical m[0] is a worthwhile future addition; the divergence
 risk is documented, not unguarded.
+
+### A20. m[1] memory-mutation surfacing uses the memory-mutation cursor, not the compartment cursor (by design)
+
+A repeated audit claim is that the m[1] drift/refold watcher compares
+`maxMutationId` (`m0_mutation_log`, compartment ops) instead of
+`maxMemoryMutationId` (`memory_mutation_log`), so in-session memory edits never
+surface. **False positive.** Two independent mechanisms exist and both are
+correct: (1) `mustMaterialize` deliberately EXCLUDES `maxMemoryMutationId` from
+its trigger set (an m[0] hard-bust on every memory edit would defeat the
+supersede-delta design); (2) on every cache-busting pass `softRefreshCachedM1` →
+`renderM1WithMetadata` reads `memory_mutation_log` via
+`getMemoryMutationsForRender(afterId = markers.maxMemoryMutationId)` and renders
+the `<memory-updates>` block, AND the +15% drift refold has a size-independent
+`memoryUpdateCount > 40` trigger. So a non-additive memory mutation surfaces on
+the next cache-busting pass — exactly the A15 "next natural bust" window, not an
+unbounded-staleness bug. The two watermarks track different things on purpose.
+
+### A21. `softRefreshCachedM1` post-ROLLBACK fallback read is intentionally un-transactioned
+
+`readCachedM0M1Row` is a SINGLE atomic SELECT, so SQLite guarantees all
+m0/m1/marker columns come from the same committed row — a torn cross-column read
+is impossible. The post-ROLLBACK fallback adopts whichever sibling committed most
+recently (newer and still self-consistent), which is correct. Wrapping a single
+SELECT in `BEGIN/COMMIT` would add write-lock contention on a hot path (every
+cache-busting pass) for zero consistency gain. Inline-commented at the call site.
+
+### A22. Pi `trimPiMessagesToBoundary` worst-case O(N²) orphan sweep
+
+The `while(changed)` re-scan with per-result owner lookup is O(N²) worst-case,
+but bounded (the removal set grows monotonically) and the cascade depth is tiny
+in practice (tool-call/result pairs are adjacent). This is carefully-audited
+cross-turn pairing logic (nine Pi rounds); a single-pass rewrite carries more
+correctness risk than the Low perf payoff on the realistic input sizes. Deferred.
+
+### A23. `flushStaleUpdates` map growth + `ctx_memory merge` tier visibility — both false positives
+
+(1) `flushStaleUpdates` calls `staleUpdates.clear()` **before** the write loop,
+so a SQLITE_BUSY write failure does NOT re-queue the entry — the map cannot grow;
+it also already logs on failure. (2) `ctx_memory merge` runs `insertMemory`
+(active) → `mergeMemoryStats` (final tier) → `supersededMemory` inside ONE
+`deps.db.transaction()`, so SQLite isolation makes the intermediate `active` tier
+invisible to concurrent autocommit readers (they see pre-tx or fully-committed
+state only). Neither is a real race.

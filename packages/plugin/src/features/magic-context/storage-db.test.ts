@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeDatabase, isDatabasePersisted, openDatabase } from "./storage-db";
+import { clearSession } from "./storage-meta-session";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -71,6 +72,59 @@ describe("storage-db", () => {
                     "session_meta",
                 ]),
             );
+        });
+
+        it("#when clearSession runs on a fresh DB #then every table it deletes from exists (no rollback)", () => {
+            // Regression guard: clearSession runs ~18 DELETEs in one
+            // transaction. If any target table is missing on a fresh install
+            // (e.g. a new DELETE added without a CREATE/migration), the first
+            // prepare() throws inside the tx and rolls back EVERY delete — so no
+            // per-session row is ever removed (unbounded growth). openDatabase
+            // runs initializeDatabase() THEN runMigrations(), and a fresh DB
+            // applies all migrations, so every table must exist. This asserts
+            // clearSession completes and actually removes the seeded row.
+            useTempDataHome("storage-db-clearsession-");
+            const db = openDatabase();
+
+            const sessionId = "ses_clearsession_fresh";
+            db.prepare("INSERT INTO session_meta (session_id, harness) VALUES (?, 'opencode')").run(
+                sessionId,
+            );
+            expect(
+                db.prepare("SELECT 1 FROM session_meta WHERE session_id = ?").get(sessionId),
+            ).toBeTruthy();
+
+            // Every table clearSession touches must exist on a fresh DB.
+            const clearSessionTables = [
+                "pending_ops",
+                "source_contents",
+                "tags",
+                "session_meta",
+                "compartments",
+                "session_facts",
+                "compartment_state_lease",
+                "notes",
+                "recomp_compartments",
+                "recomp_facts",
+                "user_memory_candidates",
+                "m0_mutation_log",
+                "compartment_events",
+                "subagent_invocations",
+                "historian_runs",
+                "plugin_messages",
+            ];
+            for (const table of clearSessionTables) {
+                expect(
+                    db
+                        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                        .get(table),
+                ).toBeTruthy();
+            }
+
+            expect(() => clearSession(db, sessionId)).not.toThrow();
+            expect(
+                db.prepare("SELECT 1 FROM session_meta WHERE session_id = ?").get(sessionId),
+            ).toBeFalsy();
         });
 
         it("#when called first time #then creates required session-scoped indexes", () => {

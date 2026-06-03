@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { runContextDump } from "./context-dump/run-context-dump"
+import { runContextDump } from "../packages/plugin/scripts/context-dump/run-context-dump"
 
 function usage(): string {
 	return "Usage: bun run scripts/context-dump.ts <session_id>"

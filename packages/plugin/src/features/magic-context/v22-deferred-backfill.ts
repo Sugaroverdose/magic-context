@@ -377,6 +377,59 @@ export async function runDeferredV22Backfill(
     };
 }
 
+/**
+ * Collision-aware single-row rekey, mirroring the main batch backfill's merge
+ * branch. Rekeying a memory's project_path can violate
+ * UNIQUE(project_path, category, normalized_hash) when the target identity
+ * already holds an equivalent memory (one project written under multiple raw
+ * legacy paths). A blind UPDATE there aborts the whole transaction and leaves
+ * the doctor repair stuck. Instead: if a collision row exists, merge into it
+ * (keep the larger seen_count, delete the source — embedding FK-cascades) and
+ * report it as changed; otherwise do the guarded UPDATE.
+ *
+ * Returns true if the row was rekeyed or merged. MUST run inside a transaction.
+ */
+function rekeyMemoryRowWithCollisionMerge(
+    db: Database,
+    rowId: number,
+    fromProjectPath: string,
+    toIdentity: string,
+): boolean {
+    const row = db
+        .prepare("SELECT category, normalized_hash, seen_count FROM memories WHERE id = ?")
+        .get(rowId) as
+        | { category: string; normalized_hash: string; seen_count: number }
+        | undefined;
+    if (!row) return false;
+
+    const collision = db
+        .prepare(
+            `SELECT id, seen_count FROM memories
+             WHERE project_path = ? AND category = ? AND normalized_hash = ?
+             LIMIT 1`,
+        )
+        .get(toIdentity, row.category, row.normalized_hash) as
+        | { id: number; seen_count: number }
+        | undefined;
+
+    if (collision && collision.id !== rowId) {
+        const mergedSeen = Math.max(collision.seen_count ?? 1, row.seen_count ?? 1);
+        if (mergedSeen !== (collision.seen_count ?? 1)) {
+            db.prepare("UPDATE memories SET seen_count = ? WHERE id = ?").run(
+                mergedSeen,
+                collision.id,
+            );
+        }
+        db.prepare("DELETE FROM memories WHERE id = ?").run(rowId);
+        return true;
+    }
+
+    const result = db
+        .prepare("UPDATE memories SET project_path = ? WHERE id = ? AND project_path = ?")
+        .run(toIdentity, rowId, fromProjectPath) as { changes?: number };
+    return (result.changes ?? 0) > 0;
+}
+
 export async function doctorRetryV22Backfill(db: Database): Promise<{
     attempted: number;
     succeeded: number;
@@ -422,15 +475,18 @@ export async function doctorRetryV22Backfill(db: Database): Promise<{
                     return;
                 }
 
-                const result = db
-                    .prepare(
-                        "UPDATE memories SET project_path = ? WHERE id = ? AND project_path = ?",
-                    )
-                    .run(identity, failure.row_id, failure.raw_project_path) as {
-                    changes?: number;
-                };
+                // Collision-aware rekey: a blind UPDATE here aborts on
+                // UNIQUE(project_path, category, normalized_hash) when the
+                // target identity already holds an equivalent memory, leaving
+                // the failure permanently unrepairable via doctor.
+                const changed = rekeyMemoryRowWithCollisionMerge(
+                    db,
+                    failure.row_id,
+                    failure.raw_project_path,
+                    identity,
+                );
 
-                if ((result.changes ?? 0) > 0) {
+                if (changed) {
                     upsertRekeyMap(db, failure.raw_project_path, identity, now);
                     const legacyRustIdentity = computeLegacyRustDirIdentity(
                         failure.raw_project_path,
@@ -479,15 +535,22 @@ export async function doctorRekeyV22DirIdentity(
 
     db.transaction(() => {
         const now = Date.now();
-        const matchingRows = db
-            .prepare("SELECT COUNT(*) AS count FROM memories WHERE project_path = ?")
-            .get(oldIdentity) as { count: number };
+        // Per-row collision-aware rekey: a bulk
+        // `UPDATE ... WHERE project_path = oldIdentity` aborts the whole
+        // transaction on UNIQUE(project_path, category, normalized_hash) when
+        // some rows collide with memories already under newIdentity. Iterate so
+        // colliding rows merge instead of poisoning the batch.
+        const rowIds = (
+            db.prepare("SELECT id FROM memories WHERE project_path = ?").all(oldIdentity) as Array<{
+                id: number;
+            }>
+        ).map((r) => r.id);
         upsertRekeyMap(db, oldIdentity, newIdentity, now);
-        db.prepare("UPDATE memories SET project_path = ? WHERE project_path = ?").run(
-            newIdentity,
-            oldIdentity,
-        );
-        changedRows = matchingRows.count;
+        for (const rowId of rowIds) {
+            if (rekeyMemoryRowWithCollisionMerge(db, rowId, oldIdentity, newIdentity)) {
+                changedRows += 1;
+            }
+        }
         if (changedRows > 0) {
             bumpProjectMemoryEpochInTransaction(db, newIdentity, now);
         }

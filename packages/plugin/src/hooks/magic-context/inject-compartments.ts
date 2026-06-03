@@ -1592,6 +1592,14 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         const row = readCachedM0M1Row(options.db, options.sessionId);
         if (!row || !cachedRowMatchesState(row, options.state)) {
             options.db.exec("ROLLBACK");
+            // Post-ROLLBACK fallback read is intentionally NOT wrapped in a
+            // transaction: readCachedM0M1Row is a SINGLE atomic SELECT, so
+            // SQLite guarantees m0/m1/markers all come from the same committed
+            // row — a torn cross-column read is impossible. If another sibling
+            // commits between ROLLBACK and this read we simply adopt that newer
+            // (still self-consistent) row, which is correct. Wrapping a single
+            // SELECT in BEGIN/COMMIT would add write-lock contention on this hot
+            // path (every cache-busting pass) for zero consistency gain.
             const sibling = readCachedM0M1Row(options.db, options.sessionId);
             if (!sibling) throw new RenderM1InvalidMarkersError(options.sessionId);
             applyCachedRowToState(options.state, sibling);

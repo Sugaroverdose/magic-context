@@ -260,10 +260,14 @@ jobs:
 
       # pi-cross-harness.test.ts spawns BOTH a Pi runner and an OpenCode
       # serve to verify cross-harness memory sharing, so this job needs
-      # opencode on PATH too — same install path the OpenCode host job uses.
+      # opencode on PATH too — same PINNED version the OpenCode host job uses.
+      # Pin to 1.15.4: opencode 1.15.5 on linux-amd64 never responds to HTTP
+      # /doc after stdout reports "server listening", so waitForReady() times
+      # out and the cross-harness test hangs (same hang the OpenCode host job
+      # pins around). Keep both jobs on the same version.
       - name: Install opencode
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.4
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode on PATH

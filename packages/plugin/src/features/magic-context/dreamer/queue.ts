@@ -27,7 +27,7 @@ export function ensureDreamQueueTable(db: Database): void {
     ).run();
 }
 
-function hasActiveDreamLease(db: Database): boolean {
+export function hasActiveDreamLease(db: Database): boolean {
     try {
         return isLeaseActive(db);
     } catch (error) {
@@ -172,11 +172,31 @@ export function getEntryRetryCount(db: Database, id: number): number {
     return row?.retry_count ?? 0;
 }
 
-/** Clear stale started entries (stuck for more than maxAgeMs). */
-export function clearStaleEntries(db: Database, maxAgeMs: number): number {
+/**
+ * Clear stale started entries (stuck for more than maxAgeMs).
+ *
+ * Callers MUST gate this on `!hasActiveDreamLease(db)` — a healthy long-running
+ * dream can exceed `maxAgeMs` while still renewing its lease, and deleting its
+ * own row mid-run is the bug this guard prevents (mirrors the enqueue path).
+ *
+ * `projectIdentity` scopes the delete to one project. The shared `dream_queue`
+ * is cross-process (OpenCode + Pi); a global delete would reap other hosts'
+ * still-running rows. Omit only for the legacy "reap any" test path.
+ */
+export function clearStaleEntries(
+    db: Database,
+    maxAgeMs: number,
+    projectIdentity?: string,
+): number {
     const cutoff = Date.now() - maxAgeMs;
-    const result = db
-        .prepare("DELETE FROM dream_queue WHERE started_at IS NOT NULL AND started_at < ?")
-        .run(cutoff);
+    const result = projectIdentity
+        ? db
+              .prepare(
+                  "DELETE FROM dream_queue WHERE project_path = ? AND started_at IS NOT NULL AND started_at < ?",
+              )
+              .run(projectIdentity, cutoff)
+        : db
+              .prepare("DELETE FROM dream_queue WHERE started_at IS NOT NULL AND started_at < ?")
+              .run(cutoff);
     return result.changes;
 }

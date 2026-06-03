@@ -549,6 +549,33 @@ export async function runPostTransformPhase(
                 "transform: m[0]/m[1] injection failed:",
                 getErrorMessage(error),
             );
+            // Fail-closed: prepareCompartmentInjection already spliced the
+            // summarized raw history out of `messages` (transform.ts), so if
+            // m[0]/m[1] injection throws, the model would otherwise receive
+            // NEITHER the raw history NOR <session-history> — silent context
+            // loss. Re-inject the prepared legacy block as a degraded fallback
+            // so the compacted history is still present this pass. This pass
+            // already busted (it threw), so the non-m0/m1 shape costs nothing;
+            // the next pass re-materializes the proper m[0]/m[1] layout.
+            if (args.pendingCompartmentInjection) {
+                try {
+                    renderCompartmentInjection(
+                        args.sessionId,
+                        args.messages,
+                        args.pendingCompartmentInjection,
+                    );
+                    sessionLog(
+                        args.sessionId,
+                        "transform: rendered legacy <session-history> fallback after m[0]/m[1] failure",
+                    );
+                } catch (fallbackError) {
+                    sessionLog(
+                        args.sessionId,
+                        "transform: legacy fallback injection also failed:",
+                        getErrorMessage(fallbackError),
+                    );
+                }
+            }
         }
         logTransformTiming(args.sessionId, "pp.injectM0M1", tInjectM0M1);
     } else if (args.fullFeatureMode && args.pendingCompartmentInjection) {

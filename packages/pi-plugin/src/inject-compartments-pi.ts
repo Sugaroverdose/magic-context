@@ -676,13 +676,24 @@ function readCurrentMarkersFromCompartments(
 	const projectState = getProjectState(db, state.projectIdentity);
 	const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 	return {
+		// reduce, not Math.max(...spread): a project with very many
+		// compartments/memories (100K+) blows the call-stack arg limit and
+		// throws RangeError, breaking m[0]/m[1] rendering for that session.
+		// OpenCode uses SQL COALESCE(MAX(id),0) with no such limit.
 		maxCompartmentSeq:
 			compartments.length > 0
-				? Math.max(...compartments.map((compartment) => compartment.sequence))
+				? compartments.reduce(
+						(max, compartment) =>
+							compartment.sequence > max ? compartment.sequence : max,
+						EMPTY_MAX_COMPARTMENT_SEQ,
+					)
 				: EMPTY_MAX_COMPARTMENT_SEQ,
 		maxMemoryId:
 			memories.length > 0
-				? Math.max(...memories.map((memory) => memory.id))
+				? memories.reduce(
+						(max, memory) => (memory.id > max ? memory.id : max),
+						0,
+					)
 				: 0,
 		maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
 		maxMemoryMutationId: getMaxMemoryMutationId(db, state.projectIdentity) ?? 0,
