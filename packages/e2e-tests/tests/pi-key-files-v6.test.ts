@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
+import { Database } from "../../plugin/src/shared/sqlite";
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -78,7 +78,7 @@ function openSeedDb(sharedDataDir: string): { db: Database; dbPath: string } {
     const dir = join(sharedDataDir, "cortexkit", "magic-context");
     mkdirSync(dir, { recursive: true });
     const dbPath = join(dir, "context.db");
-    const db = new Database(dbPath, { create: true, readwrite: true });
+    const db = new Database(dbPath);
     initializeDatabase(db);
     runMigrations(db);
     return { db, dbPath };
@@ -90,7 +90,7 @@ function replaceKeyFiles(args: {
     files: Array<{ path: string; disk: string; injected: string; tokens?: number }>;
 }): number {
     const projectPath = args.projectPath;
-    const db = new Database(args.dbPath, { readwrite: true });
+    const db = new Database(args.dbPath);
     try {
         db.exec("BEGIN IMMEDIATE");
         db.prepare("DELETE FROM project_key_files WHERE project_path = ?").run(projectPath);
