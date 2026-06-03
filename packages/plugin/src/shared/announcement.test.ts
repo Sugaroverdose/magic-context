@@ -8,8 +8,11 @@ import * as path from "node:path";
  * `getMagicContextStorageDir()`. The behavior we test:
  *   1. `markAnnouncementSeen` then `readLastAnnouncedVersion` round-trips
  *   2. `shouldShowAnnouncement` returns false after a matching mark
- *   3. `shouldShowAnnouncement` returns true after a non-matching mark
- *   4. Empty-version inputs are no-ops (don't crash, don't write garbage)
+ *   3. `shouldShowAnnouncement` returns true after a non-matching (older) mark
+ *   4. `shouldShowAnnouncement` seeds state + returns false on first run / wiped
+ *      sandbox (no prior file), so fresh installs and ephemeral envs aren't
+ *      spammed with a changelog (issue #99)
+ *   5. Empty-version inputs are no-ops (don't crash, don't write garbage)
  *
  * We isolate writes by pointing `XDG_DATA_HOME` at a temp dir before requiring
  * the module fresh per test, since the module captures the storage path at
@@ -110,9 +113,14 @@ describe("shouldShowAnnouncement gating", () => {
         expect(shouldShowAnnouncement()).toBe(false);
     });
 
-    test("returns true when the live version was never marked", async () => {
+    test("seeds state and returns false on first run / wiped sandbox (issue #99)", async () => {
         const mod = await import(`./announcement?t=${Date.now()}-none`);
-        const { ANNOUNCEMENT_VERSION, ANNOUNCEMENT_FEATURES, shouldShowAnnouncement } = mod;
+        const {
+            ANNOUNCEMENT_VERSION,
+            ANNOUNCEMENT_FEATURES,
+            shouldShowAnnouncement,
+            readLastAnnouncedVersion,
+        } = mod;
 
         if (!ANNOUNCEMENT_VERSION || ANNOUNCEMENT_FEATURES.length === 0) {
             // When empty, the gate is always false regardless of state
@@ -120,8 +128,15 @@ describe("shouldShowAnnouncement gating", () => {
             return;
         }
 
-        // No mark has been written in this fresh tmpRoot, so the gate is open
-        expect(shouldShowAnnouncement()).toBe(true);
+        // No mark exists yet (fresh install or ephemeral/wiped sandbox). The
+        // gate must NOT announce — it seeds the state to the current version and
+        // returns false, so first-run users and disposable containers are never
+        // spammed with a changelog they have no context for.
+        expect(readLastAnnouncedVersion()).toBe("");
+        expect(shouldShowAnnouncement()).toBe(false);
+        // The seed was written, so a subsequent check stays quiet too.
+        expect(readLastAnnouncedVersion()).toBe(ANNOUNCEMENT_VERSION);
+        expect(shouldShowAnnouncement()).toBe(false);
     });
 
     test("returns true when a different (older) version is marked", async () => {

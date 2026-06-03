@@ -89,8 +89,31 @@ export function markAnnouncementSeen(version: string): void {
  * True when the configured `ANNOUNCEMENT_VERSION` has not yet been dismissed
  * AND there is at least one feature to show. Used by both the TUI dialog path
  * and the Desktop ignored-message fallback.
+ *
+ * First-run / sandbox handling: when NO state file exists yet, we seed it to the
+ * current `ANNOUNCEMENT_VERSION` and return false instead of announcing. This
+ * covers two cases that previously spammed the dialog (issue #99):
+ *   - Fresh installs: a brand-new user shouldn't be shown a changelog of release
+ *     bullets they have no context for — they need onboarding, not patch notes.
+ *   - Ephemeral/sandbox environments (Docker, CI, disposable dev containers)
+ *     where the storage dir is wiped between launches: without the seed, the
+ *     missing file made the announcement re-show on every single startup.
+ * Real upgrades still announce exactly once: an existing user already has a
+ * state file at the prior version, so the version mismatch shows the dialog and
+ * dismissing it advances the file to the current version.
+ *
+ * The seed is a deliberate write side-effect on the "no file" branch — folding
+ * it here (rather than a separate startup call) makes every caller path (plugin
+ * startup, Pi startup, TUI rpc pull) consistent with no ordering dependency.
  */
 export function shouldShowAnnouncement(): boolean {
     if (!ANNOUNCEMENT_VERSION || ANNOUNCEMENT_FEATURES.length === 0) return false;
-    return readLastAnnouncedVersion() !== ANNOUNCEMENT_VERSION;
+    const lastVersion = readLastAnnouncedVersion();
+    if (!lastVersion) {
+        // No prior state: fresh install or wiped sandbox. Seed to current and
+        // skip the announcement so we never pester first-run / ephemeral envs.
+        markAnnouncementSeen(ANNOUNCEMENT_VERSION);
+        return false;
+    }
+    return lastVersion !== ANNOUNCEMENT_VERSION;
 }
