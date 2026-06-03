@@ -5,31 +5,451 @@
   "description": "Configuration schema for the @cortexkit/opencode-magic-context plugin. Place as magic-context.jsonc in your project root or ~/.config/opencode/.",
   "type": "object",
   "properties": {
-    "$schema": {
-      "type": "string"
-    },
     "enabled": {
-      "type": "boolean",
       "default": true,
-      "description": "Enable magic context plugin"
+      "description": "Enable magic context (default: true)",
+      "type": "boolean"
+    },
+    "auto_update": {
+      "description": "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
+      "type": "boolean"
     },
     "ctx_reduce_enabled": {
-      "type": "boolean",
       "default": true,
-      "description": "When false, ctx_reduce tool is hidden, all nudges disabled, and prompt guidance about ctx_reduce stripped. Heuristic cleanup, compartments, memory, and other features still work."
+      "description": "When false, ctx_reduce tool is hidden, all nudges disabled, and prompt guidance about ctx_reduce stripped. Heuristic cleanup, compartments, memory, and other features still work. (default: true)",
+      "type": "boolean"
+    },
+    "historian": {
+      "description": "Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.)",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
+          "type": "string"
+        },
+        "temperature": {
+          "description": "Sampling temperature (0-2)",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "top_p": {
+          "description": "Nucleus sampling top_p (0-1)",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "prompt": {
+          "description": "Additional system prompt text",
+          "type": "string"
+        },
+        "tools": {
+          "description": "Tool enable/disable overrides",
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "disable": {
+          "description": "Disable this agent",
+          "type": "boolean"
+        },
+        "description": {
+          "description": "Agent description",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Agent mode (subagent, primary, or all)",
+          "type": "string",
+          "enum": [
+            "subagent",
+            "primary",
+            "all"
+          ]
+        },
+        "color": {
+          "description": "Hex color for the agent (e.g. '#a1b2c3')",
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "maxSteps": {
+          "description": "Maximum tool-call steps per invocation",
+          "type": "number"
+        },
+        "permission": {
+          "description": "Per-tool permission overrides",
+          "type": "object",
+          "properties": {
+            "edit": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "bash": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
+              ]
+            },
+            "webfetch": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "doom_loop": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "external_directory": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            }
+          }
+        },
+        "maxTokens": {
+          "description": "Maximum output tokens",
+          "type": "number"
+        },
+        "variant": {
+          "description": "OpenCode reasoning variant (e.g. for extended thinking)",
+          "type": "string"
+        },
+        "fallback_models": {
+          "description": "Fallback model IDs if primary is unavailable",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "two_pass": {
+          "default": false,
+          "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",
+          "type": "boolean"
+        },
+        "thinking_level": {
+          "description": "Pi only: explicit thinking level passed as --thinking <level> to Pi historian subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off | minimal | low | medium | high | xhigh",
+          "type": "string",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        }
+      }
+    },
+    "dreamer": {
+      "description": "Dreamer agent + scheduling configuration (model, fallback_models, disable, schedule, tasks, etc.)",
+      "type": "object",
+      "properties": {
+        "model": {
+          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
+          "type": "string"
+        },
+        "temperature": {
+          "description": "Sampling temperature (0-2)",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "top_p": {
+          "description": "Nucleus sampling top_p (0-1)",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "prompt": {
+          "description": "Additional system prompt text",
+          "type": "string"
+        },
+        "tools": {
+          "description": "Tool enable/disable overrides",
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "disable": {
+          "description": "Disable this agent",
+          "type": "boolean"
+        },
+        "description": {
+          "description": "Agent description",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Agent mode (subagent, primary, or all)",
+          "type": "string",
+          "enum": [
+            "subagent",
+            "primary",
+            "all"
+          ]
+        },
+        "color": {
+          "description": "Hex color for the agent (e.g. '#a1b2c3')",
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "maxSteps": {
+          "description": "Maximum tool-call steps per invocation",
+          "type": "number"
+        },
+        "permission": {
+          "description": "Per-tool permission overrides",
+          "type": "object",
+          "properties": {
+            "edit": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "bash": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "ask",
+                    "allow",
+                    "deny"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "ask",
+                      "allow",
+                      "deny"
+                    ]
+                  }
+                }
+              ]
+            },
+            "webfetch": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "doom_loop": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            },
+            "external_directory": {
+              "type": "string",
+              "enum": [
+                "ask",
+                "allow",
+                "deny"
+              ]
+            }
+          }
+        },
+        "maxTokens": {
+          "description": "Maximum output tokens",
+          "type": "number"
+        },
+        "variant": {
+          "description": "OpenCode reasoning variant (e.g. for extended thinking)",
+          "type": "string"
+        },
+        "fallback_models": {
+          "description": "Fallback model IDs if primary is unavailable",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "schedule": {
+          "default": "02:00-06:00",
+          "description": "Scheduled window for overnight dreaming (e.g. '02:00-06:00')",
+          "type": "string"
+        },
+        "max_runtime_minutes": {
+          "default": 120,
+          "description": "Maximum runtime per dream session in minutes",
+          "type": "number",
+          "minimum": 10
+        },
+        "tasks": {
+          "default": [
+            "consolidate",
+            "verify",
+            "archive-stale",
+            "improve"
+          ],
+          "description": "Tasks to run during dreaming, in order",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "consolidate",
+              "verify",
+              "archive-stale",
+              "improve",
+              "maintain-docs"
+            ]
+          }
+        },
+        "task_timeout_minutes": {
+          "default": 20,
+          "description": "Minutes allocated per task before moving to next",
+          "type": "number",
+          "minimum": 5
+        },
+        "inject_docs": {
+          "default": true,
+          "description": "Inject ARCHITECTURE.md and STRUCTURE.md into system prompt",
+          "type": "boolean"
+        },
+        "user_memories": {
+          "default": {
+            "enabled": true,
+            "promotion_threshold": 3
+          },
+          "description": "User memory pipeline: historian extracts behavior observations from each compartment run; dreamer reviews recurring patterns and promotes them to stable user memories injected into all sessions as <user-profile>. Requires dreamer to not be disabled for promotion to actually happen. Graduated from experimental in v0.14. Default: enabled.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "Enable user memory extraction and promotion (default: true)",
+              "type": "boolean"
+            },
+            "promotion_threshold": {
+              "default": 3,
+              "description": "Minimum candidate observations before dreamer considers promotion (default: 3)",
+              "type": "number",
+              "minimum": 2,
+              "maximum": 20
+            }
+          }
+        },
+        "pin_key_files": {
+          "default": {
+            "enabled": false,
+            "token_budget": 10000,
+            "min_reads": 4
+          },
+          "description": "Pin frequently-read key files into the system prompt so the agent doesn't need to re-read them after context drops. Dreamer identifies key files per session based on read patterns. Requires dreamer to not be disabled for selection to happen. Graduated from experimental in v0.14. Default: disabled.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Enable key file pinning (default: false)",
+              "type": "boolean"
+            },
+            "token_budget": {
+              "default": 10000,
+              "description": "Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000)",
+              "type": "number",
+              "minimum": 2000,
+              "maximum": 30000
+            },
+            "min_reads": {
+              "default": 4,
+              "description": "Minimum full-read count before a file is considered for pinning (min: 2, default: 4)",
+              "type": "number",
+              "minimum": 2,
+              "maximum": 20
+            }
+          }
+        },
+        "thinking_level": {
+          "description": "Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level.",
+          "type": "string",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ]
+        }
+      }
     },
     "cache_ttl": {
-      "oneOf": [
+      "default": "5m",
+      "description": "Cache TTL: string (e.g. \"5m\") or per-model object ({ default: \"5m\", \"model-id\": \"10m\" })",
+      "anyOf": [
         {
-          "type": "string",
-          "description": "TTL string (e.g. '5m', '59m', '1h')"
+          "type": "string"
         },
         {
           "type": "object",
           "properties": {
             "default": {
-              "type": "string",
-              "description": "Default TTL"
+              "type": "string"
             }
           },
           "required": [
@@ -37,15 +457,20 @@
           ],
           "additionalProperties": {
             "type": "string"
-          },
-          "description": "Per-model TTL (e.g. { \"default\": \"5m\", \"anthropic/claude-opus-4-6\": \"59m\" })"
+          }
         }
-      ],
-      "default": "5m",
-      "description": "Cache TTL before queued operations execute. String or per-model object."
+      ]
+    },
+    "nudge_interval_tokens": {
+      "default": 10000,
+      "description": "Minimum token growth between low-priority rolling nudges (default: DEFAULT_NUDGE_INTERVAL_TOKENS)",
+      "type": "number",
+      "minimum": 1000
     },
     "execute_threshold_percentage": {
-      "oneOf": [
+      "default": 65,
+      "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }). Values above 80 are rejected because the runtime caps at 80% for cache safety (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",
+      "anyOf": [
         {
           "type": "number",
           "minimum": 20,
@@ -67,14 +492,12 @@
             "type": "number",
             "minimum": 20,
             "maximum": 80
-          },
-          "description": "Per-model threshold (e.g. { \"default\": 65, \"anthropic/claude-sonnet-4-6\": 40 })"
+          }
         }
-      ],
-      "default": 65,
-      "description": "Context usage percentage that forces queued operations to execute. Capped at 80% for cache safety. Number or per-model object."
+      ]
     },
     "execute_threshold_tokens": {
+      "description": "Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 80% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000.",
       "type": "object",
       "properties": {
         "default": {
@@ -87,749 +510,326 @@
         "type": "number",
         "minimum": 5000,
         "maximum": 2000000
-      },
-      "description": "Absolute token threshold that forces queued operations to execute. Per-model map (e.g. { \"default\": 150000, \"github-copilot/gpt-5.2-codex\": 40000 }). When set for a model, overrides execute_threshold_percentage. Clamped to 80% × context_limit with a warn log. Requires a resolvable model context limit at runtime to convert to an effective percentage."
-    },
-    "nudge_interval_tokens": {
-      "type": "number",
-      "minimum": 1000,
-      "default": 10000,
-      "description": "Minimum token growth between low-priority rolling nudges"
+      }
     },
     "protected_tags": {
+      "description": "Number of recent tags to protect from dropping (min: 1, max: 100, default: 20)",
       "type": "number",
       "minimum": 1,
-      "maximum": 100,
-      "default": 20,
-      "description": "Number of recent tags to protect from dropping"
+      "maximum": 100
     },
     "auto_drop_tool_age": {
-      "type": "number",
-      "minimum": 10,
       "default": 100,
-      "description": "Auto-drop tool outputs older than N tags during queue execution"
+      "description": "Auto-drop tool outputs older than N tags during queue execution (default: 100)",
+      "type": "number",
+      "minimum": 10
     },
     "drop_tool_structure": {
-      "type": "boolean",
       "default": true,
-      "description": "When true, dropped tool parts are fully removed. When false, tool call structure is preserved (name kept, inputs truncated to 5 chars + '...[truncated]', output replaced with '[truncated]') to prevent agents from hallucinating re-calls."
+      "description": "When true, dropped tool parts are fully removed instead of truncated in place (default: true)",
+      "type": "boolean"
     },
     "clear_reasoning_age": {
-      "type": "number",
-      "minimum": 10,
       "default": 50,
-      "description": "Clear reasoning/thinking blocks older than N tags"
+      "description": "Clear reasoning/thinking blocks older than N tags (default: 50)",
+      "type": "number",
+      "minimum": 10
     },
     "iteration_nudge_threshold": {
-      "type": "number",
-      "minimum": 5,
       "default": 15,
-      "description": "Number of consecutive assistant messages without user input to trigger iteration nudge"
+      "description": "Number of consecutive assistant messages without user input to trigger iteration nudge (default: 15)",
+      "type": "number",
+      "minimum": 5
     },
     "history_budget_percentage": {
+      "default": 0.15,
+      "description": "Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15)",
       "type": "number",
       "minimum": 0.05,
-      "maximum": 0.5,
-      "default": 0.15,
-      "description": "Fraction of usable context (context_limit × execute_threshold) reserved for the session history block"
+      "maximum": 0.5
     },
     "historian_timeout_ms": {
-      "type": "number",
-      "minimum": 60000,
       "default": 300000,
-      "description": "Timeout for each historian prompt call in milliseconds"
+      "description": "Timeout for each historian prompt call in milliseconds (default: 300000)",
+      "type": "number",
+      "minimum": 60000
     },
     "commit_cluster_trigger": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable commit-cluster based historian triggering"
-        },
-        "min_clusters": {
-          "type": "number",
-          "minimum": 1,
-          "default": 3,
-          "description": "Minimum commit clusters required to trigger historian"
-        }
-      },
-      "additionalProperties": false,
       "default": {
         "enabled": true,
         "min_clusters": 3
       },
-      "description": "Fire historian when enough commit clusters accumulate in the unsummarized tail"
-    },
-    "sqlite": {
+      "description": "Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail",
       "type": "object",
       "properties": {
-        "cache_size_mb": {
-          "type": "number",
-          "minimum": 2,
-          "maximum": 2048,
-          "default": 64,
-          "description": "SQLite page-cache size in MiB per connection (PRAGMA cache_size)."
+        "enabled": {
+          "default": true,
+          "description": "Enable commit-cluster based historian triggering (default: true)",
+          "type": "boolean"
         },
-        "mmap_size_mb": {
+        "min_clusters": {
+          "default": 3,
+          "description": "Minimum commit clusters required to trigger historian (min: 1, default: 3)",
           "type": "number",
-          "minimum": 0,
-          "maximum": 8192,
-          "default": 0,
-          "description": "SQLite memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap."
+          "minimum": 1
         }
+      }
+    },
+    "system_prompt_injection": {
+      "default": {
+        "enabled": true,
+        "skip_signatures": [
+          "<!-- magic-context: skip -->"
+        ]
       },
-      "additionalProperties": false,
+      "description": "Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile / key-files blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "When false, NO injection happens for ANY agent — global escape hatch. (default: true)",
+          "type": "boolean"
+        },
+        "skip_signatures": {
+          "default": [
+            "<!-- magic-context: skip -->"
+          ],
+          "description": "Substring opt-out list. If the agent's system prompt contains any of these strings, skip ALL Magic Context injection for that call. Default \"<!-- magic-context: skip -->\" is meant to be added inside a user's custom agent prompt to opt that agent out.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "sqlite": {
       "default": {
         "cache_size_mb": 64,
         "mmap_size_mb": 0
       },
-      "description": "Per-connection SQLite tuning for Magic Context's own context.db (does not affect OpenCode/Pi databases)."
-    },
-    "compressor": {
+      "description": "SQLite connection tuning for Magic Context's own context.db. These are per-connection PRAGMAs applied at open; they do not change the schema or what is stored.",
       "type": "object",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable background compressor. When false, history block compression never runs and older sessions may carry a larger history footprint."
-        },
-        "min_compartment_ratio": {
+        "cache_size_mb": {
+          "default": 64,
+          "description": "Page-cache size in MiB per connection (PRAGMA cache_size). Larger keeps more hot pages resident, cutting re-reads on repeated full-table scans. (min 2, max 2048, default 64)",
           "type": "number",
-          "minimum": 100,
-          "maximum": 10000,
-          "default": 1000,
-          "description": "Floor = ceil(total_raw_messages / min_compartment_ratio). Compressor never reduces compartment count below this floor."
+          "minimum": 2,
+          "maximum": 2048
         },
-        "max_merge_depth": {
-          "type": "number",
-          "minimum": 1,
-          "maximum": 5,
-          "default": 5,
-          "description": "Maximum compression depth a compartment range can reach. Depth 5 collapses to title-only (recoverable via ctx_expand). Depths 1-4 apply caveman lite/full/ultra compression."
-        },
-        "cooldown_ms": {
-          "type": "number",
-          "minimum": 60000,
-          "default": 600000,
-          "description": "Minimum milliseconds between background compressor runs for a session."
-        },
-        "max_compartments_per_pass": {
-          "type": "number",
-          "minimum": 3,
-          "maximum": 50,
-          "default": 15,
-          "description": "Cap on compartments sent to the LLM in one pass. Smaller batches avoid ordinal drift and dedup mistakes on large inputs."
-        },
-        "grace_compartments": {
+        "mmap_size_mb": {
+          "default": 0,
+          "description": "Memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap (SQLite default). Raising it can cut read overhead on large DBs at the cost of address space. (min 0, max 8192, default 0)",
           "type": "number",
           "minimum": 0,
-          "maximum": 100,
-          "default": 10,
-          "description": "Number of newest compartments always excluded from compression. Protects freshly published historian output from being re-compressed before it has been used."
+          "maximum": 8192
         }
-      },
-      "additionalProperties": false,
-      "default": {
-        "enabled": true,
-        "min_compartment_ratio": 1000,
-        "max_merge_depth": 5,
-        "cooldown_ms": 600000,
-        "max_compartments_per_pass": 15,
-        "grace_compartments": 10
-      },
-      "description": "Background compressor configuration — merges older compartments with caveman-style compression when the history block exceeds its budget."
-    },
-    "temporal_awareness": {
-      "type": "boolean",
-      "default": true,
-      "description": "Inject HTML gap-time comments between messages (e.g. <!-- +12m -->) so the agent knows how much time elapsed between turns. Compartment start/end dates are also rendered in <session-history>. Graduated from experimental.temporal_awareness; on by default (set false to opt out)."
-    },
-    "caveman_text_compression": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%)."
-        },
-        "min_chars": {
-          "type": "number",
-          "minimum": 50,
-          "default": 500,
-          "description": "Minimum text length (chars) before caveman compression is applied to a part."
-        }
-      },
-      "additionalProperties": false,
-      "default": {
-        "enabled": false,
-        "min_chars": 500
-      },
-      "description": "Deterministic caveman-style text compression for ctx_reduce_enabled=false sessions. Graduated from experimental.caveman_text_compression; opt-in, default off."
-    },
-    "historian": {
-      "type": "object",
-      "properties": {
-        "model": {
-          "type": "string",
-          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')"
-        },
-        "fallback_models": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ],
-          "description": "Fallback model IDs if primary is unavailable"
-        },
-        "temperature": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 2
-        },
-        "top_p": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "prompt": {
-          "type": "string",
-          "description": "Additional system prompt text"
-        },
-        "tools": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "boolean"
-          },
-          "description": "Tool enable/disable overrides"
-        },
-        "disable": {
-          "type": "boolean"
-        },
-        "description": {
-          "type": "string"
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "subagent",
-            "primary",
-            "all"
-          ]
-        },
-        "color": {
-          "type": "string",
-          "pattern": "^#[0-9A-Fa-f]{6}$"
-        },
-        "maxSteps": {
-          "type": "number"
-        },
-        "permission": {
-          "type": "object",
-          "properties": {
-            "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "bash": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "ask",
-                    "allow",
-                    "deny"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "string",
-                    "enum": [
-                      "ask",
-                      "allow",
-                      "deny"
-                    ]
-                  }
-                }
-              ]
-            },
-            "webfetch": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "doom_loop": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            }
-          },
-          "additionalProperties": false
-        },
-        "maxTokens": {
-          "type": "number"
-        },
-        "variant": {
-          "type": "string"
-        },
-        "two_pass": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call per historian run. Useful for models without extended thinking support."
-        },
-        "thinking_level": {
-          "type": "string",
-          "enum": [
-            "off",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ],
-          "description": "Pi only: explicit thinking level passed as --thinking <level> to Pi historian subagent invocations. Required for providers like GitHub Copilot that may apply bad defaults. OpenCode users set variant instead."
-        }
-      },
-      "additionalProperties": false,
-      "description": "Historian agent configuration (model, fallback_models, variant, two_pass, thinking_level, etc.)"
-    },
-    "dreamer": {
-      "type": "object",
-      "properties": {
-        "model": {
-          "type": "string",
-          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')"
-        },
-        "fallback_models": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ],
-          "description": "Fallback model IDs if primary is unavailable"
-        },
-        "temperature": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 2
-        },
-        "top_p": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "prompt": {
-          "type": "string",
-          "description": "Additional system prompt text"
-        },
-        "tools": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "boolean"
-          },
-          "description": "Tool enable/disable overrides"
-        },
-        "disable": {
-          "type": "boolean"
-        },
-        "description": {
-          "type": "string"
-        },
-        "mode": {
-          "type": "string",
-          "enum": [
-            "subagent",
-            "primary",
-            "all"
-          ]
-        },
-        "color": {
-          "type": "string",
-          "pattern": "^#[0-9A-Fa-f]{6}$"
-        },
-        "maxSteps": {
-          "type": "number"
-        },
-        "permission": {
-          "type": "object",
-          "properties": {
-            "edit": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "bash": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "enum": [
-                    "ask",
-                    "allow",
-                    "deny"
-                  ]
-                },
-                {
-                  "type": "object",
-                  "additionalProperties": {
-                    "type": "string",
-                    "enum": [
-                      "ask",
-                      "allow",
-                      "deny"
-                    ]
-                  }
-                }
-              ]
-            },
-            "webfetch": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "doom_loop": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            },
-            "external_directory": {
-              "type": "string",
-              "enum": [
-                "ask",
-                "allow",
-                "deny"
-              ]
-            }
-          },
-          "additionalProperties": false
-        },
-        "maxTokens": {
-          "type": "number"
-        },
-        "variant": {
-          "type": "string"
-        },
-        "schedule": {
-          "type": "string",
-          "default": "02:00-06:00",
-          "description": "Scheduled window for overnight dreaming (e.g. '02:00-06:00')"
-        },
-        "max_runtime_minutes": {
-          "type": "number",
-          "minimum": 10,
-          "default": 120,
-          "description": "Maximum runtime per dream session in minutes"
-        },
-        "tasks": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "consolidate",
-              "verify",
-              "archive-stale",
-              "improve",
-              "maintain-docs"
-            ]
-          },
-          "default": [
-            "consolidate",
-            "verify",
-            "archive-stale",
-            "improve"
-          ],
-          "description": "Tasks to run during dreaming, in order"
-        },
-        "task_timeout_minutes": {
-          "type": "number",
-          "minimum": 5,
-          "default": 20,
-          "description": "Minutes allocated per task before moving to next"
-        },
-        "inject_docs": {
-          "type": "boolean",
-          "default": true,
-          "description": "Inject ARCHITECTURE.md and STRUCTURE.md into system prompt"
-        },
-        "user_memories": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": true,
-              "description": "Extract user behavior observations from historian runs and promote recurring patterns to stable user memories injected into all sessions."
-            },
-            "promotion_threshold": {
-              "type": "number",
-              "minimum": 2,
-              "maximum": 20,
-              "default": 3,
-              "description": "Minimum candidate observations before dreamer considers promotion to stable user memory"
-            }
-          },
-          "additionalProperties": false,
-          "default": {
-            "enabled": true,
-            "promotion_threshold": 3
-          },
-          "description": "User memory pipeline configuration"
-        },
-        "pin_key_files": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Pin frequently-read key files into the system prompt. Dreamer identifies key files per session based on read patterns."
-            },
-            "token_budget": {
-              "type": "number",
-              "minimum": 2000,
-              "maximum": 30000,
-              "default": 10000,
-              "description": "Total token budget for all pinned key files"
-            },
-            "min_reads": {
-              "type": "number",
-              "minimum": 2,
-              "maximum": 20,
-              "default": 4,
-              "description": "Minimum full-read count before a file is considered for pinning"
-            }
-          },
-          "additionalProperties": false,
-          "default": {
-            "enabled": false,
-            "token_budget": 10000,
-            "min_reads": 4
-          },
-          "description": "Key file pinning configuration"
-        },
-        "thinking_level": {
-          "type": "string",
-          "enum": [
-            "off",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh"
-          ],
-          "description": "Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level."
-        }
-      },
-      "additionalProperties": false,
-      "description": "Dreamer agent + scheduling configuration"
+      }
     },
     "embedding": {
+      "description": "Embedding provider configuration",
       "type": "object",
       "properties": {
         "provider": {
+          "default": "local",
+          "description": "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'off' disables embeddings.",
           "type": "string",
           "enum": [
             "local",
             "openai-compatible",
             "off"
-          ],
-          "default": "local",
-          "description": "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'off' disables embeddings."
+          ]
         },
         "model": {
-          "type": "string",
-          "description": "Embedding model name. Required for openai-compatible, ignored for local."
+          "description": "Embedding model name. Required for openai-compatible, ignored for local.",
+          "type": "string"
         },
         "endpoint": {
-          "type": "string",
-          "description": "API endpoint URL. Required when provider is openai-compatible."
+          "description": "API endpoint URL. Required when provider is openai-compatible.",
+          "type": "string"
         },
         "api_key": {
-          "type": "string",
-          "description": "API key for remote embedding provider (optional)"
+          "description": "API key for remote embedding provider (optional)",
+          "type": "string"
         }
-      },
-      "additionalProperties": false,
-      "description": "Embedding provider configuration for memory search"
+      }
     },
-    "memory": {
+    "temporal_awareness": {
+      "default": true,
+      "description": "Inject wall-clock gap markers (<!-- +Xm -->) between user messages where > 5 min elapsed since the previous message, and add start/end date attributes on compartments. Gives the agent a sense of session pacing and \"how long ago\" across multi-day sessions. Graduated from experimental.temporal_awareness; default: true (set false to opt out).",
+      "type": "boolean"
+    },
+    "caveman_text_compression": {
+      "default": {
+        "enabled": false,
+        "min_chars": 500
+      },
+      "description": "Age-tier caveman compression for long user/assistant text parts. Only active when ctx_reduce_enabled is false. Oldest 20% of eligible tags (outside protected tail) go to ultra, next 20% to full, next 20% to lite, newest 40% untouched. Graduated from experimental.caveman_text_compression; opt-in, default off (lossy).",
       "type": "object",
       "properties": {
         "enabled": {
-          "type": "boolean",
+          "default": false,
+          "description": "Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%).",
+          "type": "boolean"
+        },
+        "min_chars": {
+          "default": 500,
+          "description": "Text parts shorter than this (characters) stay untouched. Min 100, max 10000. Default: 500.",
+          "type": "number",
+          "minimum": 100,
+          "maximum": 10000
+        }
+      }
+    },
+    "memory": {
+      "default": {
+        "enabled": true,
+        "injection_budget_tokens": 4000,
+        "auto_promote": true,
+        "retrieval_count_promotion_threshold": 3,
+        "auto_search": {
+          "enabled": true,
+          "score_threshold": 0.6,
+          "min_prompt_chars": 20
+        },
+        "git_commit_indexing": {
+          "enabled": false,
+          "since_days": 365,
+          "max_commits": 2000
+        }
+      },
+      "description": "Cross-session memory configuration",
+      "type": "object",
+      "properties": {
+        "enabled": {
           "default": true,
-          "description": "Enable cross-session memory"
+          "description": "Enable cross-session memory (default: true)",
+          "type": "boolean"
         },
         "injection_budget_tokens": {
+          "default": 4000,
+          "description": "Token budget for memory injection on session start (min: 500, max: 20000, default: 4000)",
           "type": "number",
           "minimum": 500,
-          "maximum": 20000,
-          "default": 4000,
-          "description": "Token budget for memory injection on session start"
+          "maximum": 20000
         },
         "auto_promote": {
-          "type": "boolean",
           "default": true,
-          "description": "Automatically promote eligible session facts into memory"
+          "description": "Automatically promote eligible session facts into memory (default: true)",
+          "type": "boolean"
         },
         "retrieval_count_promotion_threshold": {
-          "type": "number",
-          "minimum": 1,
           "default": 3,
-          "description": "Retrieval count threshold for promoting memory to permanent status"
+          "description": "retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3)",
+          "type": "number",
+          "minimum": 1
         },
         "auto_search": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": true,
-              "description": "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled."
-            },
-            "score_threshold": {
-              "type": "number",
-              "minimum": 0.3,
-              "maximum": 0.95,
-              "default": 0.6,
-              "description": "Minimum similarity score for a result to appear in the hint."
-            },
-            "min_prompt_chars": {
-              "type": "number",
-              "minimum": 5,
-              "maximum": 500,
-              "default": 20,
-              "description": "Skip auto-search for user messages shorter than this character count."
-            }
-          },
-          "additionalProperties": false,
           "default": {
             "enabled": true,
             "score_threshold": 0.6,
             "min_prompt_chars": 20
           },
-          "description": "Auto-search hint injection on eligible user turns."
-        },
-        "git_commit_indexing": {
+          "description": "Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled.",
           "type": "object",
           "properties": {
             "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled."
+              "default": true,
+              "description": "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled.",
+              "type": "boolean"
             },
-            "since_days": {
+            "score_threshold": {
+              "default": 0.6,
+              "description": "Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.60)",
               "type": "number",
-              "minimum": 7,
-              "maximum": 3650,
-              "default": 365,
-              "description": "How far back to index commits (in days)."
+              "minimum": 0.3,
+              "maximum": 0.95
             },
-            "max_commits": {
+            "min_prompt_chars": {
+              "default": 20,
+              "description": "Skip hint when user message is shorter than this (min: 5, max: 500, default: 20)",
               "type": "number",
-              "minimum": 100,
-              "maximum": 20000,
-              "default": 2000,
-              "description": "Maximum number of commits to index."
+              "minimum": 5,
+              "maximum": 500
             }
-          },
-          "additionalProperties": false,
+          }
+        },
+        "git_commit_indexing": {
           "default": {
             "enabled": false,
             "since_days": 365,
             "max_commits": 2000
           },
-          "description": "Index git commits so ctx_search can retrieve them."
+          "description": "Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "description": "Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled.",
+              "type": "boolean"
+            },
+            "since_days": {
+              "default": 365,
+              "description": "Days of HEAD history to index (min: 7, max: 3650, default: 365)",
+              "type": "number",
+              "minimum": 7,
+              "maximum": 3650
+            },
+            "max_commits": {
+              "default": 2000,
+              "description": "Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000)",
+              "type": "number",
+              "minimum": 100,
+              "maximum": 20000
+            }
+          }
         }
-      },
-      "additionalProperties": false,
-      "description": "Cross-session memory configuration"
+      }
     },
     "sidekick": {
+      "description": "Optional sidekick agent configuration for session-start memory retrieval",
       "type": "object",
       "properties": {
         "model": {
-          "type": "string",
-          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')"
-        },
-        "fallback_models": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          ],
-          "description": "Fallback model IDs if primary is unavailable"
+          "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
+          "type": "string"
         },
         "temperature": {
+          "description": "Sampling temperature (0-2)",
           "type": "number",
           "minimum": 0,
           "maximum": 2
         },
         "top_p": {
+          "description": "Nucleus sampling top_p (0-1)",
           "type": "number",
           "minimum": 0,
           "maximum": 1
         },
         "prompt": {
-          "type": "string",
-          "description": "Additional system prompt text"
+          "description": "Additional system prompt text",
+          "type": "string"
         },
         "tools": {
+          "description": "Tool enable/disable overrides",
           "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
           "additionalProperties": {
             "type": "boolean"
-          },
-          "description": "Tool enable/disable overrides"
+          }
         },
         "disable": {
+          "description": "Disable this agent",
           "type": "boolean"
         },
         "description": {
+          "description": "Agent description",
           "type": "string"
         },
         "mode": {
+          "description": "Agent mode (subagent, primary, or all)",
           "type": "string",
           "enum": [
             "subagent",
@@ -838,13 +838,16 @@
           ]
         },
         "color": {
+          "description": "Hex color for the agent (e.g. '#a1b2c3')",
           "type": "string",
           "pattern": "^#[0-9A-Fa-f]{6}$"
         },
         "maxSteps": {
+          "description": "Maximum tool-call steps per invocation",
           "type": "number"
         },
         "permission": {
+          "description": "Per-tool permission overrides",
           "type": "object",
           "properties": {
             "edit": {
@@ -856,7 +859,7 @@
               ]
             },
             "bash": {
-              "oneOf": [
+              "anyOf": [
                 {
                   "type": "string",
                   "enum": [
@@ -867,6 +870,9 @@
                 },
                 {
                   "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
                   "additionalProperties": {
                     "type": "string",
                     "enum": [
@@ -902,25 +908,41 @@
                 "deny"
               ]
             }
-          },
-          "additionalProperties": false
+          }
         },
         "maxTokens": {
+          "description": "Maximum output tokens",
           "type": "number"
         },
         "variant": {
+          "description": "OpenCode reasoning variant (e.g. for extended thinking)",
           "type": "string"
         },
+        "fallback_models": {
+          "description": "Fallback model IDs if primary is unavailable",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
         "timeout_ms": {
-          "type": "number",
           "default": 30000,
-          "description": "Timeout for sidekick calls in milliseconds"
+          "description": "Timeout for sidekick calls in milliseconds",
+          "type": "number"
         },
         "system_prompt": {
-          "type": "string",
-          "description": "Custom system prompt for sidekick"
+          "description": "Custom system prompt for sidekick",
+          "type": "string"
         },
         "thinking_level": {
+          "description": "Pi only: explicit thinking level for sidekick subagent invocations. See historian.thinking_level.",
           "type": "string",
           "enum": [
             "off",
@@ -929,12 +951,13 @@
             "medium",
             "high",
             "xhigh"
-          ],
-          "description": "Pi only: explicit thinking level for sidekick subagent invocations. See historian.thinking_level."
+          ]
         }
-      },
-      "additionalProperties": false,
-      "description": "Sidekick agent configuration for session-start memory retrieval"
+      }
+    },
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor validation and autocomplete."
     }
   },
   "additionalProperties": false
