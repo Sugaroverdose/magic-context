@@ -653,9 +653,7 @@ const SidebarContent = (props: {
                         bold/accent — they're a glanceable summary, so the label
                         and value share the muted tone (matches Memories row). */}
                     <box width="100%" flexDirection="row" justifyContent="space-between">
-                        <text fg={props.theme.textMuted}>
-                            Historian (C:{s()?.compartmentCount ?? 0})
-                        </text>
+                        <text fg={props.theme.textMuted}>Historian</text>
                         {s()?.historianRunning ? (
                             <text fg={props.theme.warning}>comparting ⟳</text>
                         ) : (
@@ -673,7 +671,7 @@ const SidebarContent = (props: {
                     <box width="100%" flexDirection="row" justifyContent="space-between">
                         <text fg={props.theme.textMuted}>Status</text>
                         <text fg={props.theme.textMuted}>
-                            Q:{s()?.pendingOpsCount ?? 0} N:{s()?.sessionNoteCount ?? 0}
+                            C:{s()?.compartmentCount ?? 0} Q:{s()?.pendingOpsCount ?? 0} N:{s()?.sessionNoteCount ?? 0}
                         </text>
                     </box>
                     {s()?.recompProgress && (
