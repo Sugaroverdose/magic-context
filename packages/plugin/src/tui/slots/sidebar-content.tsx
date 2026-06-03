@@ -616,9 +616,11 @@ const SidebarContent = (props: {
                 <text fg={props.theme.textMuted}>v{packageJson.version}</text>
             </box>
 
-            {/* Token breakdown bar */}
+            {/* Token breakdown bar. In collapsed mode the header, bar and the
+                3 summary rows stack with no vertical padding for a compact look;
+                expanded mode keeps the 1-row gap above the bar. */}
             {s() && s()!.inputTokens > 0 && (
-                <box marginTop={1} flexDirection="column">
+                <box marginTop={collapsed() ? 0 : 1} flexDirection="column">
                     {(s()?.contextLimit ?? 0) > 0 && (
                         <box width="100%" flexDirection="row" justifyContent="space-between">
                             {/* Left: current usage vs the per-model execute
@@ -646,10 +648,13 @@ const SidebarContent = (props: {
                 Historian (with compartment count), Memories (injected/total),
                 Status (Q=queued ops, N=session notes). */}
             {collapsed() && (
-                <box width="100%" flexDirection="column" marginTop={1}>
+                <box width="100%" flexDirection="column">
+                    {/* Collapsed rows are intentionally uniform faded-grey, not
+                        bold/accent — they're a glanceable summary, so the label
+                        and value share the muted tone (matches Memories row). */}
                     <box width="100%" flexDirection="row" justifyContent="space-between">
-                        <text fg={props.theme.text}>
-                            <b>Historian (C:{s()?.compartmentCount ?? 0})</b>
+                        <text fg={props.theme.textMuted}>
+                            Historian (C:{s()?.compartmentCount ?? 0})
                         </text>
                         {s()?.historianRunning ? (
                             <text fg={props.theme.warning}>comparting ⟳</text>
@@ -657,21 +662,20 @@ const SidebarContent = (props: {
                             <text fg={props.theme.textMuted}>idle</text>
                         )}
                     </box>
-                    <StatRow
-                        theme={props.theme}
-                        label="Memories"
-                        value={
-                            (s()?.memoryBlockCount ?? 0) > 0
+                    <box width="100%" flexDirection="row" justifyContent="space-between">
+                        <text fg={props.theme.textMuted}>Memories</text>
+                        <text fg={props.theme.textMuted}>
+                            {(s()?.memoryBlockCount ?? 0) > 0
                                 ? `${s()!.memoryBlockCount}/${s()?.memoryCount ?? 0}`
-                                : String(s()?.memoryCount ?? 0)
-                        }
-                        accent
-                    />
-                    <StatRow
-                        theme={props.theme}
-                        label="Status"
-                        value={`Q:${s()?.pendingOpsCount ?? 0} N:${s()?.sessionNoteCount ?? 0}`}
-                    />
+                                : String(s()?.memoryCount ?? 0)}
+                        </text>
+                    </box>
+                    <box width="100%" flexDirection="row" justifyContent="space-between">
+                        <text fg={props.theme.textMuted}>Status</text>
+                        <text fg={props.theme.textMuted}>
+                            Q:{s()?.pendingOpsCount ?? 0} N:{s()?.sessionNoteCount ?? 0}
+                        </text>
+                    </box>
                     {s()?.recompProgress && (
                         <RecompProgressSection theme={props.theme} progress={s()!.recompProgress!} />
                     )}
