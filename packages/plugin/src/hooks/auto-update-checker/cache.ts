@@ -111,9 +111,29 @@ function removeInstalledPackage(installDir: string, packageName: string): boolea
     const packageDir = join(installDir, "node_modules", packageName);
     if (!existsSync(packageDir)) return false;
 
-    rmSync(packageDir, { recursive: true, force: true });
-    log(`[auto-update-checker] Package removed: ${packageDir}`);
-    return true;
+    try {
+        // maxRetries/retryDelay let Node ride out transient EBUSY/EPERM/ENOTEMPTY
+        // (common on Windows right after a handle closes).
+        rmSync(packageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        log(`[auto-update-checker] Package removed: ${packageDir}`);
+        return true;
+    } catch (err) {
+        // On Windows the active plugin dir is locked by the running process
+        // (loaded JS + transitive native modules), so rmSync can fail with
+        // EBUSY/EPERM no matter how many retries (issue #103). Removal is
+        // best-effort: the dependency spec was already bumped, and the
+        // subsequent `npm install` overwrites the package in place. Swallow the
+        // lock error and report "not removed" so preparePackageUpdate continues
+        // instead of silently aborting the whole update via the outer catch.
+        const code = (err as { code?: string }).code;
+        if (code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY") {
+            warn(
+                `[auto-update-checker] Could not remove ${packageDir} (${code}); the file is locked by the running process. Continuing — npm install will overwrite it in place.`,
+            );
+            return false;
+        }
+        throw err;
+    }
 }
 
 export function resolveInstallContext(

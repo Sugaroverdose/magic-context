@@ -164,8 +164,100 @@ describe("auto-update-checker/cache", () => {
                 {
                     recursive: true,
                     force: true,
+                    maxRetries: 5,
+                    retryDelay: 100,
                 },
             );
+
+            existsSpy.mockRestore();
+            readSpy.mockRestore();
+            writeSpy.mockRestore();
+            rmSpy.mockRestore();
+        });
+
+        test("tolerates Windows EBUSY lock on package dir and still continues (issue #103)", async () => {
+            const root =
+                "/home/user/.cache/opencode/packages/@cortexkit/opencode-magic-context@latest";
+            const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+                const value = String(p);
+                return (
+                    value === `${root}/package.json` ||
+                    value === `${root}/node_modules/@cortexkit/opencode-magic-context`
+                );
+            });
+            const readSpy = spyOn(fs, "readFileSync").mockImplementation(
+                (p: fs.PathOrFileDescriptor) => {
+                    if (String(p) === `${root}/package.json`) {
+                        return JSON.stringify({
+                            dependencies: { "@cortexkit/opencode-magic-context": "0.15.5" },
+                        });
+                    }
+                    return "";
+                },
+            );
+            const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
+            // Simulate Windows locking the actively-loaded plugin dir.
+            const rmSpy = spyOn(fs, "rmSync").mockImplementation(() => {
+                const err = new Error("EBUSY: resource busy or locked") as Error & { code: string };
+                err.code = "EBUSY";
+                throw err;
+            });
+            const { preparePackageUpdate } = await freshCacheImport();
+
+            // Must NOT abort: dependency spec is already bumped and npm install
+            // overwrites in place, so removal failure is non-fatal. Returns the
+            // install dir (continues) rather than null (aborts the whole update).
+            expect(
+                preparePackageUpdate(
+                    "0.15.6",
+                    "@cortexkit/opencode-magic-context",
+                    `${root}/node_modules/@cortexkit/opencode-magic-context/package.json`,
+                ),
+            ).toBe(root);
+
+            existsSpy.mockRestore();
+            readSpy.mockRestore();
+            writeSpy.mockRestore();
+            rmSpy.mockRestore();
+        });
+
+        test("rethrows non-lock rmSync errors", async () => {
+            const root =
+                "/home/user/.cache/opencode/packages/@cortexkit/opencode-magic-context@latest";
+            const existsSpy = spyOn(fs, "existsSync").mockImplementation((p: fs.PathLike) => {
+                const value = String(p);
+                return (
+                    value === `${root}/package.json` ||
+                    value === `${root}/node_modules/@cortexkit/opencode-magic-context`
+                );
+            });
+            const readSpy = spyOn(fs, "readFileSync").mockImplementation(
+                (p: fs.PathOrFileDescriptor) => {
+                    if (String(p) === `${root}/package.json`) {
+                        return JSON.stringify({
+                            dependencies: { "@cortexkit/opencode-magic-context": "0.15.5" },
+                        });
+                    }
+                    return "";
+                },
+            );
+            const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {});
+            // A non-lock error (e.g. EACCES) must NOT be swallowed — it bubbles to
+            // preparePackageUpdate's outer catch, which returns null (abort).
+            const rmSpy = spyOn(fs, "rmSync").mockImplementation(() => {
+                const err = new Error("EACCES: permission denied") as Error & { code: string };
+                err.code = "EACCES";
+                throw err;
+            });
+            const { preparePackageUpdate } = await freshCacheImport();
+
+            expect(
+                preparePackageUpdate(
+                    "0.15.6",
+                    "@cortexkit/opencode-magic-context",
+                    `${root}/node_modules/@cortexkit/opencode-magic-context/package.json`,
+                ),
+            ).toBeNull();
 
             existsSpy.mockRestore();
             readSpy.mockRestore();
