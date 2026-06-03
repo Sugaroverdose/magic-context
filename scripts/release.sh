@@ -205,6 +205,14 @@ echo "→ Generating historian reference seeds..."
 bun packages/plugin/scripts/build-reference-seeds.ts || { echo "Error: Reference-seed generation failed"; exit 1; }
 echo ""
 
+# Step 3c: Re-lint generated artifacts. The pre-release lint (above) runs BEFORE
+# generation, so a generator that emits non-repo-style output would otherwise
+# only fail in CI after the tag is cut. Lint the regenerated files here so any
+# formatting drift fails locally.
+echo "→ Linting generated artifacts..."
+bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Generated artifacts failed lint (regenerated schema/seeds not repo-style)"; exit 1; }
+echo ""
+
 # Step 4: Sync version
 echo "→ Syncing version to $VERSION..."
 bun scripts/version-sync.mjs "$VERSION"

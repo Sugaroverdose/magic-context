@@ -13,6 +13,7 @@
  * Regenerate after editing the source corpus:
  *   bun run packages/plugin/scripts/build-reference-seeds.ts
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +75,26 @@ export const REFERENCE_SEEDS: ReadonlyArray<ReferenceSeed> = ${JSON.stringify(se
 `;
 
 writeFileSync(OUT, header, "utf-8");
+
+// Format the emitted file with biome so it matches repo style (4-space indent).
+// The template above is hand-indented 2-space and JSON.stringify uses 2-space;
+// without this, the generated file fails the lint gate. release.sh lints BEFORE
+// regenerating, so an unformatted emit would otherwise only surface in CI.
+// biome resolves its config + include scope from cwd, so run it with cwd set to
+// the plugin package root (where biome.json lives and src/** is in scope) — the
+// script may be invoked from the repo root (e.g. release.sh) where the plugin's
+// generated path is not in biome's include set and the format would be a no-op.
+const pluginRoot = resolve(here, "..");
+const fmt = spawnSync("bunx", ["biome", "check", "--write", OUT], {
+  cwd: pluginRoot,
+  stdio: "ignore",
+});
+if (fmt.status !== 0) {
+  console.warn(
+    `build-reference-seeds: biome format step exited ${fmt.status ?? "null"} (continuing; lint gate will catch any issue)`,
+  );
+}
+
 console.log(
   `build-reference-seeds: emitted ${seeds.length} seeds (importance ${Math.min(
     ...seeds.map((s) => s.importance),
