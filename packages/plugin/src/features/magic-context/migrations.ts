@@ -1010,6 +1010,16 @@ const MIGRATIONS: Migration[] = [
             // tag_number (hence §N§ and all per-tag state) stable. Nullable:
             // OpenCode never writes it (real id on pass 1), so its rows stay
             // NULL and adoption never fires.
+            //
+            // Guard on the tags table existing: in production tags is created
+            // (migration v1) long before this runs, but partial test fixtures
+            // that stamp a mid-ladder version without a tags table must not
+            // throw here (ensureColumn's ALTER + the CREATE INDEX both require
+            // the table). A DB with no tags table has nothing to index.
+            const hasTags = db
+                .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tags' LIMIT 1")
+                .get();
+            if (!hasTags) return;
             ensureColumn(db, "tags", "entry_fingerprint", "TEXT");
             db.exec(
                 `CREATE INDEX IF NOT EXISTS idx_tags_pi_adopt

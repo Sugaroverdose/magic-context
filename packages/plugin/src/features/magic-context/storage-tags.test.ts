@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    adoptFallbackTagMessageId,
+    findAdoptableFallbackTags,
     getActiveTagsBySession,
     getMaxDroppedTagNumber,
     getTagById,
@@ -35,6 +37,7 @@ function makeMemoryDatabase(): Database {
       caveman_depth INTEGER NOT NULL DEFAULT 0,
             harness TEXT NOT NULL DEFAULT 'opencode',
       tool_owner_message_id TEXT DEFAULT NULL,
+      entry_fingerprint TEXT,
       UNIQUE(session_id, id)
     );
     CREATE TABLE IF NOT EXISTS pending_ops (
@@ -514,6 +517,113 @@ describe("storage-tags", () => {
             }
 
             expect(fromHelper).toBe(watermark);
+        });
+    });
+
+    describe("#given Pi fallback-tag adoption", () => {
+        it("#when a fallback tag matches by fingerprint #then migrates message_id keeping tag_number", () => {
+            db = makeMemoryDatabase();
+            // Fallback-id tag (pass 1: in-flight message under pi-msg-*).
+            insertTag(
+                db,
+                "ses-1",
+                "pi-msg-0-123-user:p0",
+                "message",
+                100,
+                1,
+                0,
+                null,
+                0,
+                null,
+                "FP-A",
+            );
+
+            const candidates = findAdoptableFallbackTags(db, "ses-1", "FP-A");
+            expect(candidates).toHaveLength(1);
+            expect(candidates[0]).toEqual({ tagNumber: 1, messageId: "pi-msg-0-123-user:p0" });
+
+            const migrated = adoptFallbackTagMessageId(
+                db,
+                "ses-1",
+                1,
+                "pi-msg-0-123-user:p0",
+                "real-entry-abc:p0",
+            );
+            expect(migrated).toBe(true);
+            // tag_number preserved; message_id migrated to the real id.
+            const tag = getTagById(db, "ses-1", 1);
+            expect(tag?.messageId).toBe("real-entry-abc:p0");
+            // No longer adoptable (message_id is now a real id, not pi-msg-*).
+            expect(findAdoptableFallbackTags(db, "ses-1", "FP-A")).toHaveLength(0);
+        });
+
+        it("#when fingerprint is shared by two fallback messages #then both surface (caller skips on ambiguity)", () => {
+            db = makeMemoryDatabase();
+            insertTag(
+                db,
+                "ses-1",
+                "pi-msg-0-1-user:p0",
+                "message",
+                100,
+                1,
+                0,
+                null,
+                0,
+                null,
+                "DUP",
+            );
+            insertTag(
+                db,
+                "ses-1",
+                "pi-msg-1-2-user:p0",
+                "message",
+                100,
+                2,
+                0,
+                null,
+                0,
+                null,
+                "DUP",
+            );
+            // The lookup returns both; the adoption pre-pass applies its
+            // unique-base-id guard and skips when >1 distinct base id matches.
+            expect(findAdoptableFallbackTags(db, "ses-1", "DUP")).toHaveLength(2);
+        });
+
+        it("#when the guarded UPDATE loses the race #then returns false and does not migrate", () => {
+            db = makeMemoryDatabase();
+            insertTag(
+                db,
+                "ses-1",
+                "pi-msg-0-1-user:p0",
+                "message",
+                100,
+                1,
+                0,
+                null,
+                0,
+                null,
+                "FP-R",
+            );
+            // Old value in the WHERE clause doesn't match (sibling already
+            // migrated it) → changes === 0 → false.
+            const migrated = adoptFallbackTagMessageId(
+                db,
+                "ses-1",
+                1,
+                "pi-msg-STALE:p0",
+                "real:p0",
+            );
+            expect(migrated).toBe(false);
+            expect(getTagById(db, "ses-1", 1)?.messageId).toBe("pi-msg-0-1-user:p0");
+        });
+
+        it("#when a real-id tag exists with a fingerprint #then it is never an adoption candidate", () => {
+            db = makeMemoryDatabase();
+            // A real-id tag that happens to carry a fingerprint must not match
+            // (only pi-msg-* shaped rows are adoptable).
+            insertTag(db, "ses-1", "real-entry-x:p0", "message", 100, 1, 0, null, 0, null, "FP-X");
+            expect(findAdoptableFallbackTags(db, "ses-1", "FP-X")).toHaveLength(0);
         });
     });
 });

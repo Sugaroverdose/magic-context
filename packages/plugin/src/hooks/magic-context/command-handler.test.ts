@@ -23,6 +23,7 @@ function createTestDb(): Database {
       caveman_depth INTEGER NOT NULL DEFAULT 0,
             harness TEXT NOT NULL DEFAULT 'opencode',
       tool_owner_message_id TEXT DEFAULT NULL,
+      entry_fingerprint TEXT,
       UNIQUE(session_id, tag_number)
     );
 

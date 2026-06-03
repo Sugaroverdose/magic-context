@@ -55,8 +55,8 @@ import {
 } from "@magic-context/core/features/magic-context/message-index-async";
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
-	type ContextDatabase,
 	adoptFallbackTagMessageId,
+	type ContextDatabase,
 	clearPendingPiCompactionMarkerStateIf,
 	findAdoptableFallbackTags,
 	getActiveTagsBySession,
