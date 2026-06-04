@@ -2,8 +2,13 @@ import { DREAMER_AGENT } from "../agents/dreamer";
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { checkScheduleAndEnqueue, processDreamQueue } from "../features/magic-context/dreamer";
 import {
+    acquireGitSweepLease,
     embedUnembeddedCommits,
+    GIT_SWEEP_LEASE_RENEWAL_MS,
     indexCommitsForProject,
+    markGitSweepSuccessAndRelease,
+    releaseGitSweepLease,
+    renewGitSweepLease,
 } from "../features/magic-context/git-commits";
 import {
     embedUnembeddedMemoriesForProject,
@@ -257,6 +262,26 @@ async function sweepProject(
  * Project identity resolution happens inside the indexer so we always read
  * the same `git:<sha>` identity used by memories and ctx_search.
  */
+function startGitSweepLeaseRenewal(
+    db: Database,
+    projectIdentity: string,
+    holderId: string,
+): () => void {
+    const timer = setInterval(() => {
+        try {
+            if (!renewGitSweepLease(db, projectIdentity, holderId)) {
+                log(`[git-commits] sweep lease renewal failed for ${projectIdentity}`);
+            }
+        } catch (error) {
+            log(
+                `[git-commits] sweep lease renewal errored for ${projectIdentity}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }, GIT_SWEEP_LEASE_RENEWAL_MS);
+    (timer as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+}
+
 async function sweepGitCommits(args: {
     directory: string;
     projectIdentity: string;
@@ -264,9 +289,21 @@ async function sweepGitCommits(args: {
     gitCommitIndexing: { enabled: boolean; since_days: number; max_commits: number };
 }): Promise<void> {
     const { directory, projectIdentity, db, gitCommitIndexing } = args;
+    const holderId = crypto.randomUUID();
+    const lease = acquireGitSweepLease(db, projectIdentity, holderId);
+    if (!lease.acquired) {
+        const reason =
+            lease.reason === "cooldown_active"
+                ? `cooldown active until ${lease.nextAllowedAt}`
+                : `lease held by ${lease.leaseHolder ?? "another holder"} until ${lease.leaseExpiresAt ?? "unknown"}`;
+        log(`[git-commits] sweep skipped for ${projectIdentity} (${directory}): ${reason}`);
+        return;
+    }
+
     const startedAt = Date.now();
+    const stopRenewal = startGitSweepLeaseRenewal(db, projectIdentity, holderId);
     log(
-        `[git-commits] sweep starting for ${directory} (sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits})`,
+        `[git-commits] sweep starting for ${directory} (project=${projectIdentity} sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits})`,
     );
     try {
         const result = await indexCommitsForProject(db, projectIdentity, directory, {
@@ -278,14 +315,24 @@ async function sweepGitCommits(args: {
         if (result.embedded > 0) {
             drainedEmbeddings = await embedUnembeddedCommits(db, projectIdentity);
         }
+        const cooldownMarked = markGitSweepSuccessAndRelease(db, projectIdentity, holderId);
+        if (!cooldownMarked) {
+            releaseGitSweepLease(db, projectIdentity, holderId);
+            log(
+                `[git-commits] sweep finished for ${projectIdentity}, but lease was no longer active; cooldown not advanced`,
+            );
+        }
         const elapsedMs = Date.now() - startedAt;
         log(
             `[git-commits] sweep finished for ${projectIdentity} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings}`,
         );
     } catch (error) {
+        releaseGitSweepLease(db, projectIdentity, holderId);
         const elapsedMs = Date.now() - startedAt;
         log(
             `[git-commits] sweep failed for ${directory} after ${elapsedMs}ms: ${error instanceof Error ? error.message : String(error)}`,
         );
+    } finally {
+        stopRenewal();
     }
 }

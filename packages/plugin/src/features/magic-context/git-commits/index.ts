@@ -29,3 +29,15 @@ export {
     upsertCommit,
     upsertCommits,
 } from "./storage-git-commits";
+export {
+    acquireGitSweepLease,
+    GIT_SWEEP_COOLDOWN_MS,
+    GIT_SWEEP_LEASE_RENEWAL_MS,
+    GIT_SWEEP_LEASE_TTL_MS,
+    type GitSweepCoordinatorState,
+    type GitSweepLeaseResult,
+    getGitSweepCoordinatorState,
+    markGitSweepSuccessAndRelease,
+    releaseGitSweepLease,
+    renewGitSweepLease,
+} from "./sweep-coordinator";

@@ -36,6 +36,7 @@ const insertStatements = new WeakMap<Database, PreparedStatement>();
 const existingShasStatements = new WeakMap<Database, PreparedStatement>();
 const projectCountStatements = new WeakMap<Database, PreparedStatement>();
 const evictStatements = new WeakMap<Database, PreparedStatement>();
+const evictOverflowStatements = new WeakMap<Database, PreparedStatement>();
 const latestCommitTimeStatements = new WeakMap<Database, PreparedStatement>();
 
 function getInsertStatement(db: Database): PreparedStatement {
@@ -92,14 +93,31 @@ function getEvictStatement(db: Database): PreparedStatement {
     if (!stmt) {
         stmt = db.prepare(
             `DELETE FROM git_commits
-             WHERE sha IN (
-                 SELECT sha FROM git_commits
+             WHERE rowid IN (
+                 SELECT rowid FROM git_commits
                  WHERE project_path = ?
-                 ORDER BY committed_at ASC
+                 ORDER BY committed_at ASC, sha ASC
                  LIMIT ?
              )`,
         );
         evictStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getEvictOverflowStatement(db: Database): PreparedStatement {
+    let stmt = evictOverflowStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `DELETE FROM git_commits
+             WHERE rowid IN (
+                 SELECT rowid FROM git_commits
+                 WHERE project_path = ?
+                 ORDER BY committed_at DESC, sha DESC
+                 LIMIT -1 OFFSET ?
+             )`,
+        );
+        evictOverflowStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -198,8 +216,12 @@ export function enforceProjectCap(db: Database, projectPath: string, maxCommits:
     const count = getCommitCount(db, projectPath);
     if (count <= maxCommits) return 0;
 
-    const excess = count - maxCommits;
-    const evicted = evictOldestCommits(db, projectPath, excess);
+    // Decide the overflow inside the DELETE statement from the current committed
+    // table state. This avoids a stale count-derived `excess` deleting the next
+    // oldest page if another process already enforced the same cap.
+    getEvictOverflowStatement(db).run(projectPath, maxCommits);
+    const after = getCommitCount(db, projectPath);
+    const evicted = Math.max(0, count - after);
     if (evicted > 0) {
         log(
             `[git-commits] evicted ${evicted} oldest commits for project ${projectPath} (cap=${maxCommits}, was=${count})`,

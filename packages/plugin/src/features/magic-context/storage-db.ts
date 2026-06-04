@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 27;
+export const LATEST_SUPPORTED_VERSION = 28;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -461,6 +461,17 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       project_user_profile_version INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS git_sweep_coordinator (
+      project_path TEXT PRIMARY KEY,
+      lease_holder TEXT,
+      lease_expires_at INTEGER,
+      last_swept_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_git_sweep_coordinator_lease_expires
+      ON git_sweep_coordinator(lease_expires_at);
+    CREATE INDEX IF NOT EXISTS idx_git_sweep_coordinator_last_swept
+      ON git_sweep_coordinator(last_swept_at);
 
     CREATE TABLE IF NOT EXISTS m0_mutation_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

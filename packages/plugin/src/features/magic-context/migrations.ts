@@ -1028,6 +1028,24 @@ const MIGRATIONS: Migration[] = [
             );
         },
     },
+    {
+        version: 28,
+        description: "Add git commit sweep coordinator lease/cooldown table",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS git_sweep_coordinator (
+                    project_path TEXT PRIMARY KEY,
+                    lease_holder TEXT,
+                    lease_expires_at INTEGER,
+                    last_swept_at INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_git_sweep_coordinator_lease_expires
+                    ON git_sweep_coordinator(lease_expires_at);
+                CREATE INDEX IF NOT EXISTS idx_git_sweep_coordinator_last_swept
+                    ON git_sweep_coordinator(last_swept_at);
+            `);
+        },
+    },
 ];
 
 /**

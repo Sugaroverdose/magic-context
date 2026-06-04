@@ -1,0 +1,210 @@
+import type { Database } from "../../../shared/sqlite";
+
+export const GIT_SWEEP_COOLDOWN_MS = 10 * 60 * 1000;
+// Commit indexing can include two embedding drains (the indexer drain plus the
+// timer follow-up drain). The lease is renewed every minute while the sweep is
+// running, so this TTL is crash-recovery latency rather than the expected full
+// wall-clock budget.
+export const GIT_SWEEP_LEASE_TTL_MS = 5 * 60 * 1000;
+export const GIT_SWEEP_LEASE_RENEWAL_MS = 60 * 1000;
+
+export type GitSweepSkipReason = "lease_active" | "cooldown_active";
+
+export interface GitSweepLeaseAcquired {
+    acquired: true;
+    projectPath: string;
+    holderId: string;
+    acquiredAt: number;
+    leaseExpiresAt: number;
+}
+
+export interface GitSweepLeaseSkipped {
+    acquired: false;
+    projectPath: string;
+    reason: GitSweepSkipReason;
+    leaseHolder: string | null;
+    leaseExpiresAt: number | null;
+    lastSweptAt: number | null;
+    nextAllowedAt: number | null;
+}
+
+export type GitSweepLeaseResult = GitSweepLeaseAcquired | GitSweepLeaseSkipped;
+
+export interface GitSweepCoordinatorState {
+    projectPath: string;
+    leaseHolder: string | null;
+    leaseExpiresAt: number | null;
+    lastSweptAt: number | null;
+}
+
+interface GitSweepCoordinatorRow {
+    project_path: string;
+    lease_holder: string | null;
+    lease_expires_at: number | null;
+    last_swept_at: number | null;
+}
+
+export interface AcquireGitSweepLeaseOptions {
+    cooldownMs?: number;
+    leaseTtlMs?: number;
+}
+
+function runImmediate<T>(db: Database, body: () => T): T {
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        const result = body();
+        db.exec("COMMIT");
+        committed = true;
+        return result;
+    } finally {
+        if (!committed) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // already rolled back / no active transaction
+            }
+        }
+    }
+}
+
+function rowToState(row: GitSweepCoordinatorRow): GitSweepCoordinatorState {
+    return {
+        projectPath: row.project_path,
+        leaseHolder: row.lease_holder,
+        leaseExpiresAt: row.lease_expires_at,
+        lastSweptAt: row.last_swept_at,
+    };
+}
+
+export function getGitSweepCoordinatorState(
+    db: Database,
+    projectPath: string,
+): GitSweepCoordinatorState | null {
+    const row = db
+        .prepare(
+            `SELECT project_path, lease_holder, lease_expires_at, last_swept_at
+             FROM git_sweep_coordinator
+             WHERE project_path = ?`,
+        )
+        .get(projectPath) as GitSweepCoordinatorRow | undefined;
+    return row ? rowToState(row) : null;
+}
+
+export function acquireGitSweepLease(
+    db: Database,
+    projectPath: string,
+    holderId: string,
+    options: AcquireGitSweepLeaseOptions = {},
+): GitSweepLeaseResult {
+    const cooldownMs = options.cooldownMs ?? GIT_SWEEP_COOLDOWN_MS;
+    const leaseTtlMs = options.leaseTtlMs ?? GIT_SWEEP_LEASE_TTL_MS;
+
+    return runImmediate(db, () => {
+        const now = Date.now();
+        const row = getGitSweepCoordinatorState(db, projectPath);
+        if (row?.leaseHolder && row.leaseExpiresAt !== null && row.leaseExpiresAt > now) {
+            return {
+                acquired: false,
+                projectPath,
+                reason: "lease_active",
+                leaseHolder: row.leaseHolder,
+                leaseExpiresAt: row.leaseExpiresAt,
+                lastSweptAt: row.lastSweptAt,
+                nextAllowedAt: null,
+            };
+        }
+
+        if (row?.lastSweptAt !== null && row?.lastSweptAt !== undefined) {
+            const nextAllowedAt = row.lastSweptAt + cooldownMs;
+            if (nextAllowedAt > now) {
+                return {
+                    acquired: false,
+                    projectPath,
+                    reason: "cooldown_active",
+                    leaseHolder: row.leaseHolder,
+                    leaseExpiresAt: row.leaseExpiresAt,
+                    lastSweptAt: row.lastSweptAt,
+                    nextAllowedAt,
+                };
+            }
+        }
+
+        const leaseExpiresAt = now + leaseTtlMs;
+        db.prepare(
+            `INSERT INTO git_sweep_coordinator (
+                 project_path,
+                 lease_holder,
+                 lease_expires_at,
+                 last_swept_at
+             ) VALUES (?, ?, ?, NULL)
+             ON CONFLICT(project_path) DO UPDATE SET
+                 lease_holder = excluded.lease_holder,
+                 lease_expires_at = excluded.lease_expires_at`,
+        ).run(projectPath, holderId, leaseExpiresAt);
+
+        return {
+            acquired: true,
+            projectPath,
+            holderId,
+            acquiredAt: now,
+            leaseExpiresAt,
+        };
+    });
+}
+
+export function renewGitSweepLease(
+    db: Database,
+    projectPath: string,
+    holderId: string,
+    leaseTtlMs = GIT_SWEEP_LEASE_TTL_MS,
+): boolean {
+    return runImmediate(db, () => {
+        const now = Date.now();
+        const leaseExpiresAt = now + leaseTtlMs;
+        const result = db
+            .prepare(
+                `UPDATE git_sweep_coordinator
+                 SET lease_expires_at = ?
+                 WHERE project_path = ?
+                   AND lease_holder = ?
+                   AND lease_expires_at > ?`,
+            )
+            .run(leaseExpiresAt, projectPath, holderId, now);
+        return result.changes === 1;
+    });
+}
+
+export function markGitSweepSuccessAndRelease(
+    db: Database,
+    projectPath: string,
+    holderId: string,
+): boolean {
+    return runImmediate(db, () => {
+        const now = Date.now();
+        const result = db
+            .prepare(
+                `UPDATE git_sweep_coordinator
+                 SET lease_holder = NULL,
+                     lease_expires_at = NULL,
+                     last_swept_at = ?
+                 WHERE project_path = ?
+                   AND lease_holder = ?
+                   AND lease_expires_at > ?`,
+            )
+            .run(now, projectPath, holderId, now);
+        return result.changes === 1;
+    });
+}
+
+export function releaseGitSweepLease(db: Database, projectPath: string, holderId: string): void {
+    runImmediate(db, () => {
+        db.prepare(
+            `UPDATE git_sweep_coordinator
+             SET lease_holder = NULL,
+                 lease_expires_at = NULL
+             WHERE project_path = ?
+               AND lease_holder = ?`,
+        ).run(projectPath, holderId);
+    });
+}
