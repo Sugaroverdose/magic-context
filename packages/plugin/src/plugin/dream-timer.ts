@@ -110,7 +110,7 @@ export async function startDreamScheduleTimer(
 
     if (isNewRegistration) {
         log(
-            `[dreamer] registered project ${args.directory} (dreaming=${dreamingEnabled} embeddings=${embeddingSweepEnabled} commits=${commitIndexingEnabled}; total=${registeredProjects.size})`,
+            `[dreamer] registered project ${args.projectIdentity} (dreaming=${dreamingEnabled} embeddings=${embeddingSweepEnabled} commits=${commitIndexingEnabled}; total=${registeredProjects.size})`,
         );
     }
 
@@ -139,7 +139,7 @@ export async function startDreamScheduleTimer(
     return () => {
         registeredProjects.delete(args.directory);
         log(
-            `[dreamer] unregistered project ${args.directory} (remaining=${registeredProjects.size})`,
+            `[dreamer] unregistered project ${args.projectIdentity} (remaining=${registeredProjects.size})`,
         );
         if (registeredProjects.size === 0 && activeTimer) {
             clearInterval(activeTimer);
@@ -226,7 +226,7 @@ async function sweepProject(
 
     try {
         log(
-            `[dreamer] timer tick (${origin}) ${reg.directory} — checking schedule window "${reg.dreamerConfig.schedule}"`,
+            `[dreamer] timer tick (${origin}) ${reg.projectIdentity} — checking schedule window "${reg.dreamerConfig.schedule}"`,
         );
         // Resolve THIS registration's project identity. The shared `dream_queue`
         // is process-global (any OpenCode/Pi instance can write to it), but
@@ -251,7 +251,7 @@ async function sweepProject(
             fallbackModels: resolveFallbackChain(DREAMER_AGENT, reg.dreamerConfig.fallback_models),
         });
     } catch (error) {
-        log(`[dreamer] timer-triggered queue processing failed for ${reg.directory}:`, error);
+        log(`[dreamer] timer-triggered queue processing failed for ${reg.projectIdentity}:`, error);
     }
 }
 
@@ -296,14 +296,14 @@ async function sweepGitCommits(args: {
             lease.reason === "cooldown_active"
                 ? `cooldown active until ${lease.nextAllowedAt}`
                 : `lease held by ${lease.leaseHolder ?? "another holder"} until ${lease.leaseExpiresAt ?? "unknown"}`;
-        log(`[git-commits] sweep skipped for ${projectIdentity} (${directory}): ${reason}`);
+        log(`[git-commits] sweep skipped for ${projectIdentity}: ${reason}`);
         return;
     }
 
     const startedAt = Date.now();
     const stopRenewal = startGitSweepLeaseRenewal(db, projectIdentity, holderId);
     log(
-        `[git-commits] sweep starting for ${directory} (project=${projectIdentity} sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits})`,
+        `[git-commits] sweep starting for ${projectIdentity} (sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits})`,
     );
     try {
         const result = await indexCommitsForProject(db, projectIdentity, directory, {
@@ -330,7 +330,7 @@ async function sweepGitCommits(args: {
         releaseGitSweepLease(db, projectIdentity, holderId);
         const elapsedMs = Date.now() - startedAt;
         log(
-            `[git-commits] sweep failed for ${directory} after ${elapsedMs}ms: ${error instanceof Error ? error.message : String(error)}`,
+            `[git-commits] sweep failed for ${projectIdentity} after ${elapsedMs}ms: ${error instanceof Error ? error.message : String(error)}`,
         );
     } finally {
         stopRenewal();

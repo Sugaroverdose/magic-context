@@ -1371,9 +1371,10 @@ export async function processDreamQueue(args: {
     // sibling-worktree path the shared identity map might resolve to.
     const projectDirectory =
         args.sessionDirectoryOverride ?? resolveDreamSessionDirectory(entry.projectIdentity);
-    log(
-        `[dreamer] dequeued project ${entry.projectIdentity} (dir=${projectDirectory}), starting dream run`,
-    );
+    // Log the project identity only — never the resolved directory. The
+    // absolute path carries the username + project name (privacy), and the
+    // git:<sha>/dir:<hash> identity uniquely correlates the run for debugging.
+    log(`[dreamer] dequeued project ${entry.projectIdentity}, starting dream run`);
 
     let result: DreamRunResult;
     try {

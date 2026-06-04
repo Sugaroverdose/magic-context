@@ -59,6 +59,14 @@ export interface ReadGitCommitsOptions {
     branch?: string;
     /** Hard cap on returned commits. Default 5000. */
     maxCommits?: number;
+    /**
+     * Project identity (`git:<sha>` / `dir:<hash>`) used ONLY for log
+     * correlation. We never log the absolute `directory` — it carries the
+     * username + project name (privacy, and these logs flow into
+     * `doctor --issue` reports). When omitted, logs fall back to a neutral
+     * "<project>" placeholder.
+     */
+    projectIdentity?: string;
 }
 
 /**
@@ -85,6 +93,10 @@ export async function readGitCommits(
             `readGitCommits: refusing revision that looks like an option: "${revision}"`,
         );
     }
+    // Privacy: logs identify the project by its opaque identity, never the
+    // absolute cwd (which carries the username + project name and lands in
+    // doctor --issue reports).
+    const projectLabel = options.projectIdentity ?? "<project>";
     const args = [
         "log",
         revision,
@@ -116,13 +128,13 @@ export async function readGitCommits(
         // retry. We DO log the reason though — a silent empty-result masked a
         // real cwd / PATH / timeout bug during the v0.14 git-commits rollout.
         const message = error instanceof Error ? error.message : String(error);
-        log(`[git-commits] readGitCommits failed at cwd=${directory}: ${message.slice(0, 500)}`);
+        log(`[git-commits] readGitCommits failed for ${projectLabel}: ${message.slice(0, 500)}`);
         return [];
     }
 
     if (stdout.trim().length === 0) {
         log(
-            `[git-commits] readGitCommits returned empty stdout at cwd=${directory} (sinceMs=${options.sinceMs ?? "none"} args=${args.slice(0, 4).join(" ")})`,
+            `[git-commits] readGitCommits returned empty stdout for ${projectLabel} (sinceMs=${options.sinceMs ?? "none"} args=${args.slice(0, 4).join(" ")})`,
         );
     }
 

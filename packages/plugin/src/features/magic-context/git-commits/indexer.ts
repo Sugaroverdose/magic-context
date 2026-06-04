@@ -91,6 +91,7 @@ export async function indexCommitsForProject(
         const commits = await readGitCommits(directory, {
             sinceMs,
             maxCommits: options.maxCommits,
+            projectIdentity: projectPath,
         });
         result.scanned = commits.length;
 
