@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 export type ToolDropResult = "removed" | "truncated" | "absent" | "incomplete";
@@ -149,7 +150,8 @@ export function hasMeaningfulPart(part: unknown): boolean {
     if (!isRecord(part)) return false;
     const type = part.type;
     if (type === "text") {
-        return typeof part.text === "string" && part.text.trim().length > 0;
+        if (typeof part.text !== "string") return false;
+        return stripTagPrefix(part.text).trim().length > 0;
     }
     if (typeof type !== "string") return false;
     if (IGNORE_PART_TYPES.has(type)) return false;
