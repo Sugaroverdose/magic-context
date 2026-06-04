@@ -12,7 +12,7 @@
  * Only `assistant` messages are stripped. User/tool messages keep intentional tags.
  */
 
-import { stripPersistedAssistantText } from "../../plugin/src/hooks/magic-context/tag-content-primitives";
+import { stripPersistedAssistantText } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 
 /**
  * Mutate the given assistant message's text parts in place to strip MC tag notation.

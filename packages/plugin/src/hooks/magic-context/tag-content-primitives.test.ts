@@ -15,7 +15,7 @@ const SECTION = "\u00a7";
 
 const DEGREE = "\u00b0";
 
-describe("stripTagPrefix (transform ? ? notation only)", () => {
+describe("stripTagPrefix (transform §N§ notation only)", () => {
     it("#given well-formed leading prefix #when stripTagPrefix runs #then removes it", () => {
         expect(stripTagPrefix(`${SECTION}42${SECTION} Hello`)).toBe("Hello");
     });

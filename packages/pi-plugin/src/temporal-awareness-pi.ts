@@ -24,13 +24,13 @@
  */
 
 import {
+	peelLeadingMcTagNotation,
+	stripTagPrefix,
+} from "@magic-context/core/hooks/magic-context/tag-content-primitives";
+import {
 	TEMPORAL_MARKER_PATTERN,
 	temporalMarkerPrefix,
 } from "@magic-context/core/hooks/magic-context/temporal-awareness";
-import {
-	peelLeadingMcTagNotation,
-	stripTagPrefix,
-} from "../../plugin/src/hooks/magic-context/tag-content-primitives";
 
 type PiTextContent = { type: "text"; text: string; textSignature?: string };
 type PiImageContent = { type: "image"; data: string; mimeType: string };
