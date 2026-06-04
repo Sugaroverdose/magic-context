@@ -47,6 +47,16 @@ interface GitSweepCoordinatorRow {
 export interface AcquireGitSweepLeaseOptions {
     cooldownMs?: number;
     leaseTtlMs?: number;
+    /**
+     * Skip the recently-swept cooldown gate, acquiring on mutual-exclusion
+     * (lease) alone. Used by the backlog-drain path: draining unembedded rows
+     * has no git-log cost and must run every tick until the backlog clears, so
+     * it must not be starved by a cooldown the dream-timer sweep advanced.
+     * Cross-process duplication is still prevented by the lease itself, and the
+     * caller releases with releaseGitSweepLease (which does NOT advance the
+     * cooldown), keeping the dream-timer's cooldown tracking independent.
+     */
+    ignoreCooldown?: boolean;
 }
 
 function runImmediate<T>(db: Database, body: () => T): T {
@@ -115,7 +125,11 @@ export function acquireGitSweepLease(
             };
         }
 
-        if (row?.lastSweptAt !== null && row?.lastSweptAt !== undefined) {
+        if (
+            !options.ignoreCooldown &&
+            row?.lastSweptAt !== null &&
+            row?.lastSweptAt !== undefined
+        ) {
             const nextAllowedAt = row.lastSweptAt + cooldownMs;
             if (nextAllowedAt > now) {
                 return {

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context";
@@ -10,6 +10,7 @@ import {
     loadUnembeddedCommits,
     saveCommitEmbedding,
 } from "./git-commits/storage-git-commit-embeddings";
+import { acquireGitSweepLease, releaseGitSweepLease } from "./git-commits/sweep-coordinator";
 import { invalidateProject } from "./memory/embedding-cache";
 import { getEmbeddingProviderIdentity } from "./memory/embedding-identity";
 import { LocalEmbeddingProvider } from "./memory/embedding-local";
@@ -24,6 +25,13 @@ import {
 const OFF_PROVIDER_IDENTITY = "embedding-provider:off";
 const SWEEP_MAX_WALL_CLOCK_MS = 10 * 60 * 1000;
 const SWEEP_MAX_CONSECUTIVE_EMPTY = 3;
+// Backlog-drain caps for the commit-embedding path. The drain loops within one
+// held coordinator lease so a large backlog (e.g. a 2000-commit repo that was
+// indexed before embeddings were enabled) clears in a few ticks instead of
+// crawling one batch per tick. Bounded per sweep so one project can't starve
+// the others or pin the provider indefinitely.
+const COMMIT_DRAIN_BATCH_SIZE = 16;
+const COMMIT_DRAIN_MAX_PER_SWEEP = 500;
 
 export interface EmbeddingFeatures {
     memoryEnabled: boolean;
@@ -427,14 +435,12 @@ export async function embedUnembeddedMemoriesForProject(
     }
 }
 
-async function embedUnembeddedCommitsForProject(
+/** Drain a single batch of unembedded commits. Returns how many embedded. */
+async function embedCommitBatch(
     db: Database,
     projectIdentity: string,
     batchSize: number,
 ): Promise<number> {
-    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.gitCommitEnabled) return 0;
-
     const commits = loadUnembeddedCommits(db, projectIdentity, Math.max(1, Math.floor(batchSize)));
     if (commits.length === 0) return 0;
 
@@ -454,6 +460,48 @@ async function embedUnembeddedCommitsForProject(
         }
     })();
     return embeddedCount;
+}
+
+/**
+ * Drain a project's unembedded-commit backlog, coordinated across processes.
+ *
+ * This is the ONLY path that drains pure backlogs (the dream-timer git-sweep
+ * only embeds when `git log` finds NEW commits, so a repo indexed before
+ * embeddings were enabled never drains there). Every plugin process runs this
+ * on its dream-timer tick, so without coordination N processes hammer the
+ * embedding provider with the same commits. We take the shared git-sweep lease
+ * (mutual exclusion) per identity — but with `ignoreCooldown`, because a
+ * backlog must keep draining every tick until empty and must not be blocked by
+ * the cooldown the dream-timer sweep advances. We release without marking
+ * success so the two paths' cooldown tracking stays independent.
+ */
+async function drainCommitBacklogForProject(
+    db: Database,
+    projectIdentity: string,
+    deadline: number,
+): Promise<number> {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.gitCommitEnabled) return 0;
+
+    const holderId = `embed-sweep-${randomUUID()}`;
+    const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
+    if (!lease.acquired) {
+        // Another process is sweeping/draining this identity — skip cleanly.
+        return 0;
+    }
+
+    let total = 0;
+    try {
+        while (Date.now() < deadline && total < COMMIT_DRAIN_MAX_PER_SWEEP) {
+            const embedded = await embedCommitBatch(db, projectIdentity, COMMIT_DRAIN_BATCH_SIZE);
+            if (embedded === 0) break;
+            total += embedded;
+            if (embedded < COMMIT_DRAIN_BATCH_SIZE) break; // partial batch = drained
+        }
+    } finally {
+        releaseGitSweepLease(db, projectIdentity, holderId);
+    }
+    return total;
 }
 
 export async function sweepAllRegisteredProjects(
@@ -500,7 +548,7 @@ export async function sweepAllRegisteredProjects(
             }
 
             if (Date.now() < deadline) {
-                commits = await embedUnembeddedCommitsForProject(db, projectIdentity, batchSize);
+                commits = await drainCommitBacklogForProject(db, projectIdentity, deadline);
                 commitsEmbedded += commits;
             }
 

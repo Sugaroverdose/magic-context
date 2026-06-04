@@ -112,6 +112,36 @@ describe("git sweep coordinator", () => {
         expect(retry.acquired).toBe(true);
     });
 
+    it("ignoreCooldown bypasses the cooldown gate but still honors the active lease", () => {
+        const projectPath = "git:drain-backlog";
+        // A prior dream-timer sweep advanced the cooldown.
+        const swept = acquireGitSweepLease(db, projectPath, "holder-a");
+        expect(swept.acquired).toBe(true);
+        if (!swept.acquired) throw new Error("expected first lease");
+        expect(markGitSweepSuccessAndRelease(db, projectPath, swept.holderId)).toBe(true);
+
+        // The normal path is cooldown-blocked...
+        expect(acquireGitSweepLease(db, projectPath, "holder-b")).toEqual(
+            expect.objectContaining({ acquired: false, reason: "cooldown_active" }),
+        );
+
+        // ...but the backlog drainer ignores cooldown and acquires.
+        const drain = acquireGitSweepLease(db, projectPath, "drainer-1", { ignoreCooldown: true });
+        expect(drain.acquired).toBe(true);
+
+        // While the drainer holds the lease, a second drainer is still excluded.
+        expect(
+            acquireGitSweepLease(db, projectPath, "drainer-2", { ignoreCooldown: true }),
+        ).toEqual(expect.objectContaining({ acquired: false, reason: "lease_active" }));
+
+        // Release does NOT advance the cooldown (independent tracking).
+        releaseGitSweepLease(db, projectPath, drain.acquired ? drain.holderId : "");
+        const stateAfter = getGitSweepCoordinatorState(db, projectPath);
+        expect(stateAfter?.leaseHolder).toBeNull();
+        // last_swept_at is still the dream-timer value, not bumped by the drain.
+        expect(typeof stateAfter?.lastSweptAt).toBe("number");
+    });
+
     it("lets a new holder acquire after a crashed holder lease expires", () => {
         const projectPath = "git:crashed-holder";
         const lease = acquireGitSweepLease(db, projectPath, "holder-a");
