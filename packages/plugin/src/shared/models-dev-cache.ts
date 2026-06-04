@@ -1,31 +1,34 @@
 /**
- * Resolve per-model context limits to match whatever OpenCode itself sees.
+ * Resolve per-model context limits from OpenCode's SDK — the single source of
+ * truth — for OpenCode sessions.
  *
- * Two layers:
+ * `client.config.providers()` returns OpenCode's fully-resolved config: the
+ * live models.dev cache + compiled-in snapshot + opencode.json custom-provider
+ * overrides + auth-plugin caps (e.g. the Codex-OAuth gpt-5.5 400k cap). We
+ * consume ONLY that. We no longer read OpenCode's `models.json` file ourselves:
+ * a torn read mid-write produced impossible limits (a 6748 "limit" for a session
+ * that had run for hours), and a stale on-disk copy out-voted the live
+ * auth-resolved cap (922k vs the real 400k). OpenCode reads that file safely in
+ * its own process and hands us the merged answer.
  *
- *   1. API cache (primary): populated asynchronously via
- *      `client.config.providers()`. OpenCode's own provider service merges
- *      the live models.dev cache file, its compiled-in snapshot fallback,
- *      opencode.json custom provider overrides, and derived experimental
- *      modes. Whatever OpenCode reports is the source of truth.
+ * Layers:
+ *   1. `apiCache` (authoritative): warmed once at startup from the SDK; seeded
+ *      from a persisted last-known-good file on cold start so a restart uses the
+ *      real limit immediately (no 128k-default budget-collapse window).
  *
- *   2. File cache (fallback): read-from-disk parse of OpenCode's
- *      `models.json` plus `opencode.json(c)` custom provider entries.
- *      Used during cold starts before the API cache warms up and in any
- *      code path that cannot reach the SDK client.
+ * All cached values are bounded to a sane [20k, 3M] range on insert, so torn /
+ * unconfigured-default garbage can never be returned or persisted. The startup
+ * warm retries a couple times when OpenCode's provider service isn't ready yet.
  *
- * The public getter (`getModelsDevContextLimit()`) is synchronous: it checks
- * the API cache first, then the file cache. The plugin warms the API cache
- * once from `src/index.ts` at startup. Runtime retries are reserved for the
- * issue #77 cache-regression recovery path.
+ * Pi does NOT use this — it resolves from its own `ctx.getModel().contextWindow`
+ * (instant at extension load), so `getSdkContextLimit()` returns `undefined`
+ * for Pi and Pi's own path is used.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir, platform } from "node:os";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getCacheDir } from "./data-path";
-import { parseJsonc } from "./jsonc-parser";
+import { getMagicContextStorageDir } from "./data-path";
+import { getHarness } from "./harness";
 import { sessionLog } from "./logger";
 
 interface OpencodeClientLike {
@@ -34,63 +37,95 @@ interface OpencodeClientLike {
     };
 }
 
-// File-cache fallback only. The primary API refresh is one-shot at startup;
-// this 5-minute interval governs the on-disk-cache fallback path when the API
-// loader hasn't run yet (e.g. during plugin warmup).
-const RELOAD_INTERVAL_MS = 5 * 60 * 1000;
+// Plausible bounds for a real model's prompt limit. A value outside this range
+// is physically impossible for an agentic session and signals a transient/garbage
+// read — e.g. a torn read of OpenCode's `models.json` mid-write once produced
+// `contextLimit=6748` (smaller than a single system prompt) for a session that
+// had been running for hours past 200k+ (issue #117). Such values must be
+// REJECTED, not trusted as a "smaller real cap". A genuinely smaller real limit
+// still comes through the overflow-detection path (detectedContextLimit).
+export const MIN_SANE_LIMIT = 20_000;
+export const MAX_SANE_LIMIT = 3_000_000;
+
+/** True when `limit` is a plausible real prompt window — used to reject torn /
+ *  unconfigured-default garbage in BOTH harnesses (OpenCode's SDK values and
+ *  Pi's reported `contextWindow`). Exported so Pi applies the identical bound. */
+export function isSaneLimit(limit: number | undefined): limit is number {
+    return typeof limit === "number" && limit >= MIN_SANE_LIMIT && limit <= MAX_SANE_LIMIT;
+}
 
 interface CachedModelMetadata {
     limit?: number;
 }
 
-/** Populated async from OpenCode SDK. Primary source of truth when available. */
+/**
+ * Authoritative source (OpenCode only): populated async from the SDK
+ * `config.providers()`, which is OpenCode's fully-resolved config — models.dev +
+ * compiled-in snapshot + opencode.json overrides + auth-plugin caps (e.g. the
+ * Codex-OAuth gpt-5.5 400k cap). When present, this WINS unconditionally; the
+ * disk file is never consulted (no torn-read exposure, no stale value
+ * out-voting the live limit). Pi never warms this — it has its own
+ * `contextWindow` source — so for Pi this stays null and resolution falls
+ * through to the file fallback exactly as before.
+ */
 let apiCache: Map<string, CachedModelMetadata> | null = null;
 let apiLoadedAt = 0;
 
-/** Populated sync from disk as fallback. */
-let fileCache: Map<string, CachedModelMetadata> | null = null;
-let fileLastAttempt = 0;
+// Persisted last-known-good apiCache (OpenCode). Survives restart so a cold
+// start uses the real limit instantly instead of falling to the disk file or the
+// 128k default for the warm-up window (which over-shrinks the history budget).
+// Harness-scoped: only OpenCode warms/persists apiCache, so Pi's file (which is
+// never written) stays absent and Pi seeds nothing — keeping Pi byte-identical.
+let persistSeedLoaded = false;
 
-function hashFast(input: string): string {
-    // Matches OpenCode's Hash.fast() (packages/shared/src/util/hash.ts).
-    return createHash("sha1").update(input).digest("hex");
+function persistFilePath(): string {
+    return join(getMagicContextStorageDir(), `model-context-limits-${getHarness()}.json`);
 }
 
-function getModelsJsonPath(): string {
-    // 1. Explicit path override (OpenCode's OPENCODE_MODELS_PATH takes highest priority).
-    const explicit = process.env.OPENCODE_MODELS_PATH?.trim();
-    if (explicit) return explicit;
-
-    // OpenCode uses `xdg-basedir`, which falls back to `<homedir>/.cache` on
-    // every platform (including Windows) when XDG_CACHE_HOME is unset. See
-    // shared/data-path.ts#getCacheDir for the shared helper.
-    const cacheBase = getCacheDir();
-
-    // 2. Custom models source → hashed filename (matches OpenCode).
-    //    source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`
-    const source = process.env.OPENCODE_MODELS_URL?.trim();
-    const filename =
-        source && source !== "https://models.dev"
-            ? `models-${hashFast(source)}.json`
-            : "models.json";
-
-    return join(cacheBase, "opencode", filename);
+/** Seed apiCache from the persisted last-known-good file once per process, only
+ *  when apiCache hasn't been warmed yet. Values are sane-filtered on load so a
+ *  stale garbage entry can never resurrect. */
+function loadPersistedApiCacheOnce(): void {
+    if (persistSeedLoaded || apiCache !== null) return;
+    persistSeedLoaded = true;
+    try {
+        const raw = readFileSync(persistFilePath(), "utf-8");
+        const obj = JSON.parse(raw) as Record<string, number>;
+        const map = new Map<string, CachedModelMetadata>();
+        for (const [key, limit] of Object.entries(obj)) {
+            if (isSaneLimit(limit)) map.set(key, { limit });
+        }
+        if (map.size > 0) {
+            apiCache = map;
+            sessionLog(
+                "global",
+                `models-dev-cache: seeded ${map.size} entries from persisted cache (cold start)`,
+            );
+        }
+    } catch {
+        // No persisted cache yet, or unreadable — fall through to file/SDK.
+    }
 }
 
-function getOpencodeConfigPath(): string | null {
-    const envDir = process.env.OPENCODE_CONFIG_DIR?.trim();
-    const configDir = envDir
-        ? envDir
-        : platform() === "win32"
-          ? join(homedir(), ".config", "opencode")
-          : join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode");
-
-    // Check jsonc first, then json (matches OpenCode's own lookup order).
-    const jsonc = join(configDir, "opencode.jsonc");
-    if (existsSync(jsonc)) return jsonc;
-    const json = join(configDir, "opencode.json");
-    if (existsSync(json)) return json;
-    return null;
+/** Atomically persist the current (sane-filtered) apiCache so the next process
+ *  cold-starts with the real limits. Temp-write + rename so a concurrent reader
+ *  never sees a torn file (the exact failure mode we're eliminating). */
+function persistApiCache(): void {
+    if (!apiCache) return;
+    const obj: Record<string, number> = {};
+    for (const [key, value] of apiCache) {
+        if (isSaneLimit(value.limit)) obj[key] = value.limit;
+    }
+    try {
+        const dir = getMagicContextStorageDir();
+        mkdirSync(dir, { recursive: true });
+        const target = persistFilePath();
+        const tmp = `${target}.${process.pid}.tmp`;
+        writeFileSync(tmp, JSON.stringify(obj), { encoding: "utf-8", mode: 0o600 });
+        renameSync(tmp, target);
+    } catch {
+        // best-effort — a failed persist only loses cold-start warmth, not correctness
+    }
 }
 
 /**
@@ -123,7 +158,10 @@ function setCachedModelMetadata(
 ): void {
     const limit = resolveLimit(model?.limit);
 
-    if (limit === undefined) {
+    // Only cache plausible limits. A value outside [20k, 3M] is garbage (torn
+    // read / unconfigured default) and must never enter the cache or get
+    // persisted — see isSaneLimit.
+    if (!isSaneLimit(limit)) {
         return;
     }
 
@@ -141,88 +179,6 @@ function setCachedModelMetadata(
     }
 }
 
-function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
-    const metadata = new Map<string, CachedModelMetadata>();
-
-    // 1. Read OpenCode's models.dev cache file (base layer).
-    const modelsJsonPath = getModelsJsonPath();
-    let fileFound = false;
-    try {
-        if (existsSync(modelsJsonPath)) {
-            fileFound = true;
-            const raw = readFileSync(modelsJsonPath, "utf-8");
-            const data = JSON.parse(raw) as Record<
-                string,
-                {
-                    models?: Record<
-                        string,
-                        {
-                            limit?: { context?: number; input?: number };
-                            experimental?: { modes?: Record<string, unknown> };
-                        }
-                    >;
-                }
-            >;
-
-            for (const [providerId, provider] of Object.entries(data)) {
-                if (!provider?.models || typeof provider.models !== "object") continue;
-                for (const [modelId, model] of Object.entries(provider.models)) {
-                    setCachedModelMetadata(metadata, `${providerId}/${modelId}`, model);
-                }
-            }
-        }
-    } catch (error) {
-        sessionLog(
-            "global",
-            `models-dev-cache: failed to read models.json at ${modelsJsonPath}:`,
-            error instanceof Error ? error.message : String(error),
-        );
-    }
-
-    // 2. Overlay custom provider models from OpenCode config (higher priority).
-    // Users define custom/proxy models via provider.<id>.models.<name>.limit.{input,context}
-    // in opencode.json(c). These override models.dev entries for the same key.
-    try {
-        const configPath = getOpencodeConfigPath();
-        if (configPath && existsSync(configPath)) {
-            // Use the shared JSONC parser — handles `//` comments AND trailing commas.
-            // The previous custom regex stripped comments only; OpenCode's `opencode.jsonc`
-            // frequently contains trailing commas (valid JSONC, invalid JSON), which broke
-            // custom provider model-limit resolution silently. See issue #14 follow-up.
-            const config = parseJsonc<{
-                provider?: Record<
-                    string,
-                    {
-                        models?: Record<string, { limit?: { context?: number; input?: number } }>;
-                    }
-                >;
-            }>(readFileSync(configPath, "utf-8"));
-
-            if (config.provider && typeof config.provider === "object") {
-                for (const [providerId, provider] of Object.entries(config.provider)) {
-                    if (!provider?.models || typeof provider.models !== "object") continue;
-                    for (const [modelId, model] of Object.entries(provider.models)) {
-                        setCachedModelMetadata(metadata, `${providerId}/${modelId}`, model);
-                    }
-                }
-            }
-        }
-    } catch (error) {
-        sessionLog(
-            "global",
-            "models-dev-cache: failed to read opencode config for custom models:",
-            error instanceof Error ? error.message : String(error),
-        );
-    }
-
-    sessionLog(
-        "global",
-        `models-dev-cache: file-layer loaded ${metadata.size} model metadata entries (modelsJsonPath=${modelsJsonPath}, found=${fileFound})`,
-    );
-
-    return metadata;
-}
-
 /**
  * Asynchronously refresh the API-layer cache from OpenCode's SDK.
  *
@@ -230,18 +186,42 @@ function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
  * OpenCode's `/config/providers` endpoint returns every provider with full
  * model metadata — including `limit.context` — resolved through the same path
  * OpenCode itself uses (live cache + compiled-in snapshot + opencode.json
- * overrides + derived experimental modes).
+ * overrides + derived experimental modes + auth-plugin caps).
+ *
+ * `retries`/`retryDelayMs`: when OpenCode's provider service isn't ready at our
+ * startup, `config.providers()` can return an empty/no-providers payload. Retry
+ * a few times so the cache warms instead of leaving the session on the 128k
+ * default until the next restart. A successful load (any providers) stops early.
  *
  * Safe to call concurrently; only overwrites the cache on success.
  */
-export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Promise<void> {
+export async function refreshModelLimitsFromApi(
+    client: OpencodeClientLike,
+    options?: { retries?: number; retryDelayMs?: number },
+): Promise<void> {
+    const attempts = Math.max(1, (options?.retries ?? 0) + 1);
+    const delayMs = options?.retryDelayMs ?? 1000;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        const ok = await refreshModelLimitsOnce(client);
+        if (ok) return;
+        if (attempt < attempts) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+}
+
+/** Single SDK fetch + cache rebuild. Returns true when providers were loaded. */
+async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {
     try {
         const result = await client.config.providers();
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
         const providers = data?.providers;
-        if (!Array.isArray(providers)) {
-            sessionLog("global", "models-dev-cache: API refresh returned no providers payload");
-            return;
+        if (!Array.isArray(providers) || providers.length === 0) {
+            sessionLog(
+                "global",
+                "models-dev-cache: API refresh returned no providers payload (will retry if attempts remain)",
+            );
+            return false;
         }
 
         const map = new Map<string, CachedModelMetadata>();
@@ -265,6 +245,9 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
         const previousSize = apiCache?.size ?? null;
         apiCache = map;
         apiLoadedAt = Date.now();
+        // Persist the freshly-resolved (sane-filtered) limits so the next process
+        // cold-starts with the real values instead of the 128k default.
+        persistApiCache();
 
         if (previousSize === null) {
             sessionLog(
@@ -277,59 +260,48 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
                 `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
             );
         }
+        return true;
     } catch (error) {
         sessionLog(
             "global",
             "models-dev-cache: API refresh failed:",
             error instanceof Error ? error.message : String(error),
         );
+        return false;
     }
 }
 
 /**
- * Returns the context limit for a provider/model.
+ * Resolve a model's prompt limit from OpenCode's SDK (`config.providers()`),
+ * the single source of truth: it already merges models.dev + compiled-in
+ * snapshot + opencode.json overrides + auth-plugin caps (e.g. the Codex-OAuth
+ * gpt-5.5 400k cap). We deliberately do NOT read OpenCode's `models.json` file
+ * ourselves — a torn read of that file mid-write produced garbage limits, and a
+ * stale on-disk copy out-voted the live auth-resolved cap (922k vs the real
+ * 400k). OpenCode reads that file safely within its own process and exposes the
+ * merged result here.
  *
- * Lookup order:
- *   1. API cache (populated by {@link refreshModelLimitsFromApi}). Matches
- *      what OpenCode sees exactly, including snapshot-only models.
- *   2. File cache (parsed from models.json + opencode.json overrides).
- *      Used before the API cache warms and as a last resort.
+ * Resolution:
+ *   1. Seed `apiCache` from the persisted last-known-good file once (cold start).
+ *   2. Return the SDK value (sane by construction — only [20k,3M] is cached).
+ *   3. `undefined` when the SDK hasn't reported this model yet → the caller
+ *      defaults / retries (the startup warm retries when OpenCode isn't ready).
  *
- * Returns `undefined` if neither layer knows the model.
+ * OpenCode-only: Pi never warms `apiCache` (it resolves from its own
+ * `ctx.getModel().contextWindow`), so for Pi this returns `undefined` and Pi's
+ * own resolution path is used.
  */
-export function getModelsDevContextLimit(providerID: string, modelID: string): number | undefined {
-    const now = Date.now();
-    if (!fileCache || now - fileLastAttempt > RELOAD_INTERVAL_MS) {
-        fileLastAttempt = now;
-        fileCache = loadModelsDevMetadataFromFile();
-    }
-
+export function getSdkContextLimit(providerID: string, modelID: string): number | undefined {
+    loadPersistedApiCacheOnce();
     const fromApi = lookupLimitWithTagFallback(apiCache, providerID, modelID);
-    const fromFile = lookupLimitWithTagFallback(fileCache, providerID, modelID);
-
-    // When BOTH layers know the model, take the LARGER limit. Providers never
-    // under-report their real window, so a suspiciously small value — e.g.
-    // ollama reporting its default `num_ctx` (4k/8k) for a cloud model via the
-    // live `/config/providers` API — must not override the correct, larger
-    // models.dev value. A genuinely smaller real limit (provider actually
-    // rejects at N) is captured separately via the overflow-detection path
-    // (detectedContextLimit), not here. (issue #117)
-    if (typeof fromApi === "number" && typeof fromFile === "number") {
-        return Math.max(fromApi, fromFile);
-    }
-    return fromApi ?? fromFile;
+    return isSaneLimit(fromApi) ? fromApi : undefined;
 }
 
 /**
- * Look up a model's limit in one cache layer, with an ollama-style tag-suffix
- * fallback.
- *
- * models.dev stores some models WITH a colon tag (e.g. `gemma3:27b`,
- * `deepseek-v3.1:671b`) and ollama-cloud base models WITHOUT one
- * (`deepseek-v4-pro`). But ollama invokes cloud models with a tag at runtime
- * (`deepseek-v4-pro:cloud`), so OpenCode reports the tagged id. An exact-only
- * match therefore misses → falls back to the 128k default → wrong pressure
- * denominator (issue #117).
+ * Look up a model's limit in the cache, with an ollama-style tag-suffix
+ * fallback. ollama invokes cloud models with a tag at runtime
+ * (`deepseek-v4-pro:cloud`) while the underlying metadata key is tag-less
+ * (`deepseek-v4-pro`), so an exact-only match misses.
  *
  * Strategy: exact match first (never collapses a legitimately-tagged model),
  * then retry once with the last `:tag` segment stripped.
@@ -352,12 +324,11 @@ function lookupLimitWithTagFallback(
     return undefined;
 }
 
-/** Clear in-memory caches (for testing). */
+/** Clear in-memory caches (for testing and the regression-recovery refetch). */
 export function clearModelsDevCache(): void {
     apiCache = null;
     apiLoadedAt = 0;
-    fileCache = null;
-    fileLastAttempt = 0;
+    persistSeedLoaded = false;
 }
 
 /** Inspection helpers (for logging / debugging). */
@@ -365,12 +336,10 @@ export function getModelsDevCacheState(): {
     apiLoaded: boolean;
     apiCount: number;
     apiAgeMs: number;
-    fileCount: number;
 } {
     return {
         apiLoaded: apiCache !== null,
         apiCount: apiCache?.size ?? 0,
         apiAgeMs: apiLoadedAt > 0 ? Date.now() - apiLoadedAt : -1,
-        fileCount: fileCache?.size ?? 0,
     };
 }

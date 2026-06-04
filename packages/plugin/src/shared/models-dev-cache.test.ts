@@ -1,44 +1,40 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     clearModelsDevCache,
     getModelsDevCacheState,
-    getModelsDevContextLimit,
+    getSdkContextLimit,
     refreshModelLimitsFromApi,
 } from "./models-dev-cache";
 
-describe("models-dev-cache", () => {
+/**
+ * Model context limits resolve from OpenCode's SDK only (`config.providers()`),
+ * bounded to a sane [20k, 3M] range, with a persisted last-known-good cache for
+ * cold start. We no longer read OpenCode's `models.json` file ourselves (a torn
+ * read produced impossible limits and a stale copy out-voted the live cap).
+ */
+describe("models-dev-cache (SDK-only)", () => {
     let tempDir: string;
-    let originalEnv: Record<string, string | undefined>;
+    let originalXdgData: string | undefined;
+
+    function makeClient(providers: Array<unknown>) {
+        return { config: { providers: async () => ({ data: { providers } }) } };
+    }
 
     beforeEach(() => {
         tempDir = mkdtempSync(join(tmpdir(), "mc-models-dev-"));
-        originalEnv = {
-            OPENCODE_MODELS_PATH: process.env.OPENCODE_MODELS_PATH,
-            OPENCODE_MODELS_URL: process.env.OPENCODE_MODELS_URL,
-            XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
-            OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
-        };
-        // Isolate from user environment — including user's ~/.config/opencode/opencode.jsonc
-        // which may have custom provider limits that would override models.json entries.
-        delete process.env.OPENCODE_MODELS_PATH;
-        delete process.env.OPENCODE_MODELS_URL;
-        process.env.XDG_CACHE_HOME = tempDir;
-        // Point at an empty directory so no opencode.json{c} is read unless the test writes one.
-        const emptyConfigDir = join(tempDir, "config", "opencode");
-        mkdirSync(emptyConfigDir, { recursive: true });
-        process.env.OPENCODE_CONFIG_DIR = emptyConfigDir;
+        // Isolate the persisted-cache file under a temp data dir so tests never
+        // touch the real ~/.local/share/cortexkit/magic-context cache.
+        originalXdgData = process.env.XDG_DATA_HOME;
+        process.env.XDG_DATA_HOME = tempDir;
         clearModelsDevCache();
     });
 
     afterEach(() => {
-        // Restore env.
-        for (const [k, v] of Object.entries(originalEnv)) {
-            if (v === undefined) delete process.env[k];
-            else process.env[k] = v;
-        }
+        if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalXdgData;
         try {
             rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {
@@ -47,66 +43,46 @@ describe("models-dev-cache", () => {
         clearModelsDevCache();
     });
 
-    test("reads context limits from models.json under XDG_CACHE_HOME", () => {
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                anthropic: {
-                    models: {
-                        "claude-sonnet-4-6": { limit: { context: 200000 } },
-                    },
-                },
-                "github-copilot": {
-                    models: {
-                        "gpt-5.3-codex": { limit: { context: 400000 } },
-                    },
-                },
-            }),
-        );
-
-        expect(getModelsDevContextLimit("anthropic", "claude-sonnet-4-6")).toBe(200000);
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.3-codex")).toBe(400000);
-        expect(getModelsDevContextLimit("unknown", "unknown")).toBeUndefined();
-    });
-
-    test("prefers limit.input over limit.context when both are present", () => {
-        //#given — GitHub Copilot shape: input is max prompt, context is total window.
-        // Matches real-world github-copilot/gpt-5.3-codex which has
-        //   limit.context = 400000 (total), limit.input = 272000 (max prompt).
-        // Our pressure math must use the input cap; sending a 400K prompt gets rejected.
-        // OpenCode's own session/overflow.ts follows the same rule.
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                "github-copilot": {
+    test("resolves from the SDK and prefers limit.input over limit.context", async () => {
+        // github-copilot / codex shape: input is the max prompt, context the total
+        // window. Pressure math must use the input cap (OpenCode's own overflow.ts
+        // does the same), so a 400k-context / 272k-input model resolves to 272k.
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "github-copilot",
                     models: {
                         "gpt-5.3-codex": { limit: { context: 400000, input: 272000 } },
-                        "claude-opus-4.6": { limit: { context: 144000, input: 128000 } },
-                        // Context-only model (no input) falls back to context.
                         "legacy-only-context": { limit: { context: 100000 } },
                     },
                 },
-            }),
+            ]),
         );
 
-        //#then
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.3-codex")).toBe(272000);
-        expect(getModelsDevContextLimit("github-copilot", "claude-opus-4.6")).toBe(128000);
-        expect(getModelsDevContextLimit("github-copilot", "legacy-only-context")).toBe(100000);
+        expect(getSdkContextLimit("github-copilot", "gpt-5.3-codex")).toBe(272000);
+        expect(getSdkContextLimit("github-copilot", "legacy-only-context")).toBe(100000);
+        expect(getSdkContextLimit("unknown", "unknown")).toBeUndefined();
     });
 
-    test("derived experimental.modes inherit the effective (input) limit", () => {
-        //#given — parent has input < context; derived modes should inherit input, not context
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                openai: {
+    test("Codex-OAuth cap is honored: a 400k/272k gpt-5.5 resolves to 272k (not the stale 922k)", async () => {
+        // The bug we're fixing: the SDK reports the auth-resolved cap; nothing may
+        // out-vote it with a larger stale value.
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "openai",
+                    models: { "gpt-5.5": { limit: { context: 400000, input: 272000 } } },
+                },
+            ]),
+        );
+        expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+    });
+
+    test("derived experimental.modes inherit the effective (input) limit", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "openai",
                     models: {
                         "gpt-5.4": {
                             limit: { context: 1050000, input: 922000 },
@@ -114,249 +90,169 @@ describe("models-dev-cache", () => {
                         },
                     },
                 },
-            }),
+            ]),
         );
-
-        //#then
-        expect(getModelsDevContextLimit("openai", "gpt-5.4")).toBe(922000);
-        expect(getModelsDevContextLimit("openai", "gpt-5.4-fast")).toBe(922000);
-        expect(getModelsDevContextLimit("openai", "gpt-5.4-mini")).toBe(922000);
+        expect(getSdkContextLimit("openai", "gpt-5.4")).toBe(922000);
+        expect(getSdkContextLimit("openai", "gpt-5.4-fast")).toBe(922000);
+        expect(getSdkContextLimit("openai", "gpt-5.4-mini")).toBe(922000);
     });
 
-    test("custom opencode.json provider overlay uses limit.input preferentially", () => {
-        //#given — user defines a proxy provider in opencode.json with input < context
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        const configDir = join(tempDir, "config", "opencode");
-        mkdirSync(configDir, { recursive: true });
-        writeFileSync(
-            join(configDir, "opencode.json"),
-            JSON.stringify({
-                provider: {
-                    "my-proxy": {
-                        models: {
-                            "split-model": { limit: { context: 400000, input: 200000 } },
-                        },
-                    },
-                },
-            }),
-        );
-        process.env.OPENCODE_CONFIG_DIR = configDir;
-        clearModelsDevCache();
-
-        //#then
-        expect(getModelsDevContextLimit("my-proxy", "split-model")).toBe(200000);
-
-        // Cleanup: restore env (afterEach also handles this, but we added a new var)
-        delete process.env.OPENCODE_CONFIG_DIR;
-    });
-
-    test("API cache uses limit.input preferentially", async () => {
-        //#given — API response shape mirrors file layer
-        const mockClient = {
-            config: {
-                providers: async () => ({
-                    data: {
-                        providers: [
-                            {
-                                id: "github-copilot",
-                                models: {
-                                    "gpt-5.3-codex": {
-                                        limit: { context: 400000, input: 272000 },
-                                    },
-                                },
-                            },
-                        ],
-                    },
-                }),
-            },
-        };
-        await refreshModelLimitsFromApi(mockClient);
-
-        //#then
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.3-codex")).toBe(272000);
-    });
-
-    test("expands experimental.modes into derived model IDs with parent context", () => {
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                "github-copilot": {
-                    models: {
-                        "gpt-5.4": {
-                            limit: { context: 400000 },
-                            experimental: { modes: { fast: {}, high: {} } },
-                        },
-                    },
-                },
-            }),
-        );
-
-        // Parent ID works.
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.4")).toBe(400000);
-        // Derived mode IDs inherit parent context.
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.4-fast")).toBe(400000);
-        expect(getModelsDevContextLimit("github-copilot", "gpt-5.4-high")).toBe(400000);
-    });
-
-    test("OPENCODE_MODELS_PATH env overrides default path", () => {
-        // Write real file somewhere unexpected.
-        const customPath = join(tempDir, "elsewhere", "my-models.json");
-        mkdirSync(join(tempDir, "elsewhere"), { recursive: true });
-        writeFileSync(
-            customPath,
-            JSON.stringify({
-                anthropic: { models: { "claude-4": { limit: { context: 1000000 } } } },
-            }),
-        );
-        process.env.OPENCODE_MODELS_PATH = customPath;
-        clearModelsDevCache();
-
-        expect(getModelsDevContextLimit("anthropic", "claude-4")).toBe(1000000);
-    });
-
-    test("OPENCODE_MODELS_URL (non-default) selects hashed filename", () => {
-        // We can't easily verify the exact hash without duplicating the hash logic,
-        // but we can confirm that setting OPENCODE_MODELS_URL prevents reading
-        // the default models.json when that file exists with different data.
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                anthropic: { models: { "claude-4": { limit: { context: 500000 } } } },
-            }),
-        );
-
-        process.env.OPENCODE_MODELS_URL = "https://custom.example.com/models";
-        clearModelsDevCache();
-
-        // Should NOT find claude-4 because we're looking at a hashed filename now,
-        // not models.json.
-        expect(getModelsDevContextLimit("anthropic", "claude-4")).toBeUndefined();
-    });
-
-    test("takes the larger limit when both layers know the model (API larger)", async () => {
-        // Seed file layer with one value.
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                anthropic: { models: { "claude-4": { limit: { context: 100000 } } } },
-            }),
-        );
-
-        // Sanity: file layer returns 100000 before API refresh.
-        expect(getModelsDevContextLimit("anthropic", "claude-4")).toBe(100000);
-
-        // Mock client providing a LARGER value via API.
-        const mockClient = {
-            config: {
-                providers: async () => ({
-                    data: {
-                        providers: [
-                            {
-                                id: "anthropic",
-                                models: {
-                                    "claude-4": { limit: { context: 1000000 } },
-                                },
-                            },
-                        ],
-                    },
-                }),
-            },
-        };
-        await refreshModelLimitsFromApi(mockClient);
-
-        // Larger (API) value wins.
-        expect(getModelsDevContextLimit("anthropic", "claude-4")).toBe(1000000);
-
-        const state = getModelsDevCacheState();
-        expect(state.apiLoaded).toBe(true);
-        expect(state.apiCount).toBe(1);
-    });
-
-    test("file value wins when the live API reports a smaller (wrong) limit (issue #117)", async () => {
-        // The ollama-cloud scenario: models.dev has the correct large window, but
-        // ollama reports its tiny default num_ctx via the live /config/providers
-        // API. The larger, correct file value must win so pressure isn't bogus.
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                "ollama-cloud": {
-                    models: { "deepseek-v4-pro": { limit: { context: 1048576 } } },
-                },
-            }),
-        );
-
-        const mockClient = {
-            config: {
-                providers: async () => ({
-                    data: {
-                        providers: [
-                            {
-                                id: "ollama-cloud",
-                                models: {
-                                    // Bogus tiny default num_ctx from ollama.
-                                    "deepseek-v4-pro": { limit: { context: 8192 } },
-                                },
-                            },
-                        ],
-                    },
-                }),
-            },
-        };
-        await refreshModelLimitsFromApi(mockClient);
-
-        // Larger (file/models.dev) value wins, not the tiny live-API value.
-        expect(getModelsDevContextLimit("ollama-cloud", "deepseek-v4-pro")).toBe(1048576);
-    });
-
-    test("matches a tagged ollama model against its tag-less models.dev entry (issue #117)", () => {
-        // ollama invokes cloud models with a tag (deepseek-v4-pro:cloud) while
-        // models.dev stores them tag-less (deepseek-v4-pro).
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                "ollama-cloud": {
+    test("matches a tagged ollama model against its tag-less SDK entry", async () => {
+        await refreshModelLimitsFromApi(
+            makeClient([
+                {
+                    id: "ollama-cloud",
                     models: {
                         "deepseek-v4-pro": { limit: { context: 1048576 } },
-                        // A legitimately-tagged model must still match exactly.
                         "gemma3:27b": { limit: { context: 131072 } },
                     },
                 },
-            }),
+            ]),
         );
-
         // Tagged invocation falls back to the tag-less entry.
-        expect(getModelsDevContextLimit("ollama-cloud", "deepseek-v4-pro:cloud")).toBe(1048576);
+        expect(getSdkContextLimit("ollama-cloud", "deepseek-v4-pro:cloud")).toBe(1048576);
         // Exact tagged match still wins (no wrongful collapse).
-        expect(getModelsDevContextLimit("ollama-cloud", "gemma3:27b")).toBe(131072);
+        expect(getSdkContextLimit("ollama-cloud", "gemma3:27b")).toBe(131072);
         // Unknown tagged model with no tag-less base stays undefined.
-        expect(getModelsDevContextLimit("ollama-cloud", "nonexistent:cloud")).toBeUndefined();
+        expect(getSdkContextLimit("ollama-cloud", "nonexistent:cloud")).toBeUndefined();
     });
 
-    test("refreshModelLimitsFromApi tolerates empty/malformed responses", async () => {
-        // Undefined data.
+    describe("sanity bounds [20k, 3M]", () => {
+        test("rejects an implausibly small limit (torn-read garbage like 6748)", async () => {
+            await refreshModelLimitsFromApi(
+                makeClient([
+                    {
+                        id: "ollama-cloud",
+                        // 6748 is smaller than a single system prompt — impossible
+                        // as a real limit; must be rejected, not trusted.
+                        models: { "deepseek-v4-pro": { limit: { context: 6748 } } },
+                    },
+                ]),
+            );
+            expect(getSdkContextLimit("ollama-cloud", "deepseek-v4-pro")).toBeUndefined();
+        });
+
+        test("rejects a below-floor 8192 num_ctx default", async () => {
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "p", models: { m: { limit: { context: 8192 } } } }]),
+            );
+            expect(getSdkContextLimit("p", "m")).toBeUndefined();
+        });
+
+        test("rejects an impossibly large limit (> 3M)", async () => {
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "p", models: { m: { limit: { context: 5_000_000 } } } }]),
+            );
+            expect(getSdkContextLimit("p", "m")).toBeUndefined();
+        });
+
+        test("accepts values exactly on the bounds", async () => {
+            await refreshModelLimitsFromApi(
+                makeClient([
+                    {
+                        id: "p",
+                        models: {
+                            lo: { limit: { context: 20000 } },
+                            hi: { limit: { context: 3000000 } },
+                        },
+                    },
+                ]),
+            );
+            expect(getSdkContextLimit("p", "lo")).toBe(20000);
+            expect(getSdkContextLimit("p", "hi")).toBe(3000000);
+        });
+    });
+
+    describe("persisted cache (cold start)", () => {
+        test("seeds from the persisted file after a clear (restart simulation)", async () => {
+            // First run: warm + persist.
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "openai", models: { "gpt-5.5": { limit: { input: 272000 } } } }]),
+            );
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+
+            // Simulate a restart: in-memory cache gone, but the persisted file
+            // remains under XDG_DATA_HOME. The next lookup seeds from disk.
+            clearModelsDevCache();
+            expect(getModelsDevCacheState().apiLoaded).toBe(false);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+            // Seeding populated the in-memory cache.
+            expect(getModelsDevCacheState().apiLoaded).toBe(true);
+        });
+
+        test("does not persist or seed insane values", async () => {
+            await refreshModelLimitsFromApi(
+                makeClient([
+                    {
+                        id: "p",
+                        models: {
+                            good: { limit: { context: 200000 } },
+                            bad: { limit: { context: 6748 } },
+                        },
+                    },
+                ]),
+            );
+            clearModelsDevCache();
+            expect(getSdkContextLimit("p", "good")).toBe(200000);
+            expect(getSdkContextLimit("p", "bad")).toBeUndefined();
+        });
+    });
+
+    describe("startup retry", () => {
+        test("retries when the provider payload is empty, then succeeds", async () => {
+            let calls = 0;
+            const client = {
+                config: {
+                    providers: async () => {
+                        calls++;
+                        if (calls === 1) return { data: { providers: [] } };
+                        return {
+                            data: {
+                                providers: [
+                                    { id: "p", models: { m: { limit: { context: 200000 } } } },
+                                ],
+                            },
+                        };
+                    },
+                },
+            };
+            await refreshModelLimitsFromApi(client, { retries: 2, retryDelayMs: 1 });
+            expect(calls).toBe(2);
+            expect(getSdkContextLimit("p", "m")).toBe(200000);
+        });
+
+        test("stops early on first successful load (no wasted retries)", async () => {
+            let calls = 0;
+            const client = {
+                config: {
+                    providers: async () => {
+                        calls++;
+                        return {
+                            data: {
+                                providers: [
+                                    { id: "p", models: { m: { limit: { context: 200000 } } } },
+                                ],
+                            },
+                        };
+                    },
+                },
+            };
+            await refreshModelLimitsFromApi(client, { retries: 3, retryDelayMs: 1 });
+            expect(calls).toBe(1);
+        });
+    });
+
+    test("tolerates empty / malformed / thrown responses without populating", async () => {
         await refreshModelLimitsFromApi({
             config: { providers: async () => ({ data: undefined }) },
         });
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
 
-        // Non-array providers.
         await refreshModelLimitsFromApi({
             config: { providers: async () => ({ data: { providers: "not an array" } }) },
         });
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
 
-        // Thrown error.
         await refreshModelLimitsFromApi({
             config: {
                 providers: async () => {
@@ -367,96 +263,32 @@ describe("models-dev-cache", () => {
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
     });
 
-    test("repeated manual API refreshes replace cache state without corruption", async () => {
-        // Simulates the issue #77 recovery path manually retrying provider metadata
-        // after a bad cache value. Normal startup no longer schedules periodic
-        // refreshes, but explicit refresh calls should still replace cache state
-        // cleanly even when provider counts alternate.
-        const sizeA = {
-            data: {
-                providers: [
-                    {
-                        id: "p",
-                        models: {
-                            m1: { limit: { context: 100 } },
-                            m2: { limit: { context: 100 } },
-                            m3: { limit: { context: 100 } },
-                        },
-                    },
-                ],
+    test("repeated refreshes replace cache state without corruption", async () => {
+        const clientA = makeClient([
+            {
+                id: "p",
+                models: {
+                    m1: { limit: { context: 200000 } },
+                    m2: { limit: { context: 200000 } },
+                    m3: { limit: { context: 200000 } },
+                },
             },
-        };
-        const sizeB = {
-            data: {
-                providers: [
-                    {
-                        id: "p",
-                        models: {
-                            m1: { limit: { context: 100 } },
-                            m2: { limit: { context: 100 } },
-                        },
-                    },
-                ],
+        ]);
+        const clientB = makeClient([
+            {
+                id: "p",
+                models: { m1: { limit: { context: 200000 } }, m2: { limit: { context: 200000 } } },
             },
-        };
-
-        const clientA = { config: { providers: async () => sizeA } };
-        const clientB = { config: { providers: async () => sizeB } };
+        ]);
 
         await refreshModelLimitsFromApi(clientA);
         expect(getModelsDevCacheState().apiCount).toBe(3);
-
         await refreshModelLimitsFromApi(clientB);
         expect(getModelsDevCacheState().apiCount).toBe(2);
-
         await refreshModelLimitsFromApi(clientA);
         expect(getModelsDevCacheState().apiCount).toBe(3);
 
-        await refreshModelLimitsFromApi(clientB);
-        expect(getModelsDevCacheState().apiCount).toBe(2);
-
-        await refreshModelLimitsFromApi(clientA);
-        expect(getModelsDevCacheState().apiCount).toBe(3);
-
-        // The cache itself still updates on every call (model contents are correct
-        // for whichever provider response just arrived). The suppression is purely
-        // a logging concern. Last call was clientA → all three models present.
-        expect(getModelsDevContextLimit("p", "m1")).toBe(100);
-        expect(getModelsDevContextLimit("p", "m2")).toBe(100);
-        expect(getModelsDevContextLimit("p", "m3")).toBe(100);
-    });
-
-    test("falls back to file layer when API provider/model key is missing", async () => {
-        const opencodeDir = join(tempDir, "opencode");
-        mkdirSync(opencodeDir, { recursive: true });
-        writeFileSync(
-            join(opencodeDir, "models.json"),
-            JSON.stringify({
-                anthropic: { models: { "claude-only-in-file": { limit: { context: 777777 } } } },
-            }),
-        );
-
-        const mockClient = {
-            config: {
-                providers: async () => ({
-                    data: {
-                        providers: [
-                            {
-                                id: "anthropic",
-                                models: {
-                                    "claude-only-in-api": { limit: { context: 888888 } },
-                                },
-                            },
-                        ],
-                    },
-                }),
-            },
-        };
-        await refreshModelLimitsFromApi(mockClient);
-
-        // API-only key comes from API.
-        expect(getModelsDevContextLimit("anthropic", "claude-only-in-api")).toBe(888888);
-        // File-only key falls through to file layer.
-        expect(getModelsDevContextLimit("anthropic", "claude-only-in-file")).toBe(777777);
+        expect(getSdkContextLimit("p", "m1")).toBe(200000);
+        expect(getSdkContextLimit("p", "m3")).toBe(200000);
     });
 });

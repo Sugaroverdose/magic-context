@@ -70,10 +70,7 @@ import {
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-import {
-	clearModelsDevCache,
-	getModelsDevContextLimit,
-} from "@magic-context/core/shared/models-dev-cache";
+import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import {
 	type PiSidekickConfig,
@@ -195,15 +192,15 @@ function getPiMessageModel(message: unknown): {
 function resolvePiPressureContextLimit(args: {
 	db: ContextDatabase;
 	sessionId: string;
-	provider: string | undefined;
-	model: string | undefined;
 	piContextWindow: number;
 }): number {
-	const cachedLimit =
-		args.provider && args.model
-			? getModelsDevContextLimit(args.provider, args.model)
-			: undefined;
-	let effectiveContextLimit = cachedLimit ?? args.piContextWindow;
+	// Pi reports the model's context window directly (ctx.getContextUsage() /
+	// ctx.getModel().contextWindow) — its own authoritative source. We no longer
+	// consult models.dev for Pi. Sanity-bound the reported value so a transient
+	// garbage window can't poison pressure (mirrors OpenCode's SDK sane bound).
+	let effectiveContextLimit = isSaneLimit(args.piContextWindow)
+		? args.piContextWindow
+		: 0;
 	try {
 		const overflowState = getOverflowState(args.db, args.sessionId);
 		if (overflowState.detectedContextLimit > 0) {
@@ -230,8 +227,6 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const effectiveContextLimit = resolvePiPressureContextLimit({
 		db: args.db,
 		sessionId: args.sessionId,
-		provider,
-		model,
 		piContextWindow: args.piContextWindow,
 	});
 	const usage = extractAssistantUsage(args.message);
@@ -252,8 +247,8 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}> = { lastResponseTime: Date.now() };
 
 	if (pressure) {
-		let percentage = pressure.percentage;
-		let contextLimit = effectiveContextLimit;
+		const percentage = pressure.percentage;
+		const contextLimit = effectiveContextLimit;
 		const meta = getOrCreateSessionMeta(args.db, args.sessionId);
 		const observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
 		if (
@@ -261,21 +256,12 @@ export async function persistPiPressureFromMessageEnd(args: {
 			observedSafeInputTokens > 0 &&
 			pressure.inputTokens <= observedSafeInputTokens * 2
 		) {
-			const oldLimit = contextLimit;
-			clearModelsDevCache();
-			contextLimit = resolvePiPressureContextLimit({
-				db: args.db,
-				sessionId: args.sessionId,
-				provider,
-				model,
-				piContextWindow: args.piContextWindow,
-			});
-			if (contextLimit >= pressure.inputTokens) {
-				percentage = (pressure.inputTokens / contextLimit) * 100;
-				log(
-					`${PREFIX} models-dev-cache: regression recovered for ${provider}/${model} via Pi cache reload (was=${oldLimit}, now=${contextLimit})`,
-				);
-			} else if (!meta.cacheAlertSent) {
+			// Pi resolves the window from its own runtime, not a cache we could
+			// reload — so a >100% reading with a known-good safe baseline means
+			// Pi's reported contextWindow is genuinely wrong. There's nothing to
+			// re-fetch; surface the alert (overflow detection still captures a
+			// real lower cap separately).
+			if (!meta.cacheAlertSent) {
 				updates.cacheAlertSent = true;
 				const safeTokens = Math.max(
 					observedSafeInputTokens,
@@ -1284,17 +1270,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// Compute pressure with OpenCode-equivalent semantics: pull
 			// the assistant's `usage` field and use
 			// `input + cacheRead + cacheWrite` (NOT output) divided by
-			// the effective context limit. Prefer
-			// `session_meta.detected_context_limit` over Pi's
-			// `getContextUsage().contextWindow` so that after a
-			// provider context-overflow, the next pass's pressure
-			// reflects the real, lower limit the provider reported.
-			// See `pi-pressure.ts` for the full rationale.
+			// the effective context limit. The window comes from Pi's own
+			// runtime — `getContextUsage().contextWindow`, falling back to
+			// `ctx.model.contextWindow` if usage hasn't populated — NOT
+			// models.dev. `session_meta.detected_context_limit` still overrides
+			// it (in persistPiPressureFromMessageEnd) so post-overflow pressure
+			// reflects the real, lower limit. See `pi-pressure.ts` for rationale.
 			const piUsage = ctx.getContextUsage?.();
 			const piContextWindow =
-				piUsage && typeof piUsage.contextWindow === "number"
+				piUsage &&
+				typeof piUsage.contextWindow === "number" &&
+				piUsage.contextWindow > 0
 					? piUsage.contextWindow
-					: 0;
+					: (ctx.model?.contextWindow ?? 0);
 			await persistPiPressureFromMessageEnd({
 				db,
 				sessionId,

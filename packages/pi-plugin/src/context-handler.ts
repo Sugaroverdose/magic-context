@@ -103,9 +103,8 @@ import { replayCavemanCompression } from "@magic-context/core/hooks/magic-contex
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
-	resolveContextLimit,
+	DEFAULT_CONTEXT_LIMIT,
 	resolveExecuteThreshold,
-	resolveTrustedContextLimit,
 } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
@@ -121,6 +120,7 @@ import {
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
+import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
@@ -1622,21 +1622,18 @@ export function registerPiContextHandler(
 
 			const sessionMeta = sessionMetaForUsage;
 			const modelKey = liveModelBySession.get(sessionId);
-			// Cold-start stable-limit fallback (parity with OpenCode's
-			// resolveTrustedContextLimit budget path): if Pi hasn't reported a
-			// contextWindow yet (first pass after restart) but the model is
-			// known, resolve a trusted limit from models.dev / detected-overflow
-			// so the history budget doesn't fall through to the 60K default and
-			// over-archive compartments. Trusted-only: an unknown model yields
+			// Cold-start stable-limit fallback: if `getContextUsage()` hasn't
+			// reported a window yet (first pass after restart, before any
+			// response), read the model's window directly from `ctx.model`
+			// — Pi exposes it at model-select, independent of any message. This
+			// is Pi's authoritative source (replacing the old models.dev lookup);
+			// sane-bounded so a transient bad value can't shrink the budget to the
+			// 60K default and over-archive. An unknown/insane window yields
 			// undefined and we keep the live back-derivation path.
-			if (usageContextLimit === undefined && modelKey) {
-				const { providerID, modelID } = splitModelKeyForPi(modelKey);
-				const trusted = resolveTrustedContextLimit(providerID, modelID, {
-					db: options.db,
-					sessionID: sessionId,
-				});
-				if (trusted !== undefined && trusted > 0) {
-					usageContextLimit = trusted;
+			if (usageContextLimit === undefined) {
+				const modelWindow = ctx.model?.contextWindow;
+				if (isSaneLimit(modelWindow)) {
+					usageContextLimit = modelWindow;
 				}
 			}
 			let schedulerDecision: "execute" | "defer";
@@ -2244,21 +2241,6 @@ export async function awaitInFlightHistorians(): Promise<void> {
 	await Promise.allSettled(Array.from(inFlightHistorian.values()));
 }
 
-function splitModelKeyForPi(modelKey: string | undefined): {
-	providerID: string | undefined;
-	modelID: string | undefined;
-} {
-	if (!modelKey) return { providerID: undefined, modelID: undefined };
-	const slash = modelKey.indexOf("/");
-	if (slash <= 0 || slash === modelKey.length - 1) {
-		return { providerID: undefined, modelID: undefined };
-	}
-	return {
-		providerID: modelKey.slice(0, slash),
-		modelID: modelKey.slice(slash + 1),
-	};
-}
-
 export function resolvePiHistorianTriggerInputs(args: {
 	db: ContextDatabase;
 	sessionId: string;
@@ -2275,19 +2257,17 @@ export function resolvePiHistorianTriggerInputs(args: {
 	commitClusterTrigger: { enabled: boolean; min_clusters: number } | undefined;
 	contextLimit: number;
 } {
-	const { providerID, modelID } = splitModelKeyForPi(args.modelKey);
-	let contextLimit = resolveContextLimit(providerID, modelID, {
-		db: args.db,
-		sessionID: args.sessionId,
-	});
-	if (
-		(providerID === undefined || modelID === undefined) &&
+	// Pi resolves the context window from its own runtime (passed in as
+	// usageContextLimit, derived from getContextUsage()/getModel().contextWindow
+	// with the detected-overflow override already applied). models.dev is not
+	// consulted for Pi. Fall back to the conservative default only when the
+	// runtime hasn't reported a usable window yet.
+	const contextLimit =
 		typeof args.usageContextLimit === "number" &&
 		Number.isFinite(args.usageContextLimit) &&
 		args.usageContextLimit > 0
-	) {
-		contextLimit = args.usageContextLimit;
-	}
+			? args.usageContextLimit
+			: DEFAULT_CONTEXT_LIMIT;
 	const executeThresholdPercentage = resolveExecuteThreshold(
 		args.historian.executeThresholdPercentage ?? 65,
 		args.modelKey,

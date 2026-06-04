@@ -238,7 +238,10 @@ describe("createEventHandler", () => {
                 },
             },
         });
-        await refreshModelLimitsFromApi(providersClient(10_000));
+        // Regress to a smaller (wrong) but still SANE limit — a sub-20k value is
+        // now rejected outright by the limit resolver's sanity floor, so the
+        // regression scenario must use a value inside [20k, 3M].
+        await refreshModelLimitsFromApi(providersClient(30_000));
 
         await handler({
             event: {
@@ -269,7 +272,11 @@ describe("createEventHandler", () => {
         await refreshModelLimitsFromApi(providersClient(100_000));
         const prompt = mock(async () => ({}));
         const deps = createDeps(contextUsageMap);
-        deps.client = providersClient(10_000, prompt);
+        // A wrong-but-still-SANE small limit (30k): sub-20k values are now rejected
+        // by the resolver's sanity floor, so the "stays wrong after refresh"
+        // scenario uses a limit inside [20k, 3M] that is still smaller than the
+        // tokens the model successfully accepted.
+        deps.client = providersClient(30_000, prompt);
         const handler = createEventHandler(deps);
 
         await handler({
@@ -287,9 +294,9 @@ describe("createEventHandler", () => {
                 },
             },
         });
-        await refreshModelLimitsFromApi(providersClient(10_000));
+        await refreshModelLimitsFromApi(providersClient(30_000));
 
-        for (const inputTokens of [90_000, 91_000]) {
+        for (const inputTokens of [90_000, 120_000]) {
             await handler({
                 event: {
                     type: "message.updated",
@@ -309,10 +316,10 @@ describe("createEventHandler", () => {
 
         const meta = getOrCreateSessionMeta(openDatabase(), "ses-regression-alert");
         expect(meta.cacheAlertSent).toBe(true);
-        expect(meta.lastContextPercentage).toBe(910);
+        expect(meta.lastContextPercentage).toBe(400);
         expect(prompt).toHaveBeenCalledTimes(1);
         const call = prompt.mock.calls[0]?.[0] as { body?: { parts?: Array<{ text?: string }> } };
-        expect(call.body?.parts?.[0]?.text).toContain("context limit of 10,000 tokens");
+        expect(call.body?.parts?.[0]?.text).toContain("context limit of 30,000 tokens");
         expect(call.body?.parts?.[0]?.text).toContain("successfully sent 90,000 tokens");
     });
 

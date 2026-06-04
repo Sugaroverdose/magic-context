@@ -19,7 +19,7 @@
 
 import { HISTORIAN_AGENT } from "../../agents/historian";
 import { AGENT_MODEL_REQUIREMENTS, expandFallbackChain } from "../../shared/model-requirements";
-import { getModelsDevContextLimit } from "../../shared/models-dev-cache";
+import { getSdkContextLimit } from "../../shared/models-dev-cache";
 
 // 5% of (main_context × execute_threshold) is the "working usable × 5%" basis.
 // This preserves the legacy static behavior for 1M × 40% (60K tail_size ≈ 15%
@@ -91,9 +91,9 @@ export function deriveHistorianChunkTokens(historianContextLimit: number): numbe
  *   - If neither models.dev nor opencode.json custom providers know the model,
  *     fall back to 128K as a conservative default.
  *
- * Context limits are resolved through `getModelsDevContextLimit`, which reads
- * both OpenCode's models.dev cache and custom `provider.*.models.*.limit.context`
- * entries from `opencode.json(c)`.
+ * Context limits are resolved through `getSdkContextLimit`, which reads
+ * OpenCode's SDK-resolved provider config (models.dev + snapshot + opencode.json
+ * overrides + auth-plugin caps), bounded to a sane range.
  */
 export function resolveHistorianContextLimit(historianModelOverride?: string): number {
     // Explicit override with full provider/model form — user intent wins.
@@ -101,7 +101,7 @@ export function resolveHistorianContextLimit(historianModelOverride?: string): n
         const [providerID, ...rest] = historianModelOverride.split("/");
         const modelID = rest.join("/");
         if (providerID && modelID) {
-            const limit = getModelsDevContextLimit(providerID, modelID);
+            const limit = getSdkContextLimit(providerID, modelID);
             if (typeof limit === "number" && limit > 0) return limit;
         }
         return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
@@ -129,7 +129,7 @@ export function resolveHistorianContextLimit(historianModelOverride?: string): n
         const [providerID, ...rest] = key.split("/");
         const modelID = rest.join("/");
         if (!providerID || !modelID) continue;
-        const limit = getModelsDevContextLimit(providerID, modelID);
+        const limit = getSdkContextLimit(providerID, modelID);
         if (typeof limit !== "number" || limit <= 0) continue;
         if (minLimit === undefined || limit < minLimit) minLimit = limit;
     }

@@ -213,9 +213,15 @@ const plugin: Plugin = async (ctx) => {
         // Warm the model-context-limit cache from OpenCode's SDK once at startup.
         // The API response matches OpenCode's internal resolution (live models.dev
         // cache + compiled-in snapshot + custom provider overrides + derived
-        // experimental modes), so any model OpenCode knows the limit for, we know
-        // too. Fire-and-forget: if it fails we fall through to the disk-based
-        // loader in models-dev-cache.
+        // experimental modes + auth-plugin caps), so any model OpenCode knows the
+        // limit for, we know too — and it is the SOLE source (we no longer read
+        // models.json ourselves). Until it warms, resolution falls back to the
+        // persisted last-known-good cache (instant on restart) then the 128k
+        // default for a brand-new install's first few passes.
+        //
+        // Retry a couple times if OpenCode's provider service isn't ready yet at
+        // our startup (the only "cold" case — OpenCode itself always has the data).
+        // Fire-and-forget so it never blocks plugin init.
         //
         // Do NOT refresh periodically. Limits are stable in practice, and newly
         // added models require an OpenCode restart anyway because provider
@@ -224,7 +230,7 @@ const plugin: Plugin = async (ctx) => {
         // smaller/wrong limit and silently break an in-progress session. The
         // event handler may still retry this refresh once when it detects an
         // obviously bad cache value, but normal operation is one-shot.
-        void refreshModelLimitsFromApi(ctx.client);
+        void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
     }
 
     // Schema-fence warning for Desktop mode. If openDatabase() fail-closed

@@ -29,10 +29,7 @@ import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/der
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import {
-	clearModelsDevCache,
-	refreshModelLimitsFromApi,
-} from "@magic-context/core/shared/models-dev-cache";
+import { clearModelsDevCache } from "@magic-context/core/shared/models-dev-cache";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
@@ -727,30 +724,21 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("alerts once when Pi model-cache context limit is below observed safe tokens", async () => {
+	it("alerts once when Pi's reported context window is below observed safe tokens", async () => {
 		const db = createTestDb();
 		try {
 			const { persistPiPressureFromMessageEnd } = await import("./index");
-			await refreshModelLimitsFromApi({
-				config: {
-					providers: async () => ({
-						data: {
-							providers: [
-								{
-									id: "test-provider",
-									models: { "test-model": { limit: { context: 10_000 } } },
-								},
-							],
-						},
-					}),
-				},
-			});
+			// Pi resolves the window from its own runtime (piContextWindow), not
+			// models.dev. Use a wrong-but-still-SANE window (30k): sub-20k values
+			// are rejected by the sanity floor, so the "reported window is wrong"
+			// scenario must use a value inside [20k, 3M] that is still smaller than
+			// the tokens the model successfully accepted.
 			updateSessionMeta(db, "ses-pi-pressure-alert", {
 				observedSafeInputTokens: 80_000,
 			});
 			const notify = mock(async () => undefined);
 
-			for (const inputTokens of [90_000, 91_000]) {
+			for (const inputTokens of [90_000, 120_000]) {
 				await persistPiPressureFromMessageEnd({
 					db,
 					sessionId: "ses-pi-pressure-alert",
@@ -759,17 +747,17 @@ describe("registerPiContextHandler", () => {
 						model: "test-model",
 						usage: { input: inputTokens, cacheRead: 0, cacheWrite: 0 },
 					}),
-					piContextWindow: 10_000,
+					piContextWindow: 30_000,
 					notifyIssue: notify,
 				});
 			}
 
 			const meta = getOrCreateSessionMeta(db, "ses-pi-pressure-alert");
 			expect(meta.cacheAlertSent).toBe(true);
-			expect(meta.lastContextPercentage).toBe(910);
+			expect(meta.lastContextPercentage).toBe(400);
 			expect(notify).toHaveBeenCalledTimes(1);
 			expect(notify.mock.calls[0]?.[0]).toContain(
-				"context limit of 10,000 tokens",
+				"context limit of 30,000 tokens",
 			);
 			expect(notify.mock.calls[0]?.[0]).toContain(
 				"successfully sent 90,000 tokens",

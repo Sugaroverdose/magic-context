@@ -1,9 +1,9 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getOverflowState } from "../../features/magic-context/storage-meta-persisted";
 import { log, sessionLog } from "../../shared/logger";
-import { getModelsDevContextLimit } from "../../shared/models-dev-cache";
+import { getSdkContextLimit } from "../../shared/models-dev-cache";
 
-const DEFAULT_CONTEXT_LIMIT = 128_000;
+export const DEFAULT_CONTEXT_LIMIT = 128_000;
 const MAX_EXECUTE_THRESHOLD = 80;
 
 type CacheTtlConfig = string | Record<string, string>;
@@ -29,7 +29,7 @@ export function resolveContextLimit(
     ctx?: { db?: ContextDatabase; sessionID?: string },
 ): number {
     const fromModelsDev =
-        providerID && modelID ? getModelsDevContextLimit(providerID, modelID) : undefined;
+        providerID && modelID ? getSdkContextLimit(providerID, modelID) : undefined;
     const baseline = fromModelsDev ?? DEFAULT_CONTEXT_LIMIT;
 
     if (ctx?.db && ctx.sessionID) {
@@ -68,7 +68,7 @@ export function resolveTrustedContextLimit(
     ctx?: { db?: ContextDatabase; sessionID?: string },
 ): number | undefined {
     const fromModelsDev =
-        providerID && modelID ? getModelsDevContextLimit(providerID, modelID) : undefined;
+        providerID && modelID ? getSdkContextLimit(providerID, modelID) : undefined;
 
     let detected: number | undefined;
     if (ctx?.db && ctx.sessionID) {

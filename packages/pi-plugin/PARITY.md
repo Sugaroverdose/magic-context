@@ -286,6 +286,31 @@ because only OpenCode Desktop can hide the log.
 
 ---
 
+## 14. Context-limit source: OpenCode reads the SDK; Pi reads its own runtime
+
+Neither harness reads OpenCode's `models.json` (models.dev) file anymore — that
+redundant read produced torn-read garbage (a 6748 "limit" for a session that had
+run for hours) and let a stale on-disk copy out-vote the live auth-resolved cap
+(922k vs the real Codex-OAuth 400k). Each harness now resolves the limit from its
+own authoritative runtime source, then bounds it to a sane `[20k, 3M]` range
+(shared `isSaneLimit`):
+
+- **OpenCode** warms `apiCache` from the SDK `config.providers()` (OpenCode's
+  fully-resolved config: models.dev + snapshot + opencode.json + auth-plugin
+  caps), persisted for cold-start. `getSdkContextLimit()` returns the SDK value
+  or `undefined`. Pi never warms `apiCache`, so for Pi that getter is unused.
+- **Pi** resolves from its own runtime: `getContextUsage().contextWindow`,
+  falling back to `ctx.model.contextWindow` (available at model-select, before
+  any message). The detected-overflow limit still overrides both. This is Pi's
+  equivalent of OpenCode's SDK — instant and auth-correct — so Pi does not call
+  `getSdkContextLimit`/`resolveContextLimit`/`resolveTrustedContextLimit` at all.
+
+Same effective behavior (authoritative per-harness limit, sane-bounded, overflow
+override); different source because each harness exposes the resolved window
+through a different API.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or
