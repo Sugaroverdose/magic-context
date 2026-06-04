@@ -211,6 +211,10 @@ export function createCtxSearchTool(
 					gitCommitsEnabled,
 					sources: params.sources,
 					visibleMemoryIds,
+					// Explicit agent search → literal-probe multi-query recall
+					// (parity with OpenCode's ctx_search). Pi auto-search leaves
+					// this off to protect its latency budget.
+					explicitSearch: true,
 				},
 			);
 

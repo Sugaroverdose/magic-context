@@ -164,6 +164,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     gitCommitsEnabled,
                     sources: normalizeSources(args.sources),
                     visibleMemoryIds,
+                    // Explicit agent search → enable literal-probe multi-query
+                    // recall for symbol/command/path lookups. Auto-search hints
+                    // (the hot path) leave this off to protect their latency.
+                    explicitSearch: true,
                 },
             );
 

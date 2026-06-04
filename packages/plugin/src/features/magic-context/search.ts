@@ -1,6 +1,7 @@
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { type GitCommitSearchHit, searchGitCommitsSync } from "./git-commits";
+import { containsProbeVerbatim, extractLiteralProbes } from "./literal-probes";
 import {
     ensureMemoryEmbeddings,
     getMemoriesByProject,
@@ -80,6 +81,13 @@ export interface UnifiedSearchOptions {
      *  do, automatic surfacing doesn't indicate usefulness. Mis-counting drives
      *  spurious retrieval-count-based memory promotion decisions. */
     countRetrievals?: boolean;
+    /** When true, run multi-probe message search: extract literal symbol/command/
+     *  path probes from the query and query each one separately (RRF-fused) so a
+     *  message containing the exact literal but not the query's other tokens is
+     *  still recalled. Default false — only explicit `ctx_search` tool calls opt
+     *  in; the auto-search hot path stays single-probe to protect its latency
+     *  budget. NL queries with no extractable probes are unaffected either way. */
+    explicitSearch?: boolean;
 }
 
 export interface MemorySearchResult {
@@ -368,6 +376,61 @@ function linearDecayScore(rank: number, total: number): number {
     return Math.max(0, 1 - rank / total);
 }
 
+interface NormalizedMessageRow {
+    messageOrdinal: number;
+    messageId: string;
+    role: string;
+    content: string;
+}
+
+/** Run one FTS query and return ordinal-cutoff-filtered, validated rows in
+ *  bm25 rank order. `ftsQuery` must already be sanitized. */
+function runMessageFtsQuery(
+    db: Database,
+    sessionId: string,
+    ftsQuery: string,
+    fetchLimit: number,
+    cutoff: number | null,
+): NormalizedMessageRow[] {
+    if (ftsQuery.length === 0) return [];
+    const rows = getMessageSearchStatement(db)
+        .all(sessionId, ftsQuery, fetchLimit)
+        .map((row) => row as MessageSearchRow);
+
+    const result: NormalizedMessageRow[] = [];
+    for (const row of rows) {
+        const messageOrdinal = getMessageOrdinal(row.messageOrdinal);
+        if (
+            messageOrdinal === null ||
+            typeof row.messageId !== "string" ||
+            typeof row.role !== "string" ||
+            typeof row.content !== "string"
+        ) {
+            continue;
+        }
+        // Skip messages still in the live context (not yet compartmentalized).
+        if (cutoff !== null && messageOrdinal > cutoff) {
+            continue;
+        }
+        result.push({
+            messageOrdinal,
+            messageId: row.messageId,
+            role: row.role,
+            content: row.content,
+        });
+    }
+    return result;
+}
+
+// Reciprocal-rank-fusion constant. 60 is the canonical RRF k; it dampens the
+// reward gap between rank-0 and rank-1 so a candidate that appears in several
+// probe lists outranks one that tops a single list.
+const RRF_K = 60;
+// Additive bonus when a candidate's text contains a literal probe verbatim.
+// Tuned to sit above one extra mid-rank list appearance so an exact-symbol hit
+// reliably surfaces, without swamping a candidate that ranks high everywhere.
+const VERBATIM_PROBE_BONUS = 0.5;
+
 function searchMessages(args: {
     db: Database;
     sessionId: string;
@@ -375,66 +438,89 @@ function searchMessages(args: {
     limit: number;
     /** Only return messages with ordinal ≤ this value. Omit or -1 to search all indexed messages. */
     maxOrdinal?: number;
+    /** Literal probes to additionally query (multi-probe recall). Empty = the
+     *  original single-query behavior (unchanged for NL queries / hot path). */
+    probes?: string[];
 }): MessageSearchResult[] {
-    const sanitizedQuery = sanitizeFtsQuery(args.query.trim());
-    if (sanitizedQuery.length === 0) {
-        return [];
-    }
-
-    // Fetch more rows than needed so post-filter still has enough results
+    const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
     const fetchLimit =
         args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.limit * 3 : args.limit;
-    const rows = getMessageSearchStatement(args.db)
-        .all(args.sessionId, sanitizedQuery, fetchLimit)
-        .map((row) => row as MessageSearchRow);
 
-    const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
+    const baseQuery = sanitizeFtsQuery(args.query.trim());
+    const probes = args.probes ?? [];
 
-    const filtered = rows
-        .map((row) => {
-            const messageOrdinal = getMessageOrdinal(row.messageOrdinal);
-            if (
-                messageOrdinal === null ||
-                typeof row.messageId !== "string" ||
-                typeof row.role !== "string" ||
-                typeof row.content !== "string"
-            ) {
-                return null;
+    // No probes → original single-query path, byte-identical scoring. This is
+    // the hot path (auto-search) and every plain natural-language query.
+    if (probes.length === 0) {
+        const filtered = runMessageFtsQuery(
+            args.db,
+            args.sessionId,
+            baseQuery,
+            fetchLimit,
+            cutoff,
+        ).slice(0, args.limit);
+        return filtered.map((row, rank) => ({
+            source: "message" as const,
+            content: previewText(row.content),
+            score: linearDecayScore(rank, filtered.length),
+            messageOrdinal: row.messageOrdinal,
+            messageId: row.messageId,
+            role: row.role,
+        }));
+    }
+
+    // Multi-probe: run the full query plus each literal probe as its OWN FTS
+    // query, then RRF-fuse the ranked lists. This recovers messages that
+    // contain a literal symbol but not the query's other (AND-joined) tokens.
+    const queryLists: NormalizedMessageRow[][] = [];
+    if (baseQuery.length > 0) {
+        queryLists.push(runMessageFtsQuery(args.db, args.sessionId, baseQuery, fetchLimit, cutoff));
+    }
+    for (const probe of probes) {
+        const probeQuery = sanitizeFtsQuery(probe);
+        if (probeQuery.length === 0) continue;
+        queryLists.push(
+            runMessageFtsQuery(args.db, args.sessionId, probeQuery, fetchLimit, cutoff),
+        );
+    }
+
+    const fused = new Map<string, { row: NormalizedMessageRow; score: number }>();
+    for (const list of queryLists) {
+        list.forEach((row, rank) => {
+            const rrf = 1 / (RRF_K + rank);
+            const existing = fused.get(row.messageId);
+            if (existing) {
+                existing.score += rrf;
+            } else {
+                fused.set(row.messageId, { row, score: rrf });
             }
+        });
+    }
 
-            // Skip messages still in the live context (not yet compartmentalized)
-            if (cutoff !== null && messageOrdinal > cutoff) {
-                return null;
-            }
+    // Verbatim boost: a message that literally contains a probe is exactly what
+    // a symbol/command lookup wants surfaced first.
+    for (const entry of fused.values()) {
+        if (containsProbeVerbatim(entry.row.content, probes)) {
+            entry.score += VERBATIM_PROBE_BONUS;
+        }
+    }
 
-            return {
-                messageOrdinal,
-                messageId: row.messageId,
-                role: row.role,
-                content: row.content,
-            };
-        })
-        .filter(
-            (
-                result,
-            ): result is {
-                messageOrdinal: number;
-                messageId: string;
-                role: string;
-                content: string;
-            } => result !== null,
+    const ranked = [...fused.values()]
+        .sort((a, b) =>
+            b.score !== a.score ? b.score - a.score : a.row.messageOrdinal - b.row.messageOrdinal,
         )
         .slice(0, args.limit);
 
-    // Score with linear decay over the final returned count (not the raw
-    // FTS fetch count) so a small result set still gets strong scores.
-    return filtered.map((row, rank) => ({
+    // Normalize fused scores into the 0..1 band the unified ranker expects from
+    // the message source (linearDecayScore's range), preserving relative order.
+    const maxScore = ranked.length > 0 ? ranked[0].score : 1;
+    return ranked.map((entry) => ({
         source: "message" as const,
-        content: previewText(row.content),
-        score: linearDecayScore(rank, filtered.length),
-        messageOrdinal: row.messageOrdinal,
-        messageId: row.messageId,
-        role: row.role,
+        content: previewText(entry.row.content),
+        score: maxScore > 0 ? entry.score / maxScore : 0,
+        messageOrdinal: entry.row.messageOrdinal,
+        messageId: entry.row.messageId,
+        role: entry.row.role,
     }));
 }
 
@@ -586,6 +672,9 @@ export async function unifiedSearch(
     // in flight. Message indexing is event-driven and never runs here;
     // unreconciled sessions simply return no message hits until the async
     // first-touch reconciliation finishes.
+    // Multi-probe recall is opt-in for explicit searches only. NL queries
+    // yield no probes, so this is a no-op for them regardless of the flag.
+    const messageProbes = options.explicitSearch ? extractLiteralProbes(trimmedQuery) : [];
     const messageResults: MessageSearchResult[] = runMessages
         ? searchMessages({
               db,
@@ -593,6 +682,7 @@ export async function unifiedSearch(
               query: trimmedQuery,
               limit: tierLimit,
               maxOrdinal: options.maxMessageOrdinal,
+              probes: messageProbes,
           })
         : [];
 

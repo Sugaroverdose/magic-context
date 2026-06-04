@@ -253,6 +253,57 @@ describe("unifiedSearch", () => {
         expect(messages[2].score).toBeGreaterThan(0.2);
     });
 
+    it("explicitSearch recalls a literal-symbol message the AND-joined NL query misses", async () => {
+        // The target message contains the symbol `/ctx-status` but NOT the
+        // other words of the natural-language query. With FTS implicit-AND,
+        // the full query can't match it. The literal probe must recover it.
+        rawMessagesBySession.set("ses-probe", [
+            {
+                ordinal: 1,
+                id: "m1",
+                role: "assistant",
+                parts: [{ type: "text", text: "Fixed the /ctx-status tool count breakdown." }],
+            },
+            {
+                ordinal: 2,
+                id: "m2",
+                role: "user",
+                parts: [{ type: "text", text: "unrelated chatter about something else entirely" }],
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-probe", readMessages);
+
+        const nlQuery = "why did the inflated tool calls breakdown happen in ctx-status";
+
+        // Without explicitSearch: the AND-joined query fails to surface m1
+        // (it lacks "why/did/inflated/happen"). Tokenization splits ctx-status
+        // → ctx + status, so the literal still doesn't rescue it under AND.
+        const baseline = await unifiedSearch(db, "ses-probe", "/repo/probe", nlQuery, {
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+        });
+        expect(baseline.some((r) => r.source === "message" && r.messageId === "m1")).toBe(false);
+
+        // With explicitSearch: the `ctx-status` probe runs as its own query and
+        // recalls m1, and the verbatim boost ranks it first.
+        const probed = await unifiedSearch(db, "ses-probe", "/repo/probe", nlQuery, {
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            explicitSearch: true,
+        });
+        const probedMessages = probed.filter((r) => r.source === "message");
+        expect(probedMessages.some((r) => r.messageId === "m1")).toBe(true);
+        expect(probedMessages[0]?.messageId).toBe("m1");
+    });
+
     it("returns empty message results until async indexing populates FTS", async () => {
         rawMessagesBySession.set("ses-2", [
             {
