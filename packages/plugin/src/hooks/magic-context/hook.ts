@@ -257,6 +257,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const agentBySession = deps.liveSessionState?.agentBySession ?? new Map<string, string>();
     const sessionDirectoryBySession =
         deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
+    const internalChildSessions = deps.liveSessionState?.internalChildSessions ?? new Set<string>();
     // Recomp/upgrade progress map — shared with the RPC sidebar/status snapshot
     // when liveSessionState is provided (production), local fallback in tests.
     const recompProgressBySession =
@@ -316,6 +317,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             deferredMaterializationSessions,
             sessionDirectoryBySession,
             recompProgressBySession,
+            internalChildSessions,
         },
         directory: deps.directory,
         historianChunkTokens: getHistorianChunkTokens(),
@@ -365,6 +367,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deferredMaterializationSessions,
         lastHeuristicsTurnId,
         commitSeenLastPass,
+        internalChildSessions,
         client: deps.client,
         directory: deps.directory,
         memoryConfig: deps.config.memory
@@ -435,6 +438,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         tagger: deps.tagger,
         db,
         client: deps.client,
+        internalChildSessions,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
                 sessionId,
@@ -467,6 +471,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             recompProgressBySession.delete(sessionId);
             recentReduceBySession.delete(sessionId);
             toolUsageSinceUserTurn.delete(sessionId);
+            internalChildSessions.delete(sessionId);
         },
     });
 
@@ -634,6 +639,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         injectionSkipSignatures: deps.config.system_prompt_injection?.skip_signatures ?? [
             "<!-- magic-context: skip -->",
         ],
+        internalChildSessions,
         experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
         experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,

@@ -243,6 +243,15 @@ export interface TransformDeps {
      * so this cache lives until the session is deleted.
      */
     sessionDirectoryBySession?: Map<string, string>;
+    /**
+     * Process-scoped set of Magic Context's OWN hidden child sessions
+     * (historian/dreamer/sidekick/memory-migration), detected by title prefix
+     * at `session.created`. When a session is in this set the transform returns
+     * immediately (messages unmodified) — these children have their own fixed
+     * agent identity and never use any MC feature, so even reduced-mode work
+     * (tagging, heuristic drops) is pure overhead. See live-session-state.ts.
+     */
+    internalChildSessions?: Set<string>;
     /** Experimental auto-search hint — transform-time ctx_search on each new
      *  user message; when top hit clears the threshold, append a compact
      *  fragment hint to the user message. Controlled by
@@ -306,6 +315,19 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
+
+        // Magic Context's OWN hidden children (historian/dreamer/sidekick/
+        // memory-migration) are fully exempt from the transform. They have a
+        // fixed agent identity + single-shot/bounded job and use zero MC
+        // features, so even reduced-mode work (tagging, heuristic drops) is
+        // pure overhead and conceptual noise. Detected at session.created by
+        // the `magic-context-` title prefix. Returning here leaves messages
+        // unmodified. (Worst case the very first pass races the session.created
+        // event and runs reduced-mode once — harmless for these short sessions.)
+        if (deps.internalChildSessions?.has(sessionId)) {
+            sessionLog(sessionId, "transform skipped (internal magic-context child session)");
+            return;
+        }
 
         // System prompt change detection is handled in experimental.chat.system.transform
         // (see system-prompt-hash.ts), not here. The messages transform only receives

@@ -940,6 +940,59 @@ describe("createTransform", () => {
         expect(nudger).not.toHaveBeenCalled();
     });
 
+    it("fully skips the transform for Magic Context's own hidden children", async () => {
+        //#given — a session flagged as an internal MC child (historian/dreamer/
+        // sidekick/migration). Unlike a generic subagent, these get ZERO
+        // transform work: no tagging, scheduler never consulted, messages
+        // untouched.
+        useTempDataHome("context-transform-internal-child-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const nudger = mock(() => null);
+        const internalChildSessions = new Set<string>(["ses-historian-child"]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-historian-child",
+                    { usage: { percentage: 61, inputTokens: 122_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger,
+            db: openDatabase(),
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            internalChildSessions,
+        });
+
+        const db = openDatabase();
+        // isSubagent is also true for these (parentID set), but the
+        // internal-child flag must take precedence and skip BEFORE any work.
+        updateSessionMeta(db, "ses-historian-child", { isSubagent: true });
+
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-hist", role: "user", sessionID: "ses-historian-child" },
+                parts: [{ type: "text", text: "historian chunk prompt" }],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then — message untouched, NO tags written, scheduler never consulted.
+        expect(text(messages[0], 0)).toBe("historian chunk prompt");
+        expect(getTagsBySession(db, "ses-historian-child")).toHaveLength(0);
+        expect(scheduler.shouldExecute).not.toHaveBeenCalled();
+        expect(nudger).not.toHaveBeenCalled();
+    });
+
     it("injects empty m[0] and placeholder m[1] for first-pass primary sessions", async () => {
         //#given
         useTempDataHome("context-transform-m0m1-first-pass-");

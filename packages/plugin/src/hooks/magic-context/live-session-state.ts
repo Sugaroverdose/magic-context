@@ -47,6 +47,18 @@ export interface LiveSessionState {
      * only — a process restart interrupts the recomp anyway.
      */
     recompProgressBySession: Map<string, RecompProgress>;
+    /**
+     * Sessions that are Magic Context's OWN hidden children (historian,
+     * dreamer, sidekick, memory-migration). Detected at `session.created` by
+     * the `magic-context-` title prefix. These sessions are fully exempt from
+     * the message transform AND system-prompt injection — they have their own
+     * fixed agent identity/prompt, never use ctx_reduce/nudges/compartments,
+     * and getting the MC guidance block bolted on is wasted spend plus a
+     * contradictory second identity frame. In-memory only: these children are
+     * ephemeral (a process restart abandons any in-flight run), so the set
+     * never needs to survive a restart.
+     */
+    internalChildSessions: Set<string>;
 }
 
 export function createLiveSessionState(): LiveSessionState {
@@ -61,5 +73,6 @@ export function createLiveSessionState(): LiveSessionState {
         deferredMaterializationSessions: new Set<string>(),
         sessionDirectoryBySession: new Map<string, string>(),
         recompProgressBySession: new Map<string, RecompProgress>(),
+        internalChildSessions: new Set<string>(),
     };
 }

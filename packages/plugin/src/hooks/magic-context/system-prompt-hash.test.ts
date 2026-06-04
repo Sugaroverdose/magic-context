@@ -60,6 +60,7 @@ function buildHandler(opts?: {
     injectDocs?: boolean;
     directory?: string;
     experimentalUserMemories?: boolean;
+    internalChildSessions?: Set<string>;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
@@ -76,6 +77,7 @@ function buildHandler(opts?: {
         injectionEnabled: opts?.injectionEnabled,
         injectionSkipSignatures: opts?.injectionSkipSignatures,
         experimentalUserMemories: opts?.experimentalUserMemories,
+        internalChildSessions: opts?.internalChildSessions,
     });
 }
 
@@ -333,6 +335,65 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
         // The normal-agent path still appends the magic-context guidance.
         expect(system.length).toBeGreaterThan(1);
         expect(system.join("\n")).toContain("## Magic Context");
+    });
+});
+
+/**
+ * Magic Context's OWN hidden children (historian/dreamer/sidekick/migration)
+ * must not get the guidance block — wasted spend + a contradictory second
+ * identity frame. Detected by prompt signature (pass-1, timing-independent)
+ * AND the title-prefix `internalChildSessions` flag.
+ */
+describe("system-prompt-hash skips Magic Context internal child agents", () => {
+    const HISTORIAN_HEAD =
+        "You are Historian — the hippocampus of a long-running coding agent. You and the primary agent are one mind.";
+    const DREAMER_HEAD = "You are a memory maintenance agent for the magic-context system.";
+    const SIDEKICK_HEAD =
+        "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.";
+    const KEY_FILES_HEAD =
+        "You are a file importance evaluator. Given read statistics about files in a coding session, identify which are core.";
+
+    for (const [label, head] of [
+        ["historian", HISTORIAN_HEAD],
+        ["dreamer", DREAMER_HEAD],
+        ["sidekick", SIDEKICK_HEAD],
+        ["key-files", KEY_FILES_HEAD],
+    ] as const) {
+        it(`skips ALL injection for the ${label} agent (prompt signature)`, async () => {
+            useTempDataHome(`sph-skip-mc-${label}-`);
+            const { handler } = buildHandler();
+            const system = [head];
+            await handler({ sessionID: `ses-mc-${label}` }, { system });
+            expect(system).toHaveLength(1);
+            expect(system[0]).toBe(head);
+            expect(system.join("\n")).not.toContain("## Magic Context");
+        });
+    }
+
+    it("skips injection via the internalChildSessions flag even when the prompt has no known signature", async () => {
+        // Covers the title-prefix detection path: a child whose prompt opener
+        // we don't signature-match (e.g. a future MC agent) is still exempt
+        // because session.created flagged it by `magic-context-` title.
+        useTempDataHome("sph-skip-mc-flag-");
+        const sessionId = "ses-mc-flagged";
+        const { handler } = buildHandler({
+            internalChildSessions: new Set<string>([sessionId]),
+        });
+        const system = ["Some custom internal prompt with no known opener."];
+        await handler({ sessionID: sessionId }, { system });
+        expect(system).toHaveLength(1);
+        expect(system.join("\n")).not.toContain("## Magic Context");
+    });
+
+    it("does NOT update systemPromptHash for internal MC child calls", async () => {
+        useTempDataHome("sph-skip-mc-no-hash-");
+        const sessionId = "ses-mc-no-hash";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash-xyz" });
+        const { handler } = buildHandler();
+        await handler({ sessionID: sessionId }, { system: [HISTORIAN_HEAD] });
+        expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).toBe("main-agent-hash-xyz");
     });
 });
 

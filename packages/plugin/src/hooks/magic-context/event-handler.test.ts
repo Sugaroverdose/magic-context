@@ -177,6 +177,52 @@ describe("createEventHandler", () => {
         expect(getOrCreateSessionMeta(openDatabase(), "ses-child").isSubagent).toBe(true);
     });
 
+    it("flags our own hidden children by the magic-context- title prefix", async () => {
+        useTempDataHome("context-event-internal-child-");
+        const internalChildSessions = new Set<string>();
+        const handler = createEventHandler({
+            ...createDeps(new Map()),
+            internalChildSessions,
+        });
+
+        // A magic-context child (historian/dreamer/sidekick/migration title).
+        await handler({
+            event: {
+                type: "session.created",
+                properties: {
+                    info: {
+                        id: "ses-hist",
+                        parentID: "ses-parent",
+                        title: "magic-context-compartment",
+                    },
+                },
+            },
+        });
+        // A generic OpenCode subagent (task() child) — NOT ours.
+        await handler({
+            event: {
+                type: "session.created",
+                properties: {
+                    info: { id: "ses-task", parentID: "ses-parent", title: "Explore the codebase" },
+                },
+            },
+        });
+        // A root session — never flagged.
+        await handler({
+            event: {
+                type: "session.created",
+                properties: {
+                    info: { id: "ses-root2", parentID: "", title: "magic-context-compartment" },
+                },
+            },
+        });
+
+        expect(internalChildSessions.has("ses-hist")).toBe(true);
+        expect(internalChildSessions.has("ses-task")).toBe(false);
+        // parentID empty → not a child, never flagged even with our title.
+        expect(internalChildSessions.has("ses-root2")).toBe(false);
+    });
+
     it("tracks assistant token usage and updates lastResponseTime", async () => {
         useTempDataHome("context-event-message-updated-");
         const contextUsageMap = new Map<string, ContextUsageCacheEntry>();

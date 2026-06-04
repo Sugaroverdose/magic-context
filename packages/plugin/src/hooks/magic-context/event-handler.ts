@@ -92,7 +92,17 @@ export interface EventHandlerDeps {
     db: import("../../shared/sqlite").Database;
     client?: unknown;
     getNotificationParams?: (sessionId: string) => NotificationParams;
+    /**
+     * Process-scoped set of Magic Context's own hidden child sessions, keyed by
+     * sessionId. Populated here at `session.created` when the child's title
+     * starts with `magic-context-`; read by the transform + system-prompt hooks
+     * to fully exempt these sessions from the MC pipeline.
+     */
+    internalChildSessions?: Set<string>;
 }
+
+/** Title prefix used by every Magic Context hidden child session. */
+const INTERNAL_CHILD_TITLE_PREFIX = "magic-context-";
 
 function formatTokens(value: number): string {
     return value.toLocaleString();
@@ -222,6 +232,23 @@ export function createEventHandler(deps: EventHandlerDeps) {
             const info = getSessionCreatedInfo(input.event.properties);
             if (!info) {
                 return;
+            }
+
+            // Flag our own hidden children (historian/dreamer/sidekick/
+            // memory-migration) by their `magic-context-` title prefix so the
+            // transform + system-prompt hooks can fully exempt them. In-memory
+            // only — these sessions never span a restart.
+            if (
+                deps.internalChildSessions &&
+                info.parentID.length > 0 &&
+                typeof info.title === "string" &&
+                info.title.startsWith(INTERNAL_CHILD_TITLE_PREFIX)
+            ) {
+                deps.internalChildSessions.add(info.id);
+                sessionLog(
+                    info.id,
+                    `marked internal magic-context child (title="${info.title}") — exempt from transform + injection`,
+                );
             }
 
             try {

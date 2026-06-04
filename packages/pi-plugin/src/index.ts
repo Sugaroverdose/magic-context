@@ -270,7 +270,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 				const modelLabel =
 					provider && model ? `${provider}/${model}` : "the active model";
 				await args.notifyIssue?.(
-					`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(contextLimit)} tokens for ${modelLabel} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the cached limit looks wrong. Restart Pi if you suspect this is incorrect.`,
+					`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(contextLimit)} tokens for ${modelLabel} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the reported limit looks wrong. Restart Pi if you suspect this is incorrect.`,
 				);
 			}
 		}

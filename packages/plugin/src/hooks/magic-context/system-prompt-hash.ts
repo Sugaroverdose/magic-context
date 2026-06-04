@@ -73,6 +73,43 @@ function isInternalOpenCodeAgent(systemPromptContent: string): boolean {
 }
 
 /**
+ * Detect Magic Context's OWN hidden child agents by their system-prompt
+ * openers. These children (historian/dreamer/sidekick/memory-migration) load a
+ * fixed agent identity and must NOT receive the MC guidance block — it's wasted
+ * spend and a contradictory second identity frame ("You are Historian…" plus
+ * "You are the user's long-term partner…").
+ *
+ * This is the timing-independent companion to the `internalChildSessions` flag:
+ * the flag is set at `session.created` (may race the very first system.transform
+ * by event-delivery latency), whereas this signature is present in the prompt
+ * content on pass 1 with zero timing dependency. Memory-migration loads the
+ * historian agent prompt, so the historian opener covers it.
+ *
+ * Literal substrings (not fuzzy) so an upstream prompt edit fails open (resumes
+ * injection) rather than silently mis-detecting.
+ */
+function isMagicContextInternalAgent(systemPromptContent: string): boolean {
+    return (
+        // HISTORIAN_AGENT (also used by memory-migration)
+        systemPromptContent.includes(
+            "You are Historian — the hippocampus of a long-running coding agent.",
+        ) ||
+        // DREAMER_SYSTEM_PROMPT
+        systemPromptContent.includes(
+            "You are a memory maintenance agent for the magic-context system.",
+        ) ||
+        // SIDEKICK_SYSTEM_PROMPT
+        systemPromptContent.includes(
+            "You are Sidekick, a focused memory-retrieval subagent for an AI coding assistant.",
+        ) ||
+        // KEY_FILES_SYSTEM_PROMPT (dreamer key-files task)
+        systemPromptContent.includes(
+            "You are a file importance evaluator. Given read statistics about files",
+        )
+    );
+}
+
+/**
  * Handle system prompt via experimental.chat.system.transform:
  *
  * 1. Inject generic magic-context guidance into the system prompt.
@@ -125,6 +162,15 @@ export function createSystemPromptHashHandler(deps: {
      * globally.
      */
     injectionSkipSignatures?: string[];
+    /**
+     * Process-scoped set of Magic Context's OWN hidden child sessions
+     * (historian/dreamer/sidekick/memory-migration), flagged by title prefix at
+     * `session.created`. When the active session is in this set we skip ALL
+     * injection — these children have their own fixed agent identity/prompt and
+     * never benefit from the MC guidance block. Belt to the prompt-signature
+     * detection below (which is the pass-1 timing-independent suspenders).
+     */
+    internalChildSessions?: Set<string>;
     /** @deprecated user memories now render in m[0]/m[1], not system prompt. */
     experimentalUserMemories?: boolean;
     /** @deprecated key files now render in m[1], not system prompt. */
@@ -181,6 +227,23 @@ export function createSystemPromptHashHandler(deps: {
             sessionLog(
                 sessionId,
                 "system-prompt-hash skipped (OpenCode internal agent: title/summary/compaction)",
+            );
+            return;
+        }
+
+        // ── Skip Magic Context's OWN hidden children ──
+        // historian/dreamer/sidekick/memory-migration must not get the MC
+        // guidance block (wasted spend + contradictory identity frame). Two
+        // signals: the title-prefix flag (set at session.created) and the
+        // prompt-signature (timing-independent, reliable on pass 1). Either
+        // match skips ALL injection + hash tracking.
+        if (
+            deps.internalChildSessions?.has(sessionId) ||
+            isMagicContextInternalAgent(fullPromptForDetection)
+        ) {
+            sessionLog(
+                sessionId,
+                "system-prompt-hash skipped (Magic Context internal child: historian/dreamer/sidekick/migration)",
             );
             return;
         }

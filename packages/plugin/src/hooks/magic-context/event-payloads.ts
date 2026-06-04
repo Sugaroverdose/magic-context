@@ -18,6 +18,13 @@ export interface SessionCreatedInfo {
     parentID: string;
     providerID?: string;
     modelID?: string;
+    /**
+     * Session title set at create time. Magic Context's own hidden children
+     * (historian/dreamer/sidekick/memory-migration) all use `magic-context-*`
+     * titles, so this is the signal used to fully exempt them from the
+     * transform + system-prompt injection pipeline.
+     */
+    title?: string;
 }
 
 export interface MessageUpdatedAssistantInfo {
@@ -89,6 +96,7 @@ export function getSessionCreatedInfo(properties: unknown): SessionCreatedInfo |
         parentID: info.parentID,
         providerID: typeof info.providerID === "string" ? info.providerID : undefined,
         modelID: typeof info.modelID === "string" ? info.modelID : undefined,
+        title: typeof info.title === "string" ? info.title : undefined,
     };
 }
 
