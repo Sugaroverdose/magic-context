@@ -71,6 +71,7 @@ describe("MagicContextConfigSchema", () => {
                     skip_signatures: ["<!-- magic-context: skip -->"],
                 },
                 temporal_awareness: false,
+                keep_subagents: false,
                 caveman_text_compression: {
                     enabled: false,
                     min_chars: 500,

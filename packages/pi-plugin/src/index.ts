@@ -19,6 +19,7 @@
  *   back to schema defaults when neither file exists.
  */
 
+import { setKeepSubagents } from '@magic-context/core/shared/keep-subagents';
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -528,6 +529,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		mmapSizeMb: config.sqlite.mmap_size_mb,
 	});
 	applySqliteTuningPragmas(db);
+
+	// Debug data-collection toggle: keep subagent child sessions instead of
+	// deleting on success (parity with the OpenCode plugin).
+	setKeepSubagents(config.keep_subagents === true);
 
 	// Top-level disable: when `enabled: false` is set in config, register
 	// nothing — same fail-closed posture the OpenCode plugin uses.

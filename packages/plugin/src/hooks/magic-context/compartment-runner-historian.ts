@@ -10,6 +10,7 @@ import * as shared from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
 import { getProjectMagicContextHistorianDir } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
+import { shouldKeepSubagents } from "../../shared/keep-subagents";
 import { buildHistorianEditorPrompt } from "./compartment-prompt";
 import type {
     HistorianProgressCallbacks,
@@ -421,7 +422,7 @@ async function runHistorianPrompt(args: {
         // (the run is already recorded as failed in subagent_invocations +
         // historian_runs; the live child session is the missing piece). A periodic
         // sweep can GC old failed child sessions later if needed.
-        if (agentSessionId && outcomeOk) {
+        if (agentSessionId && outcomeOk && !shouldKeepSubagents()) {
             await client.session.delete({ path: { id: agentSessionId } }).catch((e: unknown) => {
                 shared.sessionLog(
                     parentSessionId,
@@ -429,10 +430,10 @@ async function runHistorianPrompt(args: {
                     getErrorMessage(e),
                 );
             });
-        } else if (agentSessionId && !outcomeOk) {
+        } else if (agentSessionId && (!outcomeOk || shouldKeepSubagents())) {
             shared.sessionLog(
                 parentSessionId,
-                `historian: KEEPING failed child session ${agentSessionId} for debugging (not deleted)`,
+                `historian: KEEPING child session ${agentSessionId} (${outcomeOk ? "keep_subagents" : "failed"}) — not deleted`,
             );
         }
     }

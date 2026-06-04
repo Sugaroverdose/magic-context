@@ -1,6 +1,7 @@
 import { HISTORIAN_AGENT } from "../../../agents/historian";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { sessionLog } from "../../../shared/logger";
 import { parseProviderModel } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -346,6 +347,13 @@ export async function runMemoryMigration(
     let agentSessionId: string | null = null;
     const cleanupChildSession = async (sid: string | null): Promise<void> => {
         if (!sid) return;
+        if (shouldKeepSubagents()) {
+            sessionLog(
+                parentSessionId,
+                `memory-migration: KEEPING child session ${sid} (keep_subagents)`,
+            );
+            return;
+        }
         await client.session.delete({ path: { id: sid } }).catch((e: unknown) => {
             sessionLog(parentSessionId, `memory-migration: child cleanup failed: ${String(e)}`);
         });

@@ -3,6 +3,7 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { describeError, getErrorMessage } from "../../../shared/error-message";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { renewLease } from "../dreamer/lease";
@@ -290,7 +291,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         return result;
     } finally {
         clearInterval(leaseInterval);
-        if (agentSessionId) {
+        if (agentSessionId && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

@@ -7,6 +7,7 @@ import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getDataDir } from "../../../shared/data-path";
 import { describeError, getErrorMessage } from "../../../shared/error-message";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
@@ -417,7 +418,7 @@ async function identifyKeyFilesForSession(args: {
             }
         } finally {
             clearInterval(leaseInterval);
-            if (agentSessionId) {
+            if (agentSessionId && !shouldKeepSubagents()) {
                 await args.client.session
                     .delete({
                         path: { id: agentSessionId },
@@ -825,7 +826,8 @@ export async function runDream(args: {
                 // Delete the child session only on SUCCESS. Keep failed sessions so
                 // the task's prompt / model output / error can be inspected (the
                 // failure is already recorded in subagent_invocations).
-                if (agentSessionId && !taskFailed) {
+                // keep_subagents debug flag retains successful ones too.
+                if (agentSessionId && !taskFailed && !shouldKeepSubagents()) {
                     await args.client.session
                         .delete({
                             path: { id: agentSessionId },
@@ -833,9 +835,9 @@ export async function runDream(args: {
                         .catch((error: unknown) => {
                             log("[dreamer] failed to delete child session:", error);
                         });
-                } else if (agentSessionId && taskFailed) {
+                } else if (agentSessionId && (taskFailed || shouldKeepSubagents())) {
                     log(
-                        `[dreamer] KEEPING failed child session ${agentSessionId} for task ${taskName} (debugging)`,
+                        `[dreamer] KEEPING child session ${agentSessionId} for task ${taskName} (${taskFailed ? "failed" : "keep_subagents"})`,
                     );
                 }
             }
@@ -1301,7 +1303,7 @@ Only include notes whose conditions you could definitively evaluate against exte
         });
     } finally {
         clearInterval(leaseInterval);
-        if (agentSessionId) {
+        if (agentSessionId && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

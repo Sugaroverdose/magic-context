@@ -3,6 +3,7 @@ import type { SidekickConfig } from "../../../config/schema/magic-context";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log, sessionLog } from "../../../shared/logger";
 import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
 import { openDatabase } from "../storage";
@@ -112,7 +113,7 @@ export async function runSidekick(deps: {
         }
         return null;
     } finally {
-        if (agentSessionId) {
+        if (agentSessionId && !shouldKeepSubagents()) {
             await deps.client.session
                 .delete({
                     path: { id: agentSessionId },

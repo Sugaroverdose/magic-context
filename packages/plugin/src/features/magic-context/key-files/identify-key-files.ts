@@ -6,6 +6,7 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../../shared/error-message";
+import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
@@ -503,7 +504,11 @@ async function runKeyFilesLlm(args: {
         if (!text) throw new Error("Dreamer returned no key-files output.");
         return text;
     } finally {
-        await args.client.session.delete({ path: { id: agentSessionId } }).catch(() => undefined);
+        if (!shouldKeepSubagents()) {
+            await args.client.session
+                .delete({ path: { id: agentSessionId } })
+                .catch(() => undefined);
+        }
     }
 }
 

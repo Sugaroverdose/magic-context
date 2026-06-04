@@ -282,6 +282,11 @@ export interface MagicContextConfig {
      *  compartments so the agent has a wall-clock sense of the session.
      *  Graduated from `experimental.temporal_awareness`; default: true. */
     temporal_awareness: boolean;
+    /** Debug: when true, keep the child sessions Magic Context spawns for its
+     *  own subagents (historian, dreamer, sidekick, memory-migration) instead
+     *  of deleting them on success. For short-term inspection/data collection;
+     *  kept sessions accumulate until manually cleared. Default false. */
+    keep_subagents: boolean;
     /**
      * Age-tier caveman compression for long user/assistant text parts.
      * Graduated from `experimental.caveman_text_compression`; opt-in, default off.
@@ -513,6 +518,12 @@ export const MagicContextConfigSchema = z
             .default(true)
             .describe(
                 'Inject wall-clock gap markers (<!-- +Xm -->) between user messages where > 5 min elapsed since the previous message, and add start/end date attributes on compartments. Gives the agent a sense of session pacing and "how long ago" across multi-day sessions. Graduated from experimental.temporal_awareness; default: true (set false to opt out).',
+            ),
+        keep_subagents: z
+            .boolean()
+            .default(false)
+            .describe(
+                "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
             ),
         caveman_text_compression: z
             .object({
