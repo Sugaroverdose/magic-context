@@ -84,6 +84,10 @@ export interface SessionMeta {
     cachedM0MaterializedAt: number | null;
     cachedM0SessionFactsVersion: number | null;
     cachedM0UpgradeState: string | null;
+    /** HARD-bust markers: provider-side cache-eviction signals (system/tools/model). */
+    cachedM0SystemHash: string | null;
+    cachedM0ToolSetHash: string | null;
+    cachedM0ModelKey: string | null;
     lastObservedModelKey: string | null;
     upgradeRemindedAt: number | null;
 }

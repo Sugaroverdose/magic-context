@@ -1073,6 +1073,52 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 30,
+        description: "HARD-bust m[0] markers: cached system/tool-set/model identity",
+        up: (db: Database) => {
+            // New persisted markers so the materialization decision can detect
+            // provider-side cache-eviction events (system-block change, tools-block
+            // change, model switch) and fold m[1] into m[0] "for free" when the
+            // cache was already dead. Stored alongside the existing cached_m0_*
+            // markers on session_meta.
+            //
+            // Guard on session_meta existence: in production session_meta is
+            // created (migration v1) long before this runs, but partial test
+            // fixtures seed a minimal schema at a high version (skipping v1), so a
+            // bare ensureColumn/UPDATE would throw "no such table".
+            const hasSessionMeta = db
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta' LIMIT 1",
+                )
+                .get();
+            if (!hasSessionMeta) return;
+            ensureColumn(db, "session_meta", "cached_m0_system_hash", "TEXT");
+            ensureColumn(db, "session_meta", "cached_m0_tool_set_hash", "TEXT");
+            ensureColumn(db, "session_meta", "cached_m0_model_key", "TEXT");
+            // Clear the existing m[0]/m[1] cache once: pre-v30 cached rows have no
+            // HARD markers, so the new cachedRowMatchesState identity check would
+            // treat them as a permanent mismatch. A one-time clear forces a clean
+            // re-materialize on the first pass after upgrade (costs one bust, which
+            // a restart already incurs), after which the markers populate normally.
+            const columns = new Set(
+                (
+                    db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>
+                ).map((column) => column.name),
+            );
+            if (columns.has("cached_m0_bytes")) {
+                db.prepare(
+                    `UPDATE session_meta SET
+                        cached_m0_bytes = NULL,
+                        cached_m1_bytes = NULL,
+                        cached_m0_materialized_at = NULL,
+                        cached_m0_system_hash = NULL,
+                        cached_m0_tool_set_hash = NULL,
+                        cached_m0_model_key = NULL`,
+                ).run();
+            }
+        },
+    },
 ];
 
 /**

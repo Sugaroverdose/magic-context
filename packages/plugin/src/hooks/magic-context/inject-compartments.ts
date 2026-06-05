@@ -508,7 +508,39 @@ export interface M0SnapshotMarkers {
     materializedAt: number;
     sessionFactsVersion: number;
     upgradeState: string | null;
+    // HARD-bust markers: provider-side cache-eviction signals. A change in any
+    // of these means the Anthropic prompt cache was already dead (tools/system
+    // block changed, or model switched), so folding m[1] into m[0] is "free".
+    // Captured from runtime signals at the injectM0M1 call site (NOT a pure DB
+    // read), so readCurrentM0SnapshotMarkers takes them as inputs.
+    systemHash: string;
+    toolSetHash: string;
+    modelKey: string;
 }
+
+/**
+ * Runtime cache-eviction signals threaded into the materialization decision.
+ * These are NOT derived from durable DB state like the content markers — they
+ * come from the current flight (system-prompt hash, tool-set fingerprint,
+ * provider/model key) plus the TTL idle window.
+ */
+export interface M0HardSignals {
+    systemHash: string;
+    toolSetHash: string;
+    modelKey: string;
+    /** True when the provider cache TTL has elapsed since lastResponseTime. */
+    cacheExpired: boolean;
+    /** Epoch ms of the last completed assistant response (end-of-turn). */
+    lastResponseTime: number;
+}
+
+const EMPTY_HARD_SIGNALS: M0HardSignals = {
+    systemHash: "",
+    toolSetHash: "",
+    modelKey: "",
+    cacheExpired: false,
+    lastResponseTime: 0,
+};
 
 export interface M0M1State {
     sessionId: string;
@@ -525,6 +557,9 @@ export interface M0M1State {
     cachedM0MaterializedAt: number | null;
     cachedM0SessionFactsVersion: number | null;
     cachedM0UpgradeState: string | null;
+    cachedM0SystemHash: string | null;
+    cachedM0ToolSetHash: string | null;
+    cachedM0ModelKey: string | null;
     snapshotMarkers?: M0SnapshotMarkers | null;
 }
 
@@ -540,6 +575,8 @@ export interface M0M1RenderOptions {
     userProfileBudgetTokens?: number;
     keyFiles?: KeyFilesConfigForRender;
     isCacheBustingPass?: boolean;
+    /** Provider-side cache-eviction signals for HARD-bust detection. */
+    hardSignals?: M0HardSignals;
     preRenderedKeyFilesBlock?: string | null;
     beforePhase3ForTest?: () => void;
 }
@@ -629,40 +666,18 @@ function numberFromRow(row: unknown, key: string): number {
     return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-// Sentinel for "no compartments yet". Must be < 0 so it is distinct from the
-// first real compartment, which is sequence 0. readNewCompartments filters
-// `sequence > maxSeq`, so an empty session must report -1 for the first
-// compartment (seq 0) to be included in m[1]; and `mustMaterialize` must see
-// -1 (empty) -> 0 (first publish) as a CHANGE so the first compartment is
-// folded into m[0]. Using 0 for "empty" made the first compartment invisible
-// (0 === 0 = no refold, and `sequence > 0` excluded it). Mirrors Pi's
-// EMPTY_MAX_COMPARTMENT_SEQ.
-const EMPTY_MAX_COMPARTMENT_SEQ = -1;
-
 function getMaxCompartmentSeq(db: Database, sessionId: string): number {
     const row = cachedStatement(
         maxCompartmentSeqStatements,
         db,
         "SELECT COALESCE(MAX(sequence), -1) AS s FROM compartments WHERE session_id = ?",
     ).get(sessionId);
-    // The query returns -1 (EMPTY_MAX_COMPARTMENT_SEQ) for an empty session and
-    // the real max sequence (>= 0) otherwise.
+    // -1 for an empty session, the real max sequence (>= 0) otherwise. The -1
+    // sentinel is < 0 so it is distinct from the first real compartment (seq 0):
+    // renderM1's readNewCompartments filters `sequence > maxSeq`, so an empty m[0]
+    // baseline (maxCompartmentSeq = -1) includes the first compartment (seq 0) in
+    // m[1]. New compartments are an m[1] delta, never a mustMaterialize trigger.
     return numberFromRow(row, "s");
-}
-
-/**
- * Reinterpret a legacy persisted `0` watermark as "empty" when — and only
- * when — the session genuinely has no compartments. Builds before the seq=0
- * fix persisted `0` for empty sessions; comparing that against the new -1
- * sentinel would force one spurious materialize. Guarded against the live
- * compartment count so a real seq-0 compartment keeps `0` as its watermark.
- * Mirrors Pi's normalizeCachedMaxCompartmentSeq.
- */
-function normalizeCachedMaxCompartmentSeq(db: Database, sessionId: string, stored: number): number {
-    if (stored === 0 && getMaxCompartmentSeq(db, sessionId) === EMPTY_MAX_COMPARTMENT_SEQ) {
-        return EMPTY_MAX_COMPARTMENT_SEQ;
-    }
-    return stored;
 }
 
 function getMaxMemoryId(db: Database, projectPath: string | undefined): number {
@@ -709,8 +724,10 @@ export function readCurrentM0SnapshotMarkers(args: {
     sessionId: string;
     projectPath?: string;
     projectDirectory?: string;
+    hardSignals?: M0HardSignals;
 }): M0SnapshotMarkers {
     const projectDirectory = args.projectDirectory ?? args.projectPath ?? "";
+    const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     return {
         projectMemoryEpoch: getProjectMemoryEpoch(args.db, args.projectPath),
         projectUserProfileVersion: getGlobalUserProfileVersion(args.db),
@@ -724,6 +741,9 @@ export function readCurrentM0SnapshotMarkers(args: {
         materializedAt: Date.now(),
         sessionFactsVersion: getSessionFactsVersion(args.db, args.sessionId),
         upgradeState: getUpgradeState(args.db, args.sessionId),
+        systemHash: hard.systemHash,
+        toolSetHash: hard.toolSetHash,
+        modelKey: hard.modelKey,
     };
 }
 
@@ -747,57 +767,98 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         materializedAt: state.cachedM0MaterializedAt ?? 0,
         sessionFactsVersion: state.cachedM0SessionFactsVersion,
         upgradeState: state.cachedM0UpgradeState,
+        systemHash: state.cachedM0SystemHash ?? "",
+        toolSetHash: state.cachedM0ToolSetHash ?? "",
+        modelKey: state.cachedM0ModelKey ?? "",
     };
 }
 
+/**
+ * The materialization decision, organized around the bust taxonomy:
+ *
+ *   SOFT+  — defer pass, nothing new: replay m[0] AND m[1] byte-identical.
+ *   SOFT   — exec / deferred-consume pass: m[1] re-renders (new compartments,
+ *            new memories, new user-profile ride the m[1] delta), m[0] stays.
+ *   HARD   — the provider cache is already dead (idle>TTL, model/system/tools
+ *            changed) OR a genuine m[0] *content* marker changed: fold m[1] into
+ *            m[0], re-run decay, reset m[1].
+ *
+ * `mustMaterialize` returns true ONLY for HARD. New compartments and additive
+ * user-profile/memory changes are deliberately NOT triggers — they are m[1]
+ * deltas (see renderM1) and must never mutate the m[0] baseline. That is the
+ * whole point of the m[0]=frozen-prefix / m[1]=volatile-delta split: a routine
+ * historian publish must keep the Anthropic prompt-cache prefix intact.
+ */
 export function mustMaterialize(args: {
     db: Database;
     sessionId: string;
     state: M0M1State;
     projectPath?: string;
     projectDirectory?: string;
+    hardSignals?: M0HardSignals;
 }): MaterializeDecision {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
     if (!args.state.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
+    const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     const current = readCurrentM0SnapshotMarkers(args);
+
+    // ── HARD: provider-side cache eviction (the cache was already dead) ──
+    // Folding m[1] into m[0] here is "free" — the prefix is being re-cached
+    // regardless. A non-empty current signal that differs from the captured
+    // baseline marker means a real change; an empty current signal means
+    // "unknown this pass" and is never treated as a change (avoids spurious
+    // folds before the signal is known).
+    if (hard.modelKey !== "" && hard.modelKey !== (args.state.cachedM0ModelKey ?? "")) {
+        return { value: true, reason: "model_change" };
+    }
+    if (hard.systemHash !== "" && hard.systemHash !== (args.state.cachedM0SystemHash ?? "")) {
+        return { value: true, reason: "system_hash" };
+    }
+    if (hard.toolSetHash !== "" && hard.toolSetHash !== (args.state.cachedM0ToolSetHash ?? "")) {
+        return { value: true, reason: "tool_set_hash" };
+    }
+    // Idle > TTL: the provider evicted the cache while the user was away. Guard
+    // for idempotence across a multi-pass "came back" turn: cacheExpired stays
+    // true on every pass until lastResponseTime updates at end-of-response, so
+    // fold only when the last completed response is newer than our last
+    // materialization. After the fold, materializedAt = Date.now() exceeds the
+    // pre-expiry lastResponseTime, so subsequent passes this turn skip; the next
+    // idle-after-response re-arms naturally. Self-consuming, no extra column.
+    if (
+        hard.cacheExpired &&
+        hard.lastResponseTime > 0 &&
+        hard.lastResponseTime > (args.state.cachedM0MaterializedAt ?? 0)
+    ) {
+        return { value: true, reason: "ttl_idle" };
+    }
+
+    // ── HARD: genuine m[0] CONTENT change (the rendered baseline bytes differ) ──
     if (args.state.cachedM0ProjectMemoryEpoch !== current.projectMemoryEpoch) {
         return { value: true, reason: "project_memory_epoch" };
     }
-    if (args.state.cachedM0ProjectUserProfileVersion !== current.projectUserProfileVersion) {
-        return { value: true, reason: "project_user_profile_version" };
-    }
-    // Normalize a legacy stored 0 to the empty sentinel so an empty session whose
-    // cache predates the seq=0 fix doesn't compare 0 (legacy empty) against the
-    // first real compartment (seq 0) incorrectly — and so an empty→first-publish
-    // transition (-1 → 0) is correctly seen as a CHANGE that folds the first
-    // compartment into m[0].
-    const cachedMaxSeq =
-        args.state.cachedM0MaxCompartmentSeq === null
-            ? null
-            : normalizeCachedMaxCompartmentSeq(
-                  args.db,
-                  args.sessionId,
-                  args.state.cachedM0MaxCompartmentSeq,
-              );
-    if (cachedMaxSeq !== current.maxCompartmentSeq) {
-        return { value: true, reason: "max_compartment_seq" };
-    }
-    // NOTE: maxMemoryId is deliberately NOT a materialization trigger. New
-    // memories are ADDITIVE and surface in m[1] via the maxMemoryId watermark
-    // (readNewMemoriesForM1 reads id > cachedM0MaxMemoryId). Triggering m[0]
-    // rematerialization on every memory write would bust the m[0] cache on
-    // routine additive writes — defeating the whole additive-stability design.
-    // Memory mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile
-    // cursor, not as a materialization trigger; keep it out of this trigger set.
+    // NOTE: project_user_profile_version is deliberately NOT a trigger. Additive
+    // user-profile promotions surface in m[1] via renderM1's <new-user-profile>
+    // delta (version-watermark), exactly like new compartments and memories. A
+    // version change must not fold m[0]; the delta reconciles into m[0] on the
+    // next HARD fold. Destructive profile edits route through the same delta plus
+    // the project_memory_epoch path for external (dashboard) mutations.
+    //
+    // NOTE: max_compartment_seq is deliberately NOT a trigger. New compartments
+    // are the canonical m[1] delta (renderM1 -> readNewCompartments WHERE
+    // sequence > cachedM0Seq). Folding m[0] on every historian publish would bust
+    // the prompt-cache prefix on a routine background publish — the exact bug the
+    // m[0]/m[1] split exists to prevent. They fold into m[0] only on a HARD bust.
+    //
+    // NOTE: maxMemoryId is NOT a trigger. Additive memory writes surface in m[1]
+    // via the maxMemoryId watermark; memory mutations use the m[1] reconcile
+    // cursor. max_mutation_id (structural compartment delete/merge/recomp) IS a
+    // trigger because it changes the rendered m[0] baseline content.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return { value: true, reason: "max_mutation_id" };
     }
     if ((args.state.cachedM0ProjectDocsHash ?? "") !== current.projectDocsHash) {
         return { value: true, reason: "project_docs_hash" };
     }
-    // session_facts retired as a render source (v2): facts are promoted memories
-    // now, so a facts-version change never affects m[0] bytes. (getSessionFactsVersion
-    // is pinned to 0; this branch is kept inert-safe but never fires.)
     if ((args.state.cachedM0UpgradeState ?? null) !== current.upgradeState) {
         return { value: true, reason: "upgrade_state" };
     }
@@ -1119,6 +1180,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             sessionId: options.sessionId,
             projectPath,
             projectDirectory,
+            hardSignals: options.hardSignals,
         });
         docs = projectDirectory
             ? readProjectDocsCanonical(projectDirectory)
@@ -1201,6 +1263,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             materializedAt: Date.now(),
             sessionFactsVersion: getSessionFactsVersion(options.db, options.sessionId),
             upgradeState: getUpgradeState(options.db, options.sessionId),
+            // HARD-bust markers are flight-constant (system/tool/model identity of
+            // THIS request) — they cannot change mid-materialization-transaction,
+            // so carry the captured values and exclude them from the stale check.
+            systemHash: snapshotMarkers.systemHash,
+            toolSetHash: snapshotMarkers.toolSetHash,
+            modelKey: snapshotMarkers.modelKey,
         };
         // NOTE: maxMemoryId is deliberately EXCLUDED from this stale-check.
         // Additive memory writes (write/promote) do not invalidate the rendered
@@ -1242,6 +1310,9 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             materializedAt: snapshotMarkers.materializedAt,
             sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
             upgradeState: snapshotMarkers.upgradeState,
+            systemHash: snapshotMarkers.systemHash,
+            toolSetHash: snapshotMarkers.toolSetHash,
+            modelKey: snapshotMarkers.modelKey,
         });
 
         // v2 path persists the rendered-memory identity itself. `memory_block_ids`
@@ -1470,6 +1541,9 @@ interface CachedM0M1Row {
     cached_m0_materialized_at: number | null;
     cached_m0_session_facts_version: number | null;
     cached_m0_upgrade_state: string | null;
+    cached_m0_system_hash: string | null;
+    cached_m0_tool_set_hash: string | null;
+    cached_m0_model_key: string | null;
     memory_block_ids: string | null;
 }
 
@@ -1512,6 +1586,9 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                     cached_m0_materialized_at,
                     cached_m0_session_facts_version,
                     cached_m0_upgrade_state,
+                    cached_m0_system_hash,
+                    cached_m0_tool_set_hash,
+                    cached_m0_model_key,
                     memory_block_ids
                FROM session_meta
               WHERE session_id = ?`,
@@ -1539,6 +1616,9 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         materializedAt: row.cached_m0_materialized_at ?? 0,
         sessionFactsVersion: row.cached_m0_session_facts_version,
         upgradeState: row.cached_m0_upgrade_state,
+        systemHash: row.cached_m0_system_hash ?? "",
+        toolSetHash: row.cached_m0_tool_set_hash ?? "",
+        modelKey: row.cached_m0_model_key ?? "",
     };
 }
 
@@ -1554,7 +1634,10 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
         (row.cached_m0_project_docs_hash ?? "") === (state.cachedM0ProjectDocsHash ?? "") &&
         row.cached_m0_materialized_at === state.cachedM0MaterializedAt &&
         row.cached_m0_session_facts_version === state.cachedM0SessionFactsVersion &&
-        (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null)
+        (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&
+        (row.cached_m0_system_hash ?? "") === (state.cachedM0SystemHash ?? "") &&
+        (row.cached_m0_tool_set_hash ?? "") === (state.cachedM0ToolSetHash ?? "") &&
+        (row.cached_m0_model_key ?? "") === (state.cachedM0ModelKey ?? "")
     );
 }
 
@@ -1575,6 +1658,9 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0MaterializedAt = markers.materializedAt;
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = markers.upgradeState;
+    state.cachedM0SystemHash = markers.systemHash;
+    state.cachedM0ToolSetHash = markers.toolSetHash;
+    state.cachedM0ModelKey = markers.modelKey;
     state.snapshotMarkers = markers;
 }
 
@@ -1752,6 +1838,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         state: options.state,
         projectPath: options.projectPath,
         projectDirectory: options.projectDirectory,
+        hardSignals: options.hardSignals,
     });
     let rematerialized = false;
     let contentionExhausted = false;
@@ -1845,24 +1932,35 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m1Text = replayCachedM1(options.state);
     }
 
-    // Forced +15% drift refold (spec ARCHITECTURE.md: "A forced refold also
-    // fires at +15% budget drift if no natural hard bust occurred"). Run this
-    // only on cache-busting passes where m[1] was freshly recomputed; defer
+    // Pressure backstop refold: the "or we have to due to pressures" half of the
+    // m[0]/m[1] contract. When NO HARD bust (TTL/system/tools/model) has arrived
+    // but the volatile m[1] delta has grown large, fold it into m[0] (re-run
+    // decay, reset m[1]) so a marathon active session can't grow m[1] unbounded.
+    // Runs only on cache-busting passes where m[1] was freshly recomputed; defer
     // passes replay persisted bytes and must never live-read/refold.
-    // Absolute floor for the ratio test: m0Text defaults to M0_EMPTY_BODY
-    // (~35 chars) on an early/empty session, so the old `m0Text.length > 0`
-    // guard never excluded the placeholder and 15% of a tiny string is
-    // trivially exceeded — triggering materializeWithRetry every cache-busting
-    // pass for no benefit. Only apply the ratio test once m[0] is a real
-    // baseline (compartments/docs/profile present). The memoryUpdateCount
-    // branch is size-independent (supersede-delta drift) and stays unguarded.
+    //
+    // Three independent triggers (any one folds):
+    //   1. memoryUpdateCount > 40 — supersede-delta drift (size-independent).
+    //   2. m[1]/m[0] SIZE RATIO — m[1] grew past 15% of the m[0] baseline. Gated
+    //      by M0_DRIFT_RATIO_FLOOR so a tiny early m[0] (M0_EMPTY_BODY ~35 chars)
+    //      doesn't make 15% trivially exceeded and refold every pass.
+    //   3. m[1] ABSOLUTE CAP — when m[0] is small the ratio test is suppressed, so
+    //      m[1] could otherwise grow without bound. Fold once m[1] alone exceeds a
+    //      fixed share of the history budget, independent of m[0] size. estimateTokens
+    //      here is fine: this whole branch is rare (cache-busting + m1Recomputed).
     const M0_DRIFT_RATIO_FLOOR = 2_000;
+    const M1_ABSOLUTE_CAP_RATIO = 0.2;
+    const m1AbsoluteBudget =
+        (options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) * M1_ABSOLUTE_CAP_RATIO;
+    const m1OverAbsoluteCap =
+        m1Text !== M1_EMPTY_PLACEHOLDER && estimateTokens(m1Text) > m1AbsoluteBudget;
     if (
         !rematerialized &&
         !contentionExhausted &&
         m1Recomputed &&
         options.isCacheBustingPass &&
         (memoryUpdateCount > 40 ||
+            m1OverAbsoluteCap ||
             (m1Text !== M1_EMPTY_PLACEHOLDER &&
                 m0Text.length >= M0_DRIFT_RATIO_FLOOR &&
                 m1Text.length > m0Text.length * 0.15))

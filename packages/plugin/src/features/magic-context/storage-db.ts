@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 29;
+export const LATEST_SUPPORTED_VERSION = 30;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -607,6 +607,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_materialized_at INTEGER,
       cached_m0_session_facts_version INTEGER,
       cached_m0_upgrade_state TEXT,
+      cached_m0_system_hash TEXT,
+      cached_m0_tool_set_hash TEXT,
+      cached_m0_model_key TEXT,
       cached_m0_last_baseline_end_message_id TEXT,
       upgrade_reminded_at INTEGER,
       pi_stable_id_scheme INTEGER
@@ -856,6 +859,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_materialized_at", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_session_facts_version", "INTEGER");
     ensureColumn(db, "session_meta", "cached_m0_upgrade_state", "TEXT");
+    ensureColumn(db, "session_meta", "cached_m0_system_hash", "TEXT");
+    ensureColumn(db, "session_meta", "cached_m0_tool_set_hash", "TEXT");
+    ensureColumn(db, "session_meta", "cached_m0_model_key", "TEXT");
     // Pi-only: frozen baseline boundary (end_message_id) captured at
     // materialization so Pi trims against the snapshot boundary that produced
     // m[0], not a live-recomputed one a concurrent recomp could have moved.

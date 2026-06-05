@@ -3,6 +3,7 @@ import { getLastCompartmentEndMessage } from "../../features/magic-context/compa
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
+import { parseCacheTtl } from "../../features/magic-context/scheduler";
 
 import {
     type ContextDatabase,
@@ -224,6 +225,14 @@ export interface TransformDeps {
     ) => import("./send-session-notification").NotificationParams;
     getModelKey?: (sessionId: string) => string | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
+    /**
+     * Combined fingerprint of the current tool set for this session's
+     * provider/model/agent, used as a HARD-bust marker (the provider `tools`
+     * block sits before `system` and a tool change is invisible to the system
+     * hash). Returns "" when unknown (no tool.definition fire yet) → treated as
+     * "no signal", never a spurious fold.
+     */
+    getToolSetHash?: (sessionId: string) => string;
     projectPath?: string;
     experimentalUserMemories?: boolean;
     experimentalPinKeyFiles?: boolean;
@@ -1172,6 +1181,35 @@ export function createTransform(deps: TransformDeps) {
         sessionMeta = { ...sessionMeta, compartmentInProgress };
         logTransformTiming(sessionId, "compartmentPhase", tCompartmentPhase);
 
+        // HARD-bust signals for the m[0]/m[1] materialization decision. These
+        // capture provider-side cache-eviction events (model switch, system-block
+        // change, tools-block change) plus the TTL idle window. A change in any
+        // means the Anthropic prompt cache was already dead, so folding m[1] into
+        // m[0] is "free". systemHash is the PERSISTED last-turn hash (system.transform
+        // runs AFTER this messages.transform), so a system change is detected on the
+        // next pass — the accepted one-pass lag.
+        const hardModel = deps.liveModelBySession?.get(sessionId);
+        const hardModelKey = hardModel ? `${hardModel.providerID}/${hardModel.modelID}` : "";
+        const hardToolSetHash = deps.getToolSetHash?.(sessionId) ?? "";
+        const hardSystemHash =
+            typeof sessionMeta.systemPromptHash === "string" ? sessionMeta.systemPromptHash : "";
+        let hardTtlMs = 5 * 60 * 1000;
+        try {
+            hardTtlMs = parseCacheTtl(sessionMeta.cacheTtl);
+        } catch {
+            // invalid cache_ttl → fall back to the 5m default (same as execute-status)
+        }
+        const hardCacheExpired =
+            sessionMeta.lastResponseTime > 0 &&
+            Date.now() - sessionMeta.lastResponseTime >= hardTtlMs;
+        const m0HardSignals = {
+            systemHash: hardSystemHash,
+            toolSetHash: hardToolSetHash,
+            modelKey: hardModelKey,
+            cacheExpired: hardCacheExpired,
+            lastResponseTime: sessionMeta.lastResponseTime,
+        };
+
         const lateActiveRunBlocksMaterialization =
             getActiveCompartmentRun(sessionId) !== undefined &&
             contextUsageEarly.percentage < FORCE_MATERIALIZE_PERCENTAGE;
@@ -1284,6 +1322,7 @@ export function createTransform(deps: TransformDeps) {
                     enabled: deps.experimentalPinKeyFiles === true,
                     tokenBudget: deps.experimentalPinKeyFilesTokenBudget ?? 10_000,
                 },
+                hardSignals: m0HardSignals,
             },
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);

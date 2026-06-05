@@ -444,7 +444,13 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe("project_memory_epoch");
     });
 
-    it("mustMaterialize detects a new compartment via max sequence", () => {
+    it("mustMaterialize does NOT materialize m[0] on a new compartment (it rides m[1])", () => {
+        // Taxonomy invariant: a new compartment is a SOFT delta that surfaces in
+        // m[1] via renderM1's <new-compartments> (sequence > cachedM0Seq). It must
+        // NEVER fold m[0] — folding on every historian publish busts the prompt-
+        // cache prefix on a routine background publish, the exact bug the m[0]/m[1]
+        // split exists to prevent. New compartments fold into m[0] only on a HARD
+        // bust (TTL/system/tools/model change).
         db = makeDb();
         const projectDirectory = makeProjectDir();
         materializeM0({
@@ -467,6 +473,7 @@ describe("m[0]/m[1] materialization", () => {
                     endMessageId: "m1",
                     title: "New",
                     content: "New summary",
+                    p1: "New summary",
                 },
             ],
             [],
@@ -479,16 +486,15 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
-            }).reason,
-        ).toBe("max_compartment_seq");
+            }).value,
+        ).toBe(false);
     });
 
-    it("mustMaterialize detects the FIRST compartment (sequence 0) published after an empty materialize", () => {
-        // Regression for the seq=0 collision: an empty session materialized m[0]
-        // with maxCompartmentSeq sentinel; publishing the first compartment at
-        // sequence 0 must be seen as a CHANGE so it folds into m[0]. The old code
-        // stored 0 for "empty" too, so 0 === 0 left the first compartment invisible
-        // (never refolded into m[0], and excluded from m[1] by `sequence > 0`).
+    it("mustMaterialize does NOT materialize m[0] on the FIRST compartment (sequence 0)", () => {
+        // The first compartment (sequence 0) is also a SOFT m[1] delta — the
+        // EMPTY_MAX_COMPARTMENT_SEQ=-1 sentinel makes readNewCompartments(-1)
+        // include seq 0, so renderM1 surfaces it. mustMaterialize must NOT fold it
+        // into m[0]; that happens on the next HARD bust.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         materializeM0({
@@ -512,6 +518,7 @@ describe("m[0]/m[1] materialization", () => {
                     endMessageId: "m1",
                     title: "First",
                     content: "First summary",
+                    p1: "First summary",
                 },
             ],
             [],
@@ -524,8 +531,8 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
-            }).reason,
-        ).toBe("max_compartment_seq");
+            }).value,
+        ).toBe(false);
     });
 
     it("mustMaterialize detects a new m0_mutation_log entry by monotonic id", () => {

@@ -27,6 +27,7 @@ import {
     openDatabase,
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
+import { getCurrentToolSetHash } from "../../features/magic-context/tool-definition-tokens";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
 import type { PluginContext } from "../../plugin/types";
@@ -396,6 +397,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         getModelKey: (sessionId) => {
             const model = liveModelBySession.get(sessionId);
             return resolveModelKey(model?.providerID, model?.modelID);
+        },
+        getToolSetHash: (sessionId) => {
+            const model = liveModelBySession.get(sessionId);
+            if (!model) return "";
+            return getCurrentToolSetHash(
+                model.providerID,
+                model.modelID,
+                agentBySession.get(sessionId),
+            );
         },
         getFallbackModelId: (sessionId) => {
             const model = liveModelBySession.get(sessionId);

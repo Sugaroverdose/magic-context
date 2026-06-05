@@ -38,6 +38,9 @@ export interface SessionMetaRow {
     cached_m0_materialized_at: number | null;
     cached_m0_session_facts_version: number | null;
     cached_m0_upgrade_state: string | null;
+    cached_m0_system_hash: string | null;
+    cached_m0_tool_set_hash: string | null;
+    cached_m0_model_key: string | null;
     last_observed_model_key: string | null;
     upgrade_reminded_at: number | null;
     pi_stable_id_scheme: number | null;
@@ -76,6 +79,9 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_materialized_at",
     "cached_m0_session_facts_version",
     "cached_m0_upgrade_state",
+    "cached_m0_system_hash",
+    "cached_m0_tool_set_hash",
+    "cached_m0_model_key",
     "last_observed_model_key",
     "upgrade_reminded_at",
     "pi_stable_id_scheme",
@@ -113,6 +119,9 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0MaterializedAt: "cached_m0_materialized_at",
     cachedM0SessionFactsVersion: "cached_m0_session_facts_version",
     cachedM0UpgradeState: "cached_m0_upgrade_state",
+    cachedM0SystemHash: "cached_m0_system_hash",
+    cachedM0ToolSetHash: "cached_m0_tool_set_hash",
+    cachedM0ModelKey: "cached_m0_model_key",
     lastObservedModelKey: "last_observed_model_key",
     upgradeRemindedAt: "upgrade_reminded_at",
     piStableIdScheme: "pi_stable_id_scheme",
@@ -214,6 +223,9 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.cached_m0_materialized_at) &&
         isNumberOrNull(r.cached_m0_session_facts_version) &&
         isStringOrNull(r.cached_m0_upgrade_state) &&
+        isStringOrNull(r.cached_m0_system_hash) &&
+        isStringOrNull(r.cached_m0_tool_set_hash) &&
+        isStringOrNull(r.cached_m0_model_key) &&
         isStringOrNull(r.last_observed_model_key) &&
         isNumberOrNull(r.upgrade_reminded_at) &&
         isNumberOrNull(r.pi_stable_id_scheme)
@@ -254,6 +266,9 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MaterializedAt: null,
         cachedM0SessionFactsVersion: null,
         cachedM0UpgradeState: null,
+        cachedM0SystemHash: null,
+        cachedM0ToolSetHash: null,
+        cachedM0ModelKey: null,
         lastObservedModelKey: null,
         upgradeRemindedAt: null,
         piStableIdScheme: null,
@@ -356,6 +371,9 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0MaterializedAt: numOrNull(row.cached_m0_materialized_at),
         cachedM0SessionFactsVersion: numOrNull(row.cached_m0_session_facts_version),
         cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
+        cachedM0SystemHash: stringOrNull(row.cached_m0_system_hash),
+        cachedM0ToolSetHash: stringOrNull(row.cached_m0_tool_set_hash),
+        cachedM0ModelKey: stringOrNull(row.cached_m0_model_key),
         lastObservedModelKey: stringOrNull(row.last_observed_model_key),
         upgradeRemindedAt: numOrNull(row.upgrade_reminded_at),
         piStableIdScheme: numOrNull(row.pi_stable_id_scheme),
@@ -375,6 +393,9 @@ export interface PersistCachedM0Payload {
     materializedAt: number;
     sessionFactsVersion: number;
     upgradeState: string | null;
+    systemHash?: string | null;
+    toolSetHash?: string | null;
+    modelKey?: string | null;
 }
 
 export function persistCachedM0(
@@ -396,7 +417,10 @@ export function persistCachedM0(
             cached_m0_project_docs_hash = ?,
             cached_m0_materialized_at = ?,
             cached_m0_session_facts_version = ?,
-            cached_m0_upgrade_state = ?
+            cached_m0_upgrade_state = ?,
+            cached_m0_system_hash = ?,
+            cached_m0_tool_set_hash = ?,
+            cached_m0_model_key = ?
          WHERE session_id = ?`,
     ).run(
         Buffer.from(payload.m0Bytes),
@@ -411,6 +435,9 @@ export function persistCachedM0(
         payload.materializedAt,
         payload.sessionFactsVersion,
         payload.upgradeState,
+        payload.systemHash ?? "",
+        payload.toolSetHash ?? "",
+        payload.modelKey ?? "",
         sessionId,
     );
 }
@@ -435,6 +462,9 @@ export function clearCachedM0M1(db: Database, sessionId: string): void {
         ["cached_m0_materialized_at", null],
         ["cached_m0_session_facts_version", null],
         ["cached_m0_upgrade_state", null],
+        ["cached_m0_system_hash", null],
+        ["cached_m0_tool_set_hash", null],
+        ["cached_m0_model_key", null],
         ["cached_m0_last_baseline_end_message_id", null],
         ["memory_block_cache", ""],
         ["memory_block_count", 0],

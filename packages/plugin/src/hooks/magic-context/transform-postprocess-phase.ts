@@ -33,6 +33,7 @@ import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     getVisibleMemoryIds,
     injectM0M1,
+    type M0HardSignals,
     type M0M1State,
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
@@ -163,6 +164,7 @@ interface RunPostTransformPhaseArgs {
         memoryInjectionBudgetTokens?: number;
         historyBudgetTokens?: number;
         keyFiles?: { enabled: boolean; tokenBudget: number };
+        hardSignals?: M0HardSignals;
     };
 }
 
@@ -536,6 +538,7 @@ export async function runPostTransformPhase(
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 keyFiles: args.m0M1.keyFiles,
                 isCacheBustingPass,
+                hardSignals: args.m0M1.hardSignals,
             });
             if (result.injected) {
                 sessionLog(

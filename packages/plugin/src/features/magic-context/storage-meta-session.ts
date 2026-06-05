@@ -36,6 +36,9 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     cached_m0_materialized_at: "NULL AS cached_m0_materialized_at",
     cached_m0_session_facts_version: "NULL AS cached_m0_session_facts_version",
     cached_m0_upgrade_state: "NULL AS cached_m0_upgrade_state",
+    cached_m0_system_hash: "NULL AS cached_m0_system_hash",
+    cached_m0_tool_set_hash: "NULL AS cached_m0_tool_set_hash",
+    cached_m0_model_key: "NULL AS cached_m0_model_key",
     last_observed_model_key: "NULL AS last_observed_model_key",
     upgrade_reminded_at: "NULL AS upgrade_reminded_at",
 };
