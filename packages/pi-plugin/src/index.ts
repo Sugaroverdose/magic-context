@@ -19,7 +19,6 @@
  *   back to schema defaults when neither file exists.
  */
 
-import { setKeepSubagents } from '@magic-context/core/shared/keep-subagents';
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -70,6 +69,7 @@ import {
 } from "@magic-context/core/shared/announcement";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
+import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
 import { log } from "@magic-context/core/shared/logger";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
