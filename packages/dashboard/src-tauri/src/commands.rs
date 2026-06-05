@@ -712,6 +712,17 @@ pub fn delete_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), Str
 }
 
 #[tauri::command(async)]
+pub fn update_user_memory_content(
+    state: State<'_, AppState>,
+    id: i64,
+    content: String,
+) -> Result<(), String> {
+    let path = state.get_db_path()?;
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::update_user_memory_content(&mut conn, id, &content).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
 pub fn delete_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;

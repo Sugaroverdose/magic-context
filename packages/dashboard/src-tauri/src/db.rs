@@ -3993,6 +3993,26 @@ pub fn delete_user_memory(conn: &mut Connection, id: i64) -> Result<(), rusqlite
     Ok(())
 }
 
+pub fn update_user_memory_content(
+    conn: &mut Connection,
+    id: i64,
+    content: &str,
+) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let affected = tx.execute(
+        "UPDATE user_memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
+        params![content, now_millis(), id],
+    )?;
+    // user_memories render into the cached m[0] <user-profile> block, so an
+    // edit must bump the global user-profile version or running sessions keep
+    // serving stale content (same invariant dismiss/delete rely on).
+    if affected > 0 {
+        bump_project_user_profile_version(&tx)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn delete_user_memory_candidate(conn: &Connection, id: i64) -> Result<(), rusqlite::Error> {
     conn.execute(
         "DELETE FROM user_memory_candidates WHERE id = ?1",

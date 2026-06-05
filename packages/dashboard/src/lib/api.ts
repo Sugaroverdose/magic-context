@@ -353,6 +353,10 @@ export async function deleteUserMemory(id: number): Promise<void> {
   return invoke("delete_user_memory", { id });
 }
 
+export async function updateUserMemoryContent(id: number, content: string): Promise<void> {
+  return invoke("update_user_memory_content", { id, content });
+}
+
 export async function deleteUserMemoryCandidate(id: number): Promise<void> {
   return invoke("delete_user_memory_candidate", { id });
 }

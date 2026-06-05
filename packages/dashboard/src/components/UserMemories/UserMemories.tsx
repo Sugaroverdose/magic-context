@@ -7,13 +7,57 @@ import {
   getUserMemories,
   getUserMemoryCandidates,
   promoteUserMemoryCandidate,
-  truncate,
+  updateUserMemoryContent,
 } from "../../lib/api";
 import FilterSelect from "../shared/FilterSelect";
 
 export default function UserMemories() {
   const [statusFilter, setStatusFilter] = createSignal<string>("");
   const [error, setError] = createSignal<string | null>(null);
+  const [editingId, setEditingId] = createSignal<number | null>(null);
+  const [editContent, setEditContent] = createSignal<string>("");
+  // Two-click delete confirm (mirrors MemoryDetail): first click arms the
+  // confirm for that row's key; a second click within 3s performs the delete.
+  const [confirmDeleteKey, setConfirmDeleteKey] = createSignal<string | null>(null);
+  let confirmDeleteTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const confirmDelete = (key: string, perform: () => void) => {
+    if (confirmDeleteKey() !== key) {
+      setConfirmDeleteKey(key);
+      if (confirmDeleteTimer) clearTimeout(confirmDeleteTimer);
+      confirmDeleteTimer = setTimeout(() => setConfirmDeleteKey(null), 3000);
+      return;
+    }
+    if (confirmDeleteTimer) clearTimeout(confirmDeleteTimer);
+    setConfirmDeleteKey(null);
+    perform();
+  };
+
+  const startEdit = (id: number, content: string) => {
+    setEditContent(content);
+    setEditingId(id);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditContent("");
+  };
+
+  const handleSaveEdit = async (id: number) => {
+    const next = editContent().trim();
+    if (next.length === 0) {
+      setError("Memory content cannot be empty.");
+      return;
+    }
+    try {
+      setError(null);
+      await updateUserMemoryContent(id, next);
+      cancelEdit();
+      refetchMemories();
+    } catch (e: unknown) {
+      setError(`Failed to update memory: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const fetchMemories = () => ({ status: statusFilter() || undefined });
   const [memories, { refetch: refetchMemories }] = createResource(fetchMemories, (params) =>
@@ -164,18 +208,30 @@ export default function UserMemories() {
               <For each={memories()}>
                 {(memory) => (
                   <div class="card">
-                    <div class="card-title">
-                      <span
-                        class="mono"
-                        style={{
-                          color: "var(--text-muted)",
-                          "margin-right": "6px",
-                        }}
-                      >
-                        #{memory.id}
-                      </span>
-                      {truncate(memory.content, 120)}
-                    </div>
+                    <Show
+                      when={editingId() === memory.id}
+                      fallback={
+                        <div class="card-title" style={{ "white-space": "pre-wrap" }}>
+                          <span
+                            class="mono"
+                            style={{
+                              color: "var(--text-muted)",
+                              "margin-right": "6px",
+                            }}
+                          >
+                            #{memory.id}
+                          </span>
+                          {memory.content}
+                        </div>
+                      }
+                    >
+                      <textarea
+                        class="code-editor"
+                        style={{ "min-height": "80px", width: "100%" }}
+                        value={editContent()}
+                        onInput={(e) => setEditContent(e.currentTarget.value)}
+                      />
+                    </Show>
                     <div class="card-meta">
                       <span class={`pill ${statusPillClass(memory.status)}`}>{memory.status}</span>
                       <Show when={memory.promoted_at}>
@@ -198,22 +254,51 @@ export default function UserMemories() {
                         "margin-top": "8px",
                       }}
                     >
-                      <Show when={memory.status === "active"}>
+                      <Show
+                        when={editingId() === memory.id}
+                        fallback={
+                          <>
+                            <button
+                              type="button"
+                              class="btn sm"
+                              onClick={() => startEdit(memory.id, memory.content)}
+                            >
+                              Edit
+                            </button>
+                            <Show when={memory.status === "active"}>
+                              <button
+                                type="button"
+                                class="btn sm"
+                                onClick={() => handleDismiss(memory.id)}
+                              >
+                                Dismiss
+                              </button>
+                            </Show>
+                            <button
+                              type="button"
+                              class="btn sm danger"
+                              onClick={() =>
+                                confirmDelete(`mem:${memory.id}`, () =>
+                                  handleDeleteMemory(memory.id),
+                                )
+                              }
+                            >
+                              {confirmDeleteKey() === `mem:${memory.id}` ? "Confirm?" : "Delete"}
+                            </button>
+                          </>
+                        }
+                      >
                         <button
                           type="button"
-                          class="btn sm"
-                          onClick={() => handleDismiss(memory.id)}
+                          class="btn sm primary"
+                          onClick={() => handleSaveEdit(memory.id)}
                         >
-                          Dismiss
+                          Save
+                        </button>
+                        <button type="button" class="btn sm" onClick={cancelEdit}>
+                          Cancel
                         </button>
                       </Show>
-                      <button
-                        type="button"
-                        class="btn sm danger"
-                        onClick={() => handleDeleteMemory(memory.id)}
-                      >
-                        Delete
-                      </button>
                     </div>
                   </div>
                 )}
@@ -245,7 +330,7 @@ export default function UserMemories() {
               <For each={candidates()}>
                 {(candidate) => (
                   <div class="card">
-                    <div class="card-title">
+                    <div class="card-title" style={{ "white-space": "pre-wrap" }}>
                       <span
                         class="mono"
                         style={{
@@ -255,7 +340,7 @@ export default function UserMemories() {
                       >
                         #{candidate.id}
                       </span>
-                      {truncate(candidate.content, 120)}
+                      {candidate.content}
                     </div>
                     <div class="card-meta">
                       <span class="pill blue">candidate</span>
@@ -292,9 +377,13 @@ export default function UserMemories() {
                       <button
                         type="button"
                         class="btn sm danger"
-                        onClick={() => handleDeleteCandidate(candidate.id)}
+                        onClick={() =>
+                          confirmDelete(`cand:${candidate.id}`, () =>
+                            handleDeleteCandidate(candidate.id),
+                          )
+                        }
                       >
-                        Delete
+                        {confirmDeleteKey() === `cand:${candidate.id}` ? "Confirm?" : "Delete"}
                       </button>
                     </div>
                   </div>
