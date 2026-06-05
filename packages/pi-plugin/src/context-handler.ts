@@ -53,7 +53,10 @@ import {
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
-import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
+import {
+	createScheduler,
+	parseCacheTtl,
+} from "@magic-context/core/features/magic-context/scheduler";
 import {
 	adoptFallbackTagMessageId,
 	type ContextDatabase,
@@ -3436,6 +3439,29 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					args.isCacheBusting ? "history refresh" : "deferred history refresh",
 				);
 			}
+			// HARD-bust signals (parity with OpenCode). systemHash + TTL idle derive
+			// from the freshly-read session_meta; modelKey from the volatile live
+			// map. Pi has no tool.definition hook, so toolSetHash is always "" — its
+			// mustMaterializePi branch is inert (see PARITY.md).
+			const hardMeta = getOrCreateSessionMeta(args.db, args.sessionId);
+			let piTtlMs = 5 * 60 * 1000;
+			try {
+				piTtlMs = parseCacheTtl(hardMeta.cacheTtl);
+			} catch {
+				// invalid cache_ttl → 5m default (parity with execute-status)
+			}
+			const piHardSignals = {
+				systemHash:
+					typeof hardMeta.systemPromptHash === "string"
+						? hardMeta.systemPromptHash
+						: "",
+				toolSetHash: "",
+				modelKey: liveModelBySession.get(args.sessionId) ?? "",
+				cacheExpired:
+					hardMeta.lastResponseTime > 0 &&
+					Date.now() - hardMeta.lastResponseTime >= piTtlMs,
+				lastResponseTime: hardMeta.lastResponseTime,
+			};
 			injectionResult = injectM0M1Pi(
 				{
 					sessionId: args.sessionId,
@@ -3445,6 +3471,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					historyBudgetTokens: args.injection.historyBudgetTokens,
 					keyFilesEnabled: args.injection.keyFilesEnabled,
 					keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
+					hardSignals: piHardSignals,
 				},
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],

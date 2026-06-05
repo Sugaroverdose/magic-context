@@ -1028,3 +1028,126 @@ describe("renderM0Pi sibling-block layout (OpenCode parity)", () => {
 		}
 	});
 });
+
+describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () => {
+	const baseHard = {
+		systemHash: "sys-v1",
+		toolSetHash: "",
+		modelKey: "anthropic/opus",
+		cacheExpired: false,
+		lastResponseTime: 0,
+	};
+
+	function compartment(seq: number, body: string) {
+		return {
+			sequence: seq,
+			startMessage: seq,
+			endMessage: seq,
+			startMessageId: `entry-${seq}`,
+			endMessageId: `entry-${seq}`,
+			title: `T${seq}`,
+			content: body,
+			p1: body,
+		};
+	}
+
+	it("does NOT materialize m[0] on a new compartment (it rides m[1])", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-newcomp-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-newcomp", cwd),
+				hardSignals: baseHard,
+			};
+			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
+			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+
+			// Publish a new compartment — the routine historian publish.
+			appendCompartments(db, state.sessionId, [compartment(1, "Bravo")]);
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("HARD: a model change folds m[0]", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-model-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-model", cwd),
+				hardSignals: baseHard,
+			};
+			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
+			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+
+			const switched = {
+				...state,
+				hardSignals: { ...baseHard, modelKey: "anthropic/sonnet" },
+			};
+			expect(mustMaterializePi(switched, db)).toEqual({
+				value: true,
+				reason: "model_change",
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("HARD: a system-hash change folds m[0]", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-sys-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-sys", cwd),
+				hardSignals: baseHard,
+			};
+			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
+			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+
+			const changed = {
+				...state,
+				hardSignals: { ...baseHard, systemHash: "sys-v2" },
+			};
+			expect(mustMaterializePi(changed, db)).toEqual({
+				value: true,
+				reason: "system_hash",
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("an empty current HARD signal is never treated as a change", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-empty-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-empty", cwd),
+				hardSignals: baseHard,
+			};
+			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
+			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+
+			const unknown = {
+				...state,
+				hardSignals: {
+					systemHash: "",
+					toolSetHash: "",
+					modelKey: "",
+					cacheExpired: false,
+					lastResponseTime: 0,
+				},
+			};
+			expect(mustMaterializePi(unknown, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});

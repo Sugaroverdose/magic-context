@@ -487,6 +487,8 @@ export interface PiM0M1State {
 	/** User-profile block budget (~4K). The m[1] new-user-profile delta is
 	 *  trimmed to 25% of this (matches OpenCode renderM1). Defaults when unset. */
 	userProfileBudgetTokens?: number;
+	/** Provider-side cache-eviction signals for HARD-bust detection. */
+	hardSignals?: PiM0HardSignals;
 }
 
 export interface PiM0SnapshotMarkers {
@@ -501,7 +503,36 @@ export interface PiM0SnapshotMarkers {
 	materializedAt: number;
 	upgradeState: string;
 	lastBaselineEndMessageId: string | null;
+	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers): provider-side
+	// cache-eviction signals. systemHash/modelKey come from runtime; Pi has no
+	// tool.definition hook so toolSetHash is always "" (a documented divergence —
+	// see PARITY.md). Captured from PiM0HardSignals at the injection call site.
+	systemHash: string;
+	toolSetHash: string;
+	modelKey: string;
 }
+
+/**
+ * Runtime cache-eviction signals threaded into Pi's materialization decision
+ * (parity with OpenCode M0HardSignals). systemHash + cacheExpired derive from
+ * session_meta; modelKey comes from the volatile liveModelBySession map in
+ * context-handler. toolSetHash is always "" on Pi (no tool.definition hook).
+ */
+export interface PiM0HardSignals {
+	systemHash: string;
+	toolSetHash: string;
+	modelKey: string;
+	cacheExpired: boolean;
+	lastResponseTime: number;
+}
+
+const EMPTY_PI_HARD_SIGNALS: PiM0HardSignals = {
+	systemHash: "",
+	toolSetHash: "",
+	modelKey: "",
+	cacheExpired: false,
+	lastResponseTime: 0,
+};
 
 export interface PiMaterializeDecision {
 	value: boolean;
@@ -638,6 +669,9 @@ function getCachedMarkers(
 		// The boundary that was persisted WITH these cached m[0] bytes (may be
 		// null for a legitimately-boundaryless baseline — see the guard above).
 		lastBaselineEndMessageId: cachedBoundary,
+		systemHash: meta.cachedM0SystemHash ?? "",
+		toolSetHash: meta.cachedM0ToolSetHash ?? "",
+		modelKey: meta.cachedM0ModelKey ?? "",
 	};
 }
 
@@ -713,6 +747,9 @@ function readCurrentMarkersFromCompartments(
 			compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 		}`,
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
+		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
+		toolSetHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).toolSetHash,
+		modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 	};
 }
 
@@ -746,10 +783,41 @@ export function mustMaterializePi(
 	if (getCachedMarkers(db, state, currentCompartments) === null) {
 		return { value: true, reason: "cache_invalid" };
 	}
-	const cachedMaxCompartmentSeq = normalizeCachedMaxCompartmentSeq(
-		meta.cachedM0MaxCompartmentSeq ?? EMPTY_MAX_COMPARTMENT_SEQ,
-		currentCompartments,
-	);
+	// ── HARD: provider-side cache eviction (the cache was already dead) ──
+	// Parity with OpenCode mustMaterialize. An empty current signal means
+	// "unknown this pass" and is never treated as a change. Pi never produces a
+	// toolSetHash (no tool.definition hook), so that branch is effectively inert
+	// on Pi — kept for structural parity. See PARITY.md.
+	const hard = state.hardSignals ?? EMPTY_PI_HARD_SIGNALS;
+	if (hard.modelKey !== "" && hard.modelKey !== (meta.cachedM0ModelKey ?? "")) {
+		return { value: true, reason: "model_change" };
+	}
+	if (
+		hard.systemHash !== "" &&
+		hard.systemHash !== (meta.cachedM0SystemHash ?? "")
+	) {
+		return { value: true, reason: "system_hash" };
+	}
+	if (
+		hard.toolSetHash !== "" &&
+		hard.toolSetHash !== (meta.cachedM0ToolSetHash ?? "")
+	) {
+		return { value: true, reason: "tool_set_hash" };
+	}
+	// Idle > TTL: self-consuming guard via cachedM0MaterializedAt (parity with
+	// OpenCode). cacheExpired stays true every pass until lastResponseTime
+	// updates, so fold only when the last response is newer than the last
+	// materialization; the fold sets materializedAt = now, so the rest of the
+	// turn skips. Next idle-after-response re-arms.
+	if (
+		hard.cacheExpired &&
+		hard.lastResponseTime > 0 &&
+		hard.lastResponseTime > (meta.cachedM0MaterializedAt ?? 0)
+	) {
+		return { value: true, reason: "ttl_idle" };
+	}
+
+	// ── HARD: genuine m[0] CONTENT change ──
 	if (meta.cachedM0UpgradeState !== current.upgradeState) {
 		return { value: true, reason: "renderer_upgrade" };
 	}
@@ -759,12 +827,6 @@ export function mustMaterializePi(
 	if (current.projectMemoryEpoch !== (meta.cachedM0ProjectMemoryEpoch ?? 0)) {
 		return { value: true, reason: "project_memory_change" };
 	}
-	if (
-		current.projectUserProfileVersion !==
-		(meta.cachedM0ProjectUserProfileVersion ?? 0)
-	) {
-		return { value: true, reason: "user_profile_change" };
-	}
 	// Use !== (not >), matching OpenCode mustMaterialize: a max-id that DECREASES
 	// (revert / message.removed shrinking the compartment or mutation set) must
 	// still invalidate m[0]. A '>' comparison would miss a decrease and serve a
@@ -772,9 +834,12 @@ export function mustMaterializePi(
 	if (current.maxMutationId !== (meta.cachedM0MaxMutationId ?? 0)) {
 		return { value: true, reason: "pending_mutations" };
 	}
-	if (current.maxCompartmentSeq !== cachedMaxCompartmentSeq) {
-		return { value: true, reason: "new_compartment" };
-	}
+	// new_compartment is NOT a trigger (parity with OpenCode — Bug 1 fix): new
+	// compartments are an m[1] delta (renderM1Pi readNewCompartments WHERE
+	// sequence > cachedM0Seq, normalized via normalizeCachedMaxCompartmentSeq in
+	// the render path), folded into m[0] only on a HARD bust.
+	// project_user_profile_version is also NOT a trigger: additive user-profile
+	// rides the m[1] <new-user-profile> delta.
 	// maxMemoryId is deliberately NOT a materialization trigger (parity with
 	// OpenCode): new memories are additive and surface in m[1] via the
 	// maxMemoryId watermark, so they must not bust the m[0] cache. Memory
@@ -963,6 +1028,9 @@ function readFrozenM0InputsPi(
 				compartments.some((c) => c.legacy === 1) ? "legacy" : "ready"
 			}`,
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
+			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
+			toolSetHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).toolSetHash,
+			modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 		};
 		return { docs, markers, compartments, memories, userProfile };
 	});
@@ -1143,6 +1211,9 @@ export function materializeM0Pi(
 			materializedAt: snapshotMarkers.materializedAt,
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
 			upgradeState: snapshotMarkers.upgradeState,
+			systemHash: snapshotMarkers.systemHash,
+			toolSetHash: snapshotMarkers.toolSetHash,
+			modelKey: snapshotMarkers.modelKey,
 		});
 		// Persist the rendered-memory identity in the SAME transaction as the m[0]
 		// snapshot (parity with OpenCode materializeM0). `memory_block_ids` /
@@ -1410,6 +1481,9 @@ interface CachedPiM0M1Row {
 	cached_m0_materialized_at: number | null;
 	cached_m0_session_facts_version: number | null;
 	cached_m0_upgrade_state: string | null;
+	cached_m0_system_hash: string | null;
+	cached_m0_tool_set_hash: string | null;
+	cached_m0_model_key: string | null;
 	cached_m0_last_baseline_end_message_id: string | null;
 	memory_block_ids: string | null;
 }
@@ -1456,6 +1530,9 @@ function readCachedPiM0M1Row(
 					cached_m0_materialized_at,
 					cached_m0_session_facts_version,
 					cached_m0_upgrade_state,
+					cached_m0_system_hash,
+					cached_m0_tool_set_hash,
+					cached_m0_model_key,
 					cached_m0_last_baseline_end_message_id,
 					memory_block_ids
 			   FROM session_meta
@@ -1497,6 +1574,9 @@ function markersFromCachedPiRow(
 			row.cached_m0_last_baseline_end_message_id.length > 0
 				? row.cached_m0_last_baseline_end_message_id
 				: null,
+		systemHash: row.cached_m0_system_hash ?? "",
+		toolSetHash: row.cached_m0_tool_set_hash ?? "",
+		modelKey: row.cached_m0_model_key ?? "",
 	};
 }
 
@@ -1831,22 +1911,30 @@ export function injectM0M1Pi(
 		markers = replayed.markers;
 	}
 
-	// Forced +15% drift refold — only on Pi's cache-busting recompute gate
-	// (`executedWorkThisPass`) where m[1] was freshly recomputed; defer passes
-	// replay persisted bytes and must never live-read/refold. A large count of
-	// pending memory mutations also forces a refold as a safety valve.
-	// Absolute floor for the ratio test (parity with OpenCode): m0 defaults to a
-	// tiny empty-body placeholder on early sessions, so `m0.length > 0` never
-	// excludes it and 15% of a tiny string is trivially exceeded — forcing a
-	// materialize every cache-busting pass. Only apply the ratio once m[0] is a
-	// real baseline. The memoryUpdateCount branch is size-independent and stays.
+	// Pressure backstop refold (parity with OpenCode) — only on Pi's cache-busting
+	// recompute gate (`executedWorkThisPass`) where m[1] was freshly recomputed;
+	// defer passes replay persisted bytes and must never live-read/refold. Three
+	// independent triggers (any one folds):
+	//   1. memoryUpdateCount > 40 — supersede-delta drift (size-independent).
+	//   2. m[1]/m[0] SIZE RATIO — gated by M0_DRIFT_RATIO_FLOOR so a tiny early
+	//      m[0] doesn't make 15% trivially exceeded and refold every pass.
+	//   3. m[1] ABSOLUTE CAP — when m[0] is small the ratio test is suppressed, so
+	//      m[1] could otherwise grow unbounded after the new_compartment trigger
+	//      was removed. Fold once m[1] exceeds a fixed share of the history budget.
 	const M0_DRIFT_RATIO_FLOOR = 2_000;
+	const M1_ABSOLUTE_CAP_RATIO = 0.2;
+	const m1AbsoluteBudget =
+		(state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) *
+		M1_ABSOLUTE_CAP_RATIO;
+	const m1OverAbsoluteCap =
+		m1 !== PI_M1_PLACEHOLDER && estimateTokens(m1) > m1AbsoluteBudget;
 	if (
 		!materialized &&
 		!contentionExhausted &&
 		m1Recomputed &&
 		recomputeM1ThisPass &&
 		(memoryUpdateCount > 40 ||
+			m1OverAbsoluteCap ||
 			(m1 !== PI_M1_PLACEHOLDER &&
 				m0.length >= M0_DRIFT_RATIO_FLOOR &&
 				m1.length > m0.length * 0.15))
