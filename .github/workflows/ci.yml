@@ -95,11 +95,12 @@ jobs:
       # step, which runs config-parity.test.ts — it fails the build if the
       # plugin config schema gains/renames/removes a field the dashboard's
       # ConfigEditor coverage manifest doesn't account for, so the form can't
-      # silently drift out of sync with the schema again. (Lint is not gated
-      # here yet: the dashboard has pre-existing formatting drift to clean up
-      # separately before a lint gate can go green.)
+      # silently drift out of sync with the schema again.
       - name: TypeScript typecheck
         run: bun run --cwd packages/dashboard typecheck
+
+      - name: Lint
+        run: bun run --cwd packages/dashboard lint
 
       - name: Test
         run: bun run --cwd packages/dashboard test

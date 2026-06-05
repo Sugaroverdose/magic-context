@@ -1,19 +1,29 @@
 import { ask } from "@tauri-apps/plugin-dialog";
-import { createEffect, createMemo, createResource, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  Index,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 import {
   deleteNote,
   deleteSessionFact,
   dismissNote,
   formatDateTime,
   formatRelativeTime,
-  getProjects,
   getProjectKeyFiles,
+  getProjects,
   getSessionCacheEvents,
   getSessionDetail,
   getSessionMessages,
+  getSmartNotes,
   getSubagentInvocations,
   getSubagentTotalsBySubagent,
-  getSmartNotes,
   listSessionsPaged,
   truncate,
   updateNote,
@@ -27,7 +37,6 @@ import type {
   SessionFilter,
   SessionMessageRow,
   SessionRow,
-  SubagentInvocation,
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
@@ -107,7 +116,15 @@ function hasTiers(comp: Compartment): boolean {
   });
 }
 
-type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" | "tokens" | "keyFiles" | "cache";
+type ActiveTab =
+  | "messages"
+  | "compartments"
+  | "facts"
+  | "notes"
+  | "historian"
+  | "tokens"
+  | "keyFiles"
+  | "cache";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
@@ -179,7 +196,9 @@ export default function SessionViewer() {
   const setProjectFilter = (value: string) => {
     setProjectFilterSignal(value);
     try {
-      value ? localStorage.setItem(PROJECT_FILTER_KEY, value) : localStorage.removeItem(PROJECT_FILTER_KEY);
+      value
+        ? localStorage.setItem(PROJECT_FILTER_KEY, value)
+        : localStorage.removeItem(PROJECT_FILTER_KEY);
     } catch {}
   };
 
@@ -289,10 +308,13 @@ export default function SessionViewer() {
   onCleanup(() => loadMoreObserver?.disconnect());
 
   const detailKey = createMemo(() => selectedSession());
-  const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(detailKey, async (selected) => {
-    if (!selected) return null;
-    return getSessionDetail(selected.harness, selected.sessionId);
-  });
+  const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(
+    detailKey,
+    async (selected) => {
+      if (!selected) return null;
+      return getSessionDetail(selected.harness, selected.sessionId);
+    },
+  );
 
   // Lazy tab fetches. `messages` and `cache events` are each tens of
   // thousands of rows on long sessions and only useful when their tab is
@@ -387,18 +409,19 @@ export default function SessionViewer() {
   // can render "Messages (37312)" before paying the fetch cost. Falls back
   // to the loaded list length once the user has activated the tab, in case
   // the count was missing (e.g. older backend without the field).
-  const messagesCount = () =>
-    sessionDetail()?.messages_count ?? messagesResource()?.length ?? 0;
-  const cacheEventsCount = () =>
-    sessionDetail()?.cache_events_count ?? cacheEvents()?.length ?? 0;
+  const messagesCount = () => sessionDetail()?.messages_count ?? messagesResource()?.length ?? 0;
+  const cacheEventsCount = () => sessionDetail()?.cache_events_count ?? cacheEvents()?.length ?? 0;
   const compartments = () => sessionDetail()?.compartments ?? [];
   const facts = () => sessionDetail()?.facts ?? [];
   const notes = () => sessionDetail()?.notes ?? [];
   const meta = () => sessionDetail()?.meta ?? null;
   const tokenBreakdown = () => sessionDetail()?.token_breakdown ?? null;
   const historianInvocations = () =>
-    (subagentInvocations() ?? []).filter((row) =>
-      row.subagent === "historian" || row.subagent === "historian_editor" || row.subagent === "recomp",
+    (subagentInvocations() ?? []).filter(
+      (row) =>
+        row.subagent === "historian" ||
+        row.subagent === "historian_editor" ||
+        row.subagent === "recomp",
     );
 
   const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
@@ -456,9 +479,7 @@ export default function SessionViewer() {
     // Visible-filter applied lazily per slice — we keep the unfiltered list
     // for boundary resolution but never render the dropped messages.
     const filterVisible = (rows: SessionMessageRow[]) =>
-      rows.filter(
-        (m) => m.role.toLowerCase() !== "assistant" || m.text_preview.trim().length > 0,
-      );
+      rows.filter((m) => m.role.toLowerCase() !== "assistant" || m.text_preview.trim().length > 0);
 
     if (comps.length === 0) {
       const visible = filterVisible(raw);
@@ -535,7 +556,9 @@ export default function SessionViewer() {
   };
 
   const displayTitle = () =>
-    sessionDetail()?.title || selectedRow()?.title || truncate(selectedSession()?.sessionId ?? "", 20);
+    sessionDetail()?.title ||
+    selectedRow()?.title ||
+    truncate(selectedSession()?.sessionId ?? "", 20);
 
   const roleClass = (role: string) => {
     switch (role.toLowerCase()) {
@@ -555,8 +578,7 @@ export default function SessionViewer() {
   // can close over `roleClass` without leaking helpers to module scope.
   const MessageCard = (props: { message: SessionMessageRow }) => {
     const role = () => props.message.role;
-    const isPrimaryRole = () =>
-      ["user", "assistant", "system"].includes(role().toLowerCase());
+    const isPrimaryRole = () => ["user", "assistant", "system"].includes(role().toLowerCase());
     return (
       <div class="card">
         <div
@@ -698,7 +720,7 @@ export default function SessionViewer() {
                 "align-items": "flex-start",
                 gap: "8px",
                 "min-width": 0,
-                "flex": "1 1 0",
+                flex: "1 1 0",
                 "overflow-wrap": "anywhere",
                 "word-break": "break-word",
               }}
@@ -767,7 +789,10 @@ export default function SessionViewer() {
 
         {/* Session list */}
         <div class="scroll-area">
-          <Show when={!sessionsLoading()} fallback={<div class="empty-state">Loading sessions...</div>}>
+          <Show
+            when={!sessionsLoading()}
+            fallback={<div class="empty-state">Loading sessions...</div>}
+          >
             <div class="list-gap">
               <For each={filteredSessions()}>
                 {(session) => {
@@ -777,7 +802,10 @@ export default function SessionViewer() {
                       class="card"
                       style={{ cursor: "pointer", "text-align": "left", width: "100%" }}
                       onClick={() => {
-                        setSelectedSession({ harness: session.harness, sessionId: session.session_id });
+                        setSelectedSession({
+                          harness: session.harness,
+                          sessionId: session.session_id,
+                        });
                         // Reset to Compartments on every selection so opening
                         // a new session lands on the cheap-to-render tab
                         // instead of carrying over the previous selection's
@@ -787,7 +815,12 @@ export default function SessionViewer() {
                     >
                       <div
                         class="card-title"
-                        style={{ display: "flex", "align-items": "center", gap: "8px", "min-width": "0" }}
+                        style={{
+                          display: "flex",
+                          "align-items": "center",
+                          gap: "8px",
+                          "min-width": "0",
+                        }}
                       >
                         <HarnessBadge harness={session.harness} />
                         <span
@@ -827,13 +860,20 @@ export default function SessionViewer() {
                   loadMoreSentinel = el;
                   loadMoreObserver?.observe(el);
                 }}
-                style={{ "font-size": "11px", color: "var(--text-muted)", "text-align": "center", padding: "8px" }}
+                style={{
+                  "font-size": "11px",
+                  color: "var(--text-muted)",
+                  "text-align": "center",
+                  padding: "8px",
+                }}
                 data-page={sessionPage()}
                 data-total={totalSessions()}
               >
                 <Show
                   when={loadingMore()}
-                  fallback={<Show when={!hasMore() && filteredSessions().length > 0}>No more sessions</Show>}
+                  fallback={
+                    <Show when={!hasMore() && filteredSessions().length > 0}>No more sessions</Show>
+                  }
                 >
                   Loading more...
                 </Show>
@@ -907,9 +947,18 @@ export default function SessionViewer() {
         <Show when={sessionDetail()}>
           {(detail) => (
             <div class="card" style={{ margin: "0 20px 12px", padding: "10px 14px" }}>
-              <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "4px" }}>
+              <div
+                style={{
+                  display: "flex",
+                  "align-items": "center",
+                  gap: "8px",
+                  "margin-bottom": "4px",
+                }}
+              >
                 <HarnessBadge harness={detail().harness} />
-                <span class="card-title" style={{ margin: 0 }}>{detail().project_display}</span>
+                <span class="card-title" style={{ margin: 0 }}>
+                  {detail().project_display}
+                </span>
               </div>
               <div class="card-meta">
                 <span class="mono">{detail().session_id}</span>
@@ -925,7 +974,7 @@ export default function SessionViewer() {
         </Show>
 
         {/* Timeline bar - fixed outside scroll, aligned with scroll content */}
-        <Show when={activeTab() === "compartments" && (compartments()).length > 0}>
+        <Show when={activeTab() === "compartments" && compartments().length > 0}>
           <div style={{ padding: "0 28px 12px 20px" }}>
             <div class="timeline-bar">
               <For each={compartments()}>
@@ -977,7 +1026,8 @@ export default function SessionViewer() {
                       <For each={piCompactions()}>
                         {(entry) => (
                           <span>
-                            before {truncate(entry.first_kept_entry_id, 12)} summarized · {entry.tokens_before.toLocaleString()} tokens
+                            before {truncate(entry.first_kept_entry_id, 12)} summarized ·{" "}
+                            {entry.tokens_before.toLocaleString()} tokens
                           </span>
                         )}
                       </For>
@@ -1064,8 +1114,8 @@ export default function SessionViewer() {
                                     class="mono"
                                     style={{ "font-size": "10px", color: "var(--text-muted)" }}
                                   >
-                                    {compSeg.messages.length} msgs · ordinals{" "}
-                                    {comp.start_message}-{comp.end_message}
+                                    {compSeg.messages.length} msgs · ordinals {comp.start_message}-
+                                    {comp.end_message}
                                   </span>
                                 </div>
                                 <div
@@ -1100,9 +1150,12 @@ export default function SessionViewer() {
 
           {/* Compartments tab */}
           <Show when={activeTab() === "compartments"}>
-            <Show when={!sessionDetail.loading} fallback={<div class="empty-state">Loading...</div>}>
+            <Show
+              when={!sessionDetail.loading}
+              fallback={<div class="empty-state">Loading...</div>}
+            >
               <Show
-                when={(compartments()).length > 0}
+                when={compartments().length > 0}
                 fallback={
                   <div class="empty-state">
                     <span class="empty-state-icon">📜</span>No compartments
@@ -1251,7 +1304,9 @@ export default function SessionViewer() {
                               "word-break": "break-word",
                             }}
                           >
-                            <Index each={tierBody(comp, compartmentTier()[comp.id] ?? "p1").split("\n")}>
+                            <Index
+                              each={tierBody(comp, compartmentTier()[comp.id] ?? "p1").split("\n")}
+                            >
                               {(line) => {
                                 const isUser = () => line().startsWith("U:");
                                 return (
@@ -1282,7 +1337,10 @@ export default function SessionViewer() {
 
           {/* Key files tab */}
           <Show when={activeTab() === "keyFiles"}>
-            <Show when={!keyFiles.loading} fallback={<div class="empty-state">Loading key files...</div>}>
+            <Show
+              when={!keyFiles.loading}
+              fallback={<div class="empty-state">Loading key files...</div>}
+            >
               <Show
                 when={(keyFiles() ?? []).length > 0}
                 fallback={
@@ -1295,7 +1353,10 @@ export default function SessionViewer() {
                   <For each={keyFiles() ?? []}>
                     {(row) => (
                       <div class="card">
-                        <div class="card-title" style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                        <div
+                          class="card-title"
+                          style={{ display: "flex", "align-items": "center", gap: "8px" }}
+                        >
                           <span class="mono">{row.path}</span>
                           <span class="pill blue">v{row.version}</span>
                           <Show when={row.stale_reason}>
@@ -1342,7 +1403,7 @@ export default function SessionViewer() {
           {/* Facts tab */}
           <Show when={activeTab() === "facts"}>
             <Show
-              when={(facts()).length > 0}
+              when={facts().length > 0}
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">📝</span>No facts
@@ -1710,7 +1771,10 @@ export default function SessionViewer() {
           </Show>
 
           <Show when={activeTab() === "historian"}>
-            <Show when={historianInvocations().length > 0} fallback={<div class="empty-state">No historian invocations recorded</div>}>
+            <Show
+              when={historianInvocations().length > 0}
+              fallback={<div class="empty-state">No historian invocations recorded</div>}
+            >
               <table class="kv-table">
                 <thead>
                   <tr>
@@ -1731,8 +1795,14 @@ export default function SessionViewer() {
                         <td>{row.parent_invocation_id ? `↳ ${row.subagent}` : row.subagent}</td>
                         <td>{row.model_id ?? row.provider_id ?? "—"}</td>
                         <td>{row.status}</td>
-                        <td>{row.ended_at ? `${Math.max(0, row.ended_at - row.started_at).toLocaleString()}ms` : "—"}</td>
-                        <td title={`in ${row.input_tokens.toLocaleString()} · out ${row.output_tokens.toLocaleString()} · cache ${row.cache_read_tokens.toLocaleString()}/${row.cache_write_tokens.toLocaleString()}`}>
+                        <td>
+                          {row.ended_at
+                            ? `${Math.max(0, row.ended_at - row.started_at).toLocaleString()}ms`
+                            : "—"}
+                        </td>
+                        <td
+                          title={`in ${row.input_tokens.toLocaleString()} · out ${row.output_tokens.toLocaleString()} · cache ${row.cache_read_tokens.toLocaleString()}/${row.cache_write_tokens.toLocaleString()}`}
+                        >
                           input: {row.input_tokens.toLocaleString()} · output:{" "}
                           {row.output_tokens.toLocaleString()}
                         </td>
@@ -2216,7 +2286,10 @@ export default function SessionViewer() {
 
           {/* Cache tab */}
           <Show when={activeTab() === "cache"}>
-            <Show when={!cacheEvents.loading} fallback={<div class="empty-state">Loading cache events...</div>}>
+            <Show
+              when={!cacheEvents.loading}
+              fallback={<div class="empty-state">Loading cache events...</div>}
+            >
               <Show
                 when={(cacheEvents() ?? []).length > 0}
                 fallback={
@@ -2286,28 +2359,54 @@ export default function SessionViewer() {
                       const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
                       return (
                         <div class="card">
-                          <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "4px" }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              "align-items": "center",
+                              gap: "8px",
+                              "margin-bottom": "4px",
+                            }}
+                          >
                             <span>{severityIcon(event.severity)}</span>
-                            <span class="mono" style={{ "font-size": "11px", color: "var(--text-secondary)" }}>
+                            <span
+                              class="mono"
+                              style={{ "font-size": "11px", color: "var(--text-secondary)" }}
+                            >
                               {formatDateTime(event.timestamp)}
                             </span>
-                            <span class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}>
-                              {event.severity === "full_bust" ? "FULL BUST" : event.severity.toUpperCase()}
+                            <span
+                              class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}
+                            >
+                              {event.severity === "full_bust"
+                                ? "FULL BUST"
+                                : event.severity.toUpperCase()}
                             </span>
                           </div>
                           <div class="card-meta" style={{ gap: "12px" }}>
-                            <span class="mono" style={{ color: hitColor(ratio), "font-weight": "600" }}>
+                            <span
+                              class="mono"
+                              style={{ color: hitColor(ratio), "font-weight": "600" }}
+                            >
                               {(ratio * 100).toFixed(1)}%
                             </span>
                             <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
                             <span class="mono">cached={event.cache_read.toLocaleString()}</span>
                             <span class="mono">new={event.cache_write.toLocaleString()}</span>
                             <div class="cache-bar">
-                              <div class={`cache-bar-fill ${severityBarClass(ratio)}`} style={{ width: `${ratio * 100}%` }} />
+                              <div
+                                class={`cache-bar-fill ${severityBarClass(ratio)}`}
+                                style={{ width: `${ratio * 100}%` }}
+                              />
                             </div>
                           </div>
                           <Show when={event.cause}>
-                            <div style={{ "margin-top": "6px", "font-size": "11px", color: "var(--amber)" }}>
+                            <div
+                              style={{
+                                "margin-top": "6px",
+                                "font-size": "11px",
+                                color: "var(--amber)",
+                              }}
+                            >
                               Cause: {event.cause}
                             </div>
                           </Show>

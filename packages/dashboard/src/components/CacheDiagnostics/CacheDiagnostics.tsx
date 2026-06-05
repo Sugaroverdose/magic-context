@@ -82,11 +82,7 @@ export default function CacheDiagnostics() {
   // `bumpWatermark` is only meaningful when `events` represents a global view
   // (covers all active sessions); pass false when `events` was scoped to a
   // single session so the watermark doesn't filter out other sessions later.
-  const applyState = (
-    allEvents: DbCacheEvent[],
-    sessions: SessionRow[],
-    bumpWatermark = true,
-  ) => {
+  const applyState = (allEvents: DbCacheEvent[], sessions: SessionRow[], bumpWatermark = true) => {
     setEvents(allEvents);
     cachedEvents = allEvents;
     if (bumpWatermark && allEvents.length > 0) {
@@ -280,13 +276,15 @@ export default function CacheDiagnostics() {
           // `firstEvents` which is fine — but a single refresh is simpler
           // and the cost difference is one extra ~70ms parallel fetch.
           const allKeys = [firstKey, ...restKeys];
-          void refreshSessions(allKeys).then(() => {
-            cachedLoadedSessionKeys = allKeys;
-          }).catch(() => {
-            // Stage 2 failure leaves us with the Stage 1 single-card view —
-            // still functional; user can click "Show all" to retry via the
-            // global fetch path.
-          });
+          void refreshSessions(allKeys)
+            .then(() => {
+              cachedLoadedSessionKeys = allKeys;
+            })
+            .catch(() => {
+              // Stage 2 failure leaves us with the Stage 1 single-card view —
+              // still functional; user can click "Show all" to retry via the
+              // global fetch path.
+            });
         });
       }
     } catch {
@@ -322,7 +320,8 @@ export default function CacheDiagnostics() {
     cachedSelectedSession = next;
   };
 
-  const isSubagent = (harness: Harness, sessionId: string) => subagentIds().has(`${harness}:${sessionId}`);
+  const isSubagent = (harness: Harness, sessionId: string) =>
+    subagentIds().has(`${harness}:${sessionId}`);
 
   const filteredStats = () => {
     const harness = harnessFilter();
@@ -530,7 +529,9 @@ export default function CacheDiagnostics() {
               {(stat) => {
                 const isActive = () => {
                   const selected = selectedSession();
-                  return selected?.sessionId === stat.session_id && selected.harness === stat.harness;
+                  return (
+                    selected?.sessionId === stat.session_id && selected.harness === stat.harness
+                  );
                 };
                 return (
                   <button
@@ -633,9 +634,7 @@ export default function CacheDiagnostics() {
                   }}
                   title="Number of most-recent steps to show"
                 >
-                  <For each={[200, 400, 600]}>
-                    {(n) => <option value={String(n)}>{n}</option>}
-                  </For>
+                  <For each={[200, 400, 600]}>{(n) => <option value={String(n)}>{n}</option>}</For>
                 </select>
               </div>
             </div>
@@ -648,7 +647,8 @@ export default function CacheDiagnostics() {
               <For each={timelineEvents()}>
                 {(event) => {
                   const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
-                  const hitRatio = totalPrompt > 0 ? event.cache_read / totalPrompt : event.hit_ratio;
+                  const hitRatio =
+                    totalPrompt > 0 ? event.cache_read / totalPrompt : event.hit_ratio;
                   return (
                     <div
                       class={`chart-bar ${hitRatio === 0 ? "black" : severityBarClass(hitRatio)}`}
@@ -672,7 +672,9 @@ export default function CacheDiagnostics() {
               <div class="empty-state">
                 <span class="empty-state-icon">📊</span>
                 <span>No cache events found</span>
-                <span style={{ "font-size": "11px" }}>Cache data is read from OpenCode DB and Pi JSONL</span>
+                <span style={{ "font-size": "11px" }}>
+                  Cache data is read from OpenCode DB and Pi JSONL
+                </span>
               </div>
             }
           >
@@ -690,10 +692,26 @@ export default function CacheDiagnostics() {
                   const turnHitRatio =
                     totalPrompt > 0 ? last.cache_read / totalPrompt : last.hit_ratio;
                   const isMultiStep = turn.events.length > 1;
+                  // Only multi-step turns are expandable. Interactive rows get a real
+                  // button role + keyboard activation; single-step rows are purely
+                  // presentational with no handlers at all.
+                  const interactiveProps = isMultiStep
+                    ? {
+                        role: "button" as const,
+                        tabindex: 0,
+                        onClick: () => toggleTurn(turn.turnId),
+                        onKeyDown: (e: KeyboardEvent) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            toggleTurn(turn.turnId);
+                          }
+                        },
+                      }
+                    : {};
                   return (
                     <div
                       class="card cache-turn-row"
-                      onClick={() => isMultiStep && toggleTurn(turn.turnId)}
+                      {...interactiveProps}
                       style={{ cursor: isMultiStep ? "pointer" : "default" }}
                     >
                       <div

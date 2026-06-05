@@ -1,4 +1,12 @@
-import { createEffect, createMemo, createResource, createSignal, For, type JSX, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createResource,
+  createSignal,
+  For,
+  type JSX,
+  Show,
+} from "solid-js";
 import {
   getConfig,
   getPiConfig,
@@ -975,10 +983,7 @@ function ConfigForm(props: {
                                 }
                               >
                                 <For
-                                  each={readFallbackModels(
-                                    formData(),
-                                    "historian.fallback_models",
-                                  )}
+                                  each={readFallbackModels(formData(), "historian.fallback_models")}
                                 >
                                   {(model, index) => (
                                     <div class="model-chain-item">
@@ -1193,7 +1198,10 @@ function ConfigForm(props: {
                   <div class="config-field-header">
                     <span class="config-field-label">Dreamer agent enabled</span>
                   </div>
-                  <span class="config-field-desc">Controls whether the Dreamer hidden agent is registered. To keep manual /ctx-dream but disable automatic runs, leave enabled and set Schedule to empty.</span>
+                  <span class="config-field-desc">
+                    Controls whether the Dreamer hidden agent is registered. To keep manual
+                    /ctx-dream but disable automatic runs, leave enabled and set Schedule to empty.
+                  </span>
                   <label class="toggle-switch">
                     <input
                       type="checkbox"
@@ -1205,7 +1213,9 @@ function ConfigForm(props: {
                     />
                     <span class="toggle-slider" />
                     <span class="toggle-label">
-                      {getNestedValue(formData(), "dreamer.disable") !== true ? "Enabled" : "Disabled"}
+                      {getNestedValue(formData(), "dreamer.disable") !== true
+                        ? "Enabled"
+                        : "Disabled"}
                     </span>
                   </label>
                 </div>
@@ -1215,16 +1225,15 @@ function ConfigForm(props: {
                     <span class="config-field-label">Schedule</span>
                   </div>
                   <span class="config-field-desc">
-                    Time window for automatic dreamer runs (e.g., 02:00-06:00). Empty disables automatic runs while keeping manual /ctx-dream available.
+                    Time window for automatic dreamer runs (e.g., 02:00-06:00). Empty disables
+                    automatic runs while keeping manual /ctx-dream available.
                   </span>
                   <input
                     class="config-input"
                     type="text"
                     value={String(getNestedValue(formData(), "dreamer.schedule") ?? "")}
                     placeholder="02:00-06:00"
-                    onInput={(e) =>
-                      handleFieldChange("dreamer.schedule", e.currentTarget.value)
-                    }
+                    onInput={(e) => handleFieldChange("dreamer.schedule", e.currentTarget.value)}
                   />
                 </div>
 
@@ -1277,9 +1286,7 @@ function ConfigForm(props: {
                   <span class="config-field-desc">Models to try if primary fails</span>
                   <div class="model-chain-list">
                     <Show
-                      when={
-                        readFallbackModels(formData(), "dreamer.fallback_models").length > 0
-                      }
+                      when={readFallbackModels(formData(), "dreamer.fallback_models").length > 0}
                       fallback={
                         <span class="model-chain-empty">Using built-in fallback chain</span>
                       }
@@ -1321,10 +1328,7 @@ function ConfigForm(props: {
                       value={undefined}
                       onChange={(v) => {
                         if (v) {
-                          const current = readFallbackModels(
-                            formData(),
-                            "dreamer.fallback_models",
-                          );
+                          const current = readFallbackModels(formData(), "dreamer.fallback_models");
                           handleFieldChange("dreamer.fallback_models", [...current, v]);
                         }
                       }}
@@ -1341,188 +1345,167 @@ function ConfigForm(props: {
                 cell (rendering in only the left half with the right half empty). */}
             <div class="config-card-two-col">
               <div class="config-card-content">
-                  <div class="config-field">
-                    <div class="config-field-header">
-                      <span class="config-field-label">User Memories</span>
-                      <span class="config-field-key">dreamer.user_memories.enabled</span>
-                    </div>
-                    <span class="config-field-desc">
-                      Extract behavioral observations from historian runs, promote recurring
-                      patterns to stable user memories. Requires dreamer.
-                    </span>
-                    <label class="toggle-switch">
-                      <input
-                        type="checkbox"
-                        checked={
-                          (getNestedValue(
-                            formData(),
-                            "dreamer.user_memories.enabled",
-                          ) as boolean) ?? true
-                        }
-                        onChange={(e) =>
-                          handleFieldChange(
-                            "dreamer.user_memories.enabled",
-                            e.currentTarget.checked,
-                          )
-                        }
-                      />
-                      <span class="toggle-slider" />
-                      <span class="toggle-label">
-                        {((getNestedValue(
-                          formData(),
-                          "dreamer.user_memories.enabled",
-                        ) as boolean) ?? true)
-                          ? "Enabled"
-                          : "Disabled"}
-                      </span>
-                    </label>
+                <div class="config-field">
+                  <div class="config-field-header">
+                    <span class="config-field-label">User Memories</span>
+                    <span class="config-field-key">dreamer.user_memories.enabled</span>
                   </div>
-
-                  <Show
-                    when={
-                      ((getNestedValue(
-                        formData(),
-                        "dreamer.user_memories.enabled",
-                      ) as boolean) ?? true)
-                    }
-                  >
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">Promotion Threshold</span>
-                        <span class="config-field-key">
-                          dreamer.user_memories.promotion_threshold
-                        </span>
-                      </div>
-                      <span class="config-field-desc">
-                        Minimum candidate observations before dreamer promotes to stable (2–20)
-                      </span>
-                      <input
-                        class="config-input"
-                        type="number"
-                        min={2}
-                        max={20}
-                        value={
-                          (getNestedValue(
-                            formData(),
-                            "dreamer.user_memories.promotion_threshold",
-                          ) as number) ?? 3
-                        }
-                        onInput={(e) =>
-                          handleFieldChange(
-                            "dreamer.user_memories.promotion_threshold",
-                            Number(e.currentTarget.value),
-                          )
-                        }
-                      />
-                    </div>
-                  </Show>
+                  <span class="config-field-desc">
+                    Extract behavioral observations from historian runs, promote recurring patterns
+                    to stable user memories. Requires dreamer.
+                  </span>
+                  <label class="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={
+                        (getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ??
+                        true
+                      }
+                      onChange={(e) =>
+                        handleFieldChange("dreamer.user_memories.enabled", e.currentTarget.checked)
+                      }
+                    />
+                    <span class="toggle-slider" />
+                    <span class="toggle-label">
+                      {((getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ??
+                      true)
+                        ? "Enabled"
+                        : "Disabled"}
+                    </span>
+                  </label>
                 </div>
 
-                <div class="config-card-content">
+                <Show
+                  when={
+                    (getNestedValue(formData(), "dreamer.user_memories.enabled") as boolean) ?? true
+                  }
+                >
                   <div class="config-field">
                     <div class="config-field-header">
-                      <span class="config-field-label">Key File Pinning</span>
-                      <span class="config-field-key">dreamer.pin_key_files.enabled</span>
+                      <span class="config-field-label">Promotion Threshold</span>
+                      <span class="config-field-key">
+                        dreamer.user_memories.promotion_threshold
+                      </span>
                     </div>
                     <span class="config-field-desc">
-                      Pin frequently-read files into the system prompt so the agent doesn't need to
-                      re-read them after drops. Requires dreamer.
+                      Minimum candidate observations before dreamer promotes to stable (2–20)
                     </span>
-                    <label class="toggle-switch">
-                      <input
-                        type="checkbox"
-                        checked={
-                          (getNestedValue(
-                            formData(),
-                            "dreamer.pin_key_files.enabled",
-                          ) as boolean) ?? false
-                        }
-                        onChange={(e) =>
-                          handleFieldChange(
-                            "dreamer.pin_key_files.enabled",
-                            e.currentTarget.checked,
-                          )
-                        }
-                      />
-                      <span class="toggle-slider" />
-                      <span class="toggle-label">
-                        {((getNestedValue(
+                    <input
+                      class="config-input"
+                      type="number"
+                      min={2}
+                      max={20}
+                      value={
+                        (getNestedValue(
                           formData(),
-                          "dreamer.pin_key_files.enabled",
-                        ) as boolean) ?? false)
-                          ? "Enabled"
-                          : "Disabled"}
-                      </span>
-                    </label>
+                          "dreamer.user_memories.promotion_threshold",
+                        ) as number) ?? 3
+                      }
+                      onInput={(e) =>
+                        handleFieldChange(
+                          "dreamer.user_memories.promotion_threshold",
+                          Number(e.currentTarget.value),
+                        )
+                      }
+                    />
                   </div>
-
-                  <Show
-                    when={
-                      (getNestedValue(
-                        formData(),
-                        "dreamer.pin_key_files.enabled",
-                      ) as boolean) ?? false
-                    }
-                  >
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">Token Budget</span>
-                        <span class="config-field-key">dreamer.pin_key_files.token_budget</span>
-                      </div>
-                      <span class="config-field-desc">
-                        Total tokens for all pinned key files (2,000–30,000)
-                      </span>
-                      <input
-                        class="config-input"
-                        type="number"
-                        min={2000}
-                        max={30000}
-                        step={1000}
-                        value={
-                          (getNestedValue(
-                            formData(),
-                            "dreamer.pin_key_files.token_budget",
-                          ) as number) ?? 10000
-                        }
-                        onInput={(e) =>
-                          handleFieldChange(
-                            "dreamer.pin_key_files.token_budget",
-                            Number(e.currentTarget.value),
-                          )
-                        }
-                      />
-                    </div>
-
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">Min Reads</span>
-                        <span class="config-field-key">dreamer.pin_key_files.min_reads</span>
-                      </div>
-                      <span class="config-field-desc">
-                        Minimum full-read count before a file is eligible for pinning (2–20)
-                      </span>
-                      <input
-                        class="config-input"
-                        type="number"
-                        min={2}
-                        max={20}
-                        value={
-                          (getNestedValue(
-                            formData(),
-                            "dreamer.pin_key_files.min_reads",
-                          ) as number) ?? 4
-                        }
-                        onInput={(e) =>
-                          handleFieldChange(
-                            "dreamer.pin_key_files.min_reads",
-                            Number(e.currentTarget.value),
-                          )
-                        }
-                      />
-                    </div>
-                  </Show>
-                </div>
+                </Show>
               </div>
+
+              <div class="config-card-content">
+                <div class="config-field">
+                  <div class="config-field-header">
+                    <span class="config-field-label">Key File Pinning</span>
+                    <span class="config-field-key">dreamer.pin_key_files.enabled</span>
+                  </div>
+                  <span class="config-field-desc">
+                    Pin frequently-read files into the system prompt so the agent doesn't need to
+                    re-read them after drops. Requires dreamer.
+                  </span>
+                  <label class="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={
+                        (getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
+                        false
+                      }
+                      onChange={(e) =>
+                        handleFieldChange("dreamer.pin_key_files.enabled", e.currentTarget.checked)
+                      }
+                    />
+                    <span class="toggle-slider" />
+                    <span class="toggle-label">
+                      {((getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
+                      false)
+                        ? "Enabled"
+                        : "Disabled"}
+                    </span>
+                  </label>
+                </div>
+
+                <Show
+                  when={
+                    (getNestedValue(formData(), "dreamer.pin_key_files.enabled") as boolean) ??
+                    false
+                  }
+                >
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Token Budget</span>
+                      <span class="config-field-key">dreamer.pin_key_files.token_budget</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Total tokens for all pinned key files (2,000–30,000)
+                    </span>
+                    <input
+                      class="config-input"
+                      type="number"
+                      min={2000}
+                      max={30000}
+                      step={1000}
+                      value={
+                        (getNestedValue(
+                          formData(),
+                          "dreamer.pin_key_files.token_budget",
+                        ) as number) ?? 10000
+                      }
+                      onInput={(e) =>
+                        handleFieldChange(
+                          "dreamer.pin_key_files.token_budget",
+                          Number(e.currentTarget.value),
+                        )
+                      }
+                    />
+                  </div>
+
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Min Reads</span>
+                      <span class="config-field-key">dreamer.pin_key_files.min_reads</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Minimum full-read count before a file is eligible for pinning (2–20)
+                    </span>
+                    <input
+                      class="config-input"
+                      type="number"
+                      min={2}
+                      max={20}
+                      value={
+                        (getNestedValue(formData(), "dreamer.pin_key_files.min_reads") as number) ??
+                        4
+                      }
+                      onInput={(e) =>
+                        handleFieldChange(
+                          "dreamer.pin_key_files.min_reads",
+                          Number(e.currentTarget.value),
+                        )
+                      }
+                    />
+                  </div>
+                </Show>
+              </div>
+            </div>
           </div>
 
           {/* Sidekick Card */}
@@ -1537,7 +1520,9 @@ function ConfigForm(props: {
                 <div class="config-field-header">
                   <span class="config-field-label">Sidekick agent enabled</span>
                 </div>
-                <span class="config-field-desc">Controls whether the Sidekick hidden agent is registered for /ctx-aug.</span>
+                <span class="config-field-desc">
+                  Controls whether the Sidekick hidden agent is registered for /ctx-aug.
+                </span>
                 <label class="toggle-switch">
                   <input
                     type="checkbox"
@@ -1549,7 +1534,9 @@ function ConfigForm(props: {
                   />
                   <span class="toggle-slider" />
                   <span class="toggle-label">
-                    {getNestedValue(formData(), "sidekick.disable") !== true ? "Enabled" : "Disabled"}
+                    {getNestedValue(formData(), "sidekick.disable") !== true
+                      ? "Enabled"
+                      : "Disabled"}
                   </span>
                 </label>
               </div>
@@ -1638,10 +1625,7 @@ function ConfigForm(props: {
                     value={undefined}
                     onChange={(v) => {
                       if (v) {
-                        const current = readFallbackModels(
-                          formData(),
-                          "sidekick.fallback_models",
-                        );
+                        const current = readFallbackModels(formData(), "sidekick.fallback_models");
                         handleFieldChange("sidekick.fallback_models", [...current, v]);
                       }
                     }}
@@ -1748,10 +1732,10 @@ function ConfigForm(props: {
                     </div>
                     <span class="config-field-desc">
                       Inject elapsed-time markers (e.g. <code>+12m</code>, <code>+3d 4h</code>)
-                      between user messages with &gt;5 min gaps, and add{" "}
-                      <code>start-date</code>/<code>end-date</code> attributes on rendered
-                      compartments. Helps the agent reason about session pacing across long-running
-                      and multi-day sessions. On by default.
+                      between user messages with &gt;5 min gaps, and add <code>start-date</code>/
+                      <code>end-date</code> attributes on rendered compartments. Helps the agent
+                      reason about session pacing across long-running and multi-day sessions. On by
+                      default.
                     </span>
                     <label class="toggle-switch">
                       <input
@@ -1776,11 +1760,10 @@ function ConfigForm(props: {
                     </div>
                     <span class="config-field-desc">
                       On each new user message, run <code>ctx_search</code> in the background and
-                      append a compact <code>&lt;ctx-search-hint&gt;</code> block of vague
-                      fragments when the top hit clears the score threshold. Does NOT inject full
-                      content — just nudges the agent to run <code>ctx_search</code> for the real
-                      result if relevant. Adds one embedding round-trip per new user turn. On by
-                      default.
+                      append a compact <code>&lt;ctx-search-hint&gt;</code> block of vague fragments
+                      when the top hit clears the score threshold. Does NOT inject full content —
+                      just nudges the agent to run <code>ctx_search</code> for the real result if
+                      relevant. Adds one embedding round-trip per new user turn. On by default.
                     </span>
                     <label class="toggle-switch">
                       <input
@@ -1802,8 +1785,8 @@ function ConfigForm(props: {
                         <span class="config-field-key">memory.auto_search.score_threshold</span>
                       </div>
                       <span class="config-field-desc">
-                        Minimum top-hit score for the hint to fire. Higher = fewer but more
-                        relevant hints. Range 0.30–0.95, default 0.55.
+                        Minimum top-hit score for the hint to fire. Higher = fewer but more relevant
+                        hints. Range 0.30–0.95, default 0.55.
                       </span>
                       <input
                         class="config-input"
@@ -1853,8 +1836,8 @@ function ConfigForm(props: {
                     </div>
                     <span class="config-field-desc">
                       Index <code>HEAD</code> non-merge commits into <code>ctx_search</code> as a
-                      4th source alongside memories, facts, and message history. Useful for
-                      agents recalling regressions, prior fixes, and decisions without running{" "}
+                      4th source alongside memories, facts, and message history. Useful for agents
+                      recalling regressions, prior fixes, and decisions without running{" "}
                       <code>git log</code> manually. Off by default.
                     </span>
                     <label class="toggle-switch">
@@ -1877,8 +1860,8 @@ function ConfigForm(props: {
                         <span class="config-field-key">memory.git_commit_indexing.since_days</span>
                       </div>
                       <span class="config-field-desc">
-                        Days of HEAD history to index. Older commits are excluded from search.
-                        Range 7–3650, default 365.
+                        Days of HEAD history to index. Older commits are excluded from search. Range
+                        7–3650, default 365.
                       </span>
                       <input
                         class="config-input"
@@ -1928,13 +1911,13 @@ function ConfigForm(props: {
                     <span class="config-field-desc">
                       Age-tiered compression for long user/assistant text parts.{" "}
                       <strong>
-                        Only active when Agent Controlled Reduction (
-                        <code>ctx_reduce_enabled</code>) is OFF.
+                        Only active when Agent Controlled Reduction (<code>ctx_reduce_enabled</code>
+                        ) is OFF.
                       </strong>{" "}
-                      Outside the protected tail, oldest 20% of eligible tags get ultra
-                      compression, next 20% full, next 20% lite, newest 40% untouched. Always
-                      compresses from the original source, so depth shifts are equivalent to
-                      compressing the original text directly. Off by default.
+                      Outside the protected tail, oldest 20% of eligible tags get ultra compression,
+                      next 20% full, next 20% lite, newest 40% untouched. Always compresses from the
+                      original source, so depth shifts are equivalent to compressing the original
+                      text directly. Off by default.
                     </span>
                     <Show when={ctxReduceEnabled() && cavemanEnabled()}>
                       <div
@@ -1963,8 +1946,8 @@ function ConfigForm(props: {
                         <span class="config-field-key">caveman_text_compression.min_chars</span>
                       </div>
                       <span class="config-field-desc">
-                        Text parts shorter than this are left untouched. Range 100–10000,
-                        default 500.
+                        Text parts shorter than this are left untouched. Range 100–10000, default
+                        500.
                       </span>
                       <input
                         class="config-input"
@@ -2059,7 +2042,9 @@ function ConfigForm(props: {
                       <input
                         type="checkbox"
                         checked={keepSubagents()}
-                        onChange={(e) => handleFieldChange("keep_subagents", e.currentTarget.checked)}
+                        onChange={(e) =>
+                          handleFieldChange("keep_subagents", e.currentTarget.checked)
+                        }
                       />
                       <span class="toggle-slider" />
                       <span class="toggle-label">{keepSubagents() ? "Enabled" : "Disabled"}</span>
@@ -2147,7 +2132,6 @@ function ConfigForm(props: {
               </div>
             );
           })()}
-
         </div>
       </Show>
     </div>
@@ -2347,13 +2331,15 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">⚙️</span>
-                  <span>No {configTarget() === "pi" ? "Pi" : "OpenCode"} config found at {activeUserConfig()?.path}</span>
+                  <span>
+                    No {configTarget() === "pi" ? "Pi" : "OpenCode"} config found at{" "}
+                    {activeUserConfig()?.path}
+                  </span>
                   <Show
                     when={configTarget() === "pi"}
                     fallback={
                       <span style={{ "font-size": "11px" }}>
-                        Run <code>npx @cortexkit/magic-context setup</code> to
-                        create one
+                        Run <code>npx @cortexkit/magic-context setup</code> to create one
                       </span>
                     }
                   >

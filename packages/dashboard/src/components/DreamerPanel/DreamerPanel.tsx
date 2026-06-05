@@ -422,7 +422,11 @@ export default function DreamerPanel() {
                                           <td class="mono">{formatTaskOutput(task, run)}</td>
                                           <td
                                             class="mono"
-                                            title={task.tokens ? `input ${task.tokens.input.toLocaleString()} · output ${task.tokens.output.toLocaleString()} · cache ${task.tokens.cache_read.toLocaleString()}/${task.tokens.cache_write.toLocaleString()}` : undefined}
+                                            title={
+                                              task.tokens
+                                                ? `input ${task.tokens.input.toLocaleString()} · output ${task.tokens.output.toLocaleString()} · cache ${task.tokens.cache_read.toLocaleString()}/${task.tokens.cache_write.toLocaleString()}`
+                                                : undefined
+                                            }
                                           >
                                             {formatTaskTokens(task)}
                                           </td>
