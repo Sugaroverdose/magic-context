@@ -179,11 +179,19 @@ export function createCtxSearchTool(
 				snapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;
 
 			// Only search message history up to the last compartment boundary —
-			// anything after that is still in the live context and already visible to the agent.
+			// anything after that (the live tail, including the current turn) is
+			// still in context and already visible to the agent. When NO compartment
+			// exists yet, the historian hasn't scrolled anything out of context, so
+			// the boundary is 0: every indexed message (ordinals are 1-based) is in
+			// the live tail and must be excluded. A negative sentinel here would mean
+			// "search everything" and leak the current prompt back to the agent — the
+			// exact opposite of the intent (issue #131).
 			const lastCompartmentEnd = getLastCompartmentEndMessage(
 				deps.db,
 				sessionId,
 			);
+			const messageOrdinalCutoff =
+				lastCompartmentEnd >= 0 ? lastCompartmentEnd : 0;
 
 			// Hard-filter memories already rendered in <session-history>.
 			const visibleMemoryIds = getVisibleMemoryIds(deps.db, sessionId);
@@ -206,8 +214,7 @@ export function createCtxSearchTool(
 						return result?.vector ?? null;
 					},
 					isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
-					maxMessageOrdinal:
-						lastCompartmentEnd >= 0 ? lastCompartmentEnd : undefined,
+					maxMessageOrdinal: messageOrdinalCutoff,
 					gitCommitsEnabled,
 					sources: params.sources,
 					visibleMemoryIds,

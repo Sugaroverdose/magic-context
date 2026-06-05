@@ -115,6 +115,51 @@ describe("unifiedSearch", () => {
         expect(getMemoryById(db, memory.id)?.retrievalCount).toBe(1);
     });
 
+    it("maxMessageOrdinal=0 excludes every message (no compartment yet → whole tail is live)", async () => {
+        // Issue #131: before the historian first runs there are no compartments,
+        // so the ctx_search tool passes a cutoff of 0. Ordinals are 1-based, so a
+        // 0 cutoff must exclude EVERY indexed message — none have scrolled out of
+        // the live context the agent already sees (incl. the current prompt).
+        const memory = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "Magic context stores ranked search data in SQLite.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
+        queryEmbedding = new Float32Array([1, 0]);
+
+        rawMessagesBySession.set("ses-1", [
+            {
+                ordinal: 1,
+                id: "m1",
+                role: "user",
+                parts: [{ type: "text", text: "delete all entries in the ranked_search table" }],
+            },
+            {
+                ordinal: 2,
+                id: "m2",
+                role: "assistant",
+                parts: [{ type: "text", text: "ranked_search table cleanup acknowledged." }],
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-1", readMessages);
+
+        const results = await unifiedSearch(db, "ses-1", "/repo/project", "ranked_search", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            maxMessageOrdinal: 0,
+        });
+
+        // No message results — the current prompt must NOT come back.
+        expect(results.filter((r) => r.source === "message")).toHaveLength(0);
+        // Memory results are unaffected by the message-ordinal cutoff.
+        expect(results.some((r) => r.source === "memory")).toBe(true);
+    });
+
     it("restricts results to the sources filter", async () => {
         const memory = insertMemory(db, {
             projectPath: "/repo/project",
