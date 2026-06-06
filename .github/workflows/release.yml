@@ -235,8 +235,11 @@ jobs:
           NODE_ENV: ""
         run: |
           cd packages/e2e-tests
-          # Match every test file except pi-*.test.ts.
+          # Match every test file except pi-*.test.ts, plus the cache-bust oracle
+          # unit test (src/cache-analysis.test.ts) that backs the cache-invariant
+          # suite — a regression in it would silently neuter those guards.
           files=$(ls tests/*.test.ts | grep -v "/pi-" | tr '\n' ' ')
+          files="$files src/cache-analysis.test.ts"
           echo "Running OpenCode host tests: $files"
           bun test --timeout 600000 $files
 

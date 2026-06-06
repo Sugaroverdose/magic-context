@@ -231,7 +231,11 @@ jobs:
           # Match every test file except pi-*.test.ts. The shell glob is
           # not great at "all .test.ts except pi-*", so list them explicitly.
           cd packages/e2e-tests
+          # OpenCode host behavior tests, plus the cache-bust oracle unit test
+          # (src/cache-analysis.test.ts) — the oracle backs the cache-invariant
+          # suite, so a regression in it would silently neuter those guards.
           files=$(ls tests/*.test.ts | grep -v "/pi-" | tr '\n' ' ')
+          files="$files src/cache-analysis.test.ts"
           echo "Running OpenCode host tests: $files"
           bun test --timeout 600000 $files
 
