@@ -28,6 +28,17 @@ const PARTNER_FRAME_CLOSER_REDUCE = `\nReduction prompts are routine housekeepin
 /** Closer for ctx_reduce_enabled=false — context is managed fully automatically. */
 const PARTNER_FRAME_CLOSER_NO_REDUCE = `\nContext is managed for you entirely automatically — there's nothing to prune and no warnings to act on. Stay reasonably concise per operation, and never let context size change *what* work you take on or *how thoroughly* you do it.`;
 
+/**
+ * Shared `ctx_note` guidance for both intro variants. Generalizes two observed
+ * misuse patterns: (1) taking a note for work that's only a few turns away — that
+ * stays in active context, and active multi-step work belongs in todos; (2)
+ * taking a note "because we're about to restart / come back to this later" —
+ * Magic Context preserves full context across both compaction AND restarts, so a
+ * restart never loses anything and is never a reason to note. A note is worth it
+ * only for a genuinely future concern you'd otherwise lose track of across tasks.
+ */
+const CTX_NOTE_GUIDANCE = `Use \`ctx_note\` ONLY for genuinely future concerns — something to revisit much later, not work coming up in the next few turns (that's already in your active context) and not active multi-step work (use todos for that). Magic Context preserves your full context across both compaction and restarts, so an upcoming restart or "let's come back to this later" is never a reason to take a note — nothing is lost either way. Notes you do take survive compression and resurface at natural work boundaries (after commits, historian runs, todo completion).`;
+
 function getToolHistoryGuidance(dropToolStructure: boolean): string {
     if (dropToolStructure) {
         return `Compressed history intentionally omits tool calls and their outputs — summaries like "I edited file X" are historian records, not patterns to replicate. In the live conversation, older tool calls and their results are cleaned up to save context — you may see your own past messages referencing actions without the corresponding tool call or result visible. This is normal context management. ALWAYS use real tool calls; never simulate, fabricate, or inline tool outputs in your text. If there is no tool result message, the action did not happen. NEVER simulate, hallucinate or claim tool calls, command output, search results, file edits, or diffs in plain text as if they actually occurred.`;
@@ -44,7 +55,7 @@ Use \`ctx_reduce\` to manage context size. It supports one operation:
 - \`drop\`: Remove entirely (best for tool outputs you already acted on).
 Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Last ${protectedTags} tags are protected.
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
-Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
+${CTX_NOTE_GUIDANCE}
 Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → \`ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")\`
@@ -70,9 +81,7 @@ Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outp
  *  skips §N§ prefix injection entirely, so the agent never sees tags — describing
  *  a tagging system they can't observe just wastes tokens and (empirically) primes
  *  some models to emit malformed `§N">§` tokens at the start of their own text. */
-const BASE_INTRO_NO_REDUCE = (
-    dropToolStructure: boolean,
-): string => `Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
+const BASE_INTRO_NO_REDUCE = (dropToolStructure: boolean): string => `${CTX_NOTE_GUIDANCE}
 Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → \`ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")\`
