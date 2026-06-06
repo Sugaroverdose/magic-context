@@ -260,6 +260,51 @@ export function mainAgentRequests<T extends MinimalRequest>(requests: T[]): T[] 
     });
 }
 
+/**
+ * Extract the text of the first wire message whose content contains `marker`.
+ *
+ * v2 prepends two synthetic user messages to every request: m[0] carrying
+ * `<session-history>…</session-history>` (the frozen cumulative baseline) and
+ * m[1] carrying `<session-history-since>…</session-history-since>` (the volatile
+ * delta: new compartments, new memories, memory-update deltas, new user-profile
+ * additions). The m[0]/m[1] cache taxonomy is asserted DIRECTLY off these two
+ * messages — m[0] must stay byte-identical across a routine (SOFT) publish; the
+ * new content must surface in m[1] — rather than inferred from breakpoints.
+ */
+export function extractMessageText(body: MinimalRequest["body"], marker: string): string | null {
+    const messages = Array.isArray(body.messages) ? (body.messages as Json[]) : [];
+    for (const m of messages) {
+        const content = m.content;
+        // Extract per TEXT BLOCK, not per message. OpenCode merges the two
+        // prepended same-role user messages (m[0] and m[1]) into ONE user
+        // message with two text blocks, so a whole-message scan would conflate
+        // them. `<session-history-since>` does not contain `<session-history>`
+        // as a substring (the `-since>` differs), so block-level matching keeps
+        // m[0] and m[1] cleanly separated.
+        if (typeof content === "string") {
+            if (content.includes(marker)) return content;
+        } else if (Array.isArray(content)) {
+            for (const block of content) {
+                if (block && typeof block === "object" && typeof (block as Json).text === "string") {
+                    const text = (block as Json).text as string;
+                    if (text.includes(marker)) return text;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/** The m[0] baseline text (`<session-history>` block) for a request, or null. */
+export function extractM0(body: MinimalRequest["body"]): string | null {
+    return extractMessageText(body, "<session-history>");
+}
+
+/** The m[1] delta text (`<session-history-since>` block) for a request, or null. */
+export function extractM1(body: MinimalRequest["body"]): string | null {
+    return extractMessageText(body, "<session-history-since>");
+}
+
 /** Compact, human-readable bust report for test failure messages. */
 export function formatBustReport(comparisons: PassComparison[]): string {
     const lines: string[] = [];

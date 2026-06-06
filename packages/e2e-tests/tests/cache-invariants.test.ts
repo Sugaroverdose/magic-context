@@ -28,9 +28,95 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { findBusts, formatBustReport, mainAgentRequests } from "../src/cache-analysis";
+import {
+    extractM0,
+    extractM1,
+    findBusts,
+    formatBustReport,
+    mainAgentRequests,
+} from "../src/cache-analysis";
 import { TestHarness } from "../src/harness";
 import type { MockUsage } from "../src/mock-provider/server";
+
+const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
+
+function isHistorianRequest(body: Record<string, unknown>): boolean {
+    const system = body.system;
+    if (typeof system === "string") return system.includes(HISTORIAN_SYSTEM_MARKER);
+    if (Array.isArray(system)) {
+        return system.some(
+            (b) =>
+                b &&
+                typeof b === "object" &&
+                typeof (b as { text?: unknown }).text === "string" &&
+                ((b as { text: string }).text).includes(HISTORIAN_SYSTEM_MARKER),
+        );
+    }
+    return false;
+}
+
+/**
+ * Parse the [N] ordinal range from a historian prompt's <new_messages> block.
+ *
+ * Ordinals are matched ONLY in the exact line-anchored form the historian
+ * prompt emits — `[N] U:` / `[N] A:` at the start of a line. Matching any
+ * bracketed digit in the prose would pick up stray `[0]`-shaped text (e.g. a
+ * prompt that literally mentions `m[0]`), producing a 0-N compartment range
+ * that fails the historian's "range maps to raw session lines 1-N" validation.
+ * This bit a real test run — the `[N] U:` anchor is the robust contract.
+ */
+function findOrdinalRange(body: Record<string, unknown>): { start: number; end: number } | null {
+    const messages = (body.messages as Array<{ content: unknown }> | undefined) ?? [];
+    for (const m of messages) {
+        const blocks = Array.isArray(m.content) ? m.content : [];
+        for (const block of blocks) {
+            const text = (block as { text?: string }).text;
+            if (!text || !text.includes("<new_messages>")) continue;
+            const start = text.indexOf("<new_messages>");
+            const end = text.indexOf("</new_messages>");
+            const scope = end > start ? text.slice(start, end) : text.slice(start);
+            const nums = [...scope.matchAll(/^\[(\d+)\] [UA]:/gm)].map((mm) => Number(mm[1]));
+            if (nums.length > 0) return { start: Math.min(...nums), end: Math.max(...nums) };
+        }
+    }
+    return null;
+}
+
+/** Route historian requests to a valid single-compartment response covering the chunk. */
+function installHistorianMatcher(h: TestHarness): void {
+    h.mock.addMatcher((body) => {
+        if (!isHistorianRequest(body)) return null;
+        const range = findOrdinalRange(body);
+        const usage = {
+            input_tokens: 500,
+            output_tokens: 200,
+            cache_creation_input_tokens: 500,
+            cache_read_input_tokens: 0,
+        };
+        if (!range) {
+            return {
+                text: "<output><compartments></compartments><facts></facts><unprocessed_from>1</unprocessed_from></output>",
+                usage,
+            };
+        }
+        const payload = [
+            "<output>",
+            "<compartments>",
+            `<compartment start="${range.start}" end="${range.end}" title="cache-invariant chunk" importance="50" episode_type="feature">`,
+            "<p1>Driven by the cache-invariant harness: durable signal exercising historian publish and the m[0]/m[1] SOFT-delta taxonomy.</p1>",
+            "<p2>Cache-invariant harness chunk exercising historian publish.</p2>",
+            "<p3>cache-invariant harness chunk</p3>",
+            "<p4/>",
+            "</compartment>",
+            "</compartments>",
+            "<facts></facts>",
+            "<events></events>",
+            `<unprocessed_from>${range.end + 1}</unprocessed_from>`,
+            "</output>",
+        ].join("\n");
+        return { text: payload, usage };
+    });
+}
 
 const MODEL_LIMIT = 100_000;
 
@@ -47,6 +133,14 @@ const EXECUTE_USAGE: MockUsage = {
     input_tokens: 30_000,
     output_tokens: 20,
     cache_creation_input_tokens: 30_000,
+    cache_read_input_tokens: 0,
+};
+
+// High enough to trip the historian trigger (threshold-relative pressure).
+const HISTORIAN_TRIGGER_USAGE: MockUsage = {
+    input_tokens: 90_000,
+    output_tokens: 20,
+    cache_creation_input_tokens: 90_000,
     cache_read_input_tokens: 0,
 };
 
@@ -209,6 +303,103 @@ describe("cache invariants — replay class", () => {
                 const finalBody = JSON.stringify(mainAgentRequests(h.mock.requests()).at(-1)?.body ?? {});
                 expect(finalBody).toContain("ctx_reduce");
             }, 150_000);
+        });
+    });
+});
+
+describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
+    describe("#given a compartment published after m[0] materialized empty (B9 — the seq-refold regression)", () => {
+        describe("#when the publish surfaces it as an m[1] delta and defer passes follow", () => {
+            it("#then m[0] stays empty/frozen (SOFT) — the compartment rides m[1], never folds into m[0]", async () => {
+                //#given — the SOFT-publish invariant only exists once m[0] has
+                // materialized empty BEFORE the compartment exists. Then the
+                // baseline freezes cachedM0Seq=-1, so the published compartment
+                // (seq 0) is an m[1] delta (readNewCompartments: seq > -1) and
+                // mustMaterialize must NOT re-fold it into m[0]. Pre-fix,
+                // max_compartment_seq was a HARD mustMaterialize trigger, so the
+                // publish re-materialized m[0] and folded the compartment INTO the
+                // baseline — exactly the regression this asserts against.
+                installHistorianMatcher(h);
+                const sessionId = await h.createSession();
+
+                // Phase 1 — force an early execute pass so m[0] materializes EMPTY
+                // (0 compartments yet). A high-usage turn marks the next pass as
+                // execute; the pass after it does the empty materialization.
+                setDefer("B9 warm 1");
+                await h.sendPrompt(sessionId, "B9 turn 1: warmup.");
+                h.mock.setDefault({ text: "B9 high", usage: EXECUTE_USAGE });
+                await h.sendPrompt(sessionId, "B9 turn 2: high usage marks the next pass execute.");
+                setDefer("B9 materialize-empty");
+                await h.sendPrompt(sessionId, "B9 turn 3: execute pass materializes empty m[0].");
+
+                const m0BaselineEmpty = extractM0(mainAgentRequests(h.mock.requests()).at(-1)!.body);
+                expect(m0BaselineEmpty).toContain("<session-history></session-history>");
+
+                // Phase 2 — build an eligible tail, then trigger + run the historian.
+                for (let i = 4; i <= 11; i++) {
+                    setDefer(`B9 reply ${i}`);
+                    await h.sendPrompt(sessionId, `B9 turn ${i}: durable content for compartment chunk ${i}.`);
+                }
+                h.mock.setDefault({ text: "B9 trigger", usage: HISTORIAN_TRIGGER_USAGE });
+                await h.sendPrompt(sessionId, "B9 turn 12: high-usage historian trigger.");
+                setDefer("B9 post-trigger");
+                await h.sendPrompt(sessionId, "B9 turn 13: follow-up starts + awaits the historian publish.");
+
+                await h.waitFor(() => h.countCompartments(sessionId) >= 1, {
+                    timeoutMs: 60_000,
+                    label: "B9 compartment publishes to DB",
+                });
+
+                //#then — the published compartment must surface as an m[1] delta
+                // while m[0] stays the empty baseline.
+                const requests = mainAgentRequests(h.mock.requests());
+                const surfaceReq = requests.find((r) =>
+                    extractM1(r.body)?.includes("<new-compartments>"),
+                );
+                expect(surfaceReq).toBeDefined();
+                const m1 = extractM1(surfaceReq!.body)!;
+                const m0 = extractM0(surfaceReq!.body)!;
+                // Delta invariant: the compartment rides m[1].
+                expect(m1).toContain("<new-compartments>");
+                expect(m1).toContain("cache-invariant chunk");
+                // SOFT invariant: m[0] is STILL the empty baseline — the
+                // compartment was NOT folded into m[0] (the HARD regression).
+                expect(m0).not.toContain("cache-invariant chunk");
+                expect(m0).toBe(m0BaselineEmpty!);
+
+                // And defer passes after surfacing replay m[0] AND m[1] byte-identically.
+                const surfaceIdx = requests.indexOf(surfaceReq!);
+                setDefer("B9 replay 1");
+                await h.sendPrompt(sessionId, "B9 turn 14: defer replay of the surfaced compartment.");
+                setDefer("B9 replay 2");
+                await h.sendPrompt(sessionId, "B9 turn 15: defer replay again.");
+
+                // m[0] and m[1] must be byte-identical from the moment the
+                // compartment surfaced through every following defer pass. This is
+                // the load-bearing SOFT-replay assertion: the surfaced delta is
+                // frozen, not re-rendered, on defer.
+                const after = mainAgentRequests(h.mock.requests()).slice(surfaceIdx);
+                const m1s = new Set(after.map((r) => extractM1(r.body)));
+                const m0s = new Set(after.map((r) => extractM0(r.body)));
+                expect(m1s.size).toBe(1);
+                expect(m0s.size).toBe(1);
+
+                // Whole-wire no-bust is asserted over the trailing PURE-DEFER
+                // replay pair only. The surface pass itself is an execute pass
+                // (allowed to bust once) and the historian-await turn just before
+                // it is an in-flight multi-call assistant turn whose tail
+                // legitimately accretes parts as it settles — neither is a defer
+                // replay, so including them would conflate normal tail growth with
+                // a prefix bust. Turns 14 and 15 are both settled pure defers.
+                const replayPair = mainAgentRequests(h.mock.requests()).slice(-2);
+                const busts = findBusts(replayPair);
+                if (busts.length > 0) {
+                    console.error(
+                        `[cache-invariant:B9-soft-publish] ${busts.length} bust(s):\n${formatBustReport(busts)}`,
+                    );
+                }
+                expect(busts.length).toBe(0);
+            }, 220_000);
         });
     });
 });
