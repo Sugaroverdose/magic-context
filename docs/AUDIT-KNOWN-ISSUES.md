@@ -493,3 +493,48 @@ compartments and the materialize stale-check compares it
 from legacy → upgraded HARD-refolds m[0] via the marker — matching OpenCode. (The
 shared `clearCachedM0M1` cache-clear in the upgrade path is still a belt-and-
 suspenders backstop.) See PARITY.md §12, now also marked parity.
+
+### A31. Dreamer-v2 deferred items (telemetry, session lifecycle, maintenance cadence)
+
+These surfaced in a focused dreamer audit and are **intentionally deferred to the
+planned dreamer-v2 overhaul** (where the dreamer becomes a cron-style per-task
+runner). They are quality/observability gaps, not correctness or safety bugs:
+
+- **DREAMER#4 — Pi dream telemetry has no parent-session attribution.** OpenCode
+  resolves a parent session id so child dream sessions can be grouped in the
+  dashboard; Pi passes none. Cosmetic dashboard grouping only.
+- **DREAMER#5 — successful dream child sessions are deleted, failed ones kept.**
+  Intentional (keep failures for debugging), but means a successful run's
+  transcript isn't inspectable. Revisit when dreamer-v2 adds per-task run records
+  with persisted changed-memory ids (see note #221).
+- **DREAMER#6 — `maintain-docs` has no code-change trigger.** It runs on the
+  dream cadence regardless of whether the repo actually changed, so it can rewrite
+  ARCHITECTURE/STRUCTURE on a quiet repo. Low-cost; dreamer-v2 will gate tasks on
+  real change signals.
+- **DREAMER#7 — scheduled drains can fire slightly outside the configured
+  window.** The schedule gates *enqueue*; a drain already in flight at the window
+  edge can complete just after. Bounded and harmless (one extra run), not a
+  contamination bug (that was DREAMER#1, fixed).
+
+### A32. Embedding/index freshness is id/watermark-based, not content-hash based
+
+- **EMBED#3 / EMBED#5 / MEM#3 (same family) — memory embeddings refresh by
+  `memory.id` / mutation, not by a content hash.** If a memory's *content* is
+  edited in place without a new row, a stale embedding can linger until the next
+  full re-embed sweep. Accepted: in-session edits go through delete+reinsert (new
+  id) or bump the mutation cursor, and the periodic dream-timer sweep re-embeds;
+  a content-hash column is a dreamer-v2 nicety, not a correctness gate.
+- **EMBED#4 — git-commit indexing has no incremental per-commit watermark.** It
+  re-reads HEAD's bounded window each sweep and dedups by commit sha, so it's
+  correct but does redundant work on large repos. Bounded by `since_days` /
+  `max_commits`; optimize later if it ever shows in profiles.
+
+### A33. RPC `/ctx-dream` drain is dedup-guarded, not lease-locked (RPC#2)
+
+`/ctx-dream`'s immediate drain relies on `processDreamQueue`'s own
+`hasActiveDreamLease` check plus the queue dedup, not a separate caller-side lock.
+Two near-simultaneous `/ctx-dream` invocations both enqueue-then-drain, but the
+lease inside `processDreamQueue` ensures only one actually runs (the other returns
+"another worker is already processing"). The window is benign — no double-run, no
+data race — so a caller-side lock would add coordination for no behavioral gain.
+Accepted.
