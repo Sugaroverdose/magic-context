@@ -66,6 +66,7 @@ fn main() {
             commands::get_dream_runs,
             commands::get_dream_run_memory_changes,
             commands::enqueue_dream,
+            commands::delete_dream_queue_entry,
             // Logs & Cache
             commands::get_log_entries,
             commands::get_cache_events,

@@ -273,6 +273,10 @@ export async function enqueueDream(projectPath: string, reason: string): Promise
   return invoke("enqueue_dream", { projectPath, reason });
 }
 
+export async function deleteDreamQueueEntry(id: number): Promise<number> {
+  return invoke("delete_dream_queue_entry", { id });
+}
+
 // ── Log & Cache API ─────────────────────────────────────────
 
 export async function getLogEntries(maxLines?: number): Promise<LogEntry[]> {

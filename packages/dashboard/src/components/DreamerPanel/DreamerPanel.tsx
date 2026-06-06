@@ -1,5 +1,6 @@
 import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import {
+  deleteDreamQueueEntry,
   enqueueDream,
   formatDateTime,
   formatRelativeTime,
@@ -163,6 +164,20 @@ export default function DreamerPanel() {
     refetchQueue();
   };
 
+  const [removingQueueId, setRemovingQueueId] = createSignal<number | null>(null);
+  const handleRemoveQueueEntry = async (id: number) => {
+    if (removingQueueId() === id) return;
+    setRemovingQueueId(id);
+    try {
+      await deleteDreamQueueEntry(id);
+      refetchQueue();
+    } catch (err) {
+      console.error("Failed to remove dream-queue entry:", err);
+    } finally {
+      setRemovingQueueId(null);
+    }
+  };
+
   const refreshAll = () => {
     refetchQueue();
     refetchState();
@@ -289,9 +304,28 @@ export default function DreamerPanel() {
             <For each={pendingQueue()}>
               {(entry: DreamQueueEntry) => (
                 <div class="card">
-                  <div class="card-title">
-                    <span class="pill amber">pending</span>
-                    <span style={{ "margin-left": "8px" }}>{entry.reason}</span>
+                  <div
+                    class="card-title"
+                    style={{
+                      display: "flex",
+                      "justify-content": "space-between",
+                      "align-items": "center",
+                    }}
+                  >
+                    <span>
+                      <span class="pill amber">pending</span>
+                      <span style={{ "margin-left": "8px" }}>{entry.reason}</span>
+                    </span>
+                    <button
+                      type="button"
+                      class="btn sm"
+                      style={{ color: "var(--red)" }}
+                      disabled={removingQueueId() === entry.id}
+                      title="Remove this queued entry (use for stale entries whose project has no active runner)"
+                      onClick={() => handleRemoveQueueEntry(entry.id)}
+                    >
+                      {removingQueueId() === entry.id ? "Removing…" : "Remove"}
+                    </button>
                   </div>
                   <div class="card-meta">
                     <span>Project: {entry.project_path}</span>

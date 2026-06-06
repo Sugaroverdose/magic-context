@@ -3879,6 +3879,15 @@ pub fn enqueue_dream(
     Ok(conn.last_insert_rowid())
 }
 
+/// Delete a single dream-queue entry by id. Used to clear stale entries for
+/// projects with no active runner (e.g. a manual dashboard trigger for a project
+/// that is not currently loaded by any OpenCode/Pi host, so nothing ever
+/// dequeues it). Returns the number of rows removed (0 if the id was already
+/// gone — e.g. a runner picked it up between the list read and this call).
+pub fn delete_dream_queue_entry(conn: &Connection, id: i64) -> Result<usize, rusqlite::Error> {
+    conn.execute("DELETE FROM dream_queue WHERE id = ?1", rusqlite::params![id])
+}
+
 // ── User Memory types ───────────────────────────────────────
 
 #[derive(Debug, Serialize, Clone)]

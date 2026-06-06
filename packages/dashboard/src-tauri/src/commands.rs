@@ -380,6 +380,13 @@ pub fn enqueue_dream(
     db::enqueue_dream(&conn, &project_path, &reason).map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+pub fn delete_dream_queue_entry(state: State<'_, AppState>, id: i64) -> Result<usize, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::delete_dream_queue_entry(&conn, id).map_err(|e| e.to_string())
+}
+
 // ── Log commands ────────────────────────────────────────────
 
 #[tauri::command(async)]

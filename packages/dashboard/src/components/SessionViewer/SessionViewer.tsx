@@ -1564,7 +1564,11 @@ export default function SessionViewer() {
                                   "margin-top": "6px",
                                 }}
                               >
-                                <div class="card-meta">{formatRelativeTime(note.created_at)}</div>
+                                <div class="card-meta">
+                                  <span class="mono">#{note.id}</span>
+                                  <span>·</span>
+                                  <span>{formatRelativeTime(note.created_at)}</span>
+                                </div>
                                 <div style={{ display: "flex", gap: "6px" }}>
                                   <button
                                     type="button"
@@ -1658,6 +1662,9 @@ export default function SessionViewer() {
                   <For each={smartNotes() ?? []}>
                     {(smartNote) => (
                       <div class="card" style={{ "border-left": "3px solid var(--accent)" }}>
+                        <div class="card-meta" style={{ "margin-bottom": "4px" }}>
+                          <span class="mono">#{smartNote.id}</span>
+                        </div>
                         <div
                           style={{
                             "font-size": "12px",
