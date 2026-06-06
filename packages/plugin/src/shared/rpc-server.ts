@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
     mkdirSync,
     readdirSync,
@@ -13,6 +13,19 @@ import { log } from "./logger";
 import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+/**
+ * Constant-time bearer-token comparison. `timingSafeEqual` throws on
+ * length-mismatched buffers, so guard on length first (the length itself is not
+ * secret — the token bytes are). Avoids leaking the token via response-timing on
+ * the loopback auth check.
+ */
+function tokensMatch(presented: string, expected: string): boolean {
+    const a = Buffer.from(presented, "utf8");
+    const b = Buffer.from(expected, "utf8");
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+}
 
 export class MagicContextRpcServer {
     private server: Server | null = null;
@@ -149,9 +162,12 @@ export class MagicContextRpcServer {
         // Require the per-process bearer token on every side-effecting call.
         // The legitimate TUI client reads it from the same port file it used to
         // discover the port; a process that only guessed the port cannot.
+        // Constant-time compare so a local attacker can't byte-probe the token
+        // via response-timing (length-guard first, since timingSafeEqual throws
+        // on length mismatch).
         const auth = req.headers.authorization;
         const presented = typeof auth === "string" ? auth.replace(/^Bearer\s+/i, "") : "";
-        if (presented !== this.token) {
+        if (!tokensMatch(presented, this.token)) {
             res.writeHead(401, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Unauthorized" }));
             req.resume();

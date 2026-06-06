@@ -1,3 +1,4 @@
+import { DREAMER_AGENT } from "@magic-context/core/agents/dreamer";
 import type {
 	DreamerConfig,
 	EmbeddingConfig,
@@ -9,6 +10,7 @@ import {
 import type { DreamRunResult } from "@magic-context/core/features/magic-context/dreamer/runner";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
+import { resolveFallbackChain } from "@magic-context/core/shared/resolve-fallbacks";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
 
@@ -239,7 +241,15 @@ export async function awaitInFlightDreamers(): Promise<void> {
 function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 	const runner = piSubagentRunnerFactory();
 	const model = opts.config.model;
-	const fallbackModels = normalizeFallbackModels(opts.config.fallback_models);
+	// Resolve through the SHARED chain so Pi inherits the builtin DREAMER_AGENT
+	// fallback models when the user set no explicit `dreamer.fallback_models` —
+	// parity with OpenCode (dream-timer.ts). Previously Pi only used the explicit
+	// list, so a Pi dreamer run with no configured fallbacks stopped at the
+	// primary on a model/auth/rate-limit/not-found failure while OpenCode iterated.
+	const fallbackModels = resolveFallbackChain(
+		DREAMER_AGENT,
+		opts.config.fallback_models,
+	);
 
 	const session = {
 		create: async (args: SessionCreateArgs) => {
@@ -309,18 +319,6 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 	};
 
 	return { session } as unknown as DreamTimerClient;
-}
-
-function normalizeFallbackModels(
-	value: DreamerConfig["fallback_models"],
-): readonly string[] | undefined {
-	if (Array.isArray(value)) {
-		return value;
-	}
-	if (typeof value === "string" && value.trim().length > 0) {
-		return [value];
-	}
-	return undefined;
 }
 
 function readDirectory(args: { query?: unknown }): string | undefined {
@@ -393,7 +391,6 @@ function makeMessage(
 
 export const __test = {
 	registeredProjectCount: () => registeredProjects.size,
-	normalizeFallbackModels,
 	setPiSubagentRunnerFactory: (factory: PiSubagentRunnerFactory) => {
 		piSubagentRunnerFactory = factory;
 	},

@@ -164,6 +164,35 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(combined).toContain("apiKey");
     });
 
+    it("recovers an invalid NESTED field without wiping valid siblings in the same block", () => {
+        // Regression: one bad nested field (memory.injection_budget_tokens as a
+        // string) must NOT delete the whole `memory` block — which would silently
+        // drop valid siblings like memory.auto_search.enabled (and, on the
+        // migration path, the just-graduated memory.git_commit_indexing). Recovery
+        // should prune only the invalid leaf and keep the rest.
+        const config = JSON.stringify({
+            memory: {
+                injection_budget_tokens: "not-a-number", // invalid nested leaf
+                auto_search: { enabled: false }, // valid sibling — must survive
+            },
+        });
+
+        const result = loadWithUserConfig(config);
+        const warnings = result.configWarnings ?? [];
+
+        expect(result.enabled).toBe(true);
+        // The valid sibling the user explicitly set must be preserved, not reset
+        // to the schema default (true).
+        expect(result.memory.auto_search.enabled).toBe(false);
+        // The invalid leaf falls back to its schema default.
+        expect(typeof result.memory.injection_budget_tokens).toBe("number");
+        // A warning should name the pruned nested field.
+        const w = warnings.find(
+            (x) => x.includes("memory") && x.includes("injection_budget_tokens"),
+        );
+        expect(w).toBeDefined();
+    });
+
     it("still shows numeric and boolean invalid values (not secrets by nature)", () => {
         // Numbers/booleans in config fields are never secrets — they're
         // plain validation mistakes — so we surface them fully to help

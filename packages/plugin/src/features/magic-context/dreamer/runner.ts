@@ -215,9 +215,9 @@ export async function runDream(args: {
     }
 
     const deadline = startedAt + args.maxRuntimeMinutes * 60 * 1000;
-    const lastDreamAt =
-        getDreamState(args.db, `last_dream_at:${args.projectIdentity}`) ??
-        getDreamState(args.db, "last_dream_at");
+    // Strictly per-project (no global-key fallback — it cross-contaminated the
+    // maintain-docs cutoff across projects).
+    const lastDreamAt = getDreamState(args.db, `last_dream_at:${args.projectIdentity}`);
     log(`[dreamer] last dream at: ${lastDreamAt ?? "never"} (project=${args.projectIdentity})`);
 
     let lastErrorSignature: string | null = null;
@@ -709,8 +709,9 @@ export async function runDream(args: {
     ]);
     const hasSuccessfulTask = result.tasks.some((t) => !t.error && !POST_TASK_NAMES.has(t.name));
     if (hasSuccessfulTask && !lostLease) {
+        // Per-project only. Do NOT also write the legacy global "last_dream_at"
+        // key — that write is what let one project's run suppress another's.
         setDreamState(args.db, `last_dream_at:${args.projectIdentity}`, String(result.finishedAt));
-        setDreamState(args.db, "last_dream_at", String(result.finishedAt));
     }
     const totalDuration = ((result.finishedAt - startedAt) / 1000).toFixed(1);
     const succeeded = result.tasks.filter((t) => !t.error).length;

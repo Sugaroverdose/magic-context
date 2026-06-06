@@ -183,12 +183,34 @@ export function resolveInstallContext(
     return null;
 }
 
+/**
+ * Strict semver core with optional prerelease + build metadata (1.2.3,
+ * 1.2.3-beta.1, 1.2.3+build.5). The version reaching the update path comes from
+ * the npm registry `dist-tags` envelope — Zod-parsed only as a STRING shape, not
+ * as semver — so a malformed/crafted tag value (`npm:@evil/pkg@1.0.0`,
+ * `file:/tmp/x`, `git+ssh://...`) must never be written into package.json's
+ * dependency spec before `npm install`. Shared by the auto-update prepare path
+ * and the pinned-config rewrite.
+ */
+export function isValidSemver(version: string): boolean {
+    return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version);
+}
+
 export function preparePackageUpdate(
     version: string,
     packageName: string = PACKAGE_NAME,
     runtimePackageJsonPath: string | null = getCurrentRuntimePackageJsonPath(),
 ): string | null {
     try {
+        // Reject any non-semver install spec before it can reach the dependency
+        // entry / `npm install` (SSRF/arbitrary-package-install guard).
+        if (!isValidSemver(version)) {
+            warn(
+                `[auto-update-checker] Refusing to prepare update for invalid version "${version}"`,
+            );
+            return null;
+        }
+
         const installContext = resolveInstallContext(runtimePackageJsonPath);
         if (!installContext) {
             warn("[auto-update-checker] No install context found for auto-update");

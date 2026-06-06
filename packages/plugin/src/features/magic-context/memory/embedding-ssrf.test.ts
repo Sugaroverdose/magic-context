@@ -20,6 +20,21 @@ describe("blockedEmbeddingEndpointReason", () => {
         expect(blockedEmbeddingEndpointReason("http://[fe80::1]/v1")).toBeTruthy();
     });
 
+    it("blocks IPv4-mapped IPv6 metadata literals (dotted and hex spellings)", () => {
+        // Dotted tail.
+        expect(
+            blockedEmbeddingEndpointReason("http://[::ffff:169.254.169.254]/latest"),
+        ).toBeTruthy();
+        // Hex tail (a9fe:a9fe === 169.254.169.254) — the spelling WHATWG URL
+        // canonicalizes [::ffff:169.254.169.254] into.
+        expect(blockedEmbeddingEndpointReason("http://[::ffff:a9fe:a9fe]/latest")).toBeTruthy();
+    });
+
+    it("ALLOWS a non-link-local IPv4-mapped IPv6 (e.g. a public host)", () => {
+        // ::ffff:8.8.8.8 is not link-local — must not be over-blocked.
+        expect(blockedEmbeddingEndpointReason("http://[::ffff:8.8.8.8]/v1")).toBeNull();
+    });
+
     it("ALLOWS localhost / loopback (self-hosted LMStudio)", () => {
         expect(blockedEmbeddingEndpointReason("http://localhost:1234/v1")).toBeNull();
         expect(blockedEmbeddingEndpointReason("http://127.0.0.1:1234/v1")).toBeNull();

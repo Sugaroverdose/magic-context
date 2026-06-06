@@ -256,12 +256,18 @@ function parsePluginConfig(
     // execute_threshold cache-safety explanation). Only non-default Zod messages
     // are kept — the generic "Too big"/"Invalid input" boilerplate adds nothing.
     const customMessagesByKey = new Map<string, string>();
+    // Per top-level key, the set of FULL error paths (e.g. ["memory","auto_search"]).
+    // Used to prune only the invalid nested leaf instead of the whole block.
+    const issuePathsByKey = new Map<string, PropertyKey[][]>();
     const GENERIC_ZOD_PREFIXES = ["Too big", "Too small", "Invalid input", "Invalid", "Expected"];
     for (const issue of parsed.error.issues) {
         const topKey = issue.path[0];
         if (topKey !== undefined) {
             const key = String(topKey);
             errorPaths.add(key);
+            const paths = issuePathsByKey.get(key) ?? [];
+            paths.push([...issue.path]);
+            issuePathsByKey.set(key, paths);
             const msg = issue.message;
             if (msg && !GENERIC_ZOD_PREFIXES.some((p) => msg.startsWith(p))) {
                 if (!customMessagesByKey.has(key)) {
@@ -281,18 +287,53 @@ function parsePluginConfig(
             warnings.push(
                 `"${key}": invalid agent configuration, ignoring. Check your magic-context.jsonc.`,
             );
-        } else {
-            // Use Zod default for this field.
-            // Intentional: redactConfigValue reports type+length, never the
-            // resolved value itself, because `{env:...}` / `{file:...}`
-            // substitution may have already expanded secrets into rawConfig.
-            delete patched[key];
-            const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
+            continue;
+        }
+
+        // For object-valued keys (e.g. `memory`), prune ONLY the invalid nested
+        // leaves and keep valid siblings, so one bad nested field doesn't wipe the
+        // whole block — which would silently drop already-migrated graduated keys
+        // like memory.auto_search / memory.git_commit_indexing. Falls back to
+        // whole-key deletion when the issue is at the key itself or the value
+        // isn't a prunable object.
+        const issuePaths = issuePathsByKey.get(key) ?? [];
+        const rawValue = rawConfig[key];
+        const allNested =
+            issuePaths.length > 0 &&
+            issuePaths.every((p) => p.length >= 2) &&
+            typeof rawValue === "object" &&
+            rawValue !== null &&
+            !Array.isArray(rawValue);
+        if (allNested) {
+            const prunedBlock: Record<string, unknown> = {
+                ...(rawValue as Record<string, unknown>),
+            };
+            const prunedLeaves: string[] = [];
+            for (const p of issuePaths) {
+                const leaf = String(p[1]);
+                if (leaf in prunedBlock) {
+                    delete prunedBlock[leaf];
+                    prunedLeaves.push(leaf);
+                }
+            }
+            patched[key] = prunedBlock;
             const reason = customMessagesByKey.get(key);
             warnings.push(
-                `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultVal)}.${reason ? ` ${reason}` : ""}`,
+                `"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.${reason ? ` ${reason}` : ""}`,
             );
+            continue;
         }
+
+        // Use Zod default for this field.
+        // Intentional: redactConfigValue reports type+length, never the
+        // resolved value itself, because `{env:...}` / `{file:...}`
+        // substitution may have already expanded secrets into rawConfig.
+        delete patched[key];
+        const defaultVal = (defaults as unknown as Record<string, unknown>)[key];
+        const reason = customMessagesByKey.get(key);
+        warnings.push(
+            `"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultVal)}.${reason ? ` ${reason}` : ""}`,
+        );
     }
 
     // Re-run migration on the field-recovered patched config so legacy

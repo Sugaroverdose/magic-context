@@ -84,11 +84,20 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
 
     if (config.provider === "openai-compatible") {
         const apiKey = config.api_key?.trim();
+        const inputType = config.input_type?.trim();
+        const truncate = config.truncate?.trim();
         return {
             provider: "openai-compatible",
             model: config.model.trim(),
             endpoint: config.endpoint.trim(),
             ...(apiKey ? { api_key: apiKey } : {}),
+            // Preserve provider-specific request fields (NVIDIA NIM input_type;
+            // truncate). They must survive normalization so (a) they reach the
+            // provider request body and (b) a change to either is part of the
+            // config identity hash → a real config change correctly wipes stale
+            // vectors. Dropping them here silently disabled NIM support.
+            ...(inputType ? { input_type: inputType } : {}),
+            ...(truncate ? { truncate } : {}),
         };
     }
 
@@ -109,6 +118,8 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             endpoint: config.endpoint,
             model: config.model,
             apiKey: config.api_key,
+            inputType: config.input_type,
+            truncate: config.truncate,
         });
     }
 

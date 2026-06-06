@@ -68,10 +68,16 @@ export function findProjectsNeedingDream(db: Database): string[] {
     const projects: string[] = [];
     const now = new Date();
     for (const row of projectRows) {
+        // Strictly per-project. The legacy global "last_dream_at" key is NOT
+        // consulted: it caused cross-project contamination — a project with no
+        // per-project key inherited whatever project last dreamed, so it could be
+        // wrongly skipped as "already dreamed this window" (and its maintain-docs
+        // cutoff was another project's timestamp). A project with no per-project
+        // key is treated as never-dreamed → eligible. Worst case after upgrade is
+        // one extra dream per project; the global key can't be meaningfully
+        // migrated since it isn't attributable to a project.
         const lastDreamAtStr = getDreamState(db, `last_dream_at:${row.project_path}`);
-        // Fall back to global key for migration from old single-key format
-        const fallbackStr = !lastDreamAtStr ? getDreamState(db, "last_dream_at") : null;
-        const lastDreamAt = Number(lastDreamAtStr ?? fallbackStr ?? "0") || 0;
+        const lastDreamAt = Number(lastDreamAtStr ?? "0") || 0;
 
         // Skip if a dream already ran in the current schedule window.
         // This prevents re-enqueuing because dreamer's own memory updates

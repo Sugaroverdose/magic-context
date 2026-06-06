@@ -178,6 +178,12 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     ...(this.inputType ? { input_type: this.inputType } : {}),
                     ...(this.truncate ? { truncate: this.truncate } : {}),
                 }),
+                // SSRF: refuse to FOLLOW redirects. The pre-flight SSRF check only
+                // validates the configured endpoint; default redirect-follow would
+                // let an allowed host 307/308 the bearer token + memory content to
+                // a link-local/metadata target. A legitimate /embeddings POST never
+                // redirects, so `redirect: "error"` rejects the response instead.
+                redirect: "error",
                 signal: internalController.signal,
             });
 

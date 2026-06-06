@@ -246,7 +246,10 @@ describe("dreamer", () => {
             expect(result.tasks.map((task) => task.name)).toEqual(["consolidate", "verify"]);
             expect(result.tasks.every((task) => task.durationMs >= 0)).toBe(true);
             expect(result.tasks.every((task) => typeof task.result === "string")).toBe(true);
-            expect(getDreamState(db, "last_dream_at")).not.toBeNull();
+            // Per-project key only (the legacy global "last_dream_at" write was
+            // removed — it cross-contaminated other projects' schedules).
+            expect(getDreamState(db, "last_dream_at:/repo/project")).not.toBeNull();
+            expect(getDreamState(db, "last_dream_at")).toBeNull();
             expect(isLeaseActive(db)).toBe(false);
             expect(createdSessionIds).toEqual(["dream-1", "dream-2"]);
             expect(deletedSessionIds).toEqual(["dream-1", "dream-2"]);

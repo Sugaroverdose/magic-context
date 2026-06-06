@@ -532,11 +532,6 @@ function showUpgradeDialog(
                 title={title}
                 message={message}
                 onConfirm={() => {
-                    // Explicit choice → dismiss the fresh reminder durably so it
-                    // won't re-show. (Resume prompts are staging-driven and still
-                    // fire if this run is later interrupted.)
-                    void dismissUpgradeReminder(sessionId)
-                    void requestUpgrade(sessionId)
                     // Start the sidebar's recomp self-poll immediately — the RPC
                     // call fires no message event, so without this the progress
                     // bar wouldn't appear until the upgrade finished.
@@ -547,6 +542,15 @@ function showUpgradeDialog(
                             : "Session upgrade started — running in the background",
                         variant: "info",
                         duration: 5000,
+                    })
+                    // Dismiss the durable reminder ONLY after the upgrade request
+                    // actually started. If requestUpgrade() returns false (RPC /
+                    // server / db / auth failure, restart race), the session stays
+                    // legacy — dismissing first would set upgradeRemindedAt and
+                    // suppress all future reminders for a session that never
+                    // upgraded. (Resume prompts are staging-driven and unaffected.)
+                    void requestUpgrade(sessionId).then((started) => {
+                        if (started) void dismissUpgradeReminder(sessionId)
                     })
                 }}
                 onCancel={() => {

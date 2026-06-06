@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseJsonc } from "comment-json";
 
 import { log } from "../../shared/logger";
+import { isValidSemver } from "./cache";
 import {
     CACHE_DIR,
     NPM_FETCH_TIMEOUT,
@@ -242,9 +243,9 @@ export function updatePinnedVersion(
         // Validate the version before substituting it verbatim into the user's
         // config. newVersion comes from the npm registry envelope (Zod-parsed as
         // a shape, but not as semver), so a malformed/crafted value must never
-        // reach the JSONC. Accept a strict semver core with optional prerelease
-        // and build metadata (e.g. 1.2.3, 1.2.3-beta.1, 1.2.3+build.5).
-        if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(newVersion)) {
+        // reach the JSONC. Shared strict-semver check (same guard the auto-update
+        // prepare path uses).
+        if (!isValidSemver(newVersion)) {
             warn(`[auto-update-checker] Refusing to pin invalid version "${newVersion}"`);
             return false;
         }

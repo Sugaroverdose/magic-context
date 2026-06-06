@@ -834,6 +834,30 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		try {
 			const currentProject = resolveCurrentProject(ctx);
 			seenDreamerProjectIdentities.add(currentProject.projectIdentity);
+
+			// Re-register the dreamer for the CURRENT project. The boot-time
+			// registration above used process.cwd(), but Pi can switch projects
+			// mid-process (`/cd`, multi-root). Without this, a switched-into
+			// project is never dreamed and `/ctx-dream` there throws
+			// "not registered". registerPiDreamerProject is idempotent
+			// (early-returns when the project is already registered), so this is a
+			// no-op for the boot project and only does real work on first switch.
+			if (dreamerConfig) {
+				try {
+					registerPiDreamerProject({
+						db,
+						projectDir: currentProject.projectDir,
+						projectIdentity: currentProject.projectIdentity,
+						config: dreamerConfig,
+						embeddingConfig: config.embedding,
+						memoryEnabled: config.memory.enabled,
+						gitCommitIndexing: config.memory.git_commit_indexing,
+						onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
+					});
+				} catch (err) {
+					warn("before_agent_start: registerPiDreamerProject threw:", err);
+				}
+			}
 			// Pi exposes `sessionManager.getSessionId()` once a session is
 			// active. We resolve it here defensively because before_agent_start
 			// fires once per agent turn.

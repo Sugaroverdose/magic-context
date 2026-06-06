@@ -29,6 +29,32 @@ function isLinkLocalIpv4(host: string): boolean {
 }
 
 /**
+ * Extract a dotted-quad IPv4 from an IPv4-mapped IPv6 host so the link-local
+ * check sees it. WHATWG URL canonicalizes plain IPv4 literals (decimal/octal/hex
+ * → dotted) for http(s) on its own, but it keeps IPv4-mapped IPv6 in HEX form,
+ * e.g. `http://[::ffff:169.254.169.254]` → hostname `::ffff:a9fe:a9fe`. Without
+ * decoding that, `::ffff:a9fe:a9fe` slips past a string check and still routes to
+ * the metadata IP. Handles both the dotted (`::ffff:169.254.169.254`) and hex
+ * (`::ffff:a9fe:a9fe`) tails. Returns null when the host isn't IPv4-mapped.
+ */
+function ipv4FromMappedIpv6(host: string): string | null {
+    const m = /^::ffff:(.+)$/.exec(host);
+    if (!m) return null;
+    const tail = m[1];
+    // Dotted form: ::ffff:169.254.169.254
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(tail)) return tail;
+    // Hex form: ::ffff:a9fe:a9fe → 169.254.169.254
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+    if (hex) {
+        const hi = Number.parseInt(hex[1], 16);
+        const lo = Number.parseInt(hex[2], 16);
+        if (Number.isNaN(hi) || Number.isNaN(lo)) return null;
+        return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+    }
+    return null;
+}
+
+/**
  * Returns a non-empty reason string when the endpoint host is blocked, or null
  * when it is allowed. Malformed URLs are blocked (fail closed) since a config
  * value that can't even be parsed as a URL should not reach `fetch`.
@@ -54,8 +80,15 @@ export function blockedEmbeddingEndpointReason(endpoint: string): string | null 
     if (isLinkLocalIpv4(host)) {
         return `embedding endpoint host ${host} is link-local / cloud metadata (blocked)`;
     }
-    // IPv6 link-local (fe80::/10) and the IPv4-mapped metadata address.
-    if (host.startsWith("fe80:") || host === "::ffff:169.254.169.254") {
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d or hex ::ffff:hhhh:hhhh) — decode to the
+    // embedded IPv4 and re-check link-local so the metadata IP can't slip through
+    // an alternate spelling.
+    const mappedV4 = ipv4FromMappedIpv6(host);
+    if (mappedV4 && isLinkLocalIpv4(mappedV4)) {
+        return `embedding endpoint host ${host} (IPv4-mapped ${mappedV4}) is link-local / cloud metadata (blocked)`;
+    }
+    // IPv6 link-local (fe80::/10).
+    if (host.startsWith("fe80:")) {
         return `embedding endpoint host ${host} is link-local / cloud metadata (blocked)`;
     }
 

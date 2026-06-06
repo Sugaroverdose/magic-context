@@ -174,10 +174,17 @@ function parsePiConfig(
 
 	const defaults = MagicContextConfigSchema.parse({});
 	const errorPaths = new Set<string>();
+	// Per top-level key, the FULL error paths — so we can prune only the invalid
+	// nested leaf instead of the whole block (mirrors OpenCode config recovery).
+	const issuePathsByKey = new Map<string, PropertyKey[][]>();
 	for (const issue of parsed.error.issues) {
 		const topKey = issue.path[0];
 		if (topKey !== undefined) {
-			errorPaths.add(String(topKey));
+			const key = String(topKey);
+			errorPaths.add(key);
+			const paths = issuePathsByKey.get(key) ?? [];
+			paths.push([...issue.path]);
+			issuePathsByKey.set(key, paths);
 		}
 	}
 
@@ -188,15 +195,47 @@ function parsePiConfig(
 		recoveredTopLevelKeys.push(key);
 		const isAgentConfig =
 			key === "historian" || key === "dreamer" || key === "sidekick";
-		delete patched[key];
 
 		if (isAgentConfig) {
+			delete patched[key];
 			warnings.push(
 				`"${key}": invalid agent configuration, ignoring. Check your magic-context.jsonc.`,
 			);
 			continue;
 		}
 
+		// Object-valued key: prune ONLY invalid nested leaves, keep valid siblings
+		// (e.g. don't wipe the whole `memory` block — incl. migrated auto_search /
+		// git_commit_indexing — for one bad nested field). Falls back to whole-key
+		// deletion when the issue is at the key itself or the value isn't an object.
+		const issuePaths = issuePathsByKey.get(key) ?? [];
+		const rawValue = migrated[key];
+		const allNested =
+			issuePaths.length > 0 &&
+			issuePaths.every((p) => p.length >= 2) &&
+			typeof rawValue === "object" &&
+			rawValue !== null &&
+			!Array.isArray(rawValue);
+		if (allNested) {
+			const prunedBlock: Record<string, unknown> = {
+				...(rawValue as Record<string, unknown>),
+			};
+			const prunedLeaves: string[] = [];
+			for (const p of issuePaths) {
+				const leaf = String(p[1]);
+				if (leaf in prunedBlock) {
+					delete prunedBlock[leaf];
+					prunedLeaves.push(leaf);
+				}
+			}
+			patched[key] = prunedBlock;
+			warnings.push(
+				`"${key}": invalid nested field(s) ${prunedLeaves.map((l) => `"${l}"`).join(", ")}, using defaults for those.`,
+			);
+			continue;
+		}
+
+		delete patched[key];
 		const defaultValue = (defaults as unknown as Record<string, unknown>)[key];
 		warnings.push(
 			`"${key}": invalid value (${redactConfigValue(rawConfig[key])}), using default ${JSON.stringify(defaultValue)}.`,
