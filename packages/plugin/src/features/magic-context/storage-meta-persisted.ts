@@ -816,11 +816,16 @@ export function getHistorianFailureState(
     };
 }
 
-export function incrementHistorianFailure(db: Database, sessionId: string, error: string): void {
+/** Records a failure and returns the new consecutive-failure count (callers may
+ *  ignore the return). The count drives whether a failure notice is framed as
+ *  transient (low count — Magic Context will just retry) or escalated to an
+ *  actionable "your historian model needs attention" notice (persistent). */
+export function incrementHistorianFailure(db: Database, sessionId: string, error: string): number {
+    let nextCount = 1;
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         const current = getHistorianFailureState(db, sessionId);
-        const nextCount = current.failureCount + 1;
+        nextCount = current.failureCount + 1;
         db.prepare(
             "UPDATE session_meta SET historian_failure_count = ?, historian_last_error = ?, historian_last_failure_at = ? WHERE session_id = ?",
         ).run(nextCount, error, Date.now(), sessionId);
@@ -828,6 +833,7 @@ export function incrementHistorianFailure(db: Database, sessionId: string, error
         const reason = error.replace(/\s+/g, " ").trim().slice(0, 300);
         sessionLog(sessionId, `historian failure recorded: count=${nextCount} reason="${reason}"`);
     })();
+    return nextCount;
 }
 
 export function clearHistorianFailureState(db: Database, sessionId: string): void {

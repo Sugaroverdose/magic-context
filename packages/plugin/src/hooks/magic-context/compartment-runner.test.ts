@@ -19,6 +19,7 @@ import {
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
+    incrementHistorianFailure,
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -1600,9 +1601,10 @@ describe("runCompartmentAgent", () => {
 
         expect(createSession).not.toHaveBeenCalled();
         expect(getCompartments(db, "ses-invalid-existing")).toHaveLength(2);
-        expect(getIgnoredNotificationTexts(promptSession)[0]).toContain(
-            "existing stored compartments are invalid",
-        );
+        // First failure on a fresh session → transient/reassuring framing (the
+        // escalated "needs attention" + error detail only appears once failures
+        // persist past HISTORIAN_PERSISTENT_FAILURE_THRESHOLD).
+        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
     });
 
     it("rejects invalid historian output without replacing compartments or facts", async () => {
@@ -1659,9 +1661,8 @@ describe("runCompartmentAgent", () => {
         expect(getSessionFacts(db, "ses-invalid-output")).toEqual([
             expect.objectContaining({ category: "CONSTRAINTS", content: "Existing fact stays." }),
         ]);
-        expect(getIgnoredNotificationTexts(promptSession)[0]).toContain(
-            "invalid compartment output",
-        );
+        // First failure → transient framing (no raw error / no action ask yet).
+        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
     });
 
     it("alerts when historian model execution fails", async () => {
@@ -1702,9 +1703,56 @@ describe("runCompartmentAgent", () => {
         });
 
         expect(getCompartments(db, "ses-model-failure")).toHaveLength(0);
-        expect(getIgnoredNotificationTexts(promptSession)[0]).toContain(
-            "historian model unavailable",
-        );
+        // First failure → transient framing. The raw error ("historian model
+        // unavailable") is still recorded in historian_failure_state for the
+        // escalated notice + doctor diagnostics; it just isn't surfaced to the
+        // user on a single transient blip.
+        expect(getIgnoredNotificationTexts(promptSession)[0].toLowerCase()).toContain("transient");
+    });
+
+    it("escalates the historian alert to an actionable notice after persistent failures", async () => {
+        useTempDataHome("compartment-runner-persistent-failure-");
+        createOpenCodeDb("ses-persistent-failure", [
+            { id: "m-1", role: "user", text: "eligible one" },
+            { id: "m-2", role: "assistant", text: "eligible two" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        // Pre-seed prior failures so this run crosses the persistent threshold.
+        incrementHistorianFailure(db, "ses-persistent-failure", "earlier failure");
+        incrementHistorianFailure(db, "ses-persistent-failure", "earlier failure");
+
+        const promptSession = mock(async (input: { body?: { noReply?: boolean } }) => {
+            if (input.body?.noReply === true) return {};
+            throw new Error("historian model unavailable");
+        });
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp" } })),
+                create: mock(async () => ({ data: { id: "ses-agent" } })),
+                prompt: promptSession,
+                messages: mock(async () => ({ data: [] })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-persistent-failure",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+        });
+
+        const notice = getIgnoredNotificationTexts(promptSession)[0];
+        expect(notice).toContain("needs attention");
+        expect(notice).toContain("magic-context.jsonc");
+        // The escalated notice surfaces the real error for diagnosis.
+        expect(notice).toContain("historian model unavailable");
     });
 });
 

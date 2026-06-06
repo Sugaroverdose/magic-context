@@ -103,4 +103,20 @@ describe("parseRangeString", () => {
         expect(result[0]).toBe(1);
         expect(result[999]).toBe(1000);
     });
+
+    it("tolerates §N§ tag markers in a range (the agent often pastes them verbatim)", () => {
+        //#given the agent copied the transcript markers into the range
+        const input = "§302§-§305§";
+        //#when
+        const result = parseRangeString(input);
+        //#then it parses as 302-305 instead of erroring
+        expect(result).toEqual([302, 303, 304, 305]);
+    });
+
+    it("tolerates §N§ markers in a single id and a comma list", () => {
+        expect(parseRangeString("§5§")).toEqual([5]);
+        expect(parseRangeString("§1§,§2§,§9§")).toEqual([1, 2, 9]);
+        // Mixed bare + marked is fine too.
+        expect(parseRangeString("1-3,§8§")).toEqual([1, 2, 3, 8]);
+    });
 });

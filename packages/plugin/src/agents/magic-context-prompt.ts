@@ -43,6 +43,7 @@ const BASE_INTRO = (
 Use \`ctx_reduce\` to manage context size. It supports one operation:
 - \`drop\`: Remove entirely (best for tool outputs you already acted on).
 Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Last ${protectedTags} tags are protected.
+Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
 Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:

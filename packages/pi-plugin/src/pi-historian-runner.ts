@@ -71,6 +71,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "@magic-context/core/hooks/magic-context/compartment-runner-drop-queue";
 import {
+	buildHistorianFailureNotice,
 	buildHistorianRepairPrompt,
 	validateChunkCoverage,
 	validateHistorianOutput,
@@ -232,10 +233,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=existing-validation reason="${existingValidationError}"`,
 				);
-				incrementHistorianFailure(db, sessionId, existingValidationError);
-				await notify(
-					`Historian skipped: existing stored compartments are invalid: ${existingValidationError}`,
-				);
+				{
+					const failCount = incrementHistorianFailure(
+						db,
+						sessionId,
+						existingValidationError,
+					);
+					await notify(
+						buildHistorianFailureNotice(failCount, existingValidationError),
+					);
+				}
 				return;
 			}
 
@@ -276,10 +283,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
 				);
-				incrementHistorianFailure(db, sessionId, chunkCoverageError);
-				await notify(
-					`Historian skipped: raw chunk could not be safely chunked: ${chunkCoverageError}`,
-				);
+				{
+					const failCount = incrementHistorianFailure(
+						db,
+						sessionId,
+						chunkCoverageError,
+					);
+					await notify(
+						buildHistorianFailureNotice(failCount, chunkCoverageError),
+					);
+				}
 				return;
 			}
 
@@ -528,8 +541,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
 				sessionLog(sessionId, `historian failure: ${errorMsg}`);
-				incrementHistorianFailure(db, sessionId, errorMsg);
-				await notify(`Historian failed: ${errorMsg}`);
+				{
+					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
+					await notify(buildHistorianFailureNotice(failCount, errorMsg));
+				}
 				return;
 			}
 
@@ -627,8 +642,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					`historian failure: source=no-progress newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
 				);
-				incrementHistorianFailure(db, sessionId, errorMsg);
-				await notify(`Historian failed: ${errorMsg}`);
+				{
+					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
+					await notify(buildHistorianFailureNotice(failCount, errorMsg));
+				}
 				return;
 			}
 
@@ -888,8 +905,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			sessionId,
 			`historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
 		);
-		incrementHistorianFailure(db, sessionId, desc.brief);
-		await notify(`Historian failed unexpectedly: ${desc.brief}`);
+		{
+			const failCount = incrementHistorianFailure(db, sessionId, desc.brief);
+			await notify(buildHistorianFailureNotice(failCount, desc.brief));
+		}
 	} finally {
 		updateSessionMeta(db, sessionId, { compartmentInProgress: false });
 		// Record one historian_runs row for this attempt (every exit path).

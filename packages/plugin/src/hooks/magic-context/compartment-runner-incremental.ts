@@ -44,7 +44,11 @@ import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { CompartmentRunnerDeps } from "./compartment-runner-types";
-import { validateChunkCoverage, validateStoredCompartments } from "./compartment-runner-validation";
+import {
+    buildHistorianFailureNotice,
+    validateChunkCoverage,
+    validateStoredCompartments,
+} from "./compartment-runner-validation";
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { getProtectedTailStartOrdinal, readSessionChunk } from "./read-session-chunk";
@@ -149,10 +153,10 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             );
             // This is a real failure (stored compartments are corrupt) — record
             // it so `doctor --issue` and the >=95% abort path can see it.
-            incrementHistorianFailure(db, sessionId, existingValidationError);
+            const failCount = incrementHistorianFailure(db, sessionId, existingValidationError);
             telemetry.failureReason = `existing-validation: ${existingValidationError}`;
             await notifyHistorianIssue(
-                `## Historian alert\n\nHistorian skipped this session because existing stored compartments are invalid: ${existingValidationError}\n\nNo new compartments or facts were written. Rebuild or clear the broken compartments before continuing.`,
+                buildHistorianFailureNotice(failCount, existingValidationError),
             );
             return;
         }
@@ -214,10 +218,8 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             // can react. Previously this path was silent (no failure count,
             // recovery flag unchanged), making the loop bug invisible in
             // diagnostics.
-            incrementHistorianFailure(db, sessionId, chunkCoverageError);
-            await notifyHistorianIssue(
-                `## Historian alert\n\nHistorian skipped this session because the raw chunk could not be represented safely: ${chunkCoverageError}\n\nNo new compartments or facts were written.`,
-            );
+            const failCount = incrementHistorianFailure(db, sessionId, chunkCoverageError);
+            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, chunkCoverageError));
             return;
         }
 
@@ -291,11 +293,9 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 sessionId,
                 `historian failure: source=validation reason="${validatedPass.error}" chunkRange=${chunk.startIndex}-${chunk.endIndex} fallbackModel=${deps.fallbackModelId ?? "<none>"} twoPass=${deps.historianTwoPass ? "true" : "false"}`,
             );
-            incrementHistorianFailure(db, sessionId, validatedPass.error);
+            const failCount = incrementHistorianFailure(db, sessionId, validatedPass.error);
             telemetry.failureReason = `validation: ${validatedPass.error}`;
-            await notifyHistorianIssue(
-                `## Historian alert\n\n${validatedPass.error}\n\nNo new compartments or facts were written. Check the historian model/output and try again.`,
-            );
+            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, validatedPass.error));
             return;
         }
 
@@ -340,13 +340,16 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 sessionId,
                 `historian failure: source=no-progress reason="historian returned compartments that did not advance past raw message ${offset - 1}" newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
             );
-            incrementHistorianFailure(
+            const failCount = incrementHistorianFailure(
                 db,
                 sessionId,
                 `no forward progress beyond raw message ${offset - 1}`,
             );
             await notifyHistorianIssue(
-                `## Historian alert\n\nHistorian returned compartments that made no forward progress beyond raw message ${offset - 1}.\n\nNo new compartments or facts were written. Check the historian model/output and try again.`,
+                buildHistorianFailureNotice(
+                    failCount,
+                    `historian made no forward progress beyond raw message ${offset - 1}`,
+                ),
             );
             return;
         }
@@ -607,10 +610,8 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             `historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
         );
         if (!issueNotified) {
-            incrementHistorianFailure(db, sessionId, desc.brief);
-            await notifyHistorianIssue(
-                `## Historian alert\n\nHistorian failed unexpectedly: ${desc.brief}\n\nNo new compartments or facts were written. Check the historian model/output and try again.`,
-            );
+            const failCount = incrementHistorianFailure(db, sessionId, desc.brief);
+            await notifyHistorianIssue(buildHistorianFailureNotice(failCount, desc.brief));
         }
     } finally {
         if (!completedSuccessfully) {
