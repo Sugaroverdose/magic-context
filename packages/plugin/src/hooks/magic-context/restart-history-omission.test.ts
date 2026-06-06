@@ -196,4 +196,98 @@ describe("restart history omission", () => {
         expect(exec.m1).toContain("Bravo just-published");
         expect(exec.tailIds).not.toContain("m1");
     });
+
+    it("does NOT drop the first compartment when m[0] was materialized before any compartment existed (null persisted boundary)", () => {
+        // Regression for the null-boundary hole in the restart-omission fix: the
+        // cold-rebuild trim must distinguish "cached m[0] exists but boundary is
+        // null" (m[0] materialized before any compartment → its m[1] covers NOTHING
+        // → must NOT trim) from "no cached m[0] / legacy v1" (fall back to latest
+        // boundary). Falling back to the latest boundary in the null case
+        // reintroduces exactly the history loss the fix exists to prevent.
+        const projectDirectory = makeProjectDir();
+
+        // Materialize m[0]/m[1] with ZERO compartments → persisted baseline
+        // boundary is null (lastCompartmentBoundaryId([]) === null).
+        runProductionFlow({
+            projectDirectory,
+            isCacheBustingPass: true,
+            messages: makeMessages(6),
+        });
+
+        // First compartment C publishes (covers m1). Persisted cached_m1_bytes
+        // still predates C and the baseline boundary is still null.
+        appendCompartments(db, SESSION_ID, [compartment(1, "C", "Charlie first-ever")]);
+
+        // RESTART: cold in-memory cache.
+        clearInjectionCache(SESSION_ID);
+
+        // First post-restart DEFER pass.
+        const post = runProductionFlow({
+            projectDirectory,
+            isCacheBustingPass: false,
+            messages: makeMessages(6),
+        });
+
+        const cInSummary =
+            post.m1.includes("Charlie first-ever") || post.m0.includes("Charlie first-ever");
+        const cRawStillPresent = post.tailIds.includes("m1");
+
+        // Must not vanish: C's summary isn't in the stale m[1] yet, so its raw
+        // messages MUST remain in the tail (the null-boundary no-trim path).
+        expect(cInSummary).toBe(false);
+        expect(cRawStillPresent).toBe(true);
+    });
+
+    it("clearing the injection cache after an m[0]/m[1] failure routes the next defer pass to cold-rebuild (no history loss)", () => {
+        // Regression for the failure-path drain bug: a cache-busting pass trims
+        // the tail to the LATEST compartment and caches that NEW boundary, but if
+        // injectM0M1 then throws, the persisted m[1] still predates that
+        // compartment. WITHOUT clearing the in-memory injection cache, a later
+        // same-process DEFER pass reuses the cached new boundary and trims the
+        // compartment's raw messages while replaying the stale m[1] → silent loss.
+        // The fix clears the injection cache in the failure catch so the next
+        // defer pass cold-rebuilds and trims only to the persisted baseline.
+        const projectDirectory = makeProjectDir();
+
+        // Baseline: compartment A; materialize m[0]/m[1] with A → persisted
+        // baseline boundary = A's (m0), persisted m[1] = A.
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
+        runProductionFlow({
+            projectDirectory,
+            isCacheBustingPass: true,
+            messages: makeMessages(6),
+        });
+
+        // Compartment B publishes (covers m1).
+        appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo just-published")]);
+
+        // Simulate the failing cache-busting pass: prepareCompartmentInjection runs
+        // (trims to latest = B, caches boundary m1 IN MEMORY) but injectM0M1 throws
+        // — so persisted m[1] stays = A and the in-memory cache now holds boundary
+        // m1. We reproduce that by calling prepare directly without injectM0M1.
+        const failMsgs = makeMessages(6);
+        prepareCompartmentInjection(db, SESSION_ID, failMsgs, true, PROJECT_PATH);
+
+        // HAZARD (no clear): a defer pass reuses the cached m1 boundary → B's raw
+        // messages (m1) are trimmed out, and the stale m[1] (A) doesn't summarize B.
+        const hazard = runProductionFlow({
+            projectDirectory,
+            isCacheBustingPass: false,
+            messages: makeMessages(6),
+        });
+        expect(hazard.m1.includes("Bravo just-published")).toBe(false);
+        expect(hazard.tailIds.includes("m1")).toBe(false); // B lost without the fix
+
+        // FIX: clear the injection cache (what the failure catch now does), then
+        // the next defer pass cold-rebuilds and trims only to the persisted
+        // baseline (A's boundary) → B's raw messages are retained.
+        clearInjectionCache(SESSION_ID);
+        const fixed = runProductionFlow({
+            projectDirectory,
+            isCacheBustingPass: false,
+            messages: makeMessages(6),
+        });
+        expect(fixed.m1.includes("Bravo just-published")).toBe(false); // still not in stale m[1]
+        expect(fixed.tailIds.includes("m1")).toBe(true); // but raw retained → no loss
+    });
 });

@@ -622,6 +622,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// project memories into message[0]. Cross-harness coherent:
 		// memories shared with OpenCode show up here automatically.
 		injection: {
+			memoryEnabled: config.memory.enabled,
 			injectionBudgetTokens: config.memory.injection_budget_tokens,
 			temporalAwareness: config.temporal_awareness === true,
 			keyFilesEnabled: config.dreamer?.pin_key_files?.enabled ?? false,

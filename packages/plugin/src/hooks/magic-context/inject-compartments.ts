@@ -410,8 +410,27 @@ export function prepareCompartmentInjection(
     // fall back to the latest boundary.
     let trimEndMessageId = lastEndMessageId;
     if (!isCacheBusting) {
-        const persistedBaseline = readCachedBaselineEndMessageId(db, sessionId);
-        if (persistedBaseline) trimEndMessageId = persistedBaseline;
+        const baseline = readCachedBaselineState(db, sessionId);
+        if (baseline.hasCachedM0) {
+            // v2 cold defer rebuild (in-memory cache lost post-restart). Trim ONLY
+            // to what the replayed cached m[1] actually covers.
+            if (baseline.boundary) {
+                trimEndMessageId = baseline.boundary;
+            } else {
+                // hasCachedM0 but null boundary: m[0]/m[1] was materialized BEFORE
+                // any compartment boundary existed (the common new-session case — a
+                // fresh session materializes m[0] with 0 compartments, then the
+                // first historian publish lands, then a restart before the next
+                // exec pass). The cached m[1] summarizes NONE of the current
+                // compartments, so trimming to the latest boundary would drop a
+                // compartment's raw messages that live in neither m[0] nor m[1] →
+                // silent history loss. Suppress the trim entirely: keep all raw
+                // messages in the tail; the next exec pass folds them into m[1].
+                trimEndMessageId = "";
+            }
+        }
+        // else: legacy / never-materialized v1 session (no cached m[0]) → keep the
+        // latest-compartment boundary (the original v1 trim behavior).
     }
 
     if (trimEndMessageId.length === 0) {
@@ -465,19 +484,33 @@ export function prepareCompartmentInjection(
 }
 
 /**
- * Read the persisted m[1]-coverage boundary (the latest compartment end message
- * id as of the last materialize / soft-refresh). Returns null when unset
- * (legacy / never-materialized v1 sessions) so callers fall back to the live
- * latest-compartment boundary.
+ * Read the persisted m[0]/m[1] baseline state for the cold-rebuild trim decision:
+ *   - `hasCachedM0`: a v2 cached m[0] snapshot exists. Distinguishes a
+ *     materialized-but-boundaryless session (null boundary is meaningful → the
+ *     summary covers NO compartment, so do not trim) from a legacy /
+ *     never-materialized v1 session (no cache → fall back to latest boundary).
+ *   - `boundary`: the latest compartment end message id the cached m[1] covers,
+ *     or null when m[0] was materialized before any compartment boundary existed.
+ *
+ * `hasCachedM0` is the discriminator, NOT boundary-nullness: null boundary with a
+ * present cache is a legitimate state (a fresh session materializes m[0] with 0
+ * compartments), and treating it as "fall back to latest" reintroduced the very
+ * history-loss the cold-rebuild trim exists to prevent.
  */
-function readCachedBaselineEndMessageId(db: Database, sessionId: string): string | null {
+function readCachedBaselineState(
+    db: Database,
+    sessionId: string,
+): { hasCachedM0: boolean; boundary: string | null } {
     const row = db
         .prepare(
-            "SELECT cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+            "SELECT cached_m0_bytes AS m0, cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
         )
-        .get(sessionId) as { boundary: string | null } | undefined;
+        .get(sessionId) as { m0: unknown; boundary: string | null } | undefined;
     const boundary = row?.boundary;
-    return boundary && boundary.length > 0 ? boundary : null;
+    return {
+        hasCachedM0: row?.m0 != null,
+        boundary: boundary && boundary.length > 0 ? boundary : null,
+    };
 }
 
 export function renderCompartmentInjection(

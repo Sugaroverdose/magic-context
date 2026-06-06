@@ -662,6 +662,9 @@ export interface PiHeuristicsOptions {
 
 /** <session-history> injection config — writes compartments+facts+memories into message[0]. */
 export interface PiInjectionOptions {
+	/** When false (config `memory.enabled=false`), project memories are NOT read
+	 *  or rendered into m[0]/m[1]. Docs + key-files still render. */
+	memoryEnabled?: boolean;
 	injectionBudgetTokens: number;
 	temporalAwareness?: boolean;
 	keyFilesEnabled?: boolean;
@@ -1783,17 +1786,18 @@ export function registerPiContextHandler(
 			}
 
 			schedulerDecision = midTurnAdjustedSchedulerDecision;
-			const deferredExecutePending = peekDeferredExecutePending(
-				options.db,
-				sessionId,
-			);
-			if (
-				deferredExecutePending !== null &&
-				schedulerDecision === "defer" &&
-				!midTurn
-			) {
-				schedulerDecision = "execute";
-			}
+			// NOTE: do NOT promote defer→execute when a deferred-execute flag
+			// exists. OpenCode treats the flag as drain-on-success ONLY (it never
+			// re-raises execute) — see transform-postprocess-phase.ts boundary-exec
+			// drain + boundary-execution-integration.test.ts case 4 ("boundary defer
+			// with prior flag preserves the flag"). The scheduler is idempotent:
+			// shouldExecute re-returns "execute" on the next non-mid-turn pass while
+			// pressure still holds, so the deferred execute fires naturally without a
+			// Pi-only override. Promoting here diverged from OpenCode in exactly the
+			// case where pressure dropped below threshold after the mid-turn defer:
+			// OpenCode correctly defers (byte-stable) while Pi force-executed a
+			// spurious cache-busting pass. The flag is drained on the next pass that
+			// genuinely executes (peek+clear at the end of runPipeline).
 			sessionLog(
 				sessionId,
 				`[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
@@ -1909,6 +1913,7 @@ export function registerPiContextHandler(
 				injection: options.injection
 					? {
 							...options.injection,
+							memoryEnabled: options.injection.memoryEnabled,
 							// v2 decay rendering needs the HISTORY budget (~60K), not the
 							// memory injection budget (~4K). Compute it from live usage +
 							// historian config, mirroring OpenCode's decayPressure budget.
@@ -2760,6 +2765,9 @@ interface RunPipelineArgs {
 	};
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
 	injection?: {
+		/** When false (config `memory.enabled=false`), project memories are NOT
+		 *  read or rendered into m[0]/m[1]. Docs + key-files still render. */
+		memoryEnabled?: boolean;
 		injectionBudgetTokens: number;
 		/** v2 decay-render history budget (~60K), distinct from the memory
 		 *  injection budget. Drives compartment tier demotion in renderM0Pi. */
@@ -3049,14 +3057,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.sessionId,
 	);
 	const deferredHistoryRefreshWasPending = deferredHistoryWasPendingAtPassStart;
-	const deferredExecuteWasPending =
-		peekDeferredExecutePending(args.db, args.sessionId) !== null;
 	const pendingOps = getPendingOps(args.db, args.sessionId);
+	// The deferred-execute flag is drain-on-success ONLY — it must NOT appear
+	// here. OpenCode never gates work on the flag (peekDeferredExecutePending is
+	// read solely by the drain in transform-postprocess-phase.ts); the idempotent
+	// scheduler re-returns "execute" on the next non-mid-turn pass (pressure ≥
+	// threshold or TTL elapsed) and THAT drives the deferred execute. Including
+	// the flag here made Pi apply pending ops on a defer pass purely because the
+	// flag existed — a cache-busting half-execute (ops without heuristics) on a
+	// pass OpenCode keeps byte-stable. The flag is drained below on the next pass
+	// that genuinely executes.
 	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
-		hasPendingMaterializeSignal ||
-		deferredExecuteWasPending;
+		hasPendingMaterializeSignal;
 	const canConsumeDeferredLate =
 		baseShouldApplyPendingOps || shouldRunHeuristics;
 	const deferredMaterialize =
@@ -3068,13 +3082,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (shouldApplyPendingOps) {
 		const applyReason = hasPendingMaterializeSignal
 			? "explicit_flush"
-			: deferredExecuteWasPending
-				? "deferred_boundary_execute"
-				: deferredMaterialize
-					? "deferred_publication"
-					: args.forceMaterialization
-						? "force_materialization"
-						: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+			: deferredMaterialize
+				? "deferred_publication"
+				: args.forceMaterialization
+					? "force_materialization"
+					: `scheduler_execute (scheduler=${args.schedulerDecision})`;
 		sessionLog(
 			args.sessionId,
 			`pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
@@ -3484,6 +3496,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					sessionId: args.sessionId,
 					projectIdentity: args.projectIdentity,
 					projectDirectory: args.projectDirectory,
+					memoryEnabled: args.injection.memoryEnabled,
 					injectionBudgetTokens: args.injection.injectionBudgetTokens,
 					historyBudgetTokens: args.injection.historyBudgetTokens,
 					keyFilesEnabled: args.injection.keyFilesEnabled,

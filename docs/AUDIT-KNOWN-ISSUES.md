@@ -480,16 +480,14 @@ boundary is the runtime gate, which is correct.
 > `getSessionFacts` as "dead" — the render-path retirement and the staging-carry
 > reader are separate facts.
 
-### A30. Pi `upgrade_state` m[0] marker is a static constant (inert, not a missed refold)
+### A30. Pi `upgrade_state` m[0] marker is dynamic (parity with OpenCode) — superseded
 
-`inject-compartments-pi.ts` pins `PI_M0_UPGRADE_STATE = "pi-m0m1-v2"` while
-OpenCode's `mustMaterialize` reads a dynamic `getUpgradeState(db, sessionId)`.
-Auditors flag that a Pi `/ctx-session-upgrade` therefore won't refold m[0] via
-the `renderer_upgrade` trigger. **Verified inert, not a bug:** Pi's upgrade path
-calls the SHARED `executeContextRecompWithResult` → `compartment-runner-recomp`,
-which runs `clearCachedM0M1(db)` (+ `appendM0Mutation`). The cleared cache makes
-Pi's very next pass return `first_render` (HARD refold) regardless of the static
-`upgrade_state` — so the marker never needs to fire. Making it dynamic would be a
-no-op. Documented in PARITY.md; the static const is internally consistent
-(stored == current always, so it never falsely triggers and never misses a real
-transition because the cache-clear already forces the refold).
+**Superseded — no longer a divergence.** Earlier this entry described Pi pinning
+`PI_M0_UPGRADE_STATE` to a static constant while OpenCode used a dynamic
+`getUpgradeState`. Pi's marker is now **dynamic**: `inject-compartments-pi.ts`
+computes `${PI_M0_UPGRADE_STATE}:${legacy|ready}` from the presence of legacy
+compartments and the materialize stale-check compares it
+(`current.upgradeState !== snapshotMarkers.upgradeState`), so a session crossing
+from legacy → upgraded HARD-refolds m[0] via the marker — matching OpenCode. (The
+shared `clearCachedM0M1` cache-clear in the upgrade path is still a belt-and-
+suspenders backstop.) See PARITY.md §12, now also marked parity.

@@ -476,6 +476,12 @@ export interface PiM0M1State {
 	sessionId: string;
 	projectIdentity: string;
 	projectDirectory: string;
+	/** When false, project memories are NOT read or rendered into m[0]/m[1]
+	 *  (config `memory.enabled=false`). Mirrors OpenCode, which passes
+	 *  `projectPath: undefined` in that case so every memory read short-circuits.
+	 *  Docs + key-files still render (they key off projectDirectory, not memory).
+	 *  Unset/true keeps memory on. */
+	memoryEnabled?: boolean;
 	/** Memory-block trim budget (~4K). Bounds the <project-memory> block. */
 	injectionBudgetTokens?: number;
 	/** v2 decay-render history budget (~60K). Drives compartment tier demotion.
@@ -489,6 +495,16 @@ export interface PiM0M1State {
 	userProfileBudgetTokens?: number;
 	/** Provider-side cache-eviction signals for HARD-bust detection. */
 	hardSignals?: PiM0HardSignals;
+}
+
+/**
+ * The project path used for MEMORY reads only. Returns undefined when
+ * `memory.enabled=false`, so every memory read short-circuits to its empty
+ * value (mirrors OpenCode passing `projectPath: undefined`). Docs + key-files
+ * use `projectDirectory` directly and are unaffected.
+ */
+function memoryProjectPath(state: PiM0M1State): string | undefined {
+	return state.memoryEnabled === false ? undefined : state.projectIdentity;
 }
 
 export interface PiM0SnapshotMarkers {
@@ -703,11 +719,11 @@ function readCurrentMarkersFromCompartments(
 	compartments: readonly PiCompartment[],
 	projectDocsHash?: string,
 ): PiM0SnapshotMarkers {
-	const memories = getMemoriesByProject(db, state.projectIdentity, [
-		"active",
-		"permanent",
-	]);
-	const projectState = getProjectState(db, state.projectIdentity);
+	const memPath = memoryProjectPath(state);
+	const memories = memPath
+		? getMemoriesByProject(db, memPath, ["active", "permanent"])
+		: [];
+	const projectState = memPath ? getProjectState(db, memPath) : undefined;
 	const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 	return {
 		// reduce, not Math.max(...spread): a project with very many
@@ -730,7 +746,9 @@ function readCurrentMarkersFromCompartments(
 					)
 				: 0,
 		maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
-		maxMemoryMutationId: getMaxMemoryMutationId(db, state.projectIdentity) ?? 0,
+		maxMemoryMutationId: memPath
+			? (getMaxMemoryMutationId(db, memPath) ?? 0)
+			: 0,
 		projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
 		projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 		projectDocsHash:
@@ -876,9 +894,10 @@ export function renderM0Pi(
 	compartmentsOverride?: PiCompartment[],
 	userProfileOverride?: UserMemory[],
 ): string {
+	const memPath = memoryProjectPath(state);
 	const allMemories =
 		memoriesOverride ??
-		getMemoriesByProject(db, state.projectIdentity, ["active", "permanent"]);
+		(memPath ? getMemoriesByProject(db, memPath, ["active", "permanent"]) : []);
 	// Use the V2 trim + render helpers (shared with OpenCode) so both harnesses
 	// emit the SAME structured <project-memory><memory id= category= importance=>
 	// shape and the same permanent-first / importance-DESC ordering. A divergent
@@ -995,16 +1014,14 @@ function readFrozenM0InputsPi(
 	// transaction. Rendering happens later, but m[0] bytes and m[1] watermarks now
 	// share the same frozen compartments/memories/user-profile set; a concurrent
 	// writer cannot make m[0] include rows that m[1] still considers "new".
+	const memPath = memoryProjectPath(state);
 	const read = db.transaction(() => {
 		const compartments = getCompartments(db, state.sessionId);
-		const memories = getMemoriesByProject(
-			db,
-			state.projectIdentity,
-			["active", "permanent"],
-			memoryCutoff,
-		);
+		const memories = memPath
+			? getMemoriesByProject(db, memPath, ["active", "permanent"], memoryCutoff)
+			: [];
 		const userProfile = safeGetActiveUserMemoriesPi(db);
-		const projectState = getProjectState(db, state.projectIdentity);
+		const projectState = memPath ? getProjectState(db, memPath) : undefined;
 		const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 		const markers: PiM0SnapshotMarkers = {
 			maxCompartmentSeq: compartments.reduce(
@@ -1017,8 +1034,9 @@ function readFrozenM0InputsPi(
 				0,
 			),
 			maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
-			maxMemoryMutationId:
-				getMaxMemoryMutationId(db, state.projectIdentity) ?? 0,
+			maxMemoryMutationId: memPath
+				? (getMaxMemoryMutationId(db, memPath) ?? 0)
+				: 0,
 			projectMemoryEpoch: projectState?.projectMemoryEpoch ?? 0,
 			projectUserProfileVersion: globalState?.projectUserProfileVersion ?? 0,
 			projectDocsHash: docs.canonicalHash,
@@ -1370,22 +1388,32 @@ function renderM1PiWithMetadata(
 	markers: PiM0SnapshotMarkers,
 	renderedMemoryIds: readonly number[],
 	preRenderedKeyFilesBlock?: string | null,
+	// The compartment set the CALLER will use to advance the persisted trim
+	// boundary. When provided, the new-compartments filter renders from this
+	// exact set instead of a fresh live read — so a compartment can never be
+	// rendered into m[1] while the boundary advances from a different (older)
+	// snapshot, which would leave its raw messages in the tail too (duplication).
+	// Omitted by callers that don't advance the boundary (e.g. renderM1Pi probe).
+	compartmentsOverride?: readonly PiCompartment[],
 ): RenderM1PiResult {
 	const sections: string[] = [];
 	const keyFiles = renderedKeyFilesBlockPi(state, db, preRenderedKeyFilesBlock);
 	if (keyFiles) sections.push(keyFiles);
 
-	const memoryUpdates = renderMemoryUpdatesBlockPi({
-		db,
-		projectPath: state.projectIdentity,
-		afterId: markers.maxMemoryMutationId,
-		renderedMemoryIds,
-	});
+	const memPath = memoryProjectPath(state);
+	const memoryUpdates = memPath
+		? renderMemoryUpdatesBlockPi({
+				db,
+				projectPath: memPath,
+				afterId: markers.maxMemoryMutationId,
+				renderedMemoryIds,
+			})
+		: { block: undefined as string | undefined, count: 0 };
 	if (memoryUpdates.block) sections.push(memoryUpdates.block);
 
-	const newCompartments = getCompartments(db, state.sessionId).filter(
-		(compartment) => compartment.sequence > markers.maxCompartmentSeq,
-	);
+	const newCompartments = (
+		compartmentsOverride ?? getCompartments(db, state.sessionId)
+	).filter((compartment) => compartment.sequence > markers.maxCompartmentSeq);
 	if (newCompartments.length > 0) {
 		// New compartments are newest deltas → always render at P1 (full fidelity).
 		const body = newCompartments
@@ -1394,15 +1422,18 @@ function renderM1PiWithMetadata(
 		sections.push(`<new-compartments>\n${body}\n</new-compartments>`);
 	}
 
-	const newMemories = getMemoriesByProject(
-		db,
-		state.projectIdentity,
-		["active", "permanent"],
-		// Freeze expiry to the m[0] materialization timestamp (parity with
-		// OpenCode readNewMemoriesForM1): defer passes replay the same markers, so
-		// a memory crossing expires_at between passes can't silently shift m[1].
-		markers.materializedAt,
-	).filter((memory) => memory.id > markers.maxMemoryId);
+	const newMemories = memPath
+		? getMemoriesByProject(
+				db,
+				memPath,
+				["active", "permanent"],
+				// Freeze expiry to the m[0] materialization timestamp (parity with
+				// OpenCode readNewMemoriesForM1): defer passes replay the same markers,
+				// so a memory crossing expires_at between passes can't silently shift
+				// m[1].
+				markers.materializedAt,
+			).filter((memory) => memory.id > markers.maxMemoryId)
+		: [];
 	if (newMemories.length > 0) {
 		// Trim to 25% of the memory budget and V2-render with the "new-memories"
 		// wrapper — same helper, shape, AND budget cap OpenCode's renderM1 uses.
@@ -1725,6 +1756,10 @@ function softRefreshCachedM1Pi(args: {
 			markers,
 			parseMemoryBlockIds(row.memory_block_ids),
 			preRenderedKeyFilesBlock,
+			// Render new compartments from the SAME snapshot the boundary advances
+			// from below, so a concurrent sibling publish can't put a compartment
+			// in m[1] while its raw messages stay in the tail.
+			args.compartmentsForNormalization,
 		);
 		const m1Bytes = Buffer.from(rendered.text, "utf8");
 		// Advance the persisted trim boundary to the latest compartment now rendered
@@ -1993,10 +2028,12 @@ export function injectM0M1Pi(
 		injected: true,
 		compartmentCount: getCompartments(db, state.sessionId).length,
 		factCount: 0, // v2: facts retired as a render source (facts = promoted memories)
-		memoryCount: getMemoriesByProject(db, state.projectIdentity, [
-			"active",
-			"permanent",
-		]).length,
+		memoryCount: memoryProjectPath(state)
+			? getMemoriesByProject(db, memoryProjectPath(state) as string, [
+					"active",
+					"permanent",
+				]).length
+			: 0,
 		skippedVisibleMessages,
 		m0Materialized: materialized,
 		m0Reason: decision.reason,

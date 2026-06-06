@@ -486,15 +486,23 @@ function casUpdateJsonArrayColumn<T>(
         const row = db
             .prepare(`SELECT ${column} FROM session_meta WHERE session_id = ?`)
             .get(sessionId) as Record<string, string | null> | undefined;
-        const currentBlob = row?.[column] ?? "[]";
+        // Preserve the RAW stored value (may be SQL NULL on a legacy row written
+        // before the NOT-NULL default / v17 heal). The CAS predicate below uses
+        // `IS ?` so it matches NULL too — a `= ?` predicate with the coalesced
+        // "[]" would never match a genuinely-NULL row (`NULL = '[]'` is NULL in
+        // SQLite), making the CAS fail forever. Mirrors applyStrippedPlaceholderDelta.
+        const rawCurrent = (row?.[column] ?? null) as string | null;
+        const currentBlob = rawCurrent ?? "[]";
         const current = parseJsonArray(currentBlob, validator);
         const next = mutate(current);
         if (next === null) return true;
         const nextBlob = stableStringify(next);
         if (nextBlob === currentBlob) return true;
         const result = db
-            .prepare(`UPDATE session_meta SET ${column} = ? WHERE session_id = ? AND ${column} = ?`)
-            .run(nextBlob, sessionId, currentBlob);
+            .prepare(
+                `UPDATE session_meta SET ${column} = ? WHERE session_id = ? AND ${column} IS ?`,
+            )
+            .run(nextBlob, sessionId, rawCurrent);
         if (result.changes > 0) return true;
     }
     sessionLog(sessionId, `${column} CAS: ${CAS_RETRY_LIMIT} retries exhausted`);

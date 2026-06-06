@@ -232,21 +232,20 @@ Pi does NOT need the incremental watermark machinery because its source is the
 bounded wire array, not an ever-growing DB table. Do not "port" the OpenCode
 lazy/incremental path to Pi — it would be solving a cost Pi does not have.
 
-## 12. m[0] upgrade-state marker: Pi pins a constant, OpenCode is dynamic
+## 12. m[0] upgrade-state marker: both harnesses are dynamic (parity)
 
-OpenCode flips a per-session m[0] upgrade-state marker (`getUpgradeState`) when
-`/ctx-session-upgrade` rebuilds legacy → v2 compartments, which forces an m[0]
-refold so the upgraded content materializes. Pi pins the same marker to a
-constant (`PI_M0_UPGRADE_STATE = "pi-m0m1-v2"`).
+Both harnesses derive a per-session m[0] upgrade-state marker dynamically and use
+it as a HARD-bust trigger so an upgraded session re-materializes m[0]. OpenCode
+computes `getUpgradeState`; Pi computes `${PI_M0_UPGRADE_STATE}:${legacy|ready}`
+from the presence of legacy compartments at render time
+(`inject-compartments-pi.ts`), and the materialize stale-check compares it
+(`current.upgradeState !== snapshotMarkers.upgradeState`).
 
-This is **not a live bug**: OpenCode and Pi session IDs never collide, and each
-session's m[0] is produced by exactly one harness — so a Pi session never needs
-to react to an OpenCode upgrade-state transition (or vice versa). It is a latent
-divergence only: if Pi ever gains its own legacy→v2 `/ctx-session-upgrade` flow
-that must refold an already-cached m[0] mid-session, Pi would need a dynamic
-upgrade-state hook mirroring OpenCode's. Until then the constant is correct and
-cheaper. (Pi's detached recomp/upgrade — divergence #11b — already re-signals
-materialization through its own path, so today's upgrade flow is covered.)
+This is **parity**, not a divergence. (Earlier revisions of this doc described
+Pi's marker as a pinned constant — that is stale: Pi gained its own legacy→v2
+`/ctx-session-upgrade` flow and the marker was made dynamic to refold m[0] when a
+session crosses from legacy to upgraded. Pi's detached recomp/upgrade —
+divergence #11b — additionally re-signals materialization through its own path.)
 
 ---
 

@@ -32,6 +32,7 @@ import { getActiveCompartmentRun } from "./compartment-runner";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
+    clearInjectionCache,
     getVisibleMemoryIds,
     injectM0M1,
     type M0HardSignals,
@@ -582,6 +583,25 @@ export async function runPostTransformPhase(
                     );
                 }
             }
+            // History-loss guard: on a cache-busting pass,
+            // prepareCompartmentInjection (transform.ts) already trimmed the raw
+            // tail to the LATEST compartment AND cached that new boundary, and the
+            // explicit history-refresh signal was already drained. Since m[0]/m[1]
+            // injection just threw, the cached m[1] still reflects the PRE-failure
+            // compartment set. If we left the in-memory injection cache holding the
+            // new boundary, a later same-process DEFER pass would reuse it
+            // (isCacheBusting=false hits the cached path), trim the raw tail to the
+            // new boundary, and replay the stale m[1] — so a compartment published
+            // this turn would be summarized in NEITHER m[1] NOR the raw tail =
+            // silent history loss persisting past this pass. Clearing the cache
+            // forces the next defer pass through the cold-rebuild path, which trims
+            // only to the persisted baseline boundary the cached m[1] actually
+            // covers (keeping the new compartment's raw messages visible until a
+            // later exec pass folds them). We intentionally do NOT re-arm the
+            // refresh signal: a persistent injection failure would then bust the
+            // cache every pass; the scheduler's next natural execute pass retries
+            // materialization on its own.
+            clearInjectionCache(args.sessionId);
         }
         logTransformTiming(args.sessionId, "pp.injectM0M1", tInjectM0M1);
     } else if (args.fullFeatureMode && args.pendingCompartmentInjection) {

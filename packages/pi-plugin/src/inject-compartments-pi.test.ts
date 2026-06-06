@@ -260,6 +260,63 @@ function piState(sessionId: string, cwd: string) {
 	};
 }
 
+describe("injectM0M1Pi memory feature gate", () => {
+	it("does NOT render project memories into m[0]/m[1] when memoryEnabled=false", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-memgate-"));
+		try {
+			const base = piState("ses-pi-memgate", cwd);
+			// A compartment (history) MUST still render — only memory is gated.
+			appendCompartments(db, base.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "m0",
+					endMessageId: "m0",
+					title: "history",
+					content: "U: a turn\ncompartment body present",
+				},
+			]);
+			insertMemory(db, {
+				projectPath: base.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "SECRET project memory must not leak when disabled",
+				sourceType: "historian",
+			});
+
+			// memoryEnabled=false → memory suppressed, compartments retained.
+			const disabledState = { ...base, memoryEnabled: false };
+			const off = [userMessage("hello", 10)];
+			injectM0M1Pi(disabledState, db, off as never, undefined, true);
+			const offM0 = textOf(off[0] as never);
+			expect(offM0).not.toContain("SECRET project memory");
+			expect(offM0).not.toContain("<project-memory");
+			expect(offM0).toContain("compartment body present");
+
+			// Control: a fresh session with memoryEnabled left on DOES render it,
+			// proving the gate (not some other filter) is responsible.
+			const onState = piState("ses-pi-memgate-on", cwd);
+			appendCompartments(db, onState.sessionId, [
+				{
+					sequence: 1,
+					startMessage: 1,
+					endMessage: 1,
+					startMessageId: "m0",
+					endMessageId: "m0",
+					title: "history",
+					content: "U: a turn\ncompartment body present",
+				},
+			]);
+			const on = [userMessage("hello", 10)];
+			injectM0M1Pi(onState, db, on as never, undefined, true);
+			expect(textOf(on[0] as never)).toContain("SECRET project memory");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});
+
 describe("injectM0M1Pi", () => {
 	it("renders first-pass m[0] with no inner content and m[1] placeholder", () => {
 		const db = createTestDb();
