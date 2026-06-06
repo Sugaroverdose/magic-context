@@ -4,8 +4,6 @@ import type { Database } from "../../../shared/sqlite";
 export interface FileReadStat {
     filePath: string;
     fullReadCount: number;
-    /** Number of distinct compartment ranges the reads span across */
-    spreadAcrossCompartments: number;
     /** Number of times the file was edited (write/edit tool) in this session */
     editCount: number;
     /** Byte size of the most recent full read output */
@@ -101,7 +99,6 @@ export function getSessionReadStats(
     return fullReads.map((row) => ({
         filePath: row.file_path,
         fullReadCount: row.full_read_count,
-        spreadAcrossCompartments: 0, // TODO: compute from compartment boundaries if needed
         editCount: editCounts.get(row.file_path) ?? 0,
         latestReadBytes: row.latest_read_bytes ?? 0,
         // Real Claude tokenizer over the actual read-output text (the read

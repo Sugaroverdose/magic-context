@@ -353,12 +353,7 @@ export function createMagicContextCommandHandler(deps: {
     onFlush?: (sessionId: string) => void;
     /** Runs /ctx-recomp. When `range` is provided, runs partial recomp over
      *  that range (snapped to enclosing compartment boundaries). When omitted,
-     *  runs full recomp from message 1 to the protected tail.
-     *
-     *  TODO(worker-f): once bumpSessionFactsVersion is exported, the underlying
-     *  recomp publish path must call it in the same transaction that replaces
-     *  session_facts. Command parsing stays here; fact writes happen in the
-     *  runner/storage layer. */
+     *  runs full recomp from message 1 to the protected tail. */
     executeRecomp?: (
         sessionId: string,
         options?: { range?: PartialRecompRange },
