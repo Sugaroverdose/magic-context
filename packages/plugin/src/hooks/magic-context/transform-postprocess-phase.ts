@@ -1,4 +1,5 @@
 import {
+    addStaleReduceStrippedIds,
     applyStrippedPlaceholderDelta,
     type ContextDatabase,
     clearDeferredExecutePendingIfMatches,
@@ -12,6 +13,7 @@ import {
     getPendingOps,
     getPersistedStickyTurnReminder,
     getPersistedTodoSyntheticAnchor,
+    getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
     getTopNBySize,
     peekDeferredExecutePending,
@@ -511,21 +513,32 @@ export async function runPostTransformPhase(
         args.nudgePlacements.clear(args.sessionId);
     }
 
-    // Stale ctx_reduce drop is a REPLAY-class transform: it must run on EVERY
-    // pass (like reasoning-clearing replay), not only execute/heuristics passes.
-    // It is a pure, deterministic, DB-free sentinel rewrite keyed on
-    // `messages.length - protectedTags` (isSentinel-guarded, so re-running is a
-    // no-op). When it was gated to heuristics passes, an execute pass sentinelled
-    // the aged ctx_reduce parts but the next DEFER pass (messages rebuilt fresh
-    // from source) left them intact → the defer wire diverged from the execute
-    // wire and busted the Anthropic prompt cache. Unlike Pi (which persists tag
-    // drops), OpenCode keeps the sentinel representation; running it every pass
-    // makes that representation byte-stable across execute↔defer without any DB
-    // write. No-op for sessions without ctx_reduce parts (ctx_reduce_enabled=false
-    // / subagents).
+    // Stale ctx_reduce strip is a REPLAY-class transform driven by a FROZEN,
+    // id-keyed watermark (`stale_reduce_stripped_ids`), mirroring reasoning /
+    // placeholder replay:
+    //   • REPLAY (every pass, incl. defer): sentinel-strip ctx_reduce parts in
+    //     messages whose id is already frozen — byte-identical regardless of how
+    //     the live array grew.
+    //   • DETECT (cache-busting passes only): additionally find aged ctx_reduce
+    //     calls past the protected window, strip them, and CAS-persist their ids
+    //     so future passes replay them.
+    // The earlier "run every pass with a live messages.length-protectedTags
+    // boundary" version busted the Anthropic cache: tail growth moved the
+    // boundary, so a DEFER pass newly stripped an older ctx_reduce call
+    // mid-prefix (empty sentinel filtered for Anthropic + dropped tool_result →
+    // adjacent assistants merge → the message vanishes and the array shifts).
+    // Freezing the id set on bust passes and replaying it everywhere removes the
+    // moving boundary entirely. No-op for sessions without ctx_reduce parts.
     try {
         const t8 = performance.now();
-        dropStaleReduceCalls(args.messages, args.protectedTags);
+        const frozenStaleReduceIds = getStaleReduceStrippedIds(args.db, args.sessionId);
+        const staleReduceResult = dropStaleReduceCalls(args.messages, frozenStaleReduceIds, {
+            detect: isCacheBustingPass,
+            protectedCount: args.protectedTags,
+        });
+        if (isCacheBustingPass && staleReduceResult.newlyStrippedIds.length > 0) {
+            addStaleReduceStrippedIds(args.db, args.sessionId, staleReduceResult.newlyStrippedIds);
+        }
         logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
     } catch (error) {
         sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);

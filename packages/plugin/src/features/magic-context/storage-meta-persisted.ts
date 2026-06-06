@@ -1102,6 +1102,66 @@ export function removeStrippedPlaceholderId(
     return true;
 }
 
+// ── Stale ctx_reduce stripped message IDs (frozen replay watermark) ──
+
+/**
+ * Message ids whose ctx_reduce parts have been sentinel-stripped because they
+ * aged past the protected window. This set is the FROZEN replay watermark for
+ * `dropStaleReduceCalls`: it advances ONLY on cache-busting passes (where the
+ * wire is allowed to change) and is replayed verbatim on every pass. Replaying
+ * a frozen id set — instead of recomputing a live `messages.length - protected`
+ * boundary every pass — is what keeps defer passes byte-identical: tail growth
+ * can never push an older ctx_reduce call past a moving boundary and strip it
+ * mid-prefix on a defer pass (which busts the Anthropic prompt cache).
+ */
+export function getStaleReduceStrippedIds(db: Database, sessionId: string): Set<string> {
+    const row = db
+        .prepare("SELECT stale_reduce_stripped_ids FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { stale_reduce_stripped_ids?: string } | null;
+    return new Set(parseStrippedBlob(row?.stale_reduce_stripped_ids));
+}
+
+/**
+ * CAS-merge new aged ctx_reduce message ids into the frozen set, retrying on a
+ * concurrent write so sibling processes sharing the session DB merge instead of
+ * clobbering. Returns true when the set ended in the intended state (incl.
+ * no-op), false only when retries were exhausted.
+ */
+export function addStaleReduceStrippedIds(
+    db: Database,
+    sessionId: string,
+    ids: Iterable<string>,
+): boolean {
+    const add = [...ids];
+    if (add.length === 0) return true;
+    ensureSessionMetaRow(db, sessionId);
+
+    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
+        const row = db
+            .prepare("SELECT stale_reduce_stripped_ids FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { stale_reduce_stripped_ids?: string | null } | undefined;
+        const rawStored = row ? (row.stale_reduce_stripped_ids ?? null) : null;
+        const current = new Set<string>(parseStrippedBlob(rawStored));
+        let changed = false;
+        for (const id of add) {
+            if (!current.has(id)) {
+                current.add(id);
+                changed = true;
+            }
+        }
+        if (!changed) return true;
+        const nextBlob = JSON.stringify([...current]);
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET stale_reduce_stripped_ids = ? WHERE session_id = ? AND stale_reduce_stripped_ids IS ?",
+            )
+            .run(nextBlob, sessionId, rawStored);
+        if (result.changes > 0) return true;
+    }
+    sessionLog(sessionId, `stale_reduce_stripped_ids CAS: ${CAS_RETRY_LIMIT} retries exhausted`);
+    return false;
+}
+
 // ── Pending compaction marker state (plan v6 deferred drain) ──
 
 /**

@@ -4,8 +4,9 @@ import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { isSentinel } from "./sentinel";
 import type { MessageLike } from "./tag-messages";
 
-function makeMessage(role: string, parts: unknown[]): MessageLike {
-    return { info: { role }, parts };
+let idCounter = 0;
+function makeMessage(role: string, parts: unknown[], id?: string): MessageLike {
+    return { info: { role, id: id ?? `msg-${idCounter++}` }, parts };
 }
 
 function makeToolPart(toolName: string, output: string, callId = "call-1") {
@@ -16,26 +17,33 @@ function makeTextPart(text: string) {
     return { type: "text", text };
 }
 
-describe("dropStaleReduceCalls (sentinel-based)", () => {
-    describe("#given messages with ctx_reduce tool results", () => {
-        describe("#when dropping stale calls", () => {
-            it("#then sentinels ctx_reduce parts but preserves messages.length", () => {
+const NO_FROZEN = new Set<string>();
+
+describe("dropStaleReduceCalls (frozen-set replay)", () => {
+    describe("#given a detect pass over aged ctx_reduce messages", () => {
+        describe("#when detect=true and the call is past the protected window", () => {
+            it("#then sentinels the ctx_reduce part, preserves length, and reports the id", () => {
                 //#given
+                const reduceMsg = makeMessage(
+                    "tool",
+                    [makeToolPart("ctx_reduce", "Queued: drop §1§")],
+                    "reduce-1",
+                );
                 const messages = [
                     makeMessage("user", [makeTextPart("hello")]),
                     makeMessage("assistant", [makeTextPart("thinking...")]),
-                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §1§")]),
+                    reduceMsg,
                     makeMessage("user", [makeTextPart("continue")]),
                 ];
 
-                //#when
-                const didDrop = dropStaleReduceCalls(messages);
+                //#when — detect on a cache-busting pass
+                const result = dropStaleReduceCalls(messages, NO_FROZEN, { detect: true });
 
                 //#then
-                expect(didDrop).toBe(true);
+                expect(result.didDrop).toBe(true);
+                expect(result.newlyStrippedIds).toEqual(["reduce-1"]);
                 // Array length preserved — proxy cache stability invariant
                 expect(messages).toHaveLength(4);
-                // Non-sentinel messages unchanged
                 expect(messages[0].parts[0]).toEqual(makeTextPart("hello"));
                 expect(messages[1].parts[0]).toEqual(makeTextPart("thinking..."));
                 expect(messages[3].parts[0]).toEqual(makeTextPart("continue"));
@@ -46,22 +54,22 @@ describe("dropStaleReduceCalls (sentinel-based)", () => {
         });
     });
 
-    describe("#given messages with non-reduce tool results", () => {
-        describe("#when dropping stale calls", () => {
-            it("#then leaves other tool results untouched", () => {
+    describe("#given non-reduce tool results", () => {
+        describe("#when detect=true", () => {
+            it("#then leaves other tool results untouched and reports nothing", () => {
                 //#given
                 const messages = [
-                    makeMessage("tool", [makeToolPart("grep", "found 3 matches")]),
-                    makeMessage("tool", [makeToolPart("bash", "exit code 0")]),
+                    makeMessage("tool", [makeToolPart("grep", "found 3 matches")], "g1"),
+                    makeMessage("tool", [makeToolPart("bash", "exit code 0")], "b1"),
                 ];
 
                 //#when
-                const didDrop = dropStaleReduceCalls(messages);
+                const result = dropStaleReduceCalls(messages, NO_FROZEN, { detect: true });
 
                 //#then
-                expect(didDrop).toBe(false);
+                expect(result.didDrop).toBe(false);
+                expect(result.newlyStrippedIds).toEqual([]);
                 expect(messages).toHaveLength(2);
-                // Parts unchanged
                 expect((messages[0].parts[0] as { tool: string }).tool).toBe("grep");
                 expect((messages[1].parts[0] as { tool: string }).tool).toBe("bash");
             });
@@ -69,105 +77,221 @@ describe("dropStaleReduceCalls (sentinel-based)", () => {
     });
 
     describe("#given no messages", () => {
-        describe("#when dropping stale calls", () => {
-            it("#then returns false", () => {
-                const messages: MessageLike[] = [];
-                expect(dropStaleReduceCalls(messages)).toBe(false);
+        describe("#when detecting", () => {
+            it("#then returns a clean empty result", () => {
+                const result = dropStaleReduceCalls([], NO_FROZEN, { detect: true });
+                expect(result.didDrop).toBe(false);
+                expect(result.newlyStrippedIds).toEqual([]);
             });
         });
     });
 
-    describe("#given message with mixed tool parts including ctx_reduce", () => {
+    describe("#given a message with mixed tool parts including ctx_reduce", () => {
         describe("#when one part is ctx_reduce and another is a different tool", () => {
             it("#then sentinels only the ctx_reduce part and preserves parts.length", () => {
                 //#given
                 const messages = [
-                    makeMessage("tool", [
-                        makeToolPart("bash", "exit code 0", "call-a"),
-                        makeToolPart("ctx_reduce", "Queued: drop §5§", "call-b"),
-                    ]),
+                    makeMessage(
+                        "tool",
+                        [
+                            makeToolPart("bash", "exit code 0", "call-a"),
+                            makeToolPart("ctx_reduce", "Queued: drop §5§", "call-b"),
+                        ],
+                        "mixed-1",
+                    ),
                 ];
 
                 //#when
-                const didDrop = dropStaleReduceCalls(messages);
+                const result = dropStaleReduceCalls(messages, NO_FROZEN, { detect: true });
 
                 //#then
-                expect(didDrop).toBe(true);
-                expect(messages).toHaveLength(1);
-                // Parts length preserved
+                expect(result.didDrop).toBe(true);
+                expect(result.newlyStrippedIds).toEqual(["mixed-1"]);
                 expect(messages[0].parts).toHaveLength(2);
-                // First part untouched
                 expect((messages[0].parts[0] as { tool: string }).tool).toBe("bash");
-                // Second part is now a sentinel
                 expect(isSentinel(messages[0].parts[1])).toBe(true);
             });
         });
     });
 
-    describe("#given messages within protected range", () => {
-        describe("#when protectedCount covers the reduce call", () => {
-            it("#then skips protected messages and keeps their reduce calls", () => {
+    describe("#given messages within the protected range on a detect pass", () => {
+        describe("#when protectedCount covers the recent reduce call", () => {
+            it("#then detects only the aged call, never the protected one", () => {
                 //#given
                 const messages = [
-                    makeMessage("user", [makeTextPart("old message")]),
-                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §1§")]),
-                    makeMessage("user", [makeTextPart("recent message")]),
-                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §5§")]),
+                    makeMessage("user", [makeTextPart("old message")], "u-old"),
+                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §1§")], "r-old"),
+                    makeMessage("user", [makeTextPart("recent message")], "u-new"),
+                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §5§")], "r-new"),
                 ];
 
                 //#when — protect last 2 messages
-                const didDrop = dropStaleReduceCalls(messages, 2);
+                const result = dropStaleReduceCalls(messages, NO_FROZEN, {
+                    detect: true,
+                    protectedCount: 2,
+                });
 
-                //#then — only the old reduce call (index 1) is sentineled
-                expect(didDrop).toBe(true);
-                expect(messages).toHaveLength(4);
-                expect(messages[0].parts[0]).toEqual(makeTextPart("old message"));
-                // Index 1 is the neutralized reduce — single-sentinel shell
+                //#then — only the old reduce call (index 1) is detected + sentineled
+                expect(result.didDrop).toBe(true);
+                expect(result.newlyStrippedIds).toEqual(["r-old"]);
                 expect(messages[1].parts).toHaveLength(1);
                 expect(isSentinel(messages[1].parts[0])).toBe(true);
-                expect(messages[2].parts[0]).toEqual(makeTextPart("recent message"));
-                // Protected reduce call stays untouched
+                // Protected reduce call stays a real tool_use
                 expect((messages[3].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
             });
         });
     });
 
-    describe("#given all messages within protected range", () => {
-        describe("#when protectedCount covers everything", () => {
-            it("#then drops nothing", () => {
-                //#given
+    // ── The cache-bust regression: frozen replay vs. moving boundary ──
+
+    describe("#given a ctx_reduce call frozen on a prior cache-busting pass", () => {
+        describe("#when a later DEFER pass replays with tail growth (detect=false)", () => {
+            it("#then re-strips the SAME frozen id and never newly strips a grown-past call", () => {
+                //#given — pass 1 (cache-busting): reduce-1 aged past protection, detected+frozen.
+                // The conversation has since grown so reduce-2, previously protected, now sits
+                // outside a live `messages.length - protectedCount` window.
+                const reduce1 = makeMessage(
+                    "tool",
+                    [makeToolPart("ctx_reduce", "Queued: drop §1§")],
+                    "reduce-1",
+                );
+                const reduce2 = makeMessage(
+                    "tool",
+                    [makeToolPart("ctx_reduce", "Queued: drop §9§")],
+                    "reduce-2",
+                );
                 const messages = [
-                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §1§")]),
-                    makeMessage("user", [makeTextPart("hello")]),
+                    makeMessage("user", [makeTextPart("a")], "u-a"),
+                    reduce1,
+                    makeMessage("assistant", [makeTextPart("b")], "a-b"),
+                    reduce2,
+                    // tail grew by two turns since reduce-2 was protected
+                    makeMessage("user", [makeTextPart("c")], "u-c"),
+                    makeMessage("assistant", [makeTextPart("d")], "a-d"),
                 ];
+                const frozen = new Set<string>(["reduce-1"]);
 
-                //#when — protect all messages
-                const didDrop = dropStaleReduceCalls(messages, 10);
+                //#when — DEFER pass: detect MUST be false, only the frozen set replays
+                const result = dropStaleReduceCalls(messages, frozen, {
+                    detect: false,
+                    protectedCount: 2,
+                });
 
-                //#then
-                expect(didDrop).toBe(false);
-                expect(messages).toHaveLength(2);
-                // Parts unchanged
-                expect((messages[0].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
+                //#then — reduce-1 is re-stripped (frozen); reduce-2 is UNTOUCHED even though a
+                // live moving boundary would have stripped it → no mid-prefix defer-pass bust.
+                expect(result.didDrop).toBe(true);
+                expect(result.newlyStrippedIds).toEqual([]);
+                expect(messages[1].parts).toHaveLength(1);
+                expect(isSentinel(messages[1].parts[0])).toBe(true);
+                // reduce-2 still a real tool_use — the bug-free invariant
+                expect((messages[3].parts[0] as { tool: string }).tool).toBe("ctx_reduce");
             });
         });
     });
 
-    describe("#given a message that's already been sentineled on a prior pass", () => {
-        describe("#when the sentinel is in the sweep range", () => {
-            it("#then skips the sentinel idempotently", () => {
-                //#given — message[0] was already sentineled on a previous pass
+    describe("#given execute→defer replay", () => {
+        describe("#when the execute pass detects and the defer pass replays the frozen id", () => {
+            it("#then both passes produce the identical stripped shape", () => {
+                //#given
+                const buildMessages = () => [
+                    makeMessage("user", [makeTextPart("x")], "u-x"),
+                    makeMessage("tool", [makeToolPart("ctx_reduce", "Queued: drop §1§")], "r-1"),
+                    makeMessage("user", [makeTextPart("y")], "u-y"),
+                    makeMessage("user", [makeTextPart("z")], "u-z"),
+                ];
+
+                //#when — execute pass detects r-1
+                const executeMsgs = buildMessages();
+                const exec = dropStaleReduceCalls(executeMsgs, NO_FROZEN, {
+                    detect: true,
+                    protectedCount: 2,
+                });
+                // defer pass: caller has persisted the frozen id, detect=false
+                const frozen = new Set<string>(exec.newlyStrippedIds);
+                const deferMsgs = buildMessages();
+                const defer = dropStaleReduceCalls(deferMsgs, frozen, {
+                    detect: false,
+                    protectedCount: 2,
+                });
+
+                //#then — same id frozen, both produce a sentinel shell at index 1
+                expect(exec.newlyStrippedIds).toEqual(["r-1"]);
+                expect(exec.didDrop).toBe(true);
+                expect(defer.didDrop).toBe(true);
+                expect(defer.newlyStrippedIds).toEqual([]);
+                expect(isSentinel(executeMsgs[1].parts[0])).toBe(true);
+                expect(isSentinel(deferMsgs[1].parts[0])).toBe(true);
+                expect(executeMsgs[1].parts).toHaveLength(1);
+                expect(deferMsgs[1].parts).toHaveLength(1);
+            });
+        });
+    });
+
+    describe("#given a frozen id no longer present (compaction trimmed it)", () => {
+        describe("#when replaying on a defer pass", () => {
+            it("#then it is a safe no-op", () => {
+                //#given — frozen set references an id not in the current array
                 const messages = [
-                    makeMessage("tool", [{ type: "text", text: "" }]),
-                    makeMessage("user", [makeTextPart("hello")]),
+                    makeMessage("user", [makeTextPart("hello")], "u-1"),
+                    makeMessage("assistant", [makeTextPart("world")], "a-1"),
+                ];
+                const frozen = new Set<string>(["reduce-gone"]);
+
+                //#when
+                const result = dropStaleReduceCalls(messages, frozen, { detect: false });
+
+                //#then
+                expect(result.didDrop).toBe(false);
+                expect(result.newlyStrippedIds).toEqual([]);
+                expect(messages[0].parts[0]).toEqual(makeTextPart("hello"));
+                expect(messages[1].parts[0]).toEqual(makeTextPart("world"));
+            });
+        });
+    });
+
+    describe("#given a message without a stable info.id", () => {
+        describe("#when detect=true and it holds an aged ctx_reduce call", () => {
+            it("#then it is left intact (cannot be frozen for deterministic replay)", () => {
+                //#given
+                const noId: MessageLike = {
+                    info: { role: "tool" },
+                    parts: [makeToolPart("ctx_reduce", "Queued: drop §1§")],
+                };
+                const messages = [
+                    noId,
+                    makeMessage("user", [makeTextPart("a")], "u-a"),
+                    makeMessage("user", [makeTextPart("b")], "u-b"),
                 ];
 
                 //#when
-                const didDrop = dropStaleReduceCalls(messages);
+                const result = dropStaleReduceCalls(messages, NO_FROZEN, {
+                    detect: true,
+                    protectedCount: 1,
+                });
 
-                //#then — no new mutations, shape identical
-                expect(didDrop).toBe(false);
-                expect(messages).toHaveLength(2);
+                //#then — untouched, not reported
+                expect(result.didDrop).toBe(false);
+                expect(result.newlyStrippedIds).toEqual([]);
+                expect((noId.parts[0] as { tool: string }).tool).toBe("ctx_reduce");
+            });
+        });
+    });
+
+    describe("#given an already-sentineled message in the frozen set", () => {
+        describe("#when replayed again", () => {
+            it("#then it is idempotent (no new mutation)", () => {
+                //#given — message already a sentinel shell from a prior pass
+                const messages = [
+                    makeMessage("tool", [{ type: "text", text: "" }], "r-1"),
+                    makeMessage("user", [makeTextPart("hello")], "u-1"),
+                ];
+                const frozen = new Set<string>(["r-1"]);
+
+                //#when
+                const result = dropStaleReduceCalls(messages, frozen, { detect: false });
+
+                //#then
+                expect(result.didDrop).toBe(false);
                 expect(messages[0].parts).toHaveLength(1);
                 expect(isSentinel(messages[0].parts[0])).toBe(true);
             });

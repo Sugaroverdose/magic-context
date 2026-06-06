@@ -77,6 +77,7 @@ export {
 export {
     type AppendAutoSearchHintOutcome,
     type AutoSearchHintDecision,
+    addStaleReduceStrippedIds,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
     applyStrippedPlaceholderDelta,
@@ -112,6 +113,7 @@ export {
     getSessionsWithPendingMarker,
     getSessionsWithPendingPiMarker,
     getSessionWorkMetrics,
+    getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
     incrementHistorianFailure,
     loadPersistedUsage,

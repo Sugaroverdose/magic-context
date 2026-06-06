@@ -744,6 +744,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "system_prompt_hash", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "cleared_reasoning_through_tag", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "stripped_placeholder_ids", "TEXT DEFAULT ''");
+    // Frozen replay watermark for the stale-ctx_reduce strip: message ids whose
+    // ctx_reduce parts have aged past the protected window. The set only grows on
+    // cache-busting passes and is replayed verbatim on defer passes, so the strip
+    // never recomputes a volatile messages.length boundary that would silently
+    // strip newly-aged calls mid-prefix on a defer pass (Anthropic cache bust).
+    ensureColumn(db, "session_meta", "stale_reduce_stripped_ids", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "start_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "end_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
@@ -1022,6 +1028,7 @@ function healNullTextColumns(db: Database): void {
         ["todo_synthetic_state_json", ""],
         ["system_prompt_hash", ""],
         ["stripped_placeholder_ids", ""],
+        ["stale_reduce_stripped_ids", ""],
         ["memory_block_cache", ""],
         ["memory_block_ids", ""],
         ["compaction_marker_state", ""],
