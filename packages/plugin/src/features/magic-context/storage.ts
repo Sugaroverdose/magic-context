@@ -29,6 +29,7 @@ export {
     type ProjectIdentityErrorClass,
     resolveProjectIdentity,
     resolveProjectIdentityStrict,
+    storedPathBelongsToIdentity,
 } from "./project-identity";
 export {
     applySqliteTuningPragmas,
@@ -78,6 +79,7 @@ export {
     type AutoSearchHintDecision,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
+    applyStrippedPlaceholderDelta,
     clearCachedM0,
     clearCachedM0M1,
     clearDeferredExecutePendingIfMatches,

@@ -17,8 +17,8 @@
 
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
+	applyStrippedPlaceholderDelta,
 	getStrippedPlaceholderIds,
-	setStrippedPlaceholderIds,
 } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { resolvePiStableId } from "./read-session-pi";
@@ -124,6 +124,10 @@ export function stripPiDroppedPlaceholderMessages(args: {
 		(isCacheBusting || args.forceDiscovery === true) && !!stableIdByRef;
 	const presentIds = canPrune ? new Set<string>() : null;
 
+	// Track the exact ids discovered THIS pass so we can persist an add-delta
+	// (CAS) instead of overwriting the whole set — a sibling process's concurrent
+	// discovery/prune must not be clobbered.
+	const discoveredIds: string[] = [];
 	if (isCacheBusting || args.forceDiscovery) {
 		for (let i = 0; i < messages.length; i++) {
 			const id = idOf(messages[i], i);
@@ -132,6 +136,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 			if (!messageIsPlaceholderOnly(messages[i])) continue;
 			if (!idsToStrip.has(id)) {
 				idsToStrip.add(id);
+				discoveredIds.push(id);
 				discovered++;
 			}
 		}
@@ -155,18 +160,27 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	// replay state.
 	let pruned = 0;
 	if (presentIds) {
-		const finalIds = new Set<string>();
-		for (const id of idsToStrip) {
-			if (presentIds.has(id)) finalIds.add(id);
+		// Below-boundary ids: in the persisted set (pre-discovery) but no longer
+		// in the window. Compute against `persistedIds` (the original set), not
+		// the in-memory idsToStrip, so we emit a precise remove-delta.
+		const removedIds: string[] = [];
+		for (const id of persistedIds) {
+			if (!presentIds.has(id)) removedIds.push(id);
 		}
-		pruned = idsToStrip.size - finalIds.size;
-		if (discovered > 0 || pruned > 0) {
-			setStrippedPlaceholderIds(db, sessionId, finalIds);
+		pruned = removedIds.length;
+		if (discoveredIds.length > 0 || removedIds.length > 0) {
+			// CAS delta merge (parity with OpenCode): add discovered, remove
+			// below-boundary, applied atomically against a fresh read so a sibling
+			// process's concurrent change is preserved.
+			applyStrippedPlaceholderDelta(db, sessionId, {
+				add: discoveredIds,
+				remove: removedIds,
+			});
 		}
-	} else if (discovered > 0) {
+	} else if (discoveredIds.length > 0) {
 		// No carried map (legacy/test path): can't safely prune, but still persist
-		// newly discovered ids exactly as the pre-prune behavior did.
-		setStrippedPlaceholderIds(db, sessionId, idsToStrip);
+		// newly discovered ids as an add-delta.
+		applyStrippedPlaceholderDelta(db, sessionId, { add: discoveredIds });
 	}
 
 	if (removed > 0 || discovered > 0 || pruned > 0) {

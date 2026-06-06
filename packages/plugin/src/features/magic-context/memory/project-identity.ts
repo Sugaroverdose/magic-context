@@ -347,3 +347,22 @@ export function normalizeStoredProjectPath(rawOrStored: string): string {
         return directoryFallback(rawOrStored);
     }
 }
+
+/**
+ * Ownership check for a memory row against the current session's resolved
+ * project identity. A memory's stored `project_path` may be a raw filesystem
+ * path (legacy) OR an already-normalized `git:`/`dir:` identity; either must
+ * match the current identity after normalization. Used by ctx_memory
+ * delete/update/archive/merge so a session can still manage memories stored
+ * under a legacy raw path that normalizes to the same project (shared by both
+ * harnesses — Pi previously used raw `===`, diverging from OpenCode).
+ */
+export function storedPathBelongsToIdentity(
+    storedProjectPath: string,
+    projectIdentity: string,
+): boolean {
+    return (
+        storedProjectPath === projectIdentity ||
+        normalizeStoredProjectPath(storedProjectPath) === projectIdentity
+    );
+}

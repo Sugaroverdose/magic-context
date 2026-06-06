@@ -6,6 +6,7 @@ import {
     escapeXmlAttr,
     escapeXmlContent,
     getCompartments,
+    getLastCompartmentEndMessageId,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
 import {
@@ -394,7 +395,26 @@ export function prepareCompartmentInjection(
     const lastEnd = lastCompartment.endMessage;
     const lastEndMessageId = lastCompartment.endMessageId;
 
-    if (lastEndMessageId.length === 0) {
+    // Trim boundary selection. On a CACHE-BUSTING pass, trim to the latest
+    // compartment — m[1] will re-render to cover it. On a NON-cache-busting
+    // (defer) pass that reaches this REBUILD path, the in-memory injection cache
+    // was cold (a fresh process after a restart): the persisted m[0]/m[1] summary
+    // is replayed stale, so a compartment published after the last
+    // materialize/soft-refresh is summarized in NEITHER m[1] NOR m[0]. Trimming
+    // to the latest boundary would also drop its raw messages → silent history
+    // loss until the next exec pass. Instead trim only to the boundary the cached
+    // summary actually covers (cached_m0_last_baseline_end_message_id), keeping
+    // the newer compartment's raw messages in the live tail. That column is
+    // written ONLY by the m0/m1 materialize/soft-refresh path, so its presence
+    // self-gates this to v2 sessions; absent (legacy / never materialized) →
+    // fall back to the latest boundary.
+    let trimEndMessageId = lastEndMessageId;
+    if (!isCacheBusting) {
+        const persistedBaseline = readCachedBaselineEndMessageId(db, sessionId);
+        if (persistedBaseline) trimEndMessageId = persistedBaseline;
+    }
+
+    if (trimEndMessageId.length === 0) {
         sessionLog(
             sessionId,
             "injecting legacy compartments without visible-prefix trimming because latest stored compartment has no end_message_id",
@@ -418,7 +438,7 @@ export function prepareCompartmentInjection(
     }
 
     let skippedVisibleMessages = 0;
-    const cutoffIndex = messages.findIndex((message) => message.info.id === lastEndMessageId);
+    const cutoffIndex = messages.findIndex((message) => message.info.id === trimEndMessageId);
     if (cutoffIndex >= 0) {
         skippedVisibleMessages = cutoffIndex + 1;
         const remaining = messages.slice(cutoffIndex + 1);
@@ -426,14 +446,14 @@ export function prepareCompartmentInjection(
     } else {
         sessionLog(
             sessionId,
-            `compartment injection entering degraded mode: boundary ${lastEndMessageId} not in visible messages`,
+            `compartment injection entering degraded mode: boundary ${trimEndMessageId} not in visible messages`,
         );
     }
 
     const result: PreparedCompartmentInjection = {
         block,
         compartmentEndMessage: lastEnd,
-        compartmentEndMessageId: cutoffIndex >= 0 ? lastEndMessageId : null,
+        compartmentEndMessageId: cutoffIndex >= 0 ? trimEndMessageId : null,
         compartmentCount: compartments.length,
         skippedVisibleMessages,
         factCount: facts.length,
@@ -442,6 +462,22 @@ export function prepareCompartmentInjection(
     };
     injectionCache.set(sessionId, { kind: "populated", injection: result });
     return result;
+}
+
+/**
+ * Read the persisted m[1]-coverage boundary (the latest compartment end message
+ * id as of the last materialize / soft-refresh). Returns null when unset
+ * (legacy / never-materialized v1 sessions) so callers fall back to the live
+ * latest-compartment boundary.
+ */
+function readCachedBaselineEndMessageId(db: Database, sessionId: string): string | null {
+    const row = db
+        .prepare(
+            "SELECT cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as { boundary: string | null } | undefined;
+    const boundary = row?.boundary;
+    return boundary && boundary.length > 0 ? boundary : null;
 }
 
 export function renderCompartmentInjection(
@@ -626,6 +662,17 @@ export class RenderM1InvalidMarkersError extends Error {
 // Compartment already carries p1..p4, importance, episodeType, legacy (v2 model B).
 // Alias retained for readability at render call sites.
 type M0Compartment = Compartment;
+
+/**
+ * The boundary (OpenCode message id) covered by a compartment set rendered into
+ * m[0]+m[1] — the highest-sequence compartment's end message id, or null when
+ * there are none / the latest has no stored boundary (legacy rows). The input
+ * is ordered `sequence ASC`, so the last element is the latest compartment.
+ */
+function lastCompartmentBoundaryId(compartments: readonly M0Compartment[]): string | null {
+    const last = compartments.at(-1);
+    return last?.endMessageId && last.endMessageId.length > 0 ? last.endMessageId : null;
+}
 
 const DEFAULT_HISTORY_BUDGET_TOKENS = 60_000;
 export const DEFAULT_MEMORY_BUDGET_TOKENS = 8_000;
@@ -1338,6 +1385,19 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             )
             .run(renderedMemoryIds.length, JSON.stringify(renderedMemoryIds), options.sessionId);
 
+        // Persist the boundary the freshly-rendered m[0]+m[1] cover (the latest
+        // compartment's end message id). A cold post-restart pass reads this to
+        // trim the live tail to what the cached summary covers — never past it —
+        // so a compartment published after this materialize keeps its raw
+        // messages in the tail until an exec pass folds it into m[1]. Same
+        // transaction as the m[0] snapshot so bytes and boundary never diverge.
+        const baselineEndMessageId = lastCompartmentBoundaryId(compartments);
+        options.db
+            .prepare(
+                "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+            )
+            .run(baselineEndMessageId, options.sessionId);
+
         options.db.exec("COMMIT");
     } catch (error) {
         try {
@@ -1709,9 +1769,16 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
             renderedMemoryIds,
         );
         const m1Bytes = Buffer.from(rendered.text, "utf8");
+        // Advance the persisted baseline boundary too: soft-refresh re-renders
+        // m[1] to cover every compartment up to the latest, so the boundary the
+        // cached summary covers moves forward with it. Keeping it in sync here is
+        // what lets a later cold post-restart defer pass trim correctly.
+        const baselineEndMessageId = getLastCompartmentEndMessageId(options.db, options.sessionId);
         options.db
-            .prepare("UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?")
-            .run(m1Bytes, options.sessionId);
+            .prepare(
+                "UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+            )
+            .run(m1Bytes, baselineEndMessageId, options.sessionId);
         options.db.exec("COMMIT");
         options.state.cachedM1Bytes = m1Bytes;
         options.state.snapshotMarkers = markers;
@@ -1956,12 +2023,21 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     //      m[1] could otherwise grow without bound. Fold once m[1] alone exceeds a
     //      fixed share of the history budget, independent of m[0] size. estimateTokens
     //      here is fine: this whole branch is rare (cache-busting + m1Recomputed).
-    const M0_DRIFT_RATIO_FLOOR = 2_000;
+    // Small-m[0] floor in TOKENS (not chars): below this the ratio test is
+    // suppressed because a small m[0] makes the 15% ratio trivially exceeded.
+    const M0_DRIFT_RATIO_FLOOR_TOKENS = 500;
+    const M1_DRIFT_RATIO = 0.15;
     const M1_ABSOLUTE_CAP_RATIO = 0.2;
     const m1AbsoluteBudget =
         (options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) * M1_ABSOLUTE_CAP_RATIO;
-    const m1OverAbsoluteCap =
-        m1Text !== M1_EMPTY_PLACEHOLDER && estimateTokens(m1Text) > m1AbsoluteBudget;
+    // Token counts (NOT char lengths): the documented intent is "m[1] exceeds
+    // ~15% of m[0] tokens". XML-heavy / non-Latin content makes char length
+    // diverge sharply from token count, so the ratio must compare tokens on both
+    // sides. Computed once; this branch is rare (cache-busting + m1Recomputed).
+    const m1HasContent = m1Text !== M1_EMPTY_PLACEHOLDER;
+    const m1Tokens = m1HasContent ? estimateTokens(m1Text) : 0;
+    const m0Tokens = estimateTokens(m0Text);
+    const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
     if (
         !rematerialized &&
         !contentionExhausted &&
@@ -1969,9 +2045,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         options.isCacheBustingPass &&
         (memoryUpdateCount > 40 ||
             m1OverAbsoluteCap ||
-            (m1Text !== M1_EMPTY_PLACEHOLDER &&
-                m0Text.length >= M0_DRIFT_RATIO_FLOOR &&
-                m1Text.length > m0Text.length * 0.15))
+            (m1HasContent &&
+                m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
+                m1Tokens > m0Tokens * M1_DRIFT_RATIO))
     ) {
         try {
             const refolded = materializeWithRetry(options);

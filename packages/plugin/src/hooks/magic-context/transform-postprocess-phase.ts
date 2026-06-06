@@ -1,4 +1,5 @@
 import {
+    applyStrippedPlaceholderDelta,
     type ContextDatabase,
     clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
@@ -18,10 +19,10 @@ import {
     pruneNoteNudgeAnchors,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
-    setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { applyContextNudge } from "./apply-context-nudge";
@@ -70,7 +71,9 @@ import {
 import { logTransformTiming } from "./transform-stage-logger";
 
 const DEGRADE_CACHE_WARNING_THRESHOLD = 10;
-const degradedCacheCountBySession = new Map<string, number>();
+// Bounded (LRU, max 100) so a crashed/never-reset session can't leak an entry
+// forever in a long-running process — matches the other per-session caches.
+const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
@@ -640,7 +643,9 @@ export async function runPostTransformPhase(
             // but already sentinel — those are working as intended.
             if (missingIds.length > 0) {
                 for (const id of missingIds) persistedIds.delete(id);
-                setStrippedPlaceholderIds(args.db, args.sessionId, persistedIds);
+                // CAS delta (remove) so a sibling process discovering new IDs in
+                // parallel isn't clobbered by this prune's whole-set overwrite.
+                applyStrippedPlaceholderDelta(args.db, args.sessionId, { remove: missingIds });
             }
         }
 
@@ -662,9 +667,14 @@ export async function runPostTransformPhase(
                 droppedResult.sentineledIds.length + systemInjectedResult.sentineledIds.length;
 
             if (newlyNeutralized > 0) {
-                for (const id of droppedResult.sentineledIds) persistedIds.add(id);
-                for (const id of systemInjectedResult.sentineledIds) persistedIds.add(id);
-                setStrippedPlaceholderIds(args.db, args.sessionId, persistedIds);
+                const addedIds = [
+                    ...droppedResult.sentineledIds,
+                    ...systemInjectedResult.sentineledIds,
+                ];
+                for (const id of addedIds) persistedIds.add(id);
+                // CAS delta (add) so a concurrent prune in a sibling process
+                // doesn't clobber these newly-discovered IDs.
+                applyStrippedPlaceholderDelta(args.db, args.sessionId, { add: addedIds });
                 sessionLog(
                     args.sessionId,
                     `neutralized ${droppedResult.stripped} dropped + ${systemInjectedResult.stripped} system-injected messages (${newlyNeutralized} new, ${persistedIds.size} total persisted)`,

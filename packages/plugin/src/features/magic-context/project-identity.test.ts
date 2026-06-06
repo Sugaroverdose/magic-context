@@ -9,6 +9,7 @@ import {
     ProjectIdentityError,
     resolveProjectIdentity,
     resolveProjectIdentityStrict,
+    storedPathBelongsToIdentity,
 } from "./project-identity";
 
 const tempDirs: string[] = [];
@@ -144,6 +145,20 @@ describe("project identity", () => {
         const directory = makeTempDir("project-identity-normalize-");
 
         expect(normalizeStoredProjectPath(directory)).toBe(expectedDirIdentity(directory));
+    });
+
+    it("storedPathBelongsToIdentity matches on exact identity and on normalized raw path", () => {
+        // Exact stored-identity match.
+        expect(storedPathBelongsToIdentity("git:abc123", "git:abc123")).toBe(true);
+        expect(storedPathBelongsToIdentity("dir:deadbeef", "dir:deadbeef")).toBe(true);
+        // Mismatched identity.
+        expect(storedPathBelongsToIdentity("git:abc123", "git:other")).toBe(false);
+        // A raw filesystem path stored before normalization must still match the
+        // identity it normalizes to (the #11 case Pi previously rejected).
+        const directory = makeTempDir("project-identity-belongs-");
+        const identity = expectedDirIdentity(directory);
+        expect(storedPathBelongsToIdentity(directory, identity)).toBe(true);
+        expect(storedPathBelongsToIdentity(directory, "dir:not-this-one")).toBe(false);
     });
 
     it("ProjectIdentityError carries classification and raw directory fields", () => {

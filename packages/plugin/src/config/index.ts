@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { detectConfigFile, parseJsonc } from "../shared/jsonc-parser";
 import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
 import { migrateLegacyExperimental } from "./migrate-experimental";
+import {
+    dropInheritedEmbeddingKeyOnRedirect,
+    stripUnsafeProjectConfigFields,
+} from "./project-security";
 import { type MagicContextConfig, MagicContextConfigSchema } from "./schema/magic-context";
 import { substituteConfigVariables } from "./variable";
 
@@ -185,10 +189,6 @@ function deepMergeRawConfig(
     return result;
 }
 
-function getProjectUserOnlyFields(config: Record<string, unknown>): string[] {
-    return "auto_update" in config ? ["auto_update"] : [];
-}
-
 /**
  * Render a config value for a warning message in a way that never leaks resolved
  * secrets from `{env:API_KEY}` / `{file:...}` substitution.
@@ -345,24 +345,21 @@ export function loadPluginConfig(
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
 
-        // Strip user-only fields from project raw BEFORE merging. Project
-        // configs must not silently override `auto_update` — that's a
-        // security boundary: a malicious project config could otherwise
-        // suppress plugin self-updates that may include security fixes.
+        // Harden the repo-supplied (untrusted) project config before merging it
+        // over the trusted user config: strip auto_update + hidden-agent
+        // prompt/permission/tools (privilege-escalation vectors).
         const projectRaw = { ...projectLoaded.config };
-        const strippedUserOnlyFields = getProjectUserOnlyFields(projectRaw);
-        if (strippedUserOnlyFields.length > 0) {
-            for (const key of strippedUserOnlyFields) {
-                delete projectRaw[key];
-            }
-            allWarnings.push(
-                `[project config] Ignoring ${strippedUserOnlyFields.join(
-                    ", ",
-                )} from project config (security: these settings only honor user-level config)`,
-            );
+        for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+            allWarnings.push(`[project config] ${warning}`);
         }
 
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
+
+        // Post-merge: prevent a redirected embedding endpoint from inheriting
+        // the user's api_key (exfiltration guard).
+        for (const warning of dropInheritedEmbeddingKeyOnRedirect(projectRaw, mergedRaw)) {
+            allWarnings.push(`[project config] ${warning}`);
+        }
     }
 
     // Parse the merged raw config ONCE. Critical: parsing must run AFTER the
@@ -468,18 +465,13 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
         const projectRaw = { ...projectLoaded.config };
-        const strippedUserOnlyFields = getProjectUserOnlyFields(projectRaw);
-        if (strippedUserOnlyFields.length > 0) {
-            for (const key of strippedUserOnlyFields) {
-                delete projectRaw[key];
-            }
-            allWarnings.push(
-                `[project config] Ignoring ${strippedUserOnlyFields.join(
-                    ", ",
-                )} from project config (security: these settings only honor user-level config)`,
-            );
+        for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+            allWarnings.push(`[project config] ${warning}`);
         }
         mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
+        for (const warning of dropInheritedEmbeddingKeyOnRedirect(projectRaw, mergedRaw)) {
+            allWarnings.push(`[project config] ${warning}`);
+        }
     }
 
     const recoveredTopLevelKeys: string[] = [];

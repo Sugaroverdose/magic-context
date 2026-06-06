@@ -37,6 +37,27 @@ const ENV_PATTERN = /\{env:([^}]+)\}/g;
 const FILE_PATTERN = /\{file:([^}]+)\}/g;
 
 /**
+ * Directories that almost never belong in a config file's `{file:}` inline.
+ * Returns a short human label when `resolvedPath` sits inside one, else null.
+ * Used to WARN (not block) on user-level config — see the call site.
+ */
+function sensitiveFilePathReason(resolvedPath: string): string | null {
+    const home = homedir();
+    const sensitiveDirs: Array<{ dir: string; label: string }> = [
+        { dir: resolve(home, ".ssh"), label: "SSH keys" },
+        { dir: resolve(home, ".aws"), label: "AWS credentials" },
+        { dir: resolve(home, ".gnupg"), label: "GnuPG keyring" },
+        { dir: resolve(home, ".config", "gh"), label: "GitHub CLI auth" },
+    ];
+    for (const { dir, label } of sensitiveDirs) {
+        if (resolvedPath === dir || resolvedPath.startsWith(`${dir}/`)) {
+            return label;
+        }
+    }
+    return null;
+}
+
+/**
  * Expand `{env:VAR}` and `{file:path}` tokens in raw config text.
  *
  * Mirrors OpenCode's `ConfigVariable.substitute` semantics so users can share
@@ -128,6 +149,18 @@ export function substituteConfigVariables(input: SubstituteInput): SubstituteRes
             filePath = resolve(homedir(), filePath.slice(2));
         } else if (!isAbsolute(filePath)) {
             filePath = resolve(configDir, filePath);
+        }
+
+        // Warn (don't block — this is user-level config, mirroring OpenCode's
+        // {file:} semantics) when a {file:} token resolves into a known-sensitive
+        // directory. A user pasting `{file:~/.ssh/id_rsa}` from a copied snippet
+        // would otherwise silently inline a private key into the prompt.
+        const sensitiveReason = sensitiveFilePathReason(filePath);
+        if (sensitiveReason) {
+            warnings.push(
+                `${token} resolves to a sensitive path (${sensitiveReason}: ${filePath}); ` +
+                    "inlining its contents into config — make sure this is intentional.",
+            );
         }
 
         if (!existsSync(filePath)) {

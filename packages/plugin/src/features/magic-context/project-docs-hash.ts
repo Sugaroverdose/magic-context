@@ -1,10 +1,18 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { escapeXmlAttr, escapeXmlContent } from "./compartment-storage";
 
 const PROJECT_DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 const PROJECT_DOCS_DELIMITER = "\n\n---\n\n";
+
+// Project docs are repo-supplied content rendered into the trusted m[0]
+// baseline. A malicious repo could make ARCHITECTURE.md a SYMLINK to a file
+// outside the repo (e.g. ~/.ssh/id_rsa) to exfiltrate its contents into the
+// prompt. We use lstat (does NOT follow symlinks) and require a regular file,
+// so a symlinked doc is treated as absent. We also cap the size so an
+// oversized doc can't blow up the prompt.
+const MAX_PROJECT_DOC_BYTES = 256 * 1024;
 
 type DocFileFingerprint = {
     exists: boolean;
@@ -33,9 +41,13 @@ function canonicalizeDocContent(raw: string): string {
 
 function fingerprintFile(filePath: string): DocFileFingerprint {
     try {
-        const stat = statSync(filePath);
+        // lstat, NOT stat: a symlink must not be followed. isFile() is false for
+        // a symlink, so a symlinked doc fingerprints as absent (and is skipped
+        // by readCanonicalPieces, which applies the same guard).
+        const stat = lstatSync(filePath);
+        const isReadableDoc = stat.isFile() && stat.size <= MAX_PROJECT_DOC_BYTES;
         return {
-            exists: stat.isFile(),
+            exists: isReadableDoc,
             mtimeMs: stat.mtimeMs,
             size: stat.size,
         };
@@ -91,6 +103,20 @@ function readCanonicalPieces(
         const filePath = path.join(projectDirectory, filename);
         const fingerprint = files.get(filePath);
         if (!fingerprint?.exists) {
+            continue;
+        }
+
+        // Re-check at read time (close the TOCTOU between fingerprint and read):
+        // refuse to follow a symlink or read an oversized file even if the path
+        // was swapped to a symlink after fingerprinting.
+        let safeToRead = false;
+        try {
+            const st = lstatSync(filePath);
+            safeToRead = st.isFile() && st.size <= MAX_PROJECT_DOC_BYTES;
+        } catch {
+            safeToRead = false;
+        }
+        if (!safeToRead) {
             continue;
         }
 

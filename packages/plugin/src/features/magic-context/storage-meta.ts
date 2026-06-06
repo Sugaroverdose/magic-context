@@ -3,6 +3,7 @@ export {
     type AutoSearchHintDecision,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
+    applyStrippedPlaceholderDelta,
     clearDeferredExecutePendingIfMatches,
     clearDetectedContextLimit,
     clearEmergencyRecovery,

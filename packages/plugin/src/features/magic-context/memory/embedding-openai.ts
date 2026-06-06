@@ -1,6 +1,7 @@
 import { log } from "../../../shared/logger";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import type { EmbeddingProvider } from "./embedding-provider";
+import { blockedEmbeddingEndpointReason } from "./embedding-ssrf";
 
 interface OpenAICompatibleEmbeddingProviderOptions {
     endpoint?: string;
@@ -93,6 +94,18 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             log(
                 "[magic-context] openai-compatible embedding provider is missing endpoint or model",
             );
+            this.initialized = false;
+            return false;
+        }
+
+        // SSRF guard: refuse cloud-metadata / link-local endpoints. Memory
+        // content (which can carry captured secrets) is the request body, and
+        // the endpoint can be influenced by project config. Loopback + private
+        // LAN ranges stay allowed so self-hosted embeddings (LMStudio/Ollama)
+        // keep working.
+        const blockedReason = blockedEmbeddingEndpointReason(this.endpoint);
+        if (blockedReason) {
+            log(`[magic-context] embedding endpoint blocked: ${blockedReason}`);
             this.initialized = false;
             return false;
         }

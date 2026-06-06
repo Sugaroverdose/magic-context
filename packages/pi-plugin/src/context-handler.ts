@@ -5,33 +5,27 @@
  * invocation, with the full `AgentMessage[]` that's about to be sent.
  * The handler can return `{ messages }` to replace the array.
  *
- * Step 4b.2 wires the smallest meaningful pipeline:
- *   1. Wrap the AgentMessage[] in a Transcript via `createPiTranscript`.
- *   2. Tag eligible parts with the shared `Tagger` and inject `§N§ `
+ * This handler now mirrors OpenCode's full transform pipeline (see
+ * PARITY.md for the deliberate mechanism-level divergences). Per pass it:
+ *   1. Wraps the AgentMessage[] in a Transcript via `createPiTranscript`.
+ *   2. Tags eligible parts with the shared `Tagger` and injects `§N§ `
  *      prefixes (unless `ctx_reduce_enabled: false`).
- *   3. Apply queued drops from `pending_ops` via the shared
- *      `applyPendingOperations` flow.
- *   4. Apply persistent dropped/truncated states from the `tags` table
- *      via `applyFlushedStatuses` so cross-session drops survive.
- *   5. Return the rebuilt messages so Pi sees the mutations.
- *
- * What's deliberately NOT in 4b.2:
- *
- * - Historian invocation. Compartment trigger logic and historian
- *   subprocess spawn live in 4b.3.
- * - Nudges (rolling, note-nudge, ctx_reduce reminders). 4b.4.
- * - Auto-search hint injection. 4b.4.
- * - Sentinel stripping for cache stability. Pi's transform model is
- *   single-pass-per-LLM-call, so OpenCode-style cache-bust avoidance
- *   doesn't apply. If a Pi provider exposes prompt cache later we'd
- *   add the relevant subset.
- * - Compaction marker injection. OpenCode-only — Pi doesn't have a
- *   compaction-event surface to inject into.
+ *   3. Applies queued drops (`pending_ops`) + persisted tag statuses so
+ *      cross-session drops survive.
+ *   4. Prepares m[0]/m[1] history injection, trims the live tail to the
+ *      compartment boundary, and replays reasoning/placeholder/sentinel
+ *      strips for cache stability — Pi DOES have prompt-cache-sensitive
+ *      providers (Anthropic via the m[0]/m[1] split), so the same
+ *      byte-stability discipline as OpenCode applies.
+ *   5. Runs the historian/compartment trigger, nudges (rolling,
+ *      note-nudge, ctx_reduce reminders), and auto-search hints.
+ *   6. Drains deferred compaction markers via Pi's `appendCompaction()`
+ *      surface (Pi's analogue of OpenCode's compaction-marker injection).
  *
  * Error handling: any thrown error is caught and logged, then the
- * original messages pass through unmodified. Pi's LLM call should
- * never fail because of a transform bug — same fail-open philosophy
- * as the OpenCode `messages-transform` wrapper.
+ * original messages pass through unmodified — the same fail-open
+ * philosophy as the OpenCode `messages-transform` wrapper (see
+ * AUDIT-KNOWN-ISSUES.md for the documented tradeoff).
  */
 
 import * as crypto from "node:crypto";
@@ -364,10 +358,23 @@ export function consumeDeferredMaterialization(sessionId: string): boolean {
 	return wasSet;
 }
 
+// Upper bound on the number of sessions whose per-session in-memory caches
+// (the ~16 module-scoped Maps/Sets above) we retain. A session normally frees
+// its entries via clearContextHandlerSession on shutdown/switch, but a crashed
+// or force-quit Pi process never fires those, so the entries would leak forever
+// in a long-running host. When the live set grows past this cap we evict the
+// least-recently-tracked session through the SAME cleanup path — safe because
+// every per-session cache is rebuildable from the durable DB on resume (we do
+// NOT touch DB state here, identical to a process restart).
+const MAX_TRACKED_SESSIONS = 100;
+
 export function trackSessionForProject(
 	projectIdentity: string,
 	sessionId: string,
 ): void {
+	// Move-to-end so iteration order is least-recently-tracked → most-recent
+	// (Set preserves insertion order; re-inserting refreshes recency).
+	activeContextHandlerSessions.delete(sessionId);
 	activeContextHandlerSessions.add(sessionId);
 	let sessions = sessionsByProject.get(projectIdentity);
 	if (!sessions) {
@@ -375,6 +382,15 @@ export function trackSessionForProject(
 		sessionsByProject.set(projectIdentity, sessions);
 	}
 	sessions.add(sessionId);
+
+	// Evict the oldest tracked sessions beyond the cap. clearContextHandlerSession
+	// removes the evicted id from activeContextHandlerSessions, so the loop
+	// terminates; never evict the session we just registered.
+	while (activeContextHandlerSessions.size > MAX_TRACKED_SESSIONS) {
+		const oldest = activeContextHandlerSessions.values().next().value;
+		if (oldest === undefined || oldest === sessionId) break;
+		clearContextHandlerSession(oldest);
+	}
 }
 
 function isContextHandlerSessionActive(sessionId: string): boolean {

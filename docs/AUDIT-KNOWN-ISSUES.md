@@ -386,3 +386,110 @@ it also already logs on failure. (2) `ctx_memory merge` runs `insertMemory`
 `deps.db.transaction()`, so SQLite isolation makes the intermediate `active` tier
 invisible to concurrent autocommit readers (they see pre-tx or fully-committed
 state only). Neither is a real race.
+
+### A24. The message-transform wrapper fails OPEN (catch → unmodified messages) on purpose
+
+`messages-transform.ts` catches every transform error and returns the messages
+**unmodified** rather than rethrowing. Auditors flag this as contradicting the
+"fail-closed" goal (raw, untrimmed history could reach the provider and overflow
+context). The catch is **load-bearing and cannot be removed**: OpenCode runs the
+hook via `Effect.promise(async () => fn(...))` (`plugin/index.ts`), and
+`Effect.promise` treats a rejection as an unrecoverable **defect (die)** that
+propagates out of the prompt fiber with no catch around the call site — so a
+thrown hook **hard-fails the whole user request**, and would do so on *every*
+pass for a persistent error (e.g. the transient `SQLITE_BUSY` that motivated
+issue #23). Fail-open degrades one pass (no injection / no drops) instead of
+bricking the session. The genuinely risky sub-case — a throw *between*
+`prepareCompartmentInjection`'s tail-trim and `injectM0M1`'s prepend, which would
+drop history for that one pass — is bounded (the next pass replays correctly) and
+the content strips are idempotent. A future hardening would stage trim+inject
+atomically so a throw leaves the array fully transformed or fully untouched; that
+is a core-path refactor, not a quick fix, and is deferred. Do not "fix" this by
+rethrowing. (Pi mirrors the same fail-open philosophy in `context-handler.ts`.)
+
+### A25. Key-files stores LLM-provided `content`, not content re-derived from disk
+
+`identify-key-files.ts` validates the chosen *path* (candidate-set membership,
+traversal guards, doc/lockfile exclusion — the membership + exclusion checks were
+added this round) and computes the stored `content_hash` from disk, but the
+stored `content` block itself is the LLM's stitched output, not re-read from the
+file at commit time. A prompt-injected/hallucinating Dreamer could in principle
+store text that doesn't match the file, which then injects as trusted
+`<key-files>` context. Accepted for now because: the path allow-set + doc
+exclusion close the worst vector (arbitrary off-repo file selection), the Dreamer
+runs the user's own model on the user's own repo, and re-deriving content from
+disk (or AFT outline+zoom) at commit time is a larger change to the key-files
+pipeline. Tracked as a hardening candidate, not an open hole. The inline comment
+at the commit site documents that semantic content-provenance is not enforced.
+
+### A26. `materializeM0` Phase-1→3 contention can fail all retries (fragility, not corruption)
+
+`materializeM0` reads a snapshot under a plain `BEGIN` (Phase 1), renders m[0]
+outside any transaction (Phase 2), then re-checks markers under `BEGIN IMMEDIATE`
+(Phase 3) and aborts with `MaterializeContentionError` if any marker drifted —
+including a sibling-process historian publish advancing `maxCompartmentSeq`
+(which `mustMaterialize` correctly treats as *soft*). Under sustained
+cross-process contention all 3 retries can lose, falling back to a fresh
+non-persisted render (correct, just uncached for that pass). This is an
+availability/fragility cost, not a correctness bug — the fallback always renders
+*something* valid and the next pass retries. Treating compartment-seq drift as a
+soft merge (don't roll back the whole materialize for it) is a possible future
+refinement; the retry+fallback path is safe today. Accepted.
+
+### A27. Compartment historian lease uses a single-statement UPSERT (not `BEGIN IMMEDIATE`)
+
+`compartment-lease.ts` acquires/renews via one `INSERT … ON CONFLICT DO UPDATE`,
+which is atomic *per statement* — sufficient for the acquire decision — whereas
+the dreamer lease wraps its read-then-write in `BEGIN IMMEDIATE`. The compartment
+lease's renewal/expiry checks are therefore slightly less guarded against a
+pathological interleave, but a duplicate historian run is itself defended by the
+per-process `activeRuns` check and the publish transaction's own lease
+re-verification. No duplicate-run has been observed in multi-process dogfood.
+Aligning it to `runImmediate` is a low-value hardening; deferred until/unless a
+duplicate run is actually seen.
+
+### A28. Historian failure dumps may contain session content (debug aid, opt-in cleanup)
+
+On a failed historian run, `compartment-runner-historian.ts` writes the full
+model response under `<project>/.opencode/magic-context/historian/` for
+debugging (this is why failed subagent sessions are now *retained*, not deleted —
+a deliberate debuggability choice). In a shared repo / CI these dumps could
+contain session content. Accepted as a debug tradeoff: the path is project-local
+(not a shared tmp), failed-run retention is the whole point, and a future
+enhancement could TTL-GC the dumps or gate them behind a flag. Not exfiltration —
+it's local disk the user already controls.
+
+### A29. `ctx_memory` schema advertises the full dreamer action enum to primary agents
+
+The `ctx_memory` tool schema lists the full action enum (incl.
+`merge`/`archive`/`update`/`list`) to all agents, while runtime gating correctly
+restricts primary agents to `write`/`delete` (fail-closed — a disallowed action
+returns an error). So the only cost is a primary agent occasionally *attempting* a
+gated action and getting rejected (a wasted turn), never an actual capability
+leak. Per-agent dynamic schema registration would remove the wasted attempt but
+adds tool-definition complexity for a cosmetic UX gain. Accepted; the security
+boundary is the runtime gate, which is correct.
+
+> **Correction to A14 (session_facts is NOT fully dead):** A14 lists
+> `session_facts` among "vestigial" tables, but it still has ONE live reader —
+> `compartment-runner-partial-recomp.ts` calls `getSessionFacts` to carry
+> existing facts through partial-recomp staging unchanged (partial recomp must
+> not re-extract facts from an incomplete range). So `session_facts` is retired as
+> a *render* source (never injected into the prompt) but is still a live
+> *staging-carry* store for partial recomp. Do NOT drop the table or
+> `getSessionFacts` as "dead" — the render-path retirement and the staging-carry
+> reader are separate facts.
+
+### A30. Pi `upgrade_state` m[0] marker is a static constant (inert, not a missed refold)
+
+`inject-compartments-pi.ts` pins `PI_M0_UPGRADE_STATE = "pi-m0m1-v2"` while
+OpenCode's `mustMaterialize` reads a dynamic `getUpgradeState(db, sessionId)`.
+Auditors flag that a Pi `/ctx-session-upgrade` therefore won't refold m[0] via
+the `renderer_upgrade` trigger. **Verified inert, not a bug:** Pi's upgrade path
+calls the SHARED `executeContextRecompWithResult` → `compartment-runner-recomp`,
+which runs `clearCachedM0M1(db)` (+ `appendM0Mutation`). The cleared cache makes
+Pi's very next pass return `first_render` (HARD refold) regardless of the static
+`upgrade_state` — so the marker never needs to fire. Making it dynamic would be a
+no-op. Documented in PARITY.md; the static const is internally consistent
+(stored == current always, so it never falsely triggers and never misses a real
+transition because the cache-clear already forces the refold).

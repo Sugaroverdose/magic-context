@@ -23,6 +23,7 @@ import { computeNormalizedHash } from "../../features/magic-context/memory/norma
 import {
     normalizeStoredProjectPath,
     queueMemoryMutation,
+    storedPathBelongsToIdentity,
 } from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
@@ -199,10 +200,7 @@ function projectIdentityForStoredPath(rawProjectPath: string): string {
 }
 
 function memoryBelongsToProject(memory: Memory, projectPath: string): boolean {
-    return (
-        memory.projectPath === projectPath ||
-        projectIdentityForStoredPath(memory.projectPath) === projectPath
-    );
+    return storedPathBelongsToIdentity(memory.projectPath, projectPath);
 }
 
 function updateMemoryContentInCurrentTransaction(

@@ -303,4 +303,21 @@ describe("substituteConfigVariables", () => {
             expect(result.warnings).toHaveLength(0);
         });
     });
+
+    describe("sensitive-path warnings", () => {
+        it("warns when a user {file:} resolves into ~/.ssh", () => {
+            const input = `{ "key": "{file:~/.ssh/id_rsa}" }`;
+            const result = substituteConfigVariables({ text: input });
+            // Whether the file exists or not, the sensitive-path warning fires
+            // before the existence check.
+            expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(true);
+            expect(result.warnings.some((w) => w.includes("SSH keys"))).toBe(true);
+        });
+
+        it("does NOT warn for an ordinary {file:} path", () => {
+            const input = `{ "prompt": "{file:~/notes/context.md}" }`;
+            const result = substituteConfigVariables({ text: input });
+            expect(result.warnings.some((w) => w.includes("sensitive path"))).toBe(false);
+        });
+    });
 });

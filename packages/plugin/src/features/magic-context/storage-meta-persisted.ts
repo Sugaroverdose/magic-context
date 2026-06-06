@@ -1015,17 +1015,76 @@ export function setStrippedPlaceholderIds(db: Database, sessionId: string, ids: 
     );
 }
 
+/**
+ * Compare-and-swap a delta (add/remove) onto the persisted stripped-placeholder
+ * set, retrying on a concurrent write so sibling OpenCode/Pi processes sharing
+ * the session DB merge instead of clobbering each other's discovered IDs.
+ *
+ * The mutation is expressed as a delta (not a whole-set overwrite) precisely so
+ * the CAS retry is meaningful: each attempt re-reads the current set, re-applies
+ * `(current ∪ add) \ remove`, and CAS-writes against the exact bytes it read.
+ * A whole-set overwrite would re-apply a stale-read-derived set and silently
+ * undo a sibling's concurrent change.
+ *
+ * Returns true when the set ended in the intended state (incl. no-op), false
+ * only when retries were exhausted.
+ */
+export function applyStrippedPlaceholderDelta(
+    db: Database,
+    sessionId: string,
+    delta: { add?: Iterable<string>; remove?: Iterable<string> },
+): boolean {
+    const add = delta.add ? [...delta.add] : [];
+    const remove = delta.remove ? [...delta.remove] : [];
+    if (add.length === 0 && remove.length === 0) return true;
+    ensureSessionMetaRow(db, sessionId);
+
+    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
+        const row = db
+            .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { stripped_placeholder_ids?: string | null } | undefined;
+        // Keep the RAW stored value (NULL vs "") for the CAS predicate — SQLite's
+        // `IS` matches NULL and value equality alike, so we can compare against
+        // exactly what we read regardless of whether the column is NULL or "".
+        const rawStored = row ? (row.stripped_placeholder_ids ?? null) : null;
+        const current = new Set<string>(parseStrippedBlob(rawStored));
+        for (const id of add) current.add(id);
+        for (const id of remove) current.delete(id);
+        const nextBlob = current.size > 0 ? JSON.stringify([...current]) : "";
+        if (nextBlob === (rawStored ?? "")) return true;
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET stripped_placeholder_ids = ? WHERE session_id = ? AND stripped_placeholder_ids IS ?",
+            )
+            .run(nextBlob, sessionId, rawStored);
+        if (result.changes > 0) return true;
+    }
+    sessionLog(sessionId, `stripped_placeholder_ids CAS: ${CAS_RETRY_LIMIT} retries exhausted`);
+    return false;
+}
+
+function parseStrippedBlob(raw: string | null | undefined): string[] {
+    if (!raw || raw.length === 0) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed))
+            return parsed.filter((v: unknown): v is string => typeof v === "string");
+    } catch {
+        // corrupt JSON → empty
+    }
+    return [];
+}
+
 export function removeStrippedPlaceholderId(
     db: Database,
     sessionId: string,
     messageId: string,
 ): boolean {
-    const ids = getStrippedPlaceholderIds(db, sessionId);
-    if (!ids.delete(messageId)) {
+    const before = getStrippedPlaceholderIds(db, sessionId);
+    if (!before.has(messageId)) {
         return false;
     }
-
-    setStrippedPlaceholderIds(db, sessionId, ids);
+    applyStrippedPlaceholderDelta(db, sessionId, { remove: [messageId] });
     return true;
 }
 

@@ -1943,13 +1943,19 @@ export function injectM0M1Pi(
 	//   3. m[1] ABSOLUTE CAP — when m[0] is small the ratio test is suppressed, so
 	//      m[1] could otherwise grow unbounded after the new_compartment trigger
 	//      was removed. Fold once m[1] exceeds a fixed share of the history budget.
-	const M0_DRIFT_RATIO_FLOOR = 2_000;
+	// Token counts (NOT char lengths) on both sides of the ratio — parity with
+	// OpenCode. The documented intent is "m[1] exceeds ~15% of m[0] tokens";
+	// char length diverges from token count on XML-heavy / non-Latin content.
+	const M0_DRIFT_RATIO_FLOOR_TOKENS = 500;
+	const M1_DRIFT_RATIO = 0.15;
 	const M1_ABSOLUTE_CAP_RATIO = 0.2;
 	const m1AbsoluteBudget =
 		(state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) *
 		M1_ABSOLUTE_CAP_RATIO;
-	const m1OverAbsoluteCap =
-		m1 !== PI_M1_PLACEHOLDER && estimateTokens(m1) > m1AbsoluteBudget;
+	const m1HasContent = m1 !== PI_M1_PLACEHOLDER;
+	const m1Tokens = m1HasContent ? estimateTokens(m1) : 0;
+	const m0Tokens = estimateTokens(m0);
+	const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
 	if (
 		!materialized &&
 		!contentionExhausted &&
@@ -1957,9 +1963,9 @@ export function injectM0M1Pi(
 		recomputeM1ThisPass &&
 		(memoryUpdateCount > 40 ||
 			m1OverAbsoluteCap ||
-			(m1 !== PI_M1_PLACEHOLDER &&
-				m0.length >= M0_DRIFT_RATIO_FLOOR &&
-				m1.length > m0.length * 0.15))
+			(m1HasContent &&
+				m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
+				m1Tokens > m0Tokens * M1_DRIFT_RATIO))
 	) {
 		decision = { value: true, reason: "drift" };
 		try {

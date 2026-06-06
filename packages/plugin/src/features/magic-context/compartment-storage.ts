@@ -255,6 +255,24 @@ export function getLastCompartmentEndMessage(db: Database, sessionId: string): n
 }
 
 /**
+ * The OpenCode message id at the boundary of the highest-sequence compartment —
+ * i.e. the last raw message the compartment history (m[0]+m[1]) covers. Returns
+ * null when there are no compartments or the latest one has no stored boundary
+ * (legacy rows). Used to persist the m[1]-coverage boundary so a cold post-
+ * restart pass trims the live tail to what the cached summary actually covers,
+ * not to the latest compartment (which may be newer than the cached m[1]).
+ */
+export function getLastCompartmentEndMessageId(db: Database, sessionId: string): string | null {
+    const row = db
+        .prepare(
+            "SELECT end_message_id FROM compartments WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+        )
+        .get(sessionId) as { end_message_id: string | null } | undefined;
+    const id = row?.end_message_id;
+    return id && id.length > 0 ? id : null;
+}
+
+/**
  * Look up compartments whose stored `end_message_id` matches the given
  * OpenCode message id. Returns an ARRAY — schema only enforces
  * `UNIQUE(session_id, sequence)`, NOT `(session_id, end_message_id)`, so

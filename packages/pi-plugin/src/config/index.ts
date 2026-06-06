@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
 import {
+	dropInheritedEmbeddingKeyOnRedirect,
+	stripUnsafeProjectConfigFields,
+} from "@magic-context/core/config/project-security";
+import {
 	type MagicContextConfig,
 	MagicContextConfigSchema,
 } from "@magic-context/core/config/schema/magic-context";
@@ -76,6 +80,9 @@ function loadConfigFile(
 		const substituted = substituteConfigVariables({
 			text: rawText,
 			configPath: path,
+			// Repo-supplied project configs are untrusted: do not expand
+			// {env:}/{file:} secret-bearing tokens (parity with OpenCode).
+			isProjectConfig: scope === "project",
 		});
 		return {
 			path,
@@ -234,7 +241,24 @@ export function loadPiConfig(
 		const prefix =
 			loaded.scope === "user" ? "[user config]" : "[project config]";
 		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-		rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+
+		if (loaded.scope === "project") {
+			// Harden the repo-supplied (untrusted) project config before merging
+			// it over the trusted user config (parity with OpenCode).
+			const projectRaw = { ...loaded.config };
+			for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+				warnings.push(`${prefix} ${warning}`);
+			}
+			rawConfig = mergeRawConfigs(rawConfig, projectRaw);
+			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+				projectRaw,
+				rawConfig,
+			)) {
+				warnings.push(`${prefix} ${warning}`);
+			}
+		} else {
+			rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+		}
 	}
 
 	const parsed = parsePiConfig(rawConfig);
@@ -335,7 +359,22 @@ export function loadPiConfigDetailed(
 		const prefix =
 			loaded.scope === "user" ? "[user config]" : "[project config]";
 		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-		rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+
+		if (loaded.scope === "project") {
+			const projectRaw = { ...loaded.config };
+			for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+				warnings.push(`${prefix} ${warning}`);
+			}
+			rawConfig = mergeRawConfigs(rawConfig, projectRaw);
+			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+				projectRaw,
+				rawConfig,
+			)) {
+				warnings.push(`${prefix} ${warning}`);
+			}
+		} else {
+			rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+		}
 	}
 
 	const recoveredTopLevelKeys: string[] = [];

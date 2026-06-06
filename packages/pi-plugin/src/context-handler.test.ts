@@ -49,6 +49,7 @@ import {
 	signalPiDeferredHistoryRefresh,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
+	trackSessionForProject,
 } from "./context-handler";
 import {
 	assistantMessage,
@@ -68,6 +69,28 @@ describe("registerPiContextHandler", () => {
 		clearContextHandlerSession("ses-sticky-context");
 		clearAutoSearchForPiSession("ses-context");
 		clearAutoSearchForPiSession("ses-sticky-context");
+	});
+
+	it("evicts the least-recently-tracked session's per-session caches past the cap", () => {
+		// Register a victim session with observable per-session state, then track
+		// >100 newer sessions so the victim is evicted via clearContextHandlerSession.
+		const victim = "ses-evict-victim";
+		recordPiToolExecution(victim);
+		trackSessionForProject("proj-evict", victim);
+		expect(getPiToolUsageSinceUserTurnForTest(victim)).toBe(1);
+
+		// 100 newer sessions push the victim past the cap (it was tracked first).
+		for (let i = 0; i < 100; i++) {
+			trackSessionForProject("proj-evict", `ses-evict-${i}`);
+		}
+
+		// Victim's per-session tool-usage cache was cleared by eviction (the map
+		// entry is deleted, so the getter returns undefined).
+		expect(getPiToolUsageSinceUserTurnForTest(victim)).toBeUndefined();
+
+		// Cleanup the survivors.
+		clearContextHandlerSession(victim);
+		for (let i = 0; i < 100; i++) clearContextHandlerSession(`ses-evict-${i}`);
 	});
 
 	it("schedules first-touch message index reconciliation", async () => {

@@ -53,7 +53,10 @@ import {
 	getProjectEmbeddingSnapshot,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "@magic-context/core/features/magic-context/memory/normalize-hash";
-import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import {
+	resolveProjectIdentity,
+	storedPathBelongsToIdentity,
+} from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	type ContextDatabase,
 	queueMemoryMutation,
@@ -308,7 +311,10 @@ export function createCtxMemoryTool(
 					return err("Error: 'id' is required when action is 'delete'.");
 				}
 				const memory = getMemoryById(deps.db, params.id);
-				if (!memory || memory.projectPath !== projectIdentity) {
+				if (
+					!memory ||
+					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
+				) {
 					return err(`Error: Memory with ID ${params.id} was not found.`);
 				}
 				deps.db.transaction(() => {
@@ -342,7 +348,10 @@ export function createCtxMemoryTool(
 				}
 
 				const memory = getMemoryById(deps.db, params.id);
-				if (!memory || memory.projectPath !== projectIdentity) {
+				if (
+					!memory ||
+					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
+				) {
 					return err(`Error: Memory with ID ${params.id} was not found.`);
 				}
 
@@ -395,15 +404,12 @@ export function createCtxMemoryTool(
 					return err("Error: One or more source memories were not found.");
 				}
 
-				if (
-					sourceMemories.some(
-						(memory) => memory.projectPath !== projectIdentity,
-					)
-				) {
-					return err(
-						"Error: All memories to merge must belong to the current project.",
-					);
-				}
+				// merge intentionally does NOT enforce single-project ownership
+				// (unlike update/delete/archive) — parity with OpenCode. Cross-
+				// identity consolidation is a supported dreamer capability: each
+				// source is superseded under ITS OWN project identity with a
+				// per-project supersede-delta row (see the supersede loop below),
+				// so every affected project's m[1] reconciles correctly.
 
 				const requestedCategory = params.category?.trim();
 				if (requestedCategory && !isMemoryCategory(requestedCategory)) {
@@ -567,7 +573,10 @@ export function createCtxMemoryTool(
 					return err("Error: 'id' is required when action is 'archive'.");
 				}
 				const memory = getMemoryById(deps.db, params.id);
-				if (!memory || memory.projectPath !== projectIdentity) {
+				if (
+					!memory ||
+					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
+				) {
 					return err(`Error: Memory with ID ${params.id} was not found.`);
 				}
 				deps.db.transaction(() => {
