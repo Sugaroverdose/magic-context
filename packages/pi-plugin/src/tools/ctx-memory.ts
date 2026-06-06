@@ -32,7 +32,6 @@
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { invalidateAllMemoryBlockCaches } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	archiveMemory,
 	CATEGORY_PRIORITY,
@@ -54,6 +53,7 @@ import {
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "@magic-context/core/features/magic-context/memory/normalize-hash";
 import {
+	normalizeStoredProjectPath,
 	resolveProjectIdentity,
 	storedPathBelongsToIdentity,
 } from "@magic-context/core/features/magic-context/memory/project-identity";
@@ -302,7 +302,14 @@ export function createCtxMemoryTool(
 				});
 
 				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
-				invalidateAllMemoryBlockCaches(deps.db);
+				// Do NOT invalidate the m[0]/m[1] cache here. An additive write is a
+				// supersede-delta operation: it surfaces in m[1] via the maxMemoryId
+				// watermark (renderM1 reads memories with id > cachedM0MaxMemoryId) on
+				// the next cache-busting pass, WITHOUT busting m[0]. Clearing the cache
+				// re-materialized m[0] for every session (the call was global over
+				// session_meta), defeating the whole additive/non-additive split and
+				// busting unrelated projects. Matches OpenCode's write path, which
+				// likewise does no cache invalidation.
 				return ok(`Saved memory [ID: ${memory.id}] in ${rawCategory}.`);
 			}
 
@@ -536,7 +543,13 @@ export function createCtxMemoryTool(
 						}
 						supersededMemory(deps.db, memory.id, canonicalMemory.id);
 						queueMemoryMutation(deps.db, {
-							projectPath: memory.projectPath,
+							// Normalize the stored path to the resolved identity
+							// before queueing — the render-side mutation-log reader
+							// matches exact project_path, and OpenCode + dashboard
+							// both normalize first. A legacy raw filesystem path here
+							// would write a row that normalized git:/dir: sessions
+							// never read (the supersede delta would silently vanish).
+							projectPath: normalizeStoredProjectPath(memory.projectPath),
 							mutationType: "superseded",
 							targetMemoryId: memory.id,
 							supersededById: canonicalMemory.id,
@@ -545,7 +558,9 @@ export function createCtxMemoryTool(
 
 					if (canonicalExisting && canonicalContentChanged) {
 						queueMemoryMutation(deps.db, {
-							projectPath: canonicalMemory.projectPath,
+							projectPath: normalizeStoredProjectPath(
+								canonicalMemory.projectPath,
+							),
 							mutationType: "update",
 							targetMemoryId: canonicalMemory.id,
 							category,

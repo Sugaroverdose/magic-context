@@ -8,7 +8,6 @@ import {
     getCompartments,
     getRecompPartialRange,
     getRecompStaging,
-    getSessionFacts,
     saveRecompStagingPass,
     setRecompPartialRange,
 } from "../../features/magic-context/compartment-storage";
@@ -196,14 +195,14 @@ export async function executePartialRecompInternal(
             ].join("\n");
         }
 
-        // ── Snapshot current facts so we can restore them on promotion ─────
-        // Partial recomp must not re-extract facts. Facts are session-wide and
-        // the partial range does not see enough history to produce a complete
-        // set. We carry existing facts through staging unchanged.
-        const currentFacts = getSessionFacts(db, sessionId).map((f) => ({
-            category: f.category,
-            content: f.content,
-        }));
+        // v2: facts are RETIRED as a render source (facts = promoted memories,
+        // surfaced via <project-memory>) and the recomp promote path deletes
+        // session_facts and never re-inserts. So partial recomp neither snapshots
+        // nor carries facts — staging passes get an empty fact list. (Earlier code
+        // snapshotted session_facts and reported "Facts unchanged (N)", but the
+        // promote dropped them regardless, so the snapshot was dead work and the
+        // claim was misleading.)
+        const stagedFacts: { category: string; content: string }[] = [];
 
         // ── Resolve project memories for historian fact dedup context ─────
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
@@ -252,7 +251,7 @@ export async function executePartialRecompInternal(
             offset = snapStart;
             // Save initial staging (prior only, pass_number 0) so a crash right after
             // this point still leaves discoverable staging with the correct range.
-            saveRecompStagingPass(db, sessionId, 0, candidateCompartments, currentFacts);
+            saveRecompStagingPass(db, sessionId, 0, candidateCompartments, stagedFacts);
             setRecompPartialRange(db, sessionId, { start: snapStart, end: snapEnd });
         }
 
@@ -324,7 +323,7 @@ export async function executePartialRecompInternal(
 
             // Save a final staging pass containing prior + new + tail. Promote
             // replaces the real tables atomically with this set.
-            saveRecompStagingPass(db, sessionId, passCount + 1, merged, currentFacts);
+            saveRecompStagingPass(db, sessionId, passCount + 1, merged, stagedFacts);
             const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) {
                 log("[magic-context] partial recomp promote returned null");
@@ -474,14 +473,14 @@ export async function executePartialRecompInternal(
                 ...(validatedPass.compartments ?? []),
             ];
             // Intentional: partial recomp ignores historian's fact output entirely.
-            // Facts are session-wide and cannot be reliably re-derived from a partial
-            // message range. currentFacts remains the untouched snapshot.
+            // Facts are retired as a render source in v2 (= promoted memories), so
+            // staging always carries the empty stagedFacts list.
 
             passCount += 1;
             currentTokenBudget = historianChunkTokens;
             passAttempt = 1;
 
-            saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, currentFacts);
+            saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, stagedFacts);
 
             const nextOffset =
                 (validatedPass.compartments?.[validatedPass.compartments.length - 1]?.endMessage ??
@@ -504,7 +503,6 @@ export async function executePartialRecompInternal(
             ...(resumed ? ["Resumed from previous interrupted partial run."] : []),
             `Rebuilt compartments covering messages ${snapStart}-${snapEnd} using ${passCount} historian pass${passCount === 1 ? "" : "es"}.`,
             `Preserved ${priorCompartments.length} prior compartment(s) and ${tailCompartments.length} tail compartment(s) unchanged.`,
-            `Facts unchanged (${currentFacts.length} entr${currentFacts.length === 1 ? "y" : "ies"}).`,
             `Total compartments: ${finalResult.compartmentCount}.`,
         ].join("\n");
     } catch (error: unknown) {

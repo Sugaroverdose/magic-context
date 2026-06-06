@@ -629,24 +629,6 @@ export function promoteRecompStaging(
     }
 }
 
-/**
- * Clear memory_block_cache for ALL sessions so every active session
- * re-renders its memory block on the next cache-busting pass.
- * Called after ctx_memory write/delete mutations.
- */
-export function invalidateAllMemoryBlockCaches(db: Database): void {
-    try {
-        const rows = db.prepare("SELECT session_id FROM session_meta").all() as Array<{
-            session_id: string;
-        }>;
-        for (const row of rows) {
-            clearCachedM0M1(db, row.session_id);
-        }
-    } catch {
-        // Best-effort — session_meta may not exist in test environments
-    }
-}
-
 /** Clear staging tables for a session (on cancel/abandon or after successful promote). */
 export function clearRecompStaging(db: Database, sessionId: string): void {
     db.transaction(() => {

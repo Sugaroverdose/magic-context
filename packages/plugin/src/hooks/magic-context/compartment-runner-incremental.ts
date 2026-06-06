@@ -426,7 +426,6 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         if (deps.preserveInjectionCacheUntilConsumed !== true) {
             clearInjectionCache(sessionId);
         }
-        deps.onCompartmentStatePublished?.(sessionId);
 
         // Use the RESOLVED session directory for memory project identity, not
         // raw deps.directory. deps.directory can be empty even
@@ -515,6 +514,19 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         }
 
         queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
+
+        // Signal deferred materialization/history-refresh LAST — after fact
+        // promotion, events, embeddings AND queueDrops above. The callback arms
+        // deferredHistoryRefreshSessions + deferredMaterializationSessions, which a
+        // concurrent `messages.transform` pass can consume and CLEAR (one-shot
+        // signals). If we signalled at COMMIT (before this point), that pass could
+        // fire during the `await ensureProjectRegistered` window and rebuild m[1]
+        // WITHOUT the just-promoted memories, and materialize the pending-ops drain
+        // BEFORE queueDrops wrote the rows — leaving drops unapplied until a later
+        // execute/flush/85% pass. Signalling last makes "signal set" imply "all
+        // publish-visible state is durable" (the A6 assumption). Mirrors Pi's
+        // signal-last ordering in pi-historian-runner.ts.
+        deps.onCompartmentStatePublished?.(sessionId);
 
         // Inject compaction marker into OpenCode's DB.
         // When deferring (plan v6 §4), the pending blob was already written

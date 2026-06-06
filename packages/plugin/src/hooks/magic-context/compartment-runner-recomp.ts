@@ -250,7 +250,6 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             if (deps.preserveInjectionCacheUntilConsumed !== true) {
                 clearInjectionCache(sessionId);
             }
-            deps.onCompartmentStatePublished?.(sessionId);
 
             // v2 locked rule: recomp does NOT promote facts to project memory
             // (see final-success path below for rationale). Structural rebuild only.
@@ -281,6 +280,15 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             if (lastCompartmentEnd > 0) {
                 queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
             }
+
+            // Signal LAST relative to the drop queue — after queueDrops so a
+            // concurrent transform pass that consumes the one-shot
+            // history/materialize signals finds the drop rows durable (recomp does
+            // not promote facts, so the drops are the only signal-visible state).
+            // Placed before the embedding await + marker because neither is
+            // consumed by those signals, and the await window is exactly where the
+            // race fired. Mirrors the incremental path.
+            deps.onCompartmentStatePublished?.(sessionId);
 
             // Update compaction marker after recomp.
             // Recomp is explicit (eagerly clears injection cache), so the marker
@@ -533,7 +541,6 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         if (deps.preserveInjectionCacheUntilConsumed !== true) {
             clearInjectionCache(sessionId);
         }
-        deps.onCompartmentStatePublished?.(sessionId);
 
         const finalCompartments = promoted?.compartments ?? candidateCompartments;
         const finalFacts = promoted?.facts ?? candidateFacts;
@@ -550,6 +557,11 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         if (lastCompartmentEnd > 0) {
             queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
         }
+
+        // Signal LAST relative to the drop queue (mirrors the incremental +
+        // early-publish paths): a concurrent transform pass consuming the one-shot
+        // history/materialize signals must find the drop rows durable.
+        deps.onCompartmentStatePublished?.(sessionId);
 
         // v2 (E2): recompute P1 embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which

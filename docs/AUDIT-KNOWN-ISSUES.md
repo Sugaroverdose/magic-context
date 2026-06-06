@@ -470,15 +470,17 @@ leak. Per-agent dynamic schema registration would remove the wasted attempt but
 adds tool-definition complexity for a cosmetic UX gain. Accepted; the security
 boundary is the runtime gate, which is correct.
 
-> **Correction to A14 (session_facts is NOT fully dead):** A14 lists
-> `session_facts` among "vestigial" tables, but it still has ONE live reader —
-> `compartment-runner-partial-recomp.ts` calls `getSessionFacts` to carry
-> existing facts through partial-recomp staging unchanged (partial recomp must
-> not re-extract facts from an incomplete range). So `session_facts` is retired as
-> a *render* source (never injected into the prompt) but is still a live
-> *staging-carry* store for partial recomp. Do NOT drop the table or
-> `getSessionFacts` as "dead" — the render-path retirement and the staging-carry
-> reader are separate facts.
+> **A14 update — `session_facts` is now fully retired (no live reader):** an
+> earlier correction here noted `session_facts` still had ONE live reader
+> (`compartment-runner-partial-recomp.ts` snapshotting facts to "carry through
+> staging"). That reader was removed: partial recomp snapshotted facts and
+> reported "Facts unchanged (N)", but the recomp promote path
+> (`promoteRecompStagingWithM0Mutation`) unconditionally `DELETE`s `session_facts`
+> and never re-inserts, so the snapshot was dead work and the message was
+> misleading. Partial recomp now stages an empty fact list and drops the claim.
+> `session_facts` is therefore vestigial in v2: written by nothing on the live
+> path, read by nothing, rendered by nothing. The table + `getSessionFacts` are
+> kept only for schema stability / legacy rows; safe to treat as dead.
 
 ### A30. Pi `upgrade_state` m[0] marker is dynamic (parity with OpenCode) — superseded
 

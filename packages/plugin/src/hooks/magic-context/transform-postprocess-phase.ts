@@ -511,17 +511,24 @@ export async function runPostTransformPhase(
         args.nudgePlacements.clear(args.sessionId);
     }
 
-    if (
-        shouldRunHeuristics &&
-        (args.didMutateFromFlushedStatuses || didMutateFromPendingOperations)
-    ) {
-        try {
-            const t8 = performance.now();
-            dropStaleReduceCalls(args.messages, args.protectedTags);
-            logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
-        } catch (error) {
-            sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
-        }
+    // Stale ctx_reduce drop is a REPLAY-class transform: it must run on EVERY
+    // pass (like reasoning-clearing replay), not only execute/heuristics passes.
+    // It is a pure, deterministic, DB-free sentinel rewrite keyed on
+    // `messages.length - protectedTags` (isSentinel-guarded, so re-running is a
+    // no-op). When it was gated to heuristics passes, an execute pass sentinelled
+    // the aged ctx_reduce parts but the next DEFER pass (messages rebuilt fresh
+    // from source) left them intact → the defer wire diverged from the execute
+    // wire and busted the Anthropic prompt cache. Unlike Pi (which persists tag
+    // drops), OpenCode keeps the sentinel representation; running it every pass
+    // makes that representation byte-stable across execute↔defer without any DB
+    // write. No-op for sessions without ctx_reduce parts (ctx_reduce_enabled=false
+    // / subagents).
+    try {
+        const t8 = performance.now();
+        dropStaleReduceCalls(args.messages, args.protectedTags);
+        logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
+    } catch (error) {
+        sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
     }
 
     const m0M1Enabled =
