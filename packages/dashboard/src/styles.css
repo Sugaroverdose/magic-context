@@ -1835,6 +1835,25 @@ select.config-input {
   color: var(--text-muted);
 }
 
+/* The Default row sits OUTSIDE the bordered .per-model-overrides box; override
+ * rows sit INSIDE it (1px border + 8px padding) and end before a 26px remove
+ * button (10px gap). Indent the Default row by the matching amounts so its value
+ * column lines up exactly — both left and right edges — with the override rows
+ * below it. */
+.per-model-row.default-row {
+  padding-left: 9px; /* overrides-box: 1px border + 8px padding */
+  padding-right: 45px; /* box edge (9) + row gap (10) + remove button (26) */
+}
+
+/* In per-model rows the slider must FILL its value column: the surrounding
+ * .range-slider-container is flex:1, so without lifting the global 280px cap the
+ * track stops short and leaves a large dead gap between the slider and the value
+ * readout / remove button. Scoped to per-model rows so the standalone scalar
+ * slider (ConfigEditor) keeps its compact 280px width. */
+.per-model-row .range-slider {
+  max-width: none;
+}
+
 .per-model-overrides {
   display: flex;
   flex-direction: column;

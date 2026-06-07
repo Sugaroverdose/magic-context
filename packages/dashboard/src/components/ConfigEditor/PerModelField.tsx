@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, Index, Show } from "solid-js";
 import ModelSelect from "./ModelSelect";
 
 interface PerModelFieldProps {
@@ -130,8 +130,10 @@ export default function PerModelField(props: PerModelFieldProps) {
       </div>
       <span class="config-field-desc">{props.description}</span>
 
-      {/* Default value */}
-      <div class="per-model-row">
+      {/* Default value. `default-row` indents it to line up with the override
+          rows below, which sit inside the padded+bordered .per-model-overrides
+          box (see CSS). */}
+      <div class="per-model-row default-row">
         <span class="per-model-label">Default</span>
         {props.inputType === "slider" && props.sliderConfig ? (
           <div class="range-slider-container" style={{ flex: "1" }}>
@@ -167,49 +169,60 @@ export default function PerModelField(props: PerModelFieldProps) {
         )}
       </div>
 
-      {/* Per-model overrides */}
+      {/* Per-model overrides.
+          Index (NOT For): For keys by referential identity, but
+          Object.entries() returns brand-new tuple arrays every render, so on
+          each onInput For disposes + recreates every row's DOM — which destroys
+          the <input> the user is dragging mid-gesture, the browser loses pointer
+          capture, and a range slider moves one tick then stops. Index keys by
+          position and updates the per-row accessor in place, so the DOM node
+          (and the active drag) survives value changes. */}
       <Show when={hasOverrides()}>
         <div class="per-model-overrides">
-          <For each={Object.entries(normalized().overrides)}>
-            {([model, val]) => (
-              <div class="per-model-row">
-                <span class="per-model-model mono">{model}</span>
-                {props.inputType === "slider" && props.sliderConfig ? (
-                  <div class="range-slider-container" style={{ flex: "1" }}>
+          <Index each={Object.entries(normalized().overrides)}>
+            {(entry) => {
+              const model = () => entry()[0];
+              const val = () => entry()[1];
+              return (
+                <div class="per-model-row">
+                  <span class="per-model-model mono">{model()}</span>
+                  {props.inputType === "slider" && props.sliderConfig ? (
+                    <div class="range-slider-container" style={{ flex: "1" }}>
+                      <input
+                        class="range-slider"
+                        type="range"
+                        min={props.sliderConfig.min}
+                        max={props.sliderConfig.max}
+                        step={props.sliderConfig.step}
+                        value={Number(val())}
+                        onInput={(e) => setOverride(model(), Number(e.currentTarget.value))}
+                      />
+                      <span class="range-slider-value">
+                        {Number(val())}
+                        {props.sliderConfig.suffix}
+                      </span>
+                    </div>
+                  ) : (
                     <input
-                      class="range-slider"
-                      type="range"
-                      min={props.sliderConfig.min}
-                      max={props.sliderConfig.max}
-                      step={props.sliderConfig.step}
-                      value={Number(val)}
-                      onInput={(e) => setOverride(model, Number(e.currentTarget.value))}
+                      class="config-input"
+                      type="text"
+                      style={{ flex: "1" }}
+                      value={String(val())}
+                      onInput={(e) => setOverride(model(), e.currentTarget.value)}
                     />
-                    <span class="range-slider-value">
-                      {Number(val)}
-                      {props.sliderConfig.suffix}
-                    </span>
-                  </div>
-                ) : (
-                  <input
-                    class="config-input"
-                    type="text"
-                    style={{ flex: "1" }}
-                    value={String(val)}
-                    onInput={(e) => setOverride(model, e.currentTarget.value)}
-                  />
-                )}
-                <button
-                  type="button"
-                  class="btn sm danger"
-                  onClick={() => removeOverride(model)}
-                  title="Remove override"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-          </For>
+                  )}
+                  <button
+                    type="button"
+                    class="btn sm danger"
+                    onClick={() => removeOverride(model())}
+                    title="Remove override"
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            }}
+          </Index>
         </div>
       </Show>
 
