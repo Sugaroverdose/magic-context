@@ -20,6 +20,21 @@ describe("blockedEmbeddingEndpointReason", () => {
         expect(blockedEmbeddingEndpointReason("http://[fe80::1]/v1")).toBeTruthy();
     });
 
+    it("blocks the AWS IPv6 metadata service (fd00:ec2::254, all spellings)", () => {
+        expect(blockedEmbeddingEndpointReason("http://[fd00:ec2::254]/latest")).toBeTruthy();
+        // Expanded, uppercase, and leading-zero forms all canonicalize to the
+        // same compressed hostname via WHATWG URL.
+        expect(
+            blockedEmbeddingEndpointReason("http://[fd00:ec2:0:0:0:0:0:254]/latest"),
+        ).toBeTruthy();
+        expect(blockedEmbeddingEndpointReason("http://[FD00:EC2::254]/latest")).toBeTruthy();
+    });
+
+    it("ALLOWS other unique-local IPv6 (self-hosted ULA embedding server)", () => {
+        // fc00::/7 is NOT blocked wholesale — only the known AWS metadata literal.
+        expect(blockedEmbeddingEndpointReason("http://[fd12:3456:789a::1]:1234/v1")).toBeNull();
+    });
+
     it("blocks IPv4-mapped IPv6 metadata literals (dotted and hex spellings)", () => {
         // Dotted tail.
         expect(

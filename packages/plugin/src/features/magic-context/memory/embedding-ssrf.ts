@@ -23,6 +23,17 @@
 
 const METADATA_HOSTNAMES = new Set(["metadata.google.internal", "metadata.goog"]);
 
+/**
+ * AWS exposes its instance metadata service over IPv6 at the fixed unique-local
+ * address `fd00:ec2::254` (in addition to the IPv4 `169.254.169.254`). The
+ * broader `fc00::/7` unique-local range is NOT blocked wholesale — legitimate
+ * self-hosted embedding servers may live on ULA addresses — so we block only the
+ * known fixed metadata literal, matching the "block known metadata, allow
+ * private/self-hosted" design. WHATWG URL canonicalizes the address (e.g.
+ * `[fd00:ec2:0:0:0:0:0:254]` → `fd00:ec2::254`), so compare the compressed form.
+ */
+const IPV6_METADATA_HOSTS = new Set(["fd00:ec2::254"]);
+
 /** 169.254.0.0/16 — link-local, which includes the cloud metadata IP. */
 function isLinkLocalIpv4(host: string): boolean {
     return /^169\.254\.\d{1,3}\.\d{1,3}$/.test(host);
@@ -76,6 +87,9 @@ export function blockedEmbeddingEndpointReason(endpoint: string): string | null 
 
     if (METADATA_HOSTNAMES.has(host)) {
         return `embedding endpoint host ${host} is a cloud metadata service (blocked)`;
+    }
+    if (IPV6_METADATA_HOSTS.has(host)) {
+        return `embedding endpoint host ${host} is the AWS IPv6 metadata service (blocked)`;
     }
     if (isLinkLocalIpv4(host)) {
         return `embedding endpoint host ${host} is link-local / cloud metadata (blocked)`;
