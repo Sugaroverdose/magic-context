@@ -1808,23 +1808,31 @@ select.config-input {
   gap: 10px;
 }
 
+/* Label column for both the "Default" row and per-model override rows. A FIXED
+ * width (not min/max) is required so the value column — text input, slider, value
+ * readout, and remove button — starts at the same x on every row. Previously the
+ * model-name label grew with its text (min 60 / max 200), so a longer name like
+ * `anthropic/claude-sonnet-4-6` pushed that row's controls right and broke the
+ * column alignment. Keeping both label classes the same width also lines the
+ * Default row up with the override rows below it. */
+.per-model-label,
+.per-model-model {
+  width: 200px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .per-model-label {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  min-width: 60px;
-  flex-shrink: 0;
 }
 
 .per-model-model {
   font-size: 11px;
   color: var(--text-muted);
-  min-width: 60px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .per-model-overrides {
