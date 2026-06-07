@@ -49,9 +49,12 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install opencode (1.15.4 pin matches host e2e)
+      - name: Install opencode (latest — matches host e2e)
+        # Float to latest: this smoke job exists to catch a Linux serve-startup
+        # regression, so it must run the version users get. See ci.yml host job
+        # for the re-pin escape hatch if an upstream build is known-bad.
         run: |
-          curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.4
+          curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode binary
