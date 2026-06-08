@@ -4,22 +4,18 @@ import {
     type ContextDatabase,
     clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
-    clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
     getAutoSearchHintDecisions,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
     getPendingOps,
-    getPersistedStickyTurnReminder,
     getPersistedTodoSyntheticAnchor,
     getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
-    getTopNBySize,
     peekDeferredExecutePending,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
-    setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -27,7 +23,6 @@ import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
-import { applyContextNudge } from "./apply-context-nudge";
 import { runAutoSearchHint } from "./auto-search-runner";
 import { applyDeferredCompactionMarker } from "./compaction-marker-manager";
 import { getActiveCompartmentRun } from "./compartment-runner";
@@ -44,9 +39,6 @@ import {
 } from "./inject-compartments";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
-import { reinjectNudgeAtAnchor } from "./nudge-injection";
-import type { NudgePlacementStore } from "./nudge-placement-store";
-import type { ContextNudge } from "./nudger";
 import { replaySentinelByMessageIds } from "./sentinel";
 import {
     clearOldReasoning,
@@ -57,9 +49,7 @@ import {
 } from "./strip-content";
 import { buildSyntheticTodoPart } from "./todo-view";
 import {
-    appendReminderToLatestUserMessage,
     appendReminderToUserMessageById,
-    countMessagesSinceLastUser,
     findLastUserMessageId,
     injectToolPartIntoAssistantById,
     injectToolPartIntoLatestAssistant,
@@ -117,20 +107,14 @@ interface RunPostTransformPhaseArgs {
     deferredHistoryRefreshSessions: Set<string>;
     deferredMaterializationSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
-    autoDropToolAge: number;
-    dropToolStructure: boolean;
     clearReasoningAge: number;
     protectedTags: number;
-    nudgePlacements: NudgePlacementStore;
-    nudger: (
-        sessionId: string,
-        contextUsage: { percentage: number; inputTokens: number },
-        db: ContextDatabase,
-        topNFn: typeof getTopNBySize,
-        preloadedTags?: TagEntry[],
-        messagesSinceLastUser?: number,
-        preloadedSessionMeta?: SessionMeta,
-    ) => ContextNudge | null;
+    /**
+     * Ceiling for the tiered emergency drop = contextLimit × executeThreshold%.
+     * Undefined when the context limit isn't resolved (cold start) — the
+     * emergency drop then skips (the 95% block stays the backstop).
+     */
+    emergencyCeilingTokens?: number;
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     didMutateFromFlushedStatuses: boolean;
     watermark: number;
@@ -182,7 +166,6 @@ export interface PostTransformPhaseResult {
 export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
-    let didMutateFromPendingOperations = false;
     // `isExplicitFlush` reads pendingMaterializationSessions — the persistent
     // "user wants pending ops + heuristics to run" signal. Survives across
     // blocked defer passes (compartmentRunning) so /ctx-flush intent is not
@@ -200,6 +183,15 @@ export async function runPostTransformPhase(
         args.lastHeuristicsTurnId.get(args.sessionId) === args.currentTurnId;
     const forceMaterialization =
         args.fullFeatureMode && args.contextUsage.percentage >= args.forceMaterializationPercentage;
+    // Tiered emergency drop eligibility (Phase 2). Unlike `forceMaterialization`
+    // (primary-only — it also forces m[0] materialization), the emergency tool
+    // floor fires at ≥85% for BOTH primary AND subagent: it's the only tool
+    // floor subagents have now that routine age-drops are gone. It's still a
+    // cache-busting-pass operation (selection persisted, defer passes replay),
+    // so it only runs when heuristics run (see shouldRunHeuristics) AND usage is
+    // ≥ the force-materialize threshold.
+    const emergencyDropEligible =
+        args.contextUsage.percentage >= args.forceMaterializationPercentage;
     const activeCompartmentRun = args.canRunCompartments
         ? getActiveCompartmentRun(args.sessionId)
         : undefined;
@@ -272,6 +264,11 @@ export async function runPostTransformPhase(
         (!compartmentRunning || emergencyBypassCompartmentGate) &&
         (materializationRequested ||
             forceMaterialization ||
+            // ≥85% emergency floor for BOTH primary and subagent. For a primary
+            // this coincides with forceMaterialization (fullFeatureMode && ≥85%);
+            // for a subagent (no forceMaterialization) it's the only path that
+            // fires the tiered drop, even if the scheduler deferred mid-turn.
+            emergencyDropEligible ||
             (args.schedulerDecision === "execute" &&
                 (!alreadyRanThisTurn || !args.fullFeatureMode)));
     // Central cache-busting gate used by all mutation paths below.
@@ -356,7 +353,6 @@ export async function runPostTransformPhase(
                 args.sessionId,
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
             );
-            const pendingCountBefore = pendingOps.length;
             const tApply = performance.now();
             // P0 perf: don't pass `args.tags` here. applyPendingOperations
             // genuinely needs the full tag set (including dropped/compacted
@@ -369,7 +365,7 @@ export async function runPostTransformPhase(
             //   - When pending ops do exist (rare execute/flush passes),
             //     the load runs once inside the same transaction the
             //     mutations need, which is unavoidable.
-            didMutateFromPendingOperations = applyPendingOperations(
+            applyPendingOperations(
                 args.sessionId,
                 args.db,
                 args.targets,
@@ -377,10 +373,6 @@ export async function runPostTransformPhase(
                 undefined,
                 pendingOps,
             );
-            const pendingCountAfter = getPendingOps(args.db, args.sessionId).length;
-            if (pendingCountBefore > 0 && pendingCountAfter === 0) {
-                clearPersistedStickyTurnReminder(args.db, args.sessionId);
-            }
             logTransformTiming(args.sessionId, "applyPendingOperations", tApply);
         }
         if (shouldRunHeuristics) {
@@ -401,22 +393,25 @@ export async function runPostTransformPhase(
                 args.targets,
                 args.messageTagNumbers,
                 {
-                    autoDropToolAge: args.autoDropToolAge,
-                    dropToolStructure: args.dropToolStructure,
                     protectedTags: args.protectedTags,
-                    dropAllTools: forceMaterialization,
+                    // Tiered emergency drop fires only at ≥85% (both primary and
+                    // subagent) AND only when the ceiling is known. Undefined
+                    // ceiling (cold start) or below-threshold usage → no
+                    // emergency arg → routine pass does dedup/injection-strip
+                    // only (Phase 2 removed need-blind routine tool drops).
+                    emergency:
+                        emergencyDropEligible &&
+                        args.emergencyCeilingTokens !== undefined &&
+                        args.emergencyCeilingTokens > 0
+                            ? {
+                                  currentTotalInputTokens: args.contextUsage.inputTokens,
+                                  ceilingTokens: args.emergencyCeilingTokens,
+                              }
+                            : undefined,
                     caveman: cavemanConfig,
                 },
                 args.tags,
             );
-            if (
-                cleanup.droppedTools > 0 ||
-                cleanup.deduplicatedTools > 0 ||
-                cleanup.droppedInjections > 0 ||
-                cleanup.compressedTextTags > 0
-            ) {
-                didMutateFromPendingOperations = true;
-            }
             logTransformTiming(
                 args.sessionId,
                 "applyHeuristicCleanup",
@@ -504,13 +499,6 @@ export async function runPostTransformPhase(
     } catch (error) {
         sessionLog(args.sessionId, "transform failed applying pending operations:", error);
         updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
-        // Only clear on cache-busting passes to avoid re-anchor on next defer.
-        if (isCacheBustingPass) args.nudgePlacements.clear(args.sessionId);
-    }
-    // Only clear nudge placements on cache-busting passes. Clearing on defer would
-    // cause the next pass to re-anchor the nudge on a cached assistant message (Finding 2).
-    if (didMutateFromPendingOperations && isCacheBustingPass) {
-        args.nudgePlacements.clear(args.sessionId);
     }
 
     // Stale ctx_reduce strip is a REPLAY-class transform driven by a FROZEN,
@@ -724,119 +712,14 @@ export async function runPostTransformPhase(
         logTransformTiming(args.sessionId, "pp.placeholderNeutralize", tPlaceholder);
     }
 
-    // Sticky turn reminder replay is primary-only: subagents never CREATE
-    // this state (gated in hook-handlers.ts), but a session that was briefly
-    // misclassified as primary (race before session.created processes) could
-    // leave stale state behind. On a cache-busting pass for a subagent, clear
-    // any leftover state so it doesn't replay forever.
-    const pendingUserTurnReminder = args.fullFeatureMode
-        ? getPersistedStickyTurnReminder(args.db, args.sessionId)
-        : null;
-    if (!args.fullFeatureMode && isCacheBustingPass) {
-        const stale = getPersistedStickyTurnReminder(args.db, args.sessionId);
-        if (stale) {
-            clearPersistedStickyTurnReminder(args.db, args.sessionId);
-            sessionLog(
-                args.sessionId,
-                "sticky turn reminder cleared — subagent should not have this state (cache-busting pass)",
-            );
-        }
-    }
-    if (pendingUserTurnReminder) {
-        // Only clear the reminder when the pass is already cache-busting (execute/flush).
-        // Clearing on a cache-safe pass would remove text from an anchored user message,
-        // changing cached content and busting the Anthropic prompt-cache prefix.
-        if (args.hasRecentReduceCall && isCacheBustingPass) {
-            clearPersistedStickyTurnReminder(args.db, args.sessionId);
-            sessionLog(
-                args.sessionId,
-                "sticky turn reminder cleared — ctx_reduce found in recent messages (cache-busting pass)",
-            );
-        } else {
-            if (pendingUserTurnReminder.messageId) {
-                const reinjected = appendReminderToUserMessageById(
-                    args.messages,
-                    pendingUserTurnReminder.messageId,
-                    pendingUserTurnReminder.text,
-                );
-                if (!reinjected) {
-                    if (isCacheBustingPass) {
-                        // Anchor message gone (compacted/deleted) — clear stale reminder.
-                        // A new reminder will only be created if a future tool-heavy turn
-                        // triggers createChatMessageHook; it is NOT auto-recreated from
-                        // pending drops alone.
-                        clearPersistedStickyTurnReminder(args.db, args.sessionId);
-                        sessionLog(
-                            args.sessionId,
-                            `sticky turn reminder cleared — anchor ${pendingUserTurnReminder.messageId} gone (compacted/deleted)`,
-                        );
-                    } else {
-                        sessionLog(
-                            args.sessionId,
-                            `preserving sticky turn reminder anchor to avoid cache bust: messageId=${pendingUserTurnReminder.messageId}`,
-                        );
-                    }
-                }
-            } else {
-                const anchoredMessageId = appendReminderToLatestUserMessage(
-                    args.messages,
-                    pendingUserTurnReminder.text,
-                );
-                if (anchoredMessageId) {
-                    setPersistedStickyTurnReminder(
-                        args.db,
-                        args.sessionId,
-                        pendingUserTurnReminder.text,
-                        anchoredMessageId,
-                    );
-                }
-            }
-        }
-    }
+    // The in-turn ctx_reduce nudge (Channel 1) is injected into tool outputs in
+    // tool.execute.after and persisted by OpenCode, so it needs no transform-side
+    // replay. The old rolling/iteration assistant-anchored nudges and the
+    // tool-heavy sticky user-message reminder were removed (their buried-anchor
+    // first-append busted the Anthropic prompt-cache prefix). Their persisted
+    // state is zeroed by migration v31; no code reads it anymore.
 
     const tNudgeBlock = performance.now();
-    const messagesSinceLastUser = countMessagesSinceLastUser(args.messages);
-
-    if (args.fullFeatureMode) {
-        let nudge: ContextNudge | null = null;
-        try {
-            nudge = args.nudger(
-                args.sessionId,
-                args.contextUsage,
-                args.db,
-                getTopNBySize,
-                args.tags,
-                messagesSinceLastUser,
-                args.sessionMeta,
-            );
-        } catch (error) {
-            sessionLog(args.sessionId, "transform nudge computation failed:", error);
-        }
-
-        if (nudge?.type === "assistant") {
-            const t9 = performance.now();
-            applyContextNudge(args.messages, nudge, args.nudgePlacements, args.sessionId);
-            logTransformTiming(args.sessionId, "applyContextNudge", t9);
-        } else if (isCacheBustingPass) {
-            // Only retire the nudge anchor on cache-busting passes (Finding 4).
-            // Clearing on defer would remove previously-injected nudge text from
-            // the cached assistant message.
-            args.nudgePlacements.clear(args.sessionId);
-        } else {
-            // Defer pass: replay existing anchor to keep cached content stable.
-            const existing = args.nudgePlacements.get(args.sessionId);
-            if (existing) {
-                reinjectNudgeAtAnchor(
-                    args.messages,
-                    existing.nudgeText,
-                    args.nudgePlacements,
-                    args.sessionId,
-                );
-            }
-        }
-    } else {
-        args.nudgePlacements.clear(args.sessionId);
-    }
 
     // Sticky-injection replay (§2.4): every pass replays every persisted anchor
     // so cached user-message bytes remain identical until that message leaves

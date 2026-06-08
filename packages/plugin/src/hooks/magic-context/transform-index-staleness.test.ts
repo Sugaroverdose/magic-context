@@ -14,7 +14,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
-import { createNudgePlacementStore, createTransform } from "./transform";
+import { createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
 type ThinkingPart = { type: "thinking"; thinking: string };
@@ -70,16 +70,12 @@ function createTestTransform(sessionId: string) {
             [sessionId, { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() }],
         ]),
         liveModelBySession,
-        nudger: () => null,
         db: openDatabase(),
-        nudgePlacements: createNudgePlacementStore(),
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
         clearReasoningAge: 2,
         protectedTags: 0,
-        autoDropToolAge: 1000,
-        dropToolStructure: true,
     });
     return { transform, shouldExecute };
 }

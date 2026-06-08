@@ -1,32 +1,16 @@
 /** @jsxImportSource @opentui/solid */
-import { appendFileSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { formatThresholdPercent } from "../../shared/format-threshold"
 
-// TEMP recomp-poll instrumentation (dogfood 2026-05-30). Writes to a dedicated
-// file so we can trace the client poll loop the server log can't see. Remove
-// once the freeze is diagnosed.
-const RECOMP_TRACE = join(tmpdir(), "mc-recomp-trace.log")
-function rtrace(msg: string): void {
-    try {
-        appendFileSync(RECOMP_TRACE, `[${new Date().toISOString()}] ${msg}\n`)
-    } catch {
-        // ignore
-    }
-}
-
 // Module-level hook so the upgrade/recomp dialog can kick the sidebar into its
 // fast recomp self-poll the INSTANT the user confirms — without waiting for a
 // parent-session message event (the RPC upgrade/recomp call fires none). The
-// mounted SidebarContent registers its refresh here (dogfood 2026-05-30).
+// mounted SidebarContent registers its refresh here.
 let activeRecompPollKick: (() => void) | null = null
 export function kickRecompProgressRefresh(): void {
-    rtrace(`kickRecompProgressRefresh called; activeKick=${activeRecompPollKick ? "set" : "NULL"}`)
     activeRecompPollKick?.()
 }
 
@@ -473,9 +457,6 @@ const SidebarContent = (props: {
         void loadSidebarSnapshot(sid, directory)
             .then((data) => {
                 const phase = data?.recompProgress?.phase
-                rtrace(
-                    `poll#${recompPollCount} phase=${phase ?? "ABSENT"} passCount=${data?.recompProgress?.passCount ?? "-"} note=${data?.recompProgress?.note ?? "-"} sawPhase=${recompSawPhase} absent=${recompConsecutiveAbsent}`,
-                )
                 // While a recomp is known-active, a transient snapshot that lost
                 // recompProgress (sticky cache / busy-DB empty) must NOT wipe the
                 // visible bar — carry the last good progress forward so it stays
@@ -499,7 +480,6 @@ const SidebarContent = (props: {
                     // Terminal state rendered — stop. The server keeps "done"/
                     // "skipped" for a grace window and "failed" until the next run,
                     // so the outcome stays visible without further polling.
-                    rtrace(`STOP: terminal phase=${phase}`)
                     recompActive = false
                 } else {
                     // Phase absent this poll.
@@ -508,7 +488,6 @@ const SidebarContent = (props: {
                         // Still waiting for the server's first "Starting…".
                         if (recompPollCount < RECOMP_PROBE_MAX) scheduleRecompTick()
                         else {
-                            rtrace("STOP: probe window exhausted, never saw phase")
                             recompActive = false
                         }
                     } else if (recompConsecutiveAbsent < RECOMP_ABSENT_GIVEUP) {
@@ -519,7 +498,6 @@ const SidebarContent = (props: {
                         scheduleRecompTick()
                     } else {
                         // Long continuous absence — the entry is genuinely gone.
-                        rtrace("STOP: absent giveup")
                         recompActive = false
                     }
                 }
@@ -527,7 +505,6 @@ const SidebarContent = (props: {
             .catch((err) => {
                 // CRITICAL: a failed/slow fetch must NOT kill the loop — keep
                 // polling while active so we still catch the terminal state.
-                rtrace(`poll#${recompPollCount} FETCH ERROR: ${String(err)}`)
                 scheduleRecompTick()
             })
     }
@@ -536,7 +513,6 @@ const SidebarContent = (props: {
     // first detects an active recomp). The server emits an immediate "Starting…"
     // entry; the probe window covers the brief RPC race before it lands.
     function kickRecompPoll(): void {
-        rtrace(`kickRecompPoll: recompActive=${recompActive} (${recompActive ? "SKIP" : "starting"})`)
         if (recompActive) return // already running
         recompActive = true
         recompSawPhase = false
@@ -546,7 +522,6 @@ const SidebarContent = (props: {
     }
 
     activeRecompPollKick = kickRecompPoll
-    rtrace("SidebarContent mounted; registered activeRecompPollKick")
 
     onCleanup(() => {
         if (refreshTimer) clearTimeout(refreshTimer)

@@ -114,7 +114,7 @@ describe("auto-search-runner", () => {
         }
     });
 
-    test("timeout path: caches skip and returns without hanging transform", async () => {
+    test("timeout path: returns without hanging transform and does NOT inject a hint", async () => {
         // Hanging search: never resolves.
         const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
             () => new Promise(() => {}) as unknown as ReturnType<typeof searchModule.unifiedSearch>,
@@ -140,15 +140,21 @@ describe("auto-search-runner", () => {
             expect(winner).toBe("done");
             // Must complete within the 3s AUTO_SEARCH_TIMEOUT_MS + some slack.
             expect(elapsed).toBeLessThan(4_000);
+            // Timeout must not inject a hint into the user message.
+            expect(findUserPromptText(messages[0])).not.toContain("<ctx-search-hint>");
 
-            // Second pass on the same message id must be cached (no new search call).
+            // Timeout is RETRYABLE: it does NOT persist a permanent no-hint
+            // decision, so a later pass (with the user message still at the tail)
+            // re-attempts the search rather than being suppressed forever. The
+            // live-tail gate (user message must be the last element) is what bounds
+            // re-search to new-turn passes, not a cached no-hint decision.
             await runAutoSearchHint({
                 sessionId: "s1",
                 db,
                 messages,
                 options: baseOptions,
             });
-            expect(spy).toHaveBeenCalledTimes(1);
+            expect(spy).toHaveBeenCalledTimes(2);
             expect(findUserPromptText(messages[0])).not.toContain("<ctx-search-hint>");
         } finally {
             spy.mockRestore();

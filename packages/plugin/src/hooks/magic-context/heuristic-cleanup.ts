@@ -6,9 +6,14 @@ import {
     updateTagDropMode,
     updateTagStatus,
 } from "../../features/magic-context/storage";
+import {
+    getEmergencyDropWatermark,
+    setEmergencyDropWatermark,
+} from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
+import { type EmergencyDropTag, planEmergencyDrop } from "./emergency-drop";
 import { stripSystemInjection } from "./system-injection-stripper";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
@@ -31,10 +36,17 @@ export function applyHeuristicCleanup(
     targets: Map<number, TagTarget>,
     messageTagNumbers: Map<MessageLike, number>,
     config: {
-        autoDropToolAge: number;
-        dropToolStructure: boolean;
         protectedTags: number;
-        dropAllTools?: boolean;
+        /**
+         * Tiered target-headroom emergency drop. Provided only on the ≥85%
+         * force-materialize (cache-busting) pass; undefined on routine execute
+         * passes (Phase 2 removed routine age-based tool drops entirely). When
+         * present, the emergency drop runs before dedup/injection-strip.
+         */
+        emergency?: {
+            currentTotalInputTokens: number;
+            ceilingTokens: number;
+        };
         /**
          * Age-tier caveman text compression settings. Only honored when the
          * session is running with ctx_reduce_enabled=false — caller is
@@ -61,40 +73,48 @@ export function applyHeuristicCleanup(
     // the authoritative max via an O(log N) backward index seek so the
     // contract holds whether `tags` is full or active-only.
     const maxTag = getMaxTagNumberBySession(db, sessionId);
-    const toolAgeCutoff = maxTag - config.autoDropToolAge;
     const protectedCutoff = maxTag - config.protectedTags;
 
     let droppedTools = 0;
     let deduplicatedTools = 0;
     let droppedInjections = 0;
 
-    db.transaction(() => {
-        for (const tag of tags) {
-            if (tag.status !== "active") continue;
-            if (tag.tagNumber > protectedCutoff) continue;
-
-            const shouldDropTool =
-                tag.type === "tool" &&
-                (config.dropAllTools === true || tag.tagNumber <= toolAgeCutoff);
-            if (shouldDropTool) {
-                const target = targets.get(tag.tagNumber);
-                const useFullDrop = config.dropToolStructure || config.dropAllTools === true;
-                const result = useFullDrop
-                    ? (target?.drop?.() ?? "absent")
-                    : (target?.truncate?.() ?? "absent");
-                if (result === "removed" || result === "truncated" || result === "absent") {
-                    updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-                    updateTagDropMode(
-                        db,
-                        sessionId,
-                        tag.tagNumber,
-                        useFullDrop ? "full" : "truncated",
-                    );
-                    droppedTools++;
+    // ── Tiered target-headroom emergency drop (Phase 2) ──
+    // Replaces the old need-blind routine age-drop + `dropAllTools` nuke. Runs
+    // only when the caller supplies `emergency` (i.e. ≥85% force-materialize
+    // cache-busting pass). Selection is pure (`planEmergencyDrop`); we apply the
+    // returned plan and advance the persisted watermark so each tag drops once.
+    if (config.emergency) {
+        const priorWatermark = getEmergencyDropWatermark(db, sessionId);
+        const plan = planEmergencyDrop({
+            tags: tags as readonly EmergencyDropTag[],
+            maxTag,
+            protectedTags: config.protectedTags,
+            currentTotalInputTokens: config.emergency.currentTotalInputTokens,
+            ceilingTokens: config.emergency.ceilingTokens,
+            priorWatermark,
+        });
+        if (plan.shouldDrop) {
+            const toDrop = new Set(plan.tagNumbers);
+            db.transaction(() => {
+                for (const tag of tags) {
+                    if (!toDrop.has(tag.tagNumber)) continue;
+                    if (tag.status !== "active" || tag.type !== "tool") continue;
+                    const target = targets.get(tag.tagNumber);
+                    const result = target?.drop?.() ?? "absent";
+                    if (result === "removed" || result === "truncated" || result === "absent") {
+                        updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+                        updateTagDropMode(db, sessionId, tag.tagNumber, "full");
+                        droppedTools++;
+                    }
                 }
-            }
+                setEmergencyDropWatermark(db, sessionId, plan.newWatermark);
+            })();
+            sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
+        } else {
+            sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
         }
-    })();
+    }
 
     db.transaction(() => {
         // Strip or drop system injections (todo continuation, skill reminders, etc.)
@@ -180,16 +200,12 @@ export function applyHeuristicCleanup(
                 for (let i = 0; i < group.length - 1; i++) {
                     const tag = group[i];
                     const target = targets.get(tag.tagNumber);
-                    const result = config.dropToolStructure
-                        ? (target?.drop?.() ?? "absent")
-                        : (target?.truncate?.() ?? "absent");
+                    // Always full-drop: Phase 2 removed truncate-mode entirely
+                    // (the emergency path full-drops for max reclaim, and dedup
+                    // drops are redundant duplicates with nothing to preserve).
+                    const result = target?.drop?.() ?? "absent";
                     if (result === "incomplete") continue;
-                    updateTagDropMode(
-                        db,
-                        sessionId,
-                        tag.tagNumber,
-                        config.dropToolStructure ? "full" : "truncated",
-                    );
+                    updateTagDropMode(db, sessionId, tag.tagNumber, "full");
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                     deduplicatedTools++;
                 }

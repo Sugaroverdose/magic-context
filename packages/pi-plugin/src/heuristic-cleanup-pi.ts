@@ -46,9 +46,17 @@ import {
 	applyCavemanCleanup,
 	type CavemanCleanupConfig,
 } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
+import {
+	type EmergencyDropTag,
+	planEmergencyDrop,
+} from "@magic-context/core/hooks/magic-context/emergency-drop";
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
+import {
+	getEmergencyDropWatermark,
+	setEmergencyDropWatermark,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { sessionLog } from "@magic-context/core/shared/logger";
 
 /**
@@ -71,15 +79,17 @@ const DEDUP_SAFE_TOOLS = new Set([
 ]);
 
 export interface PiHeuristicCleanupConfig {
-	autoDropToolAge: number;
-	dropToolStructure: boolean;
 	protectedTags: number;
 	/**
-	 * Emergency override: when true, drops ALL tool tags outside the
-	 * protected tail regardless of age. Mirrors OpenCode's
-	 * forceMaterialization @ 85% behavior. Caller decides when to set.
+	 * Tiered target-headroom emergency drop (Phase 2). Provided only on the
+	 * ≥85% force-materialize (cache-busting) pass; undefined on routine execute
+	 * passes (routine age-based tool drops were removed). Mirrors OpenCode's
+	 * `applyHeuristicCleanup` emergency config.
 	 */
-	dropAllTools?: boolean;
+	emergency?: {
+		currentTotalInputTokens: number;
+		ceilingTokens: number;
+	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
 	 * for only forwarding this when `ctx_reduce_enabled === false` (the
@@ -272,47 +282,60 @@ export function applyPiHeuristicCleanup(
 	// regardless of status. `getMaxTagNumberBySession` resolves with a
 	// single backward index seek (O(log N)).
 	const maxTag = getMaxTagNumberBySession(db, sessionId);
-	const toolAgeCutoff = maxTag - config.autoDropToolAge;
 	const protectedCutoff = maxTag - config.protectedTags;
+	// Stale ctx_reduce removal now uses the protected-tail window (Phase 2
+	// removed the routine age knob); a ctx_reduce call is "stale" once it ages
+	// past the protected tail, mirroring OpenCode's protected-count model.
+	const toolAgeCutoff = protectedCutoff;
 
 	let droppedTools = 0;
 	let deduplicatedTools = 0;
 	let droppedInjections = 0;
 	let droppedStaleReduceCalls = 0;
 
-	// ── Pass 1: drop aged tool tags ───────────────────────────────────
-	db.transaction(() => {
-		for (const tag of tags) {
-			if (tag.status !== "active") continue;
-			if (tag.tagNumber > protectedCutoff) continue;
-
-			const shouldDropTool =
-				tag.type === "tool" &&
-				(config.dropAllTools === true || tag.tagNumber <= toolAgeCutoff);
-			if (!shouldDropTool) continue;
-
-			const target = targets.get(tag.tagNumber);
-			const useFullDrop =
-				config.dropToolStructure || config.dropAllTools === true;
-			const result = useFullDrop
-				? (target?.drop?.() ?? "absent")
-				: (target?.truncate?.() ?? "absent");
-			if (
-				result === "removed" ||
-				result === "truncated" ||
-				result === "absent"
-			) {
-				updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-				updateTagDropMode(
-					db,
-					sessionId,
-					tag.tagNumber,
-					useFullDrop ? "full" : "truncated",
-				);
-				droppedTools++;
-			}
+	// ── Pass 1: tiered target-headroom emergency drop ─────────────────
+	// Replaces the old need-blind aged-drop + dropAllTools nuke. Runs only when
+	// the caller supplies `emergency` (≥85% cache-busting pass). Selection is
+	// pure (`planEmergencyDrop`); we apply it and advance the persisted watermark
+	// so each tag drops once. Mirrors OpenCode `applyHeuristicCleanup`.
+	if (config.emergency) {
+		const priorWatermark = getEmergencyDropWatermark(db, sessionId);
+		const plan = planEmergencyDrop({
+			tags: tags as readonly EmergencyDropTag[],
+			maxTag,
+			protectedTags: config.protectedTags,
+			currentTotalInputTokens: config.emergency.currentTotalInputTokens,
+			ceilingTokens: config.emergency.ceilingTokens,
+			priorWatermark,
+		});
+		if (plan.shouldDrop) {
+			const toDrop = new Set(plan.tagNumbers);
+			db.transaction(() => {
+				for (const tag of tags) {
+					if (!toDrop.has(tag.tagNumber)) continue;
+					if (tag.status !== "active" || tag.type !== "tool") continue;
+					const target = targets.get(tag.tagNumber);
+					const result = target?.drop?.() ?? "absent";
+					if (
+						result === "removed" ||
+						result === "truncated" ||
+						result === "absent"
+					) {
+						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+						updateTagDropMode(db, sessionId, tag.tagNumber, "full");
+						droppedTools++;
+					}
+				}
+				setEmergencyDropWatermark(db, sessionId, plan.newWatermark);
+			})();
+			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
+		} else {
+			sessionLog(
+				sessionId,
+				`emergency tiered drop skipped: ${plan.reason}`,
+			);
 		}
-	})();
+	}
 
 	// ── Pass 1b: stale ctx_reduce calls (Pi persisted-drop replay) ──────
 	const staleReduce = collectStaleReduceCallIds(
@@ -416,16 +439,10 @@ export function applyPiHeuristicCleanup(
 				for (let i = 0; i < group.length - 1; i++) {
 					const tag = group[i];
 					const target = targets.get(tag.tagNumber);
-					const result = config.dropToolStructure
-						? (target?.drop?.() ?? "absent")
-						: (target?.truncate?.() ?? "absent");
+					// Always full-drop (Phase 2 removed truncate-mode).
+					const result = target?.drop?.() ?? "absent";
 					if (result === "incomplete") continue;
-					updateTagDropMode(
-						db,
-						sessionId,
-						tag.tagNumber,
-						config.dropToolStructure ? "full" : "truncated",
-					);
+					updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 					deduplicatedTools++;
 				}

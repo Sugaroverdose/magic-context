@@ -568,11 +568,11 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
     });
 
     it("nested object fields deep-merge across user and project", () => {
-        // User sets drop_tool_structure: false; project sets historian model.
+        // User sets ctx_reduce_enabled: false; project sets historian model.
         // Both must coexist in the merged result.
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({
-                drop_tool_structure: false,
+                ctx_reduce_enabled: false,
                 historian: { model: "anthropic/claude-opus-4-7" },
             }),
             JSON.stringify({
@@ -580,7 +580,7 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
             }),
         );
 
-        expect(result.drop_tool_structure).toBe(false);
+        expect(result.ctx_reduce_enabled).toBe(false);
         expect(result.historian?.model).toBe("anthropic/claude-opus-4-7");
         expect(result.historian?.fallback_models).toEqual(["anthropic/claude-sonnet-4-6"]);
     });

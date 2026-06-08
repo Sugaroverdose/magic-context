@@ -54,6 +54,7 @@ import {
 import {
 	adoptFallbackTagMessageId,
 	type ContextDatabase,
+	casChannel2NudgeState,
 	clearPendingPiCompactionMarkerStateIf,
 	findAdoptableFallbackTags,
 	getActiveTagsBySession,
@@ -61,7 +62,6 @@ import {
 	getPendingOps,
 	getPendingPiCompactionMarkerState,
 	getTagsByNumbers,
-	getTopNBySize,
 	setSessionWorkMetrics,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
@@ -72,16 +72,13 @@ import {
 	clearEmergencyRecovery,
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
-	clearPersistedStickyTurnReminder,
 	getAutoSearchHintDecisions,
 	getNoteNudgeAnchors,
 	getOverflowState,
-	getPersistedStickyTurnReminder,
 	peekDeferredExecutePending,
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 	setDeferredExecutePendingIfAbsent,
-	setPersistedStickyTurnReminder,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	createTagger,
@@ -98,6 +95,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/boundary-execution";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
+import { shouldTriggerChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import {
 	DEFAULT_CONTEXT_LIMIT,
@@ -109,7 +107,6 @@ import {
 	onNoteTrigger,
 	peekNoteNudgeText,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
-import { createNudger } from "@magic-context/core/hooks/magic-context/nudger";
 import {
 	getProtectedTailStartOrdinal,
 	getRawSessionMessageCount,
@@ -128,6 +125,11 @@ import {
 	type ApplyDeferredPiCompactionMarkerDeps,
 	applyDeferredPiCompactionMarker,
 } from "./compaction-marker-manager-pi";
+import {
+	clearPiChannel1State,
+	computeTailToolTokensPi,
+	setPiChannel1Baseline,
+} from "./ctx-reduce-nudge-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import {
@@ -140,7 +142,6 @@ import {
 	type PiM0M1InjectionResult as PiInjectionResult,
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
-import { injectPiNudge } from "./nudge-injector";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
@@ -169,9 +170,6 @@ const FORCE_MATERIALIZATION_PERCENTAGE = 85;
 
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
-const TOOL_HEAVY_TURN_REMINDER_THRESHOLD = 5;
-const TOOL_HEAVY_TURN_REMINDER_TEXT =
-	'\n\n<instruction name="ctx_reduce_turn_cleanup">Also drop via `ctx_reduce` things you don\'t need anymore from the last turn before continuing.</instruction>';
 
 /**
  * Default `clear_reasoning_age` when neither the Pi caller nor the user
@@ -255,19 +253,7 @@ const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
 const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
 const firstContextPassSeenBySession = new Set<string>();
-const recentReduceBySession = new Map<string, number>();
 const liveModelBySession = new Map<string, string>();
-const toolUsageSinceUserTurn = new Map<string, number>();
-const latestUserMessageBySession = new Map<string, string>();
-const RECENT_REDUCE_TTL_MS = 5 * 60 * 1000;
-
-function hasRecentPiCtxReduceExecution(sessionId: string): boolean {
-	const recordedAt = recentReduceBySession.get(sessionId);
-	if (recordedAt === undefined) return false;
-	if (Date.now() - recordedAt <= RECENT_REDUCE_TTL_MS) return true;
-	recentReduceBySession.delete(sessionId);
-	return false;
-}
 
 function logTransformTiming(
 	sessionId: string,
@@ -426,44 +412,6 @@ export function recordPiLiveModel(sessionId: string, modelKey: string): void {
 	liveModelBySession.set(sessionId, modelKey);
 }
 
-export function recordPiCtxReduceExecution(sessionId: string): void {
-	recentReduceBySession.set(sessionId, Date.now());
-}
-
-export function recordPiToolExecution(sessionId: string): void {
-	const current = toolUsageSinceUserTurn.get(sessionId) ?? 0;
-	toolUsageSinceUserTurn.set(sessionId, current + 1);
-}
-
-export function getPiToolUsageSinceUserTurnForTest(
-	sessionId: string,
-): number | undefined {
-	return toolUsageSinceUserTurn.get(sessionId);
-}
-
-function onPiNewUserMessage(args: {
-	db: ContextDatabase;
-	sessionId: string;
-}): void {
-	const sessionMeta = getOrCreateSessionMeta(args.db, args.sessionId);
-	const turnUsage = toolUsageSinceUserTurn.get(args.sessionId);
-	const agentAlreadyReduced = hasRecentPiCtxReduceExecution(args.sessionId);
-	if (
-		!sessionMeta.isSubagent &&
-		!agentAlreadyReduced &&
-		getPersistedStickyTurnReminder(args.db, args.sessionId) === null &&
-		turnUsage !== undefined &&
-		turnUsage >= TOOL_HEAVY_TURN_REMINDER_THRESHOLD
-	) {
-		setPersistedStickyTurnReminder(
-			args.db,
-			args.sessionId,
-			TOOL_HEAVY_TURN_REMINDER_TEXT,
-		);
-	}
-	toolUsageSinceUserTurn.set(args.sessionId, 0);
-}
-
 function summarizeTransformError(error: unknown): string {
 	const raw = error instanceof Error ? error.message : String(error);
 	const normalized = raw.replace(/\s+/g, " ").trim();
@@ -603,34 +551,10 @@ export interface PiHistorianOptions {
 	};
 	/** Commit-cluster trigger config. Mirrors OpenCode `commit_cluster_trigger`. */
 	commitClusterTrigger?: { enabled: boolean; min_clusters: number };
-	/** Projected-drop math knobs threaded into `checkCompartmentTrigger`. */
-	autoDropToolAge?: number;
 	protectedTags?: number;
 	clearReasoningAge?: number;
-	dropToolStructure?: boolean;
 	/** Fraction of executable context reserved for rendered <session-history>. */
 	historyBudgetPercentage?: number;
-}
-
-/**
- * Optional rolling/iteration nudge config (Step 4b.4). When omitted,
- * Pi runs without any rolling reminder text appended to the LLM input —
- * existing tagging + drop behavior is unchanged. When provided, the
- * shared `createNudger` is used to evaluate band-based reminders after
- * each tagging pass and injects them as a synthetic assistant message
- * via `injectPiNudge`.
- */
-export interface PiNudgeOptions {
-	/** Number of most-recent tags treated as protected (mirrors OpenCode `protected_tags`). */
-	protectedTags: number;
-	/** Base interval between rolling reminders, in tokens (mirrors OpenCode `nudge_interval_tokens`). */
-	nudgeIntervalTokens: number;
-	/** Tool-iteration threshold — N+ tool calls without user input fires the iteration nudge. */
-	iterationNudgeThreshold: number;
-	/** Same execute threshold the historian trigger uses (default 65). */
-	executeThresholdPercentage:
-		| number
-		| { default: number; [modelKey: string]: number };
 }
 
 /**
@@ -645,10 +569,8 @@ export interface PiAutoSearchHandlerOptions {
 	minPromptChars: number;
 }
 
-/** Heuristic-cleanup config — drops aged tools, dedups, strips system injections. */
+/** Heuristic-cleanup config — tiered emergency drop, dedup, strips system injections. */
 export interface PiHeuristicsOptions {
-	autoDropToolAge: number;
-	dropToolStructure: boolean;
 	caveman?: { enabled: boolean; minChars: number };
 	/**
 	 * Number of tags before the most recent tag whose typed reasoning is
@@ -693,11 +615,10 @@ export interface PiContextHandlerOptions {
 	 */
 	ctxReduceEnabled: boolean;
 	/**
-	 * Heuristic-cleanup config (auto_drop_tool_age, drop_tool_structure,
-	 * caveman). When omitted, heuristic cleanup is disabled — tagging
-	 * and queued-drop application still run, but the transform won't
-	 * proactively shrink context. Use this only for tests; production
-	 * always passes this.
+	 * Heuristic-cleanup config (tiered emergency drop + caveman). When
+	 * omitted, heuristic cleanup is disabled — tagging and queued-drop
+	 * application still run, but the transform won't proactively shrink
+	 * context. Use this only for tests; production always passes this.
 	 */
 	heuristics?: PiHeuristicsOptions;
 	/**
@@ -732,12 +653,6 @@ export interface PiContextHandlerOptions {
 	 * async after each tagging pass.
 	 */
 	historian?: PiHistorianOptions;
-	/**
-	 * Optional rolling/iteration nudge wiring (Step 4b.4). When omitted,
-	 * no nudges are injected. When provided, evaluated AFTER each tagging
-	 * pass and injected via `injectPiNudge`.
-	 */
-	nudge?: PiNudgeOptions;
 	/**
 	 * Optional auto-search hint wiring (Step 4b.4). When omitted or
 	 * disabled, no hint computation runs. Notes that auto-search shares
@@ -1354,20 +1269,6 @@ export function registerPiContextHandler(
 		executeThresholdTokens: schedulerConfig.executeThresholdTokens,
 	});
 
-	// Build the rolling/iteration nudger lazily — it's stateless across
-	// invocations apart from the `recentReduceBySession` map and the per-
-	// session meta it reads from the DB. Skipped when no `options.nudge` is
-	// configured (returns null below at the call site).
-	const nudgerFn = options.nudge
-		? createNudger({
-				protected_tags: options.nudge.protectedTags,
-				nudge_interval_tokens: options.nudge.nudgeIntervalTokens,
-				iteration_nudge_threshold: options.nudge.iterationNudgeThreshold,
-				execute_threshold_percentage: options.nudge.executeThresholdPercentage,
-				recentReduceBySession,
-			})
-		: null;
-
 	pi.on("context", async (event, ctx) => {
 		const transformStartTime = performance.now();
 		let sessionIdForError: string | undefined;
@@ -1450,11 +1351,6 @@ export function registerPiContextHandler(
 					latestUser.messageId,
 					(_sessionId, messageId) => readPiSessionMessageById(ctx, messageId),
 				);
-				const previousUserId = latestUserMessageBySession.get(sessionId);
-				if (previousUserId !== latestUser.messageId) {
-					onPiNewUserMessage({ db: options.db, sessionId });
-					latestUserMessageBySession.set(sessionId, latestUser.messageId);
-				}
 			}
 
 			// Lazy-initialize tagger state from DB. Idempotent: re-init
@@ -1958,6 +1854,28 @@ export function registerPiContextHandler(
 			// preferred over the position-based collectMessageEntryIds.
 			const entryIds = strictEntryIds ?? undefined;
 
+			// Ceiling for the tiered emergency drop = contextLimit ×
+			// executeThreshold%. Undefined when the limit isn't resolved → the
+			// emergency drop skips that pass (95% block stays the backstop).
+			const emergencyCeilingTokens =
+				usageContextLimit && usageContextLimit > 0
+					? Math.floor(
+							usageContextLimit *
+								(resolveExecuteThreshold(
+									options.historian?.executeThresholdPercentage ?? 65,
+									liveModelBySession.get(sessionId),
+									65,
+									{
+										tokensConfig:
+											options.historian?.executeThresholdTokens,
+										contextLimit: usageContextLimit,
+										sessionId,
+									},
+								) /
+									100),
+						)
+					: undefined;
+
 			const result = await runPipeline({
 				db: options.db,
 				tagger,
@@ -1968,6 +1886,7 @@ export function registerPiContextHandler(
 				ctxReduceEnabled: options.ctxReduceEnabled,
 				protectedTags: options.protectedTags ?? 20,
 				heuristics: options.heuristics,
+				emergencyCeilingTokens,
 				injection: options.injection
 					? {
 							...options.injection,
@@ -2080,59 +1999,6 @@ export function registerPiContextHandler(
 			let outputMessages = result.messages as PiAgentMessage[];
 
 			try {
-				const cacheBustingPass = isCacheBusting || result.executedWorkThisPass;
-				outputMessages = applyStickyTurnReminder({
-					sessionId,
-					db: options.db,
-					messages: outputMessages,
-					entryIds: entryIds ?? null,
-					// Post-commit/post-splice ref-map from runPipeline — the
-					// pass-start `entryIdByRef` keys pre-commit objects and misses
-					// cloned (dirty) messages, resolving anchors to the wrong id.
-					entryIdByRef: result.postCommitEntryIdByRef,
-					hasRecentReduceCall: hasRecentPiCtxReduceExecution(sessionId),
-					isCacheBustingPass: cacheBustingPass,
-					syntheticLeadingCount: result.syntheticLeadingCount,
-				});
-			} catch (err) {
-				sessionLog(
-					sessionId,
-					`sticky turn reminder failed: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			}
-
-			// Rolling nudge inserts exactly one id-less synthetic assistant
-			// message when it fires. Track it via the array-length delta so the
-			// note-nudge anchor-GC denominator below can exclude it too —
-			// otherwise the extra unresolved synthetic keeps allResolved false and
-			// the GC never prunes. (Sticky reminder above runs BEFORE the nudge, so
-			// it correctly excludes only the m[0]/m[1] prepends.)
-			let rollingNudgeSyntheticCount = 0;
-			if (nudgerFn && options.nudge) {
-				try {
-					const tNudge = performance.now();
-					const beforeLen = outputMessages.length;
-					outputMessages = applyRollingNudge({
-						sessionId,
-						db: options.db,
-						messages: outputMessages,
-						ctx,
-						nudgerFn,
-					});
-					rollingNudgeSyntheticCount = Math.max(
-						0,
-						outputMessages.length - beforeLen,
-					);
-					logTransformTiming(sessionId, "applyContextNudge", tNudge);
-				} catch (err) {
-					sessionLog(
-						sessionId,
-						`rolling nudge failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
-			}
-
-			try {
 				outputMessages = applyNoteNudges({
 					sessionId,
 					db: options.db,
@@ -2144,11 +2010,11 @@ export function registerPiContextHandler(
 					// Same signal OpenCode uses to gate sticky-anchor GC
 					// (isCacheBustingPass = history-refresh OR work executed).
 					isCacheBusting: isCacheBusting || result.executedWorkThisPass,
-					// All id-less synthetic injections present in outputMessages: the
-					// m[0]/m[1] prepends PLUS the rolling-nudge synthetic (if it
-					// fired this pass). Excluded from the anchor-GC denominator.
-					syntheticLeadingCount:
-						result.syntheticLeadingCount + rollingNudgeSyntheticCount,
+					// Id-less synthetic injections present in outputMessages: the
+					// m[0]/m[1] prepends. (The rolling-nudge synthetic was removed in
+					// the ctx_reduce nudge redesign.) Excluded from the anchor-GC
+					// denominator.
+					syntheticLeadingCount: result.syntheticLeadingCount,
 				});
 			} catch (err) {
 				sessionLog(
@@ -2233,6 +2099,75 @@ export function registerPiContextHandler(
 				sessionLog(
 					sessionId,
 					`synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+
+			// Channel 1 baseline snapshot + Channel 2 ceiling trigger. Mirrors
+			// OpenCode's transform.ts end-of-pass block. Computed from the final
+			// `outputMessages` (already trimmed to the live tail), refreshing here
+			// (a proven transform boundary) zeroes the per-turn accumulator. The
+			// `tool_result` handler in index.ts reads this baseline. Primary-only:
+			// a missing baseline is how Channel 1 stays off for subagents.
+			try {
+				const sessionMetaForCh1 = getOrCreateSessionMeta(options.db, sessionId);
+				if (!sessionMetaForCh1.isSubagent) {
+					const resolvedExecuteThresholdPct = resolveExecuteThreshold(
+						options.historian?.executeThresholdPercentage ?? 65,
+						liveModelBySession.get(sessionId),
+						65,
+						{
+							tokensConfig: options.historian?.executeThresholdTokens,
+							contextLimit: usageContextLimit ?? 0,
+						},
+					);
+					const historyBudgetTokens = resolveHistoryBudgetTokensForPi({
+						historyBudgetPercentage: options.historian?.historyBudgetPercentage,
+						usagePercentage,
+						usageInputTokens,
+						usageContextLimit,
+						executeThresholdPercentage:
+							options.historian?.executeThresholdPercentage,
+						executeThresholdTokens: options.historian?.executeThresholdTokens,
+						modelKey: liveModelBySession.get(sessionId),
+					});
+					const tailToolTokens = computeTailToolTokensPi(
+						outputMessages as unknown[],
+					);
+					setPiChannel1Baseline(sessionId, {
+						tailToolTokens,
+						historyBudgetTokens: historyBudgetTokens ?? 0,
+						contextLimit: usageContextLimit ?? 0,
+						executeThresholdPercentage: resolvedExecuteThresholdPct,
+						lastInputTokens: usageInputTokens,
+						turnToolTokens: 0,
+						reducedSinceRefresh: false,
+					});
+
+					// Channel 2 (ceiling) trigger — record a one-shot pending intent
+					// when pressure is near the execute threshold AND a large pile of
+					// reclaimable tool output remains. Delivery happens on `agent_end`
+					// via pi.sendUserMessage. Only escalate from '' so an in-flight
+					// claim/delivery is never reset.
+					if (
+						usageContextLimit &&
+						usageContextLimit > 0 &&
+						resolvedExecuteThresholdPct > 0 &&
+						shouldTriggerChannel2({
+							undroppedTokens: tailToolTokens,
+							pressure:
+								((usageInputTokens / usageContextLimit) * 100) /
+								resolvedExecuteThresholdPct,
+						})
+					) {
+						casChannel2NudgeState(options.db, sessionId, "", "pending");
+					}
+				} else {
+					clearPiChannel1State(sessionId);
+				}
+			} catch (err) {
+				sessionLog(
+					sessionId,
+					`channel1 baseline / channel2 trigger failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 
@@ -2332,12 +2267,12 @@ export function resolvePiHistorianTriggerInputs(args: {
 }): {
 	executeThresholdPercentage: number;
 	triggerBudget: number;
-	autoDropToolAge: number;
 	protectedTags: number | undefined;
 	clearReasoningAge: number;
-	dropToolStructure: boolean;
 	commitClusterTrigger: { enabled: boolean; min_clusters: number } | undefined;
 	contextLimit: number;
+	/** ceiling = contextLimit × executeThreshold% (tiered emergency drop). */
+	emergencyCeilingTokens: number;
 } {
 	// Pi resolves the context window from its own runtime (passed in as
 	// usageContextLimit, derived from getContextUsage()/getModel().contextWindow
@@ -2366,13 +2301,14 @@ export function resolvePiHistorianTriggerInputs(args: {
 			contextLimit,
 			executeThresholdPercentage,
 		),
-		autoDropToolAge: args.historian.autoDropToolAge ?? 100,
 		protectedTags: args.historian.protectedTags,
 		clearReasoningAge:
 			args.historian.clearReasoningAge ?? DEFAULT_CLEAR_REASONING_AGE,
-		dropToolStructure: args.historian.dropToolStructure ?? true,
 		commitClusterTrigger: args.historian.commitClusterTrigger,
 		contextLimit,
+		emergencyCeilingTokens: Math.floor(
+			contextLimit * (executeThresholdPercentage / 100),
+		),
 	};
 }
 
@@ -2793,10 +2729,7 @@ function maybeFireHistorian(args: {
 			0, // _previousPercentage — unused by current trigger logic
 			triggerInputs.executeThresholdPercentage,
 			triggerInputs.triggerBudget,
-			triggerInputs.autoDropToolAge,
-			triggerInputs.protectedTags,
 			triggerInputs.clearReasoningAge,
-			triggerInputs.dropToolStructure,
 			triggerInputs.commitClusterTrigger,
 			args.activeTags,
 		);
@@ -2846,10 +2779,10 @@ interface RunPipelineArgs {
 	protectedTags: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
-		autoDropToolAge: number;
-		dropToolStructure: boolean;
 		caveman?: { enabled: boolean; minChars: number };
 	};
+	/** ceiling = contextLimit × executeThreshold% for the tiered emergency drop. */
+	emergencyCeilingTokens?: number;
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
 	injection?: {
 		/** When false (config `memory.enabled=false`), project memories are NOT
@@ -3428,10 +3361,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				targets,
 				args.messages,
 				{
-					autoDropToolAge: args.heuristics.autoDropToolAge,
-					dropToolStructure: args.heuristics.dropToolStructure,
 					protectedTags: args.protectedTags,
-					dropAllTools: args.forceMaterialization === true,
+					// Tiered emergency drop fires only at ≥85% AND when the
+					// ceiling is known. forceMaterialization already incorporates
+					// the ≥85% / emergency condition for Pi (primary-equivalent).
+					emergency:
+						args.forceMaterialization === true &&
+						args.emergencyCeilingTokens !== undefined &&
+						args.emergencyCeilingTokens > 0
+							? {
+									currentTotalInputTokens:
+										args.contextUsage.inputTokens,
+									ceilingTokens: args.emergencyCeilingTokens,
+								}
+							: undefined,
 					caveman: args.heuristics.caveman,
 				},
 				activeTags,
@@ -3843,153 +3786,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 // ---------------------------------------------------------------------------
 
 /**
- * Apply the rolling/iteration nudge after tagging. Mirrors OpenCode's
- * `transform-postprocess-phase.ts` (around lines 568-604) — but for Pi
- * there is no anchored-assistant cache, so we use the simpler
- * insert-before-latest-user strategy from `injectPiNudge`.
+ * Note-nudge + Channel 1/2 helpers.
  *
- * Pi delivers a fresh `AgentMessage[]` per `context` event, so every
- * pass behaves like an OpenCode "cache-busting" pass: nudges always
- * apply when the nudger says so, and there is no defer-pass replay or
- * anchor retirement to manage.
+ * The rolling/iteration nudge and the tool-heavy sticky reminder were removed
+ * in the ctx_reduce nudge redesign — replaced by Channel 1 (in-turn tool-result
+ * append via `pi.on("tool_result")`, see `ctx-reduce-nudge-pi.ts`) and Channel 2
+ * (the `sendUserMessage` ceiling). `appendReminderToUserMessageByIdPi` /
+ * `appendReminderToPiUserMessage` below are retained — they back the note-nudge
+ * and auto-search hint paths, which still inject into user messages.
  */
-function applyRollingNudge(args: {
-	sessionId: string;
-	db: ContextDatabase;
-	messages: PiAgentMessage[];
-	ctx: ExtensionContext;
-	nudgerFn: ReturnType<typeof createNudger>;
-}): PiAgentMessage[] {
-	const { sessionId, db, messages, ctx, nudgerFn } = args;
-
-	const piUsage = ctx.getContextUsage?.();
-	if (
-		!piUsage ||
-		piUsage.tokens === null ||
-		piUsage.percent === null ||
-		piUsage.contextWindow === 0
-	) {
-		// No usage info yet — nudger requires real numbers, so skip.
-		return messages;
-	}
-
-	const usage = {
-		percentage: piUsage.percent,
-		inputTokens: piUsage.tokens,
-		// Nudger's ContextUsage type carries a contextLimit too; pass it
-		// for completeness even though the rolling-nudge math doesn't
-		// consume it directly.
-		contextLimit: piUsage.contextWindow,
-	};
-
-	// P0 perf: nudger filters to status === "active" anyway, so feed it
-	// active-only directly. Saves a full-table scan on long sessions.
-	const tags = getActiveTagsBySession(db, sessionId);
-	const messagesSinceLastUser = countMessagesSinceLastUserPi(messages);
-
-	const nudge = nudgerFn(
-		sessionId,
-		usage,
-		db,
-		getTopNBySize,
-		tags,
-		messagesSinceLastUser,
-		// Let the nudger fetch session meta itself — Pi doesn't have the
-		// preloaded-meta optimization the OpenCode transform uses.
-		undefined,
-	);
-	if (!nudge) return messages;
-
-	return injectPiNudge(messages, nudge);
-}
-
-function applyStickyTurnReminder(args: {
-	sessionId: string;
-	db: ContextDatabase;
-	messages: PiAgentMessage[];
-	entryIds: readonly (string | undefined)[] | null;
-	/**
-	 * Splice-safe message→entryId map keyed by AgentMessage reference. Resolved
-	 * against branch entries; correct even though `messages` was spliced since
-	 * the positional `entryIds` was computed. Takes precedence over `entryIds`.
-	 */
-	entryIdByRef?: ReadonlyMap<object, string> | null;
-	hasRecentReduceCall: boolean;
-	isCacheBustingPass: boolean;
-	/**
-	 * Count of synthetic id-less messages injection prepended (m[0]/m[1] pair).
-	 * Excluded from the `allResolved` denominator — they never resolve to a real
-	 * entry id, so without this every injected pass would have allResolved=false
-	 * and pruning would never run.
-	 */
-	syntheticLeadingCount?: number;
-}): PiAgentMessage[] {
-	const reminder = getPersistedStickyTurnReminder(args.db, args.sessionId);
-	if (!reminder) return args.messages;
-
-	if (args.hasRecentReduceCall && args.isCacheBustingPass) {
-		clearPersistedStickyTurnReminder(args.db, args.sessionId);
-		return args.messages;
-	}
-
-	const messageIdByIndex = buildPiMessageIdByIndex(
-		args.messages,
-		args.entryIds,
-		false,
-		args.entryIdByRef,
-	);
-	// Reference-resolved set of entry ids actually present in the CURRENT
-	// (post-splice) messages — used to decide whether the anchored reminder
-	// message is still visible, instead of the stale positional `entryIds`.
-	const visibleResolvedIds = new Set<string>(messageIdByIndex.values());
-	// "All REAL messages resolved" — exclude injection's synthetic id-less
-	// m[0]/m[1] prepends from the denominator. Those never resolve, so comparing
-	// against the raw length would leave allResolved permanently false on every
-	// injected pass and disable the guard's prune entirely.
-	const realMessageCount = Math.max(
-		0,
-		args.messages.length - (args.syntheticLeadingCount ?? 0),
-	);
-	const allResolved = messageIdByIndex.size === realMessageCount;
-	if (reminder.messageId) {
-		const reinjected = appendReminderToUserMessageByIdPi(
-			args.messages,
-			messageIdByIndex,
-			reminder.messageId,
-			reminder.text,
-		);
-		if (
-			!reinjected &&
-			args.isCacheBustingPass &&
-			allResolved &&
-			!visibleResolvedIds.has(reminder.messageId)
-		) {
-			clearPersistedStickyTurnReminder(args.db, args.sessionId);
-		}
-		return args.messages;
-	}
-
-	if (args.entryIds === null) {
-		sessionLog(
-			args.sessionId,
-			"Pi sticky turn reminder: strict resolution failed; replay-only until next pass",
-		);
-		return args.messages;
-	}
-
-	const latest = findLatestUserMessageIdPi(args.messages, messageIdByIndex);
-	if (latest) {
-		appendReminderToPiUserMessage(args.messages[latest.index], reminder.text);
-		setPersistedStickyTurnReminder(
-			args.db,
-			args.sessionId,
-			reminder.text,
-			latest.messageId,
-		);
-	}
-	return args.messages;
-}
-
 /**
  * Apply note-nudge replay + delivery. Mirrors OpenCode's
  * `transform-postprocess-phase.ts` (around lines 611-650).
@@ -4156,23 +3961,6 @@ function applyNoteNudges(args: {
 	}
 
 	return messages;
-}
-
-/**
- * Count messages since the latest meaningful user message. "Meaningful"
- * here means a `user` role with non-empty text content. Mirrors
- * `countMessagesSinceLastUser` from
- * `packages/plugin/src/hooks/magic-context/transform-message-helpers.ts`,
- * adapted to the Pi `AgentMessage` shape.
- */
-function countMessagesSinceLastUserPi(messages: PiAgentMessage[]): number {
-	let count = 0;
-	for (let i = messages.length - 1; i >= 0; i -= 1) {
-		const msg = messages[i];
-		if (msg?.role === "user" && hasMeaningfulUserTextPi(msg)) break;
-		count += 1;
-	}
-	return count;
 }
 
 /** Returns true when the message is a user role with non-empty text content. */
@@ -4386,9 +4174,8 @@ function appendReminderToPiUserMessage(
  *   - `inFlightHistorian` / `inFlightCompressor` — these promises
  *     own their own cleanup in `.finally()` and a session switch
  *     doesn't cancel a background subagent that's already running.
- *   - `recentReduceBySession` / `pendingNoteNudgeState` — module-
- *     private to other files; they expose their own clear helpers
- *     called from where they live.
+ *   - `pendingNoteNudgeState` — module-private to other files; they
+ *     expose their own clear helpers called from where they live.
  */
 // IMPORTANT: this clears only IN-MEMORY, process-local maps — it must NOT call
 // the durable DB `clearSession(db, sessionId)`. The two callers are
@@ -4411,10 +4198,8 @@ export function clearContextHandlerSession(sessionId: string): void {
 	deferredMaterializationSessions.delete(sessionId);
 	firstContextPassSeenBySession.delete(sessionId);
 	commitSeenLastPass.delete(sessionId);
-	recentReduceBySession.delete(sessionId);
 	liveModelBySession.delete(sessionId);
-	toolUsageSinceUserTurn.delete(sessionId);
-	latestUserMessageBySession.delete(sessionId);
+	clearPiChannel1State(sessionId);
 	lastHeuristicsTurnIdBySession.delete(sessionId);
 	lastSeenProjectIdentityBySession.delete(sessionId);
 	for (const [projectIdentity, sessions] of sessionsByProject) {

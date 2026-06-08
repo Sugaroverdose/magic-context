@@ -41,12 +41,12 @@ import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./deri
 import { createEventHandler } from "./event-handler";
 import { resolveContextLimit, resolveModelKey } from "./event-resolvers";
 import { clearInjectionCache } from "./inject-compartments";
-import { createNudger } from "./nudger";
+
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import { runManagedRecomp, runManagedUpgrade } from "./recomp-orchestrator";
 import { createTextCompleteHandler } from "./text-complete";
-import { createNudgePlacementStore, createTransform } from "./transform";
+import { createTransform } from "./transform";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
 
@@ -70,6 +70,8 @@ const DREAM_SCHEDULE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 export interface MagicContextDeps {
     client: PluginContext["client"];
     directory: string;
+    /** Live HTTP listener URL for the Channel 2 ceiling nudge (#28202 workaround). */
+    serverUrl?: string;
     tagger: Tagger;
     scheduler: Scheduler;
     onSessionCacheInvalidated?: (sessionId: string) => void;
@@ -79,8 +81,6 @@ export interface MagicContextDeps {
         protected_tags: number;
         ctx_reduce_enabled?: boolean;
         nudge_interval_tokens?: number;
-        auto_drop_tool_age?: number;
-        drop_tool_structure?: boolean;
         clear_reasoning_age?: number;
         iteration_nudge_threshold?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
@@ -208,7 +208,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.config.historian?.fallback_models,
     );
 
-    const nudgePlacements = createNudgePlacementStore(db);
     // Three independent cache-busting signal sets, sourced from the
     // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
     // share the same instances as the hook (server /ctx-recomp). When
@@ -266,6 +265,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         new Map<string, import("./compartment-runner-types").RecompProgress>();
     const recentReduceBySession = new Map<string, number>();
     const toolUsageSinceUserTurn = new Map<string, number>();
+    // Channel 1 (ctx_reduce tool-output nudge) per-session metric baseline.
+    // Written at the end of each transform pass (post-drop), read in
+    // tool.execute.after. Only populated for primary sessions.
+    const channel1StateBySession = new Map<string, import("./ctx-reduce-nudge").Channel1State>();
 
     /**
      * Return the live provider/model for a session.
@@ -339,28 +342,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     });
     const sidekickRunnable = isSidekickRunnable(deps.config);
     const sidekickConfig = sidekickRunnable ? deps.config.sidekick : undefined;
-    const nudgerWithRecentReduce = ctxReduceEnabled
-        ? createNudger({
-              protected_tags: deps.config.protected_tags,
-              nudge_interval_tokens:
-                  deps.config.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
-              iteration_nudge_threshold: deps.config.iteration_nudge_threshold ?? 15,
-              execute_threshold_percentage: deps.config.execute_threshold_percentage ?? 65,
-              recentReduceBySession,
-          })
-        : () => null;
 
     const transform = createTransform({
         tagger: deps.tagger,
         scheduler: deps.scheduler,
         contextUsageMap,
-        nudger: nudgerWithRecentReduce,
         db,
-        nudgePlacements,
+        channel1StateBySession,
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
-        autoDropToolAge: deps.config.auto_drop_tool_age ?? 100,
-        dropToolStructure: deps.config.drop_tool_structure ?? true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,
@@ -448,6 +438,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         tagger: deps.tagger,
         db,
         client: deps.client,
+        serverUrl: deps.serverUrl,
+        directory: deps.directory,
+        channel1StateBySession,
         internalChildSessions,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
@@ -456,7 +449,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 variantBySession,
                 agentBySession,
             ),
-        nudgePlacements,
         onSessionCacheInvalidated: (sessionId: string) => {
             clearInjectionCache(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
@@ -630,7 +622,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
-        dropToolStructure: deps.config.drop_tool_structure ?? true,
         dreamerEnabled: dreamerRunnable,
         injectDocs: deps.config.dreamer?.inject_docs !== false,
         directory: deps.directory,
@@ -747,6 +738,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             db,
             recentReduceBySession,
             toolUsageSinceUserTurn,
+            channel1StateBySession,
         }),
     };
 }

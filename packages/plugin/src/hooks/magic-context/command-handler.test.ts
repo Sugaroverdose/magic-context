@@ -226,13 +226,6 @@ function getTagStatus(db: Database, sessionId: string, tagNumber: number): strin
     return row.status;
 }
 
-function getStickyTurnReminder(db: Database, sessionId: string): string {
-    const row = db
-        .prepare("SELECT sticky_turn_reminder_text AS text FROM session_meta WHERE session_id = ?")
-        .get(sessionId) as { text: string } | null;
-    return row?.text ?? "";
-}
-
 function makeOutput(text: string) {
     return { parts: [{ type: "text", text }] };
 }
@@ -300,9 +293,6 @@ describe("createMagicContextCommandHandler", () => {
             insertTag(db, "ses-flush", 2, 300);
             insertPendingOp(db, "ses-flush", 1);
             insertPendingOp(db, "ses-flush", 2);
-            db.prepare(
-                "INSERT INTO session_meta (session_id, sticky_turn_reminder_text) VALUES (?, ?)",
-            ).run("ses-flush", "\n[sticky reminder]");
             const sendNotification = mock(async () => {});
             const handler = createMagicContextCommandHandler({
                 db,
@@ -327,7 +317,6 @@ describe("createMagicContextCommandHandler", () => {
             expect(getPendingOpsCount(db, "ses-flush")).toBe(0);
             expect(getTagStatus(db, "ses-flush", 1)).toBe("dropped");
             expect(getTagStatus(db, "ses-flush", 2)).toBe("dropped");
-            expect(getStickyTurnReminder(db, "ses-flush")).toBe("");
         });
 
         it("clears cached m0 fields for the current session", async () => {
@@ -424,12 +413,9 @@ describe("createMagicContextCommandHandler", () => {
             expect(text).toContain("### Tags");
             expect(text).toContain("### Pending Queue");
             expect(text).toContain("### Cache TTL");
-            expect(text).toContain("### Rolling Nudges");
             expect(text).toContain("- Active: 2");
             expect(text).toContain("- Dropped: 1");
             expect(text).toContain("- Drops: 1");
-            expect(text).toContain("Rolling anchor: 80,000 tokens");
-            expect(text).toContain("Effective interval: 10,000 tokens");
             expect(text).toContain("**Protected tags:** 5");
         });
 

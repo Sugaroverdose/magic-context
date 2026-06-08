@@ -4,8 +4,6 @@ import { detectOverflow } from "../../features/magic-context/overflow-detection"
 import {
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
-    clearPersistedNudgePlacement,
-    clearPersistedStickyTurnReminder,
     clearSession,
     deleteIndexedMessage,
     deleteTagsByMessageId,
@@ -15,9 +13,7 @@ import {
     getOverflowState,
     getPendingCompactionMarkerState,
     getPersistedNoteNudge,
-    getPersistedNudgePlacement,
     getPersistedReasoningWatermark,
-    getPersistedStickyTurnReminder,
     recordDetectedContextLimit,
     recordOverflowDetected,
     removeAutoSearchHintDecisionByMessageId,
@@ -31,6 +27,7 @@ import type { Tagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 import { deriveTriggerBudget } from "./derive-budgets";
@@ -51,7 +48,7 @@ import {
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
-import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
+import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
@@ -65,20 +62,16 @@ interface ContextUsageEntry {
 }
 
 interface MessageRemovedCleanupResult {
-    clearedNudgePlacement: boolean;
     clearedNoteNudge: boolean;
 }
 
 export interface EventHandlerDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     compactionHandler: ReturnType<typeof createCompactionHandler>;
-    nudgePlacements: NudgePlacementStore;
     onSessionCacheInvalidated?: (sessionId: string) => void;
     onSessionDeleted?: (sessionId: string) => void;
     config: {
         protected_tags: number;
-        auto_drop_tool_age?: number;
-        drop_tool_structure?: boolean;
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
@@ -91,6 +84,12 @@ export interface EventHandlerDeps {
     // so by this point db is always a live handle.
     db: import("../../shared/sqlite").Database;
     client?: unknown;
+    /** Live HTTP listener URL — Channel 2 ceiling nudge delivery (#28202 workaround). */
+    serverUrl?: string;
+    /** Project directory — passed to the live-server client for Channel 2. */
+    directory?: string;
+    /** Channel 1 per-session metric baseline; read for the Channel 2 ceiling-nudge wording. */
+    channel1StateBySession?: Map<string, import("./ctx-reduce-nudge").Channel1State>;
     getNotificationParams?: (sessionId: string) => NotificationParams;
     /**
      * Process-scoped set of Magic Context's own hidden child sessions, keyed by
@@ -117,6 +116,39 @@ function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry
     }
 }
 
+/**
+ * Fire-and-forget Channel 2 ceiling-nudge delivery for a final-stop assistant
+ * turn. No-ops unless a `pending` intent exists; reads the undropped-token count
+ * from the Channel 1 baseline for the nudge wording.
+ */
+async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: string): Promise<void> {
+    try {
+        // Channel 2 is primary-only. The trigger in transform.ts is already
+        // gated fullFeatureMode-only (a subagent never records a `pending`
+        // intent), but guard delivery too: a subagent's synthetic-user nudge
+        // via promptAsync has unverified interaction with the parent task()
+        // await, so subagent Channel 2 is deferred behind an integration test.
+        try {
+            const meta = getOrCreateSessionMeta(deps.db, sessionId);
+            if (meta.isSubagent) return;
+        } catch {
+            // meta load failure: fall through (delivery itself no-ops unless a
+            // `pending` intent exists, which only a primary could have set).
+        }
+        const baseline = deps.channel1StateBySession?.get(sessionId);
+        await maybeDeliverChannel2(sessionId, {
+            db: deps.db,
+            serverUrl: deps.serverUrl,
+            directory: deps.directory ?? ".",
+            undroppedTokens: baseline
+                ? baseline.tailToolTokens + baseline.turnToolTokens
+                : undefined,
+        });
+    } catch (error) {
+        sessionLog(sessionId, "channel2 delivery wrapper failed (ignored):", error);
+    }
+}
+
 function cleanupRemovedMessageState(
     deps: EventHandlerDeps,
     sessionId: string,
@@ -139,18 +171,6 @@ function cleanupRemovedMessageState(
             strippedPlaceholderRemoved
                 ? `event message.removed: removed ${messageId} from stripped placeholder ids`
                 : `event message.removed: stripped placeholder ids unchanged for ${messageId}`,
-        );
-
-        const persistedNudgePlacement = getPersistedNudgePlacement(deps.db, sessionId);
-        const clearedNudgePlacement = persistedNudgePlacement?.messageId === messageId;
-        if (clearedNudgePlacement) {
-            clearPersistedNudgePlacement(deps.db, sessionId);
-        }
-        sessionLog(
-            sessionId,
-            clearedNudgePlacement
-                ? `event message.removed: cleared nudge anchor for ${messageId}`
-                : `event message.removed: nudge anchor unchanged for ${messageId}`,
         );
 
         const removedNoteNudgeAnchor = removeNoteNudgeAnchorByMessageId(
@@ -182,18 +202,6 @@ function cleanupRemovedMessageState(
                 : `event message.removed: auto-search decision unchanged for ${messageId}`,
         );
 
-        const persistedStickyTurnReminder = getPersistedStickyTurnReminder(deps.db, sessionId);
-        const clearedStickyTurnReminder = persistedStickyTurnReminder?.messageId === messageId;
-        if (clearedStickyTurnReminder) {
-            clearPersistedStickyTurnReminder(deps.db, sessionId);
-        }
-        sessionLog(
-            sessionId,
-            clearedStickyTurnReminder
-                ? `event message.removed: cleared sticky turn reminder for ${messageId}`
-                : `event message.removed: sticky turn reminder unchanged for ${messageId}`,
-        );
-
         const currentWatermark = getPersistedReasoningWatermark(deps.db, sessionId);
         const maxRemainingTag = getMaxTagNumberBySession(deps.db, sessionId);
         if (currentWatermark > maxRemainingTag) {
@@ -216,7 +224,6 @@ function cleanupRemovedMessageState(
         );
 
         return {
-            clearedNudgePlacement,
             clearedNoteNudge,
         };
     })();
@@ -549,10 +556,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             previousPercentage,
                             effectiveExecuteThreshold,
                             triggerBudget,
-                            deps.config.auto_drop_tool_age ?? 100,
-                            deps.config.protected_tags,
                             deps.config.clear_reasoning_age ?? 50,
-                            deps.config.drop_tool_structure ?? true,
                             deps.config.commit_cluster_trigger,
                         );
 
@@ -571,6 +575,16 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 updateSessionMeta(deps.db, info.sessionID, updates);
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated persistence failed:", error);
+            }
+
+            // Channel 2 ceiling nudge delivery. Fire only on a final-stop assistant
+            // turn (finish === "stop"); a mid-turn "tool-calls" event still has the
+            // turn in flight. The delivery itself no-ops unless a `pending` intent
+            // exists and the live server is reachable, so this is cheap.
+            // deliverChannel2IfPending guards isSubagent internally (subagent
+            // Channel 2 is deferred). Fire-and-forget — never block the event loop.
+            if (info.finish === "stop" && deps.serverUrl && deps.channel1StateBySession) {
+                void deliverChannel2IfPending(deps, info.sessionID);
             }
             return;
         }
@@ -598,7 +612,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             );
 
             try {
-                const cleanup = cleanupRemovedMessageState(deps, info.sessionID, info.messageID);
+                cleanupRemovedMessageState(deps, info.sessionID, info.messageID);
                 scheduleClearAndReindex(deps.db, info.sessionID, readRawSessionMessages);
 
                 deps.tagger.cleanup(info.sessionID);
@@ -606,14 +620,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     info.sessionID,
                     "event message.removed: invalidated tagger session cache",
                 );
-
-                if (cleanup.clearedNudgePlacement) {
-                    deps.nudgePlacements.clear(info.sessionID, { persist: false });
-                    sessionLog(
-                        info.sessionID,
-                        "event message.removed: cleared in-memory nudge placement cache",
-                    );
-                }
 
                 // If the removed message is the compaction marker boundary, remove the marker
                 const markerState = getPersistedCompactionMarkerState(deps.db, info.sessionID);
@@ -692,8 +698,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (!sessionId) {
                 return;
             }
-
-            deps.nudgePlacements.clear(sessionId);
 
             try {
                 // Read and remove compaction marker BEFORE clearSession destroys session_meta.

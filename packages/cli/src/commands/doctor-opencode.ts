@@ -684,6 +684,19 @@ export async function runDoctor(
                 fixed++;
             }
 
+            // Remove deprecated auto_drop_tool_age / drop_tool_structure — Phase 2
+            // replaced need-blind routine tool drops with the tiered target-headroom
+            // emergency drop (always full-drop), so both knobs are gone from the
+            // schema and would trigger a "not allowed" warning at plugin load.
+            for (const deadKey of ["auto_drop_tool_age", "drop_tool_structure"]) {
+                if (deadKey in mcConfig) {
+                    delete mcConfig[deadKey];
+                    mcChanged = true;
+                    log.success(`Removed deprecated ${deadKey} (replaced by tiered emergency drop)`);
+                    fixed++;
+                }
+            }
+
             const agentEnabledMigration = migrateLegacyAgentEnabledConfigForDoctor(mcConfig, log);
             if (agentEnabledMigration.changed) {
                 mcChanged = true;

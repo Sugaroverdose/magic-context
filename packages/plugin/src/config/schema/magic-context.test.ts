@@ -19,8 +19,6 @@ describe("MagicContextConfigSchema", () => {
                 nudge_interval_tokens: DEFAULT_NUDGE_INTERVAL_TOKENS,
                 execute_threshold_percentage: 65,
                 protected_tags: 20,
-                auto_drop_tool_age: 100,
-                drop_tool_structure: true,
                 clear_reasoning_age: 50,
                 iteration_nudge_threshold: 15,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
@@ -52,8 +50,6 @@ describe("MagicContextConfigSchema", () => {
                 protected_tags: 3,
                 nudge_interval_tokens: 15_000,
                 execute_threshold_percentage: 75,
-                auto_drop_tool_age: 150,
-                drop_tool_structure: false,
                 clear_reasoning_age: 60,
                 iteration_nudge_threshold: 20,
                 history_budget_percentage: 0.2,
@@ -191,10 +187,6 @@ describe("MagicContextConfigSchema", () => {
                 MagicContextConfigSchema.parse({ nudge_interval_tokens: 1000 })
                     .nudge_interval_tokens,
             ).toBe(1000);
-        });
-
-        it("rejects auto_drop_tool_age below minimum", () => {
-            expect(() => MagicContextConfigSchema.parse({ auto_drop_tool_age: 9 })).toThrow();
         });
 
         it("rejects clear_reasoning_age below minimum", () => {

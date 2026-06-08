@@ -20,7 +20,6 @@ export const RENDERED_PREFIXES: readonly string[] = [
   // General
   "enabled",
   "ctx_reduce_enabled",
-  "drop_tool_structure",
   "nudge_interval_tokens",
   "iteration_nudge_threshold",
   // Thresholds (custom PerModelField widgets)
@@ -29,7 +28,6 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "execute_threshold_tokens",
   // Tags & cleanup
   "protected_tags",
-  "auto_drop_tool_age",
   "clear_reasoning_age",
   // Historian
   "history_budget_percentage",

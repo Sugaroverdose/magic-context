@@ -124,7 +124,6 @@ export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
     protectedTags: number;
     ctxReduceEnabled: boolean;
-    dropToolStructure: boolean;
     dreamerEnabled: boolean;
     /** When true + dreamerEnabled, inject ARCHITECTURE.md and STRUCTURE.md into system prompt */
     injectDocs: boolean;
@@ -281,10 +280,14 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Step 1: Inject magic-context guidance ──
-        // Subagents get the no-reduce guidance variant: they run heuristic
-        // drops at execute threshold but have no historian, no nudges, no
-        // ctx_reduce tool. The no-reduce prompt explains what's auto-managed
-        // and omits tag-dropping instructions.
+        // Subagent guidance depends on whether ctx_reduce is enabled:
+        //   • ctx_reduce ON  → minimal §N§ + ctx_reduce block (subagentReduceMode).
+        //     Subagents share the process-global ctx_reduce tool and get §N§
+        //     prefixes (transform.ts), so they self-manage tool bloat. They take
+        //     NONE of the primary's role (no partner frame, memory/search/note
+        //     guidance, reduction taxonomy) — just the drop mechanics.
+        //   • ctx_reduce OFF → no §N§ prefix, so the no-reduce variant (like a
+        //     no-reduce primary; effectiveCtxReduceEnabled forces false here).
         let sessionMetaEarly: import("../../features/magic-context/types").SessionMeta | undefined;
         try {
             sessionMetaEarly = getOrCreateSessionMeta(deps.db, sessionId);
@@ -292,6 +295,7 @@ export function createSystemPromptHashHandler(deps: {
             sessionLog(sessionId, "system-prompt-hash session meta load failed:", error);
         }
         const isSubagentSession = sessionMetaEarly?.isSubagent === true;
+        const subagentReduceMode = isSubagentSession && deps.ctxReduceEnabled !== false;
         const effectiveCtxReduceEnabled = isSubagentSession ? false : deps.ctxReduceEnabled;
         const fullPrompt = output.system.join("\n");
         if (fullPrompt.length > 0 && !fullPrompt.includes(MAGIC_CONTEXT_MARKER)) {
@@ -300,14 +304,14 @@ export function createSystemPromptHashHandler(deps: {
                 deps.protectedTags,
                 effectiveCtxReduceEnabled,
                 deps.dreamerEnabled,
-                deps.dropToolStructure,
                 deps.experimentalTemporalAwareness,
                 deps.experimentalCavemanTextCompression,
+                subagentReduceMode,
             );
             output.system.push(guidance);
             sessionLog(
                 sessionId,
-                `injected generic guidance into system prompt (ctxReduce=${effectiveCtxReduceEnabled}, subagent=${isSubagentSession})`,
+                `injected generic guidance into system prompt (ctxReduce=${effectiveCtxReduceEnabled}, subagent=${isSubagentSession}, subagentReduceMode=${subagentReduceMode})`,
             );
         }
 

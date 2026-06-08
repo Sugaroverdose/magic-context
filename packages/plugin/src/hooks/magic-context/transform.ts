@@ -12,11 +12,19 @@ import {
     getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
     getTagsByNumbers,
-    type getTopNBySize,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import {
+    casChannel2NudgeState,
+    clearDetectedContextLimit,
+    clearEmergencyRecovery,
+    clearHistorianFailureState,
+    clearPersistedReasoningWatermark,
+    getOverflowState,
+    setDeferredExecutePendingIfAbsent,
+} from "../../features/magic-context/storage-meta-persisted";
 import type { Tagger } from "../../features/magic-context/tagger";
-import type { ContextUsage, TagEntry } from "../../features/magic-context/types";
+import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
@@ -26,15 +34,15 @@ import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
 import { FORCE_MATERIALIZE_PERCENTAGE } from "./compartment-trigger";
+import { computeTailToolTokens, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
 import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
+import type { LiveModelBySession } from "./hook-handlers";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
 } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
-import type { NudgePlacementStore } from "./nudge-placement-store";
-import type { ContextNudge } from "./nudger";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,
@@ -42,7 +50,6 @@ import {
 } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-
 import { sendIgnoredMessage } from "./send-session-notification";
 import {
     replayClearedReasoning,
@@ -63,18 +70,6 @@ import {
 } from "./transform-operations";
 import { runPostTransformPhase } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
-
-export { createNudgePlacementStore, type NudgePlacementStore } from "./nudge-placement-store";
-
-import {
-    clearDetectedContextLimit,
-    clearEmergencyRecovery,
-    clearHistorianFailureState,
-    clearPersistedReasoningWatermark,
-    getOverflowState,
-    setDeferredExecutePendingIfAbsent,
-} from "../../features/magic-context/storage-meta-persisted";
-import type { LiveModelBySession } from "./hook-handlers";
 
 // Per-session message token cache. Keyed by message ID, value is the token
 // contribution of that message split into conversation (text/reasoning/images)
@@ -154,17 +149,14 @@ export interface TransformDeps {
         string,
         { usage: ContextUsage; updatedAt: number; lastResponseTime?: number }
     >;
-    nudger: (
-        sessionId: string,
-        contextUsage: ContextUsage,
-        db: ContextDatabase,
-        topNFn: typeof getTopNBySize,
-        preloadedTags?: TagEntry[],
-        messagesSinceLastUser?: number,
-        preloadedSessionMeta?: import("../../features/magic-context/types").SessionMeta,
-    ) => ContextNudge | null;
     db: ContextDatabase;
-    nudgePlacements: NudgePlacementStore;
+    /**
+     * Channel 1 (ctx_reduce tool-output nudge) per-session metric baseline,
+     * refreshed at the end of each primary-session transform pass and read in
+     * tool.execute.after. Subagents never get a snapshot, which is how Channel 1
+     * stays primary-only.
+     */
+    channel1StateBySession?: Map<string, import("./ctx-reduce-nudge").Channel1State>;
     protectedTags: number;
     /**
      * Primary-session ctx_reduce setting. When false, tag prefix injection is
@@ -174,8 +166,6 @@ export interface TransformDeps {
      * Defaults to true when omitted (preserves legacy behavior for tests).
      */
     ctxReduceEnabled?: boolean;
-    autoDropToolAge: number;
-    dropToolStructure?: boolean;
     clearReasoningAge: number;
     /**
      * One-shot signal that `<session-history>` injection cache is stale and
@@ -344,6 +334,13 @@ export function createTransform(deps: TransformDeps) {
 
         const reducedMode = sessionMeta.isSubagent;
         const fullFeatureMode = !reducedMode;
+        // §N§ prefix + ctx_reduce + Channel 1 are gated on this single signal,
+        // NOT on subagent status. `ctx_reduce` is registered process-globally
+        // (tool-registry.ts), so subagents already have the tool — they just
+        // need the §N§ prefix + Channel 1 baseline + guidance to use it. A
+        // primary with ctx_reduce disabled correctly gets none of these (no
+        // tool to act on tags). `undefined === true` for this gate (default on).
+        const ctxReduceEnabledEffective = deps.ctxReduceEnabled !== false;
 
         // Resolve the *session's* working directory, not the OpenCode launch
         // directory. When the user runs `opencode -s <id>` from outside the
@@ -578,6 +575,36 @@ export function createTransform(deps: TransformDeps) {
             deps.executeThresholdTokens,
             resolvedContextLimit,
         );
+        // Ceiling for the tiered emergency drop = contextLimit × executeThreshold%
+        // (the usable working ceiling, NOT scaled by history_budget_percentage).
+        // Resolve the limit the same way resolveHistoryBudgetTokens does: prefer
+        // the model's stable limit, else back-derive from live usage. The
+        // emergency drop only fires at ≥85%, where percentage is reliably high,
+        // so the back-derivation is sound (it would only be unreliable at the
+        // percentage=0 cold start, which is far below the trigger). Undefined
+        // when neither is available → emergency drop skips, 95% block backstops.
+        let emergencyCeilingLimit =
+            resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : 0;
+        if (emergencyCeilingLimit <= 0 && contextUsageEarly.percentage > 0) {
+            emergencyCeilingLimit =
+                contextUsageEarly.inputTokens / (contextUsageEarly.percentage / 100);
+        }
+        const emergencyCeilingTokens =
+            Number.isFinite(emergencyCeilingLimit) && emergencyCeilingLimit > 0
+                ? Math.floor(
+                      emergencyCeilingLimit *
+                          (resolveExecuteThreshold(
+                              deps.executeThresholdPercentage ?? 65,
+                              deps.getModelKey?.(sessionId),
+                              65,
+                              {
+                                  tokensConfig: deps.executeThresholdTokens,
+                                  contextLimit: emergencyCeilingLimit,
+                              },
+                          ) /
+                              100),
+                  )
+                : undefined;
         const schedulerDecisionEarly = resolveSchedulerDecision(
             deps.scheduler,
             sessionMeta,
@@ -890,14 +917,12 @@ export function createTransform(deps: TransformDeps) {
             const tInitFromDb = performance.now();
             deps.tagger.initFromDb(sessionId, db);
             logTransformTiming(sessionId, "tag.initFromDb", tInitFromDb);
-            // Skip §N§ prefix injection when either:
-            // - ctx_reduce_enabled is false (agents have no tool to act on tags)
-            // - This is a subagent session (always treated as ctx_reduce_enabled=false)
-            // DB tag records are still maintained either way so heuristics and
-            // drops continue to work — only the agent-visible prefix is skipped.
-            // ctxReduceEnabled defaults to true (undefined === true for this gate).
-            const ctxReduceEnabledEffective = deps.ctxReduceEnabled !== false;
-            const skipPrefixInjection = !ctxReduceEnabledEffective || reducedMode;
+            // Skip §N§ prefix injection only when ctx_reduce is disabled (agents
+            // have no tool to act on tags). Subagents DO get prefixes now — they
+            // share the process-global ctx_reduce tool and self-manage tool
+            // bloat. DB tag records are maintained either way so heuristics and
+            // drops continue to work — only the agent-visible prefix is gated.
+            const skipPrefixInjection = !ctxReduceEnabledEffective;
             const result = tagMessages(sessionId, messages, deps.tagger, db, {
                 skipPrefixInjection,
             });
@@ -999,12 +1024,7 @@ export function createTransform(deps: TransformDeps) {
                 logTransformTiming(sessionId, "batchFinalize:flushed", t2);
             } catch (error) {
                 sessionLog(sessionId, "transform failed applying flushed statuses:", error);
-                // Only clear on cache-busting passes to avoid re-anchor on next defer (Finding 2).
-                if (isCacheBusting) deps.nudgePlacements.clear(sessionId);
             }
-        }
-        if (didMutateFromFlushedStatuses && isCacheBusting) {
-            deps.nudgePlacements.clear(sessionId);
         }
 
         const t3 = performance.now();
@@ -1284,12 +1304,9 @@ export function createTransform(deps: TransformDeps) {
             deferredHistoryRefreshSessions,
             deferredMaterializationSessions,
             lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
-            autoDropToolAge: deps.autoDropToolAge,
-            dropToolStructure: deps.dropToolStructure ?? true,
             clearReasoningAge: deps.clearReasoningAge,
             protectedTags: deps.protectedTags,
-            nudgePlacements: deps.nudgePlacements,
-            nudger: deps.nudger,
+            emergencyCeilingTokens,
             pendingCompartmentInjection,
             didMutateFromFlushedStatuses,
             watermark,
@@ -1515,6 +1532,83 @@ export function createTransform(deps: TransformDeps) {
             if (code !== "SQLITE_BUSY") {
                 sessionLog(sessionId, "conversation_tokens UPDATE failed:", error);
             }
+        }
+
+        // Channel 1 baseline snapshot (post-drop, post-injection). Computed from
+        // the final `messages` array, which the compartment-injection step has
+        // already trimmed to the live tail — so summing non-dropped tool output
+        // gives the post-boundary undropped tokens directly. Refreshing here (a
+        // proven transform boundary) zeroes the per-turn accumulator without the
+        // chat.message mid-turn race.
+        //
+        // Gated on ctx_reduce being effective (NOT fullFeatureMode): Channel 1
+        // nudges the agent to call ctx_reduce, so it's meaningful exactly when
+        // the agent has the §N§ prefix + the tool — i.e. any session with
+        // ctx_reduce enabled, INCLUDING subagents (which self-manage tool
+        // bloat). It must NOT fire for a ctx_reduce_enabled:false primary (no
+        // tool to act on). Channel 2 (the synthetic-user ceiling) stays
+        // primary-only — see the fullFeatureMode guard on its trigger below.
+        if (ctxReduceEnabledEffective && deps.channel1StateBySession) {
+            try {
+                const resolvedExecuteThresholdPct =
+                    typeof deps.executeThresholdPercentage === "number"
+                        ? deps.executeThresholdPercentage
+                        : resolveExecuteThreshold(
+                              deps.executeThresholdPercentage ?? 65,
+                              deps.getModelKey?.(sessionId),
+                              65,
+                              {
+                                  tokensConfig: deps.executeThresholdTokens,
+                                  contextLimit: resolvedContextLimit ?? 0,
+                              },
+                          );
+                const tailToolTokens = computeTailToolTokens(messages);
+                deps.channel1StateBySession.set(sessionId, {
+                    tailToolTokens,
+                    historyBudgetTokens: historyBudgetTokens ?? 0,
+                    contextLimit: resolvedContextLimit ?? 0,
+                    executeThresholdPercentage: resolvedExecuteThresholdPct,
+                    lastInputTokens: contextUsage.inputTokens,
+                    turnToolTokens: 0,
+                    reducedSinceRefresh: false,
+                });
+
+                // Channel 2 (ceiling) trigger — record a one-shot pending intent
+                // when pressure is near the execute threshold AND a large pile of
+                // reclaimable tool output remains. Delivery happens later from the
+                // event handler (`message.updated`) via the live-server client.
+                // Uses the real post-transform pressure (current usage% / threshold)
+                // and the just-computed tail tokens. Only escalate from the empty
+                // ('') state so we never reset an in-flight claim/delivery; the cap
+                // is one delivery per session lifetime.
+                //
+                // PRIMARY-ONLY (fullFeatureMode): Channel 2 injects a synthetic
+                // user message via promptAsync, whose interaction with a parent
+                // task() await is unverified for subagents. Subagents rely on
+                // Channel 1 + the ≥85% tiered floor. (Deferred behind an
+                // integration test — see plan.)
+                if (
+                    fullFeatureMode &&
+                    resolvedContextLimit &&
+                    resolvedExecuteThresholdPct > 0 &&
+                    shouldTriggerChannel2({
+                        undroppedTokens: tailToolTokens,
+                        pressure:
+                            ((contextUsage.inputTokens / resolvedContextLimit) * 100) /
+                            resolvedExecuteThresholdPct,
+                    })
+                ) {
+                    try {
+                        casChannel2NudgeState(db, sessionId, "", "pending");
+                    } catch (error) {
+                        sessionLog(sessionId, "channel2 trigger CAS failed (ignored):", error);
+                    }
+                }
+            } catch (error) {
+                sessionLog(sessionId, "channel1 baseline snapshot failed (ignored):", error);
+            }
+        } else {
+            deps.channel1StateBySession?.delete(sessionId);
         }
 
         const elapsed = (performance.now() - startTime).toFixed(1);

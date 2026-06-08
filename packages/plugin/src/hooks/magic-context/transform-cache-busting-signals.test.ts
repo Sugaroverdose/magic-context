@@ -30,7 +30,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { registerActiveCompartmentRun } from "./compartment-runner";
-import { createNudgePlacementStore, createTransform } from "./transform";
+import { createTransform } from "./transform";
 
 /**
  * Block "compartment running" by registering a never-resolving promise in
@@ -136,16 +136,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -200,16 +196,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -251,16 +243,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -316,16 +304,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -383,16 +367,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -500,9 +480,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions,
@@ -510,8 +488,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -550,9 +526,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions,
@@ -560,8 +534,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         await transform({}, { messages: buildSimpleMessages(sessionId) });
@@ -587,9 +559,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                         { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                     ],
                 ]),
-                nudger: () => null,
                 db: openDatabase(),
-                nudgePlacements: createNudgePlacementStore(),
                 historyRefreshSessions: new Set<string>(),
                 deferredHistoryRefreshSessions,
                 pendingMaterializationSessions: new Set<string>(),
@@ -597,8 +567,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 lastHeuristicsTurnId: new Map<string, string>(),
                 clearReasoningAge: 50,
                 protectedTags: 1,
-                autoDropToolAge: 1000,
-                dropToolStructure: true,
                 client: testClient,
                 directory: testDirectory,
             });
@@ -624,9 +592,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions: new Set<string>(),
@@ -634,8 +600,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
@@ -657,9 +621,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions,
@@ -667,8 +629,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(historyRefreshSessions.has(sessionId)).toBe(false);
@@ -708,16 +668,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -753,9 +709,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions: new Set<string>(),
@@ -763,8 +717,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const first = buildSimpleMessages(sessionId);
         await transform({}, { messages: first });
@@ -786,9 +738,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             contextUsageMap: new Map([
                 ["B", { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() }],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             deferredHistoryRefreshSessions: set,
             pendingMaterializationSessions: new Set<string>(),
@@ -796,8 +746,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await transform({}, { messages: buildSimpleMessages("B") });
         expect(set.has("A")).toBe(true);
@@ -828,9 +776,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions,
@@ -838,8 +784,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await transform({}, { messages: buildSimpleMessages(sessionId) });
         expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
@@ -877,16 +821,12 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                     { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: testClient,
             directory: testDirectory,
         });
@@ -924,9 +864,7 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
                 ["A", { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() }],
                 ["B", { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() }],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             deferredHistoryRefreshSessions,
             pendingMaterializationSessions,
@@ -934,8 +872,6 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await Promise.all([
             transform({}, { messages: buildSimpleMessages("A") }),

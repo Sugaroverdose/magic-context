@@ -13,16 +13,12 @@ import {
     getHistorianFailureState,
     getMaxCompressionDepth,
     getOrCreateSessionMeta,
-    getPersistedNudgePlacement,
-    getPersistedStickyTurnReminder,
     getStrippedPlaceholderIds,
     getTagsBySession,
     incrementCompressionDepth,
     incrementHistorianFailure,
     insertTag,
     openDatabase,
-    setPersistedNudgePlacement,
-    setPersistedStickyTurnReminder,
     setStrippedPlaceholderIds,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -108,7 +104,6 @@ function createDeps(contextUsageMap: Map<string, ContextUsageCacheEntry>) {
     return {
         contextUsageMap,
         compactionHandler: { onCompacted: mock(() => {}) },
-        nudgePlacements: { set: mock(() => {}), get: mock(() => null), clear: mock(() => {}) },
         config: {
             protected_tags: 5,
             cache_ttl: "5m" as string | Record<string, string>,
@@ -555,7 +550,6 @@ describe("createEventHandler", () => {
         ]);
         const deps = createDeps(contextUsageMap);
         const onCompacted = deps.compactionHandler.onCompacted;
-        const clearNudgePlacement = deps.nudgePlacements.clear;
         const taggerCleanup = deps.tagger.cleanup;
         const handler = createEventHandler(deps);
 
@@ -579,7 +573,6 @@ describe("createEventHandler", () => {
         expect(onCompacted).toHaveBeenCalledWith("ses-clean", expect.anything());
         expect(contextUsageMap.has("ses-clean")).toBe(false);
         expect(taggerCleanup).toHaveBeenCalledWith("ses-clean");
-        expect(clearNudgePlacement).toHaveBeenCalledWith("ses-clean");
         expect(getTagsBySession(openDatabase(), "ses-clean")).toHaveLength(0);
         expect(getMaxCompressionDepth(openDatabase(), "ses-clean")).toBe(0);
         expect(getOrCreateSessionMeta(openDatabase(), "ses-clean").isSubagent).toBe(false);
@@ -661,29 +654,6 @@ describe("createEventHandler", () => {
         ).toBe(1);
     });
 
-    it("clears the nudge anchor when the removed message was the anchor", async () => {
-        useTempDataHome("context-event-message-removed-anchor-");
-        const deps = createDeps(new Map());
-        const handler = createEventHandler(deps);
-
-        setPersistedNudgePlacement(
-            deps.db,
-            "ses-anchor",
-            "msg-anchor",
-            "<instruction>nudge</instruction>",
-        );
-
-        await handler({
-            event: {
-                type: "message.removed",
-                properties: { sessionID: "ses-anchor", messageID: "msg-anchor" },
-            },
-        });
-
-        expect(getPersistedNudgePlacement(openDatabase(), "ses-anchor")).toBeNull();
-        expect(deps.nudgePlacements.clear).toHaveBeenCalledWith("ses-anchor", { persist: false });
-    });
-
     it("prunes only sticky-injection anchors for the removed message", async () => {
         useTempDataHome("context-event-message-removed-note-");
         const deps = createDeps(new Map());
@@ -745,28 +715,6 @@ describe("createEventHandler", () => {
         expect(getNoteNudgeAnchors(openDatabase(), "ses-note-trigger")).toEqual([
             { messageId: "msg-anchor", text: "Keep anchor" },
         ]);
-    });
-
-    it("clears sticky turn reminders when the removed message was the reminder anchor", async () => {
-        useTempDataHome("context-event-message-removed-sticky-reminder-");
-        const deps = createDeps(new Map());
-        const handler = createEventHandler(deps);
-
-        setPersistedStickyTurnReminder(
-            deps.db,
-            "ses-reminder",
-            "remember to reduce",
-            "msg-reminder",
-        );
-
-        await handler({
-            event: {
-                type: "message.removed",
-                properties: { sessionID: "ses-reminder", messageID: "msg-reminder" },
-            },
-        });
-
-        expect(getPersistedStickyTurnReminder(openDatabase(), "ses-reminder")).toBeNull();
     });
 
     it("removes deleted message ids from stripped placeholder state", async () => {

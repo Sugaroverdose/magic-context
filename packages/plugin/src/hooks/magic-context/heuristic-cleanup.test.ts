@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { getTagsBySession, insertTag, updateTagStatus } from "../../features/magic-context/storage";
+import { getTagsBySession, insertTag } from "../../features/magic-context/storage";
 import { Database } from "../../shared/sqlite";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import type { MessageLike, TagTarget } from "./tag-messages";
@@ -58,6 +58,7 @@ function makeMemoryDatabase(): Database {
       conversation_tokens INTEGER DEFAULT 0,
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      last_emergency_drop_through_tag INTEGER DEFAULT 0,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
@@ -138,49 +139,6 @@ describe("applyHeuristicCleanup", () => {
         db.close();
     });
 
-    describe("#given tool tags older than autoDropToolAge", () => {
-        describe("#when executing heuristic cleanup", () => {
-            it("#then auto-drops old tool tags beyond the age threshold", () => {
-                //#given
-                for (let i = 1; i <= 10; i++) {
-                    insertTag(db, SESSION, `msg-${i}`, i <= 5 ? "tool" : "message", 1000, i);
-                }
-                const targets = new Map<number, TagTarget>();
-                for (let i = 1; i <= 10; i++) {
-                    const msg = {
-                        parts:
-                            i <= 5
-                                ? [
-                                      {
-                                          type: "tool",
-                                          tool: "grep",
-                                          state: { output: "results", status: "completed" },
-                                      },
-                                  ]
-                                : [{ type: "text", text: `message ${i}` }],
-                    };
-                    targets.set(i, makeTarget(msg));
-                }
-
-                //#when — autoDropToolAge=5 means tags 1-5 are within age (maxTag=10, cutoff=10-5=5)
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 7,
-                    dropToolStructure: true,
-                    protectedTags: 2,
-                });
-
-                //#then — tags 1-3 are tool tags older than cutoff (10-7=3), tags 4-5 are within age
-                expect(result.droppedTools).toBe(3);
-                const tags = getTagsBySession(db, SESSION);
-                expect(tags.filter((t) => t.status === "dropped").length).toBe(3);
-                expect(tags.filter((t) => t.status === "active").length).toBe(7);
-                expect(
-                    tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "full"),
-                ).toBe(true);
-            });
-        });
-    });
-
     describe("#given reasoning with actual content", () => {
         describe("#when executing heuristic cleanup", () => {
             it("#then preserves non-cleared reasoning", () => {
@@ -197,8 +155,6 @@ describe("applyHeuristicCleanup", () => {
 
                 //#when
                 applyHeuristicCleanup(SESSION, db, targets, buildMessageTagNumbers([[1, msg]]), {
-                    autoDropToolAge: 100,
-                    dropToolStructure: true,
                     protectedTags: 0,
                 });
 
@@ -208,213 +164,89 @@ describe("applyHeuristicCleanup", () => {
         });
     });
 
-    describe("#given protected tags", () => {
-        describe("#when executing heuristic cleanup", () => {
-            it("#then skips protected tags even if they are old tool outputs", () => {
-                //#given
-                for (let i = 1; i <= 5; i++) {
-                    insertTag(db, SESSION, `msg-${i}`, "tool", 1000, i);
-                }
-                const targets = new Map<number, TagTarget>();
-                for (let i = 1; i <= 5; i++) {
-                    const msg = {
-                        parts: [
-                            {
-                                type: "tool",
-                                tool: "bash",
-                                state: { output: "ok", status: "completed" },
-                            },
-                        ],
-                    };
-                    targets.set(i, makeTarget(msg));
-                }
-
-                //#when — protect last 3 tags (tags 3,4,5), autoDropToolAge=1 (cutoff=5-1=4)
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 1,
-                    dropToolStructure: true,
-                    protectedTags: 3,
-                });
-
-                //#then — only tags 1-2 are outside protection AND older than age
-                expect(result.droppedTools).toBe(2);
-                const tags = getTagsBySession(db, SESSION);
-                expect(tags.filter((t) => t.status === "dropped").map((t) => t.tagNumber)).toEqual([
-                    1, 2,
-                ]);
-            });
-        });
-    });
-
-    describe("#given already dropped tags", () => {
-        describe("#when executing heuristic cleanup", () => {
-            it("#then skips already dropped tags", () => {
-                //#given
-                insertTag(db, SESSION, "msg-1", "tool", 1000, 1);
-                insertTag(db, SESSION, "msg-2", "tool", 1000, 2);
-                insertTag(db, SESSION, "msg-10", "message", 500, 10);
-                updateTagStatus(db, SESSION, 1, "dropped");
-
-                const targets = new Map<number, TagTarget>();
+    describe("#given the tiered emergency drop config (>=85% pass)", () => {
+        it("#then drops oldest tool outputs down to the reclaim target, full-drop", () => {
+            //#given a tail of large tool outputs well over the ceiling. fixedFloor is
+            // derived as currentTotalInputTokens - Σ(active tag tokens), so with only
+            // tool tags here, fixedFloor≈0 and the target is 30% of the ceiling.
+            for (let i = 1; i <= 10; i++) {
+                insertTag(db, SESSION, `call-${i}`, "tool", 4000, i, 0, "bash");
+            }
+            const targets = new Map<number, TagTarget>();
+            for (let i = 1; i <= 10; i++) {
                 targets.set(
-                    2,
+                    i,
                     makeTarget({
                         parts: [
                             {
                                 type: "tool",
-                                tool: "grep",
-                                state: { output: "x", status: "completed" },
+                                tool: "bash",
+                                state: { output: "x".repeat(4000), status: "completed" },
                             },
                         ],
                     }),
                 );
+            }
 
-                //#when
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 5,
-                    dropToolStructure: true,
-                    protectedTags: 1,
-                });
-
-                //#then — only tag 2 dropped (tag 1 already dropped)
-                expect(result.droppedTools).toBe(1);
+            //#when 10 tags × 4000 bytes × 0.25 = 10000 tokens of tail; usage 10000,
+            // ceiling 6000 → target = 0 + 0.30×6000 = 1800 → reclaim ≈ 8200 tokens.
+            const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
+                protectedTags: 2,
+                emergency: { currentTotalInputTokens: 10_000, ceilingTokens: 6_000 },
             });
+
+            //#then oldest tags drop first (T3 bash), all full-drop, newest 2 protected.
+            expect(result.droppedTools).toBeGreaterThan(0);
+            const tags = getTagsBySession(db, SESSION);
+            const dropped = tags
+                .filter((t) => t.status === "dropped")
+                .map((t) => t.tagNumber)
+                .sort((a, b) => a - b);
+            // protected tail (tags 9,10) never dropped.
+            expect(dropped).not.toContain(9);
+            expect(dropped).not.toContain(10);
+            // oldest dropped first.
+            expect(dropped[0]).toBe(1);
+            expect(
+                tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "full"),
+            ).toBe(true);
         });
-    });
 
-    describe("#given emergency materialization above 85%", () => {
-        describe("#when executing heuristic cleanup with dropAllTools", () => {
-            it("#then drops all unprotected tool tags regardless of age", () => {
-                //#given
-                for (let i = 1; i <= 5; i++) {
-                    insertTag(db, SESSION, `msg-${i}`, "tool", 1000, i);
-                }
-                const targets = new Map<number, TagTarget>();
-                for (let i = 1; i <= 5; i++) {
-                    const msg = {
-                        parts: [
-                            {
-                                type: "tool",
-                                tool: "bash",
-                                state: { output: "ok", status: "completed" },
-                            },
-                        ],
-                    };
-                    targets.set(i, makeTarget(msg));
-                }
-
-                //#when
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 100,
-                    dropToolStructure: true,
-                    protectedTags: 2,
-                    dropAllTools: true,
-                });
-
-                //#then
-                expect(result.droppedTools).toBe(3);
-                const tags = getTagsBySession(db, SESSION);
-                expect(tags.filter((t) => t.status === "dropped").map((t) => t.tagNumber)).toEqual([
-                    1, 2, 3,
-                ]);
-                expect(
-                    tags.filter((t) => t.status === "dropped").every((t) => t.dropMode === "full"),
-                ).toBe(true);
+        it("#then is a no-op when already under target (reclaim <= 0)", () => {
+            insertTag(db, SESSION, "call-1", "tool", 4000, 1, 0, "bash");
+            insertTag(db, SESSION, "m-2", "message", 500, 2);
+            const targets = new Map<number, TagTarget>([
+                [
+                    1,
+                    makeTarget({
+                        parts: [{ type: "tool", tool: "bash", state: { output: "x" } }],
+                    }),
+                ],
+            ]);
+            // usage 1000 well under ceiling 100000 → reclaim negative → no-op.
+            const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
+                protectedTags: 0,
+                emergency: { currentTotalInputTokens: 1_000, ceilingTokens: 100_000 },
             });
+            expect(result.droppedTools).toBe(0);
         });
-    });
 
-    describe("#given old tool tags in truncation mode", () => {
-        describe("#when executing heuristic cleanup", () => {
-            it("#then keeps tool structure and truncates tool input/output in place", () => {
-                insertTag(db, SESSION, "msg-1", "tool", 1000, 1);
-                insertTag(db, SESSION, "msg-10", "message", 500, 10);
-
-                const msg = {
-                    parts: [
-                        {
-                            type: "tool",
-                            tool: "grep",
-                            state: {
-                                input: {
-                                    query: "abcdef",
-                                    short: "abc",
-                                    files: ["a", "b"],
-                                    metadata: { nested: true },
-                                    limit: 3,
-                                    exact: true,
-                                },
-                                output: "full output",
-                                status: "completed",
-                            },
-                        },
-                    ],
-                };
-                const targets = new Map<number, TagTarget>([[1, makeTarget(msg)]]);
-
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 5,
-                    dropToolStructure: false,
-                    protectedTags: 0,
-                });
-
-                expect(result.droppedTools).toBe(1);
-                expect(msg.parts).toHaveLength(1);
-                expect(msg.parts[0] as Record<string, unknown>).toEqual({
-                    type: "tool",
-                    tool: "grep",
-                    state: {
-                        input: {
-                            query: "abcdef",
-                            short: "abc",
-                            files: ["a", "b"],
-                            metadata: { nested: true },
-                            limit: 3,
-                            exact: true,
-                        },
-                        output: "[truncated]",
-                        status: "completed",
-                    },
-                });
-                expect(
-                    getTagsBySession(db, SESSION).find((tag) => tag.tagNumber === 1)?.status,
-                ).toBe("dropped");
-                expect(
-                    getTagsBySession(db, SESSION).find((tag) => tag.tagNumber === 1)?.dropMode,
-                ).toBe("truncated");
+        it("#then does nothing when no emergency config is supplied (routine pass)", () => {
+            for (let i = 1; i <= 5; i++) {
+                insertTag(db, SESSION, `call-${i}`, "tool", 4000, i, 0, "bash");
+            }
+            const targets = new Map<number, TagTarget>();
+            for (let i = 1; i <= 5; i++) {
+                targets.set(
+                    i,
+                    makeTarget({ parts: [{ type: "tool", tool: "bash", state: { output: "x" } }] }),
+                );
+            }
+            const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
+                protectedTags: 0,
             });
-
-            it("#then fully removes tool parts when dropToolStructure is enabled", () => {
-                insertTag(db, SESSION, "msg-1", "tool", 1000, 1);
-                insertTag(db, SESSION, "msg-10", "message", 500, 10);
-
-                const msg = {
-                    parts: [
-                        {
-                            type: "tool",
-                            tool: "grep",
-                            state: {
-                                input: { query: "abcdef" },
-                                output: "full output",
-                                status: "completed",
-                            },
-                        },
-                    ],
-                };
-                const targets = new Map<number, TagTarget>([[1, makeTarget(msg)]]);
-
-                const result = applyHeuristicCleanup(SESSION, db, targets, new Map(), {
-                    autoDropToolAge: 5,
-                    dropToolStructure: true,
-                    protectedTags: 0,
-                });
-
-                expect(result.droppedTools).toBe(1);
-                expect(msg.parts).toHaveLength(0);
-                expect(
-                    getTagsBySession(db, SESSION).find((tag) => tag.tagNumber === 1)?.status,
-                ).toBe("dropped");
-            });
+            // No routine tool drops anymore — only dedup/injection-strip run.
+            expect(result.droppedTools).toBe(0);
         });
     });
 
@@ -472,8 +304,6 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msgB, 60);
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                autoDropToolAge: 1000, // age cutoff doesn't fire (very large)
-                dropToolStructure: true,
                 protectedTags: 0,
             });
 
@@ -517,8 +347,6 @@ describe("applyHeuristicCleanup", () => {
             messageTagNumbers.set(msg, 80); // newest
 
             const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
-                autoDropToolAge: 1000,
-                dropToolStructure: true,
                 protectedTags: 0,
             });
 

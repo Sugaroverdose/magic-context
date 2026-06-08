@@ -21,7 +21,6 @@ export interface RegisterCtxStatusDeps {
 		projectIdentity: string;
 	};
 	protectedTags?: number;
-	nudgeIntervalTokens?: number;
 	executeThresholdPercentage?:
 		| number
 		| { default: number; [modelKey: string]: number };
@@ -95,7 +94,6 @@ export function registerCtxStatusCommand(
 					currentDeps.db,
 					sessionId,
 					currentDeps.protectedTags ?? 20,
-					currentDeps.nudgeIntervalTokens,
 					currentDeps.executeThresholdPercentage,
 					modelKey,
 					currentDeps.historyBudgetPercentage,

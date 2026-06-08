@@ -1,7 +1,4 @@
-import {
-    DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
-    DEFAULT_NUDGE_INTERVAL_TOKENS,
-} from "../../config/schema/magic-context";
+import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
 import { getCompartments } from "../../features/magic-context/compartment-storage";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
@@ -16,11 +13,6 @@ import {
 } from "./compartment-trigger";
 import { resolveExecuteThresholdDetail } from "./event-resolvers";
 import { formatBytes } from "./format-bytes";
-import {
-    formatRollingNudgeBand,
-    getRollingNudgeBand,
-    getRollingNudgeIntervalTokens,
-} from "./nudge-bands";
 import { estimateTokens } from "./read-session-formatting";
 
 function formatExecuteThreshold(
@@ -43,7 +35,6 @@ export function executeStatus(
     db: Database,
     sessionId: string,
     protectedTags: number,
-    nudgeIntervalTokens: number = DEFAULT_NUDGE_INTERVAL_TOKENS,
     executeThresholdPercentageConfig:
         | number
         | { default: number; [modelKey: string]: number } = DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
@@ -93,11 +84,6 @@ export function executeStatus(
         const remainingMs = Math.max(0, ttlMs - elapsed);
         const cacheExpired = remainingMs === 0 && meta.lastResponseTime > 0;
 
-        const currentBand = getRollingNudgeBand(
-            meta.lastContextPercentage,
-            executeThresholdPercentage,
-        );
-        const nudgeInterval = getRollingNudgeIntervalTokens(nudgeIntervalTokens, currentBand);
         const proactiveCompartmentTrigger = getProactiveCompartmentTriggerPercentage(
             executeThresholdPercentage,
         );
@@ -133,13 +119,8 @@ export function executeStatus(
             `- Remaining: ${cacheExpired ? "expired" : `${Math.round(remainingMs / 1000)}s`}`,
             `- Queue will auto-execute: ${cacheExpired ? "yes (cache expired)" : `when TTL expires or context >= ${executeThresholdPercentage}%`}`,
             "",
-            "### Rolling Nudges",
+            "### Execute Threshold",
             `- Execute threshold: ${formatExecuteThreshold(executeThresholdPercentage, thresholdMode, displayContextLimit)}`,
-            `- Rolling anchor: ${meta.lastNudgeTokens.toLocaleString()} tokens`,
-            `- Effective interval: ${nudgeInterval.toLocaleString()} tokens`,
-            `- Next rolling nudge after: ${(meta.lastNudgeTokens + nudgeInterval).toLocaleString()} tokens`,
-            `- Current band: ${formatRollingNudgeBand(currentBand)}`,
-            `- Last fired band: ${formatRollingNudgeBand(meta.lastNudgeBand)}`,
             `- Last input tokens: ${meta.lastInputTokens.toLocaleString()} tokens`,
             "",
             `**Protected tags:** ${protectedTags}`,

@@ -43,7 +43,6 @@ export interface BuildMagicContextBlockOptions {
 	protectedTags?: number;
 	ctxReduceEnabled?: boolean;
 	dreamerEnabled?: boolean;
-	dropToolStructure?: boolean;
 	temporalAwarenessEnabled?: boolean;
 	cavemanTextCompressionEnabled?: boolean;
 	/** Reserved for compatibility; user profile now lives in m[0]. */
@@ -74,7 +73,6 @@ export function buildMagicContextBlock(
 		opts.protectedTags ?? 20,
 		opts.ctxReduceEnabled ?? true,
 		opts.dreamerEnabled ?? false,
-		opts.dropToolStructure ?? true,
 		opts.temporalAwarenessEnabled ?? false,
 		opts.cavemanTextCompressionEnabled ?? false,
 	);

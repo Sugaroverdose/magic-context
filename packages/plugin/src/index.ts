@@ -274,6 +274,15 @@ const plugin: Plugin = async (ctx) => {
             ctx.directory,
             serverUrlStr,
         );
+        // Probe the live HTTP listener once at startup so the first Channel 2
+        // ceiling-nudge delivery doesn't pay the probe cost. Plain TUI 404s here,
+        // which disables Channel 2 (Channel 1 + 85% force-materialization remain).
+        // Fire-and-forget; the delivery path re-probes if this is stale/missing.
+        if (serverUrlStr) {
+            void import("./shared/live-server-client")
+                .then(({ probeServerReachable }) => probeServerReachable(serverUrlStr))
+                .catch(() => {});
+        }
     }
 
     // Auto-add TUI plugin entry to tui.json if missing.
@@ -443,8 +452,7 @@ const plugin: Plugin = async (ctx) => {
             );
         },
         "tool.execute.after": async (input, output) => {
-            void output;
-            await hooks.magicContext?.["tool.execute.after"]?.(input);
+            await hooks.magicContext?.["tool.execute.after"]?.(input, output);
         },
         "experimental.text.complete": async (input, output) => {
             await hooks.magicContext?.["experimental.text.complete"]?.(input, output);

@@ -34,6 +34,10 @@ export function createSessionHooks(args: {
         magicContext: createMagicContextHook({
             client: ctx.client,
             directory: ctx.directory,
+            serverUrl:
+                (ctx as { serverUrl?: URL }).serverUrl instanceof URL
+                    ? (ctx as { serverUrl: URL }).serverUrl.toString().replace(/\/$/, "")
+                    : undefined,
             tagger,
             scheduler,
             compactionHandler,
@@ -44,8 +48,6 @@ export function createSessionHooks(args: {
                 nudge_interval_tokens:
                     pluginConfig.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
                 cache_ttl: pluginConfig.cache_ttl,
-                auto_drop_tool_age: pluginConfig.auto_drop_tool_age,
-                drop_tool_structure: pluginConfig.drop_tool_structure,
                 clear_reasoning_age: pluginConfig.clear_reasoning_age,
                 iteration_nudge_threshold: pluginConfig.iteration_nudge_threshold,
                 execute_threshold_percentage:

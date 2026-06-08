@@ -518,17 +518,6 @@
       "minimum": 1,
       "maximum": 100
     },
-    "auto_drop_tool_age": {
-      "default": 100,
-      "description": "Auto-drop tool outputs older than N tags during queue execution (default: 100)",
-      "type": "number",
-      "minimum": 10
-    },
-    "drop_tool_structure": {
-      "default": true,
-      "description": "When true, dropped tool parts are fully removed instead of truncated in place (default: true)",
-      "type": "boolean"
-    },
     "clear_reasoning_age": {
       "default": 50,
       "description": "Clear reasoning/thinking blocks older than N tags (default: 50)",

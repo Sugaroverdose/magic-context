@@ -154,15 +154,53 @@ stamps on send.
   that re-keys persisted tag/drop/caveman/placeholder state from `pi-msg-<index>`
   ids to real `SessionEntry` ids. OpenCode has stable message ids natively.
 - **`syntheticLeadingCount`:** anchor-GC excludes the id-less m[0]/m[1] synthetic
-  prepends (and any rolling-nudge synthetic) from its "all messages resolved"
-  denominator. OpenCode messages all have intrinsic `info.id`, so it has no such
-  id-less injected messages to exclude.
+  prepends from its "all messages resolved" denominator. OpenCode messages all
+  have intrinsic `info.id`, so it has no such id-less injected messages to exclude.
 - **Dynamic `upgradeState`:** Pi derives `upgradeState` from the presence of
   legacy compartments at runtime.
 
 ---
 
-## 9. Cleared reasoning keeps its original signature (matches OpenCode)
+## 9. ctx_reduce nudges — same effect, different delivery mechanism
+
+The ctx_reduce nudge system (Channels 1 & 2) shares ALL metric math with OpenCode
+via `@magic-context/core/.../ctx-reduce-nudge` (`decideChannel1`, `computePressure`,
+`shouldTriggerChannel2`, both reminder builders, `tailToolTokensFromStrings`). Only
+the harness I/O differs:
+
+- **Channel 1 (in-turn tool-output nudge).** OpenCode appends the
+  `<system-reminder>` to a tool's `output.output` string in `tool.execute.after`;
+  Pi appends a `TextContent` block to `toolResult.content[]` in
+  `pi.on("tool_result")` (returning `{ content: [...event.content, block] }`). Both
+  persist (OpenCode→DB, Pi→JSONL via `appendMessage` on `message_end`) and replay
+  verbatim — "free sticky", no anchor/CAS/replay machinery. The metric baseline is
+  computed at the end of the pipeline (`pi.on("context")` / OpenCode transform) and
+  read in the tool hook. Pi tool output lives in `toolResult.content[].text`, not
+  OpenCode's `parts[].state.output` — `computeTailToolTokensPi` extracts it, then
+  defers to the shared `tailToolTokensFromStrings`.
+
+- **Channel 2 (synthetic-user ceiling nudge).** OpenCode MUST use a live-server
+  `createOpencodeClient(serverUrl)` + `/session` probe to dodge the plugin
+  runner-split bug (anomalyco/opencode#28202); Pi just calls the native
+  `pi.sendUserMessage(reminder, { deliverAs: "followUp" })`. **Pi has no #28202
+  workaround, no live-server client, and no probe** — it is single-process, so
+  `sendUserMessage` coalesces natively and the message lands at the tail after the
+  current turn. The shared `channel2_nudge_state` lease (pending→claimed→delivered,
+  revert-on-failure) is used identically for the one-ceiling-per-lifetime cap; only
+  the delivery call differs. OpenCode delivers from `message.updated` (finish=stop);
+  Pi delivers from `agent_end`.
+
+- **Removed in this redesign (both harnesses):** the rolling/iteration nudge
+  (`nudger`/`injectPiNudge`/`nudge-injector.ts`) and the tool-heavy sticky reminder
+  (`applyStickyTurnReminder`, `setPersistedStickyTurnReminder`, the `<instruction
+  name="ctx_reduce_turn_cleanup">` text). Pi's now-removed `recordPiToolExecution`
+  / `toolUsageSinceUserTurn` tracking backed only the deleted sticky reminder.
+  Note-nudges and auto-search hints are UNCHANGED (still append to user messages
+  via `appendReminderToUserMessageByIdPi`).
+
+---
+
+## 10. Cleared reasoning keeps its original signature (matches OpenCode)
 
 When Magic Context clears an aged reasoning/thinking block, it rewrites the
 thinking text to a `[cleared]` placeholder but **preserves the original

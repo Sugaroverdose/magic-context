@@ -91,10 +91,7 @@ import {
 	hasSystemPromptRefresh,
 	type PiAutoSearchHandlerOptions,
 	type PiHistorianOptions,
-	type PiNudgeOptions,
-	recordPiCtxReduceExecution,
 	recordPiLiveModel,
-	recordPiToolExecution,
 	registerPiContextHandler,
 	signalPiDeferredHistoryRefresh,
 	signalPiHistoryRefresh,
@@ -103,6 +100,10 @@ import {
 	signalPiSystemPromptRefreshForProject,
 	trackSessionForProject,
 } from "./context-handler";
+import {
+	markPiChannel1Reduced,
+	maybeChannel1ReminderForToolResult,
+} from "./ctx-reduce-nudge-pi";
 import {
 	awaitInFlightDreamers,
 	registerPiDreamerProject,
@@ -382,26 +383,12 @@ export function resolveHistorianFromConfig(
 		executeThresholdPercentage: config.execute_threshold_percentage,
 		executeThresholdTokens: config.execute_threshold_tokens,
 		commitClusterTrigger: config.commit_cluster_trigger,
-		autoDropToolAge: config.auto_drop_tool_age,
 		protectedTags: config.protected_tags,
 		clearReasoningAge: config.clear_reasoning_age,
-		dropToolStructure: config.drop_tool_structure,
 		historyBudgetPercentage: config.history_budget_percentage,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
 		userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
-	};
-}
-
-function resolveNudgeFromConfig(
-	config: MagicContextConfig,
-): PiNudgeOptions | undefined {
-	if (!config.ctx_reduce_enabled) return undefined;
-	return {
-		protectedTags: config.protected_tags ?? 20,
-		nudgeIntervalTokens: config.nudge_interval_tokens,
-		iterationNudgeThreshold: config.iteration_nudge_threshold,
-		executeThresholdPercentage: config.execute_threshold_percentage,
 	};
 }
 
@@ -586,7 +573,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 		};
 	}
-	const nudgeConfig = resolveNudgeFromConfig(config);
 	const autoSearchConfig = resolveAutoSearchFromConfig(config);
 	registerPiContextHandler(pi, {
 		db,
@@ -596,16 +582,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// Council finding #1 (unanimous CRITICAL): a hardcoded `0` here
 		// silently let recent-turn drops mid-task; use real config value.
 		protectedTags: config.protected_tags ?? 20,
-		// Heuristic-cleanup config — drops aged tools, dedups, strips
-		// system injections, age-tier caveman compression. The biggest
-		// reduction lever: a session that just loaded 3000 tagged
-		// messages immediately drops everything older than
-		// auto_drop_tool_age outside the protected tail. Only forwarded
-		// when ctx_reduce_enabled=false for caveman (the feature
-		// replaces manual ctx_reduce text dropping).
+		// Heuristic-cleanup config — tiered emergency drop (≥85%), dedup,
+		// strips system injections, age-tier caveman compression. Routine
+		// age-based tool drops were removed; the tiered target-headroom
+		// emergency drop is the floor. Caveman is only forwarded when
+		// ctx_reduce_enabled=false (the feature replaces manual text dropping).
 		heuristics: {
-			autoDropToolAge: config.auto_drop_tool_age,
-			dropToolStructure: config.drop_tool_structure,
 			caveman:
 				config.ctx_reduce_enabled === false && config.caveman_text_compression
 					? {
@@ -637,18 +619,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			executeThresholdTokens: config.execute_threshold_tokens,
 		},
 		historian: historianConfig,
-		nudge: nudgeConfig,
 		autoSearch: autoSearchConfig,
 	});
 	info(
 		historianConfig
 			? `registered historian trigger (model=${historianConfig.model}, executeThreshold=${historianConfig.executeThresholdPercentage ?? 65}%)`
 			: "registered historian trigger: DISABLED (set historian.model in magic-context.jsonc)",
-	);
-	info(
-		nudgeConfig
-			? `registered nudges (protected=${nudgeConfig.protectedTags}, interval=${nudgeConfig.nudgeIntervalTokens}, iter=${nudgeConfig.iterationNudgeThreshold})`
-			: "registered nudges: DISABLED (ctx_reduce_enabled=false)",
 	);
 	info(
 		autoSearchConfig.enabled
@@ -680,7 +656,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		projectIdentity,
 		resolveProject: resolveCurrentProject,
 		protectedTags: config.protected_tags,
-		nudgeIntervalTokens: config.nudge_interval_tokens,
 		executeThresholdPercentage: config.execute_threshold_percentage,
 		historyBudgetPercentage: config.history_budget_percentage,
 		injectionBudgetTokens: config.memory?.injection_budget_tokens,
@@ -1001,7 +976,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				protectedTags: config.protected_tags,
 				ctxReduceEnabled: config.ctx_reduce_enabled,
 				dreamerEnabled: isDreamerRunnable(config),
-				dropToolStructure: config.drop_tool_structure,
 				temporalAwarenessEnabled: config.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
 					config.ctx_reduce_enabled === false &&
@@ -1208,12 +1182,38 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
 			if (event.toolName === "ctx_reduce") {
-				recordPiCtxReduceExecution(sessionId);
+				markPiChannel1Reduced(sessionId);
 			}
-			recordPiToolExecution(sessionId);
 		} catch (err) {
 			log(
 				`tool_execution_end hook failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	});
+
+	// Channel 1 (ctx_reduce in-turn nudge), Pi parity with OpenCode's
+	// `tool.execute.after` → `output.output` append. `tool_result` lets an
+	// extension REPLACE the recorded tool result content; returning the original
+	// content plus an appended `<system-reminder>` block persists to the session
+	// JSONL (via `appendMessage` on `message_end`) and replays verbatim on every
+	// later `context` pass — "free sticky", no anchor/CAS/replay machinery. The
+	// metric baseline is computed in the pipeline (`pi.on("context")`) and read
+	// here, exactly mirroring OpenCode's transform→tool.execute.after split.
+	pi.on("tool_result", async (event, ctx) => {
+		try {
+			const sessionId = ctx.sessionManager.getSessionId();
+			if (typeof sessionId !== "string" || sessionId.length === 0) return;
+			const block = maybeChannel1ReminderForToolResult({
+				db,
+				sessionId,
+				toolName: event.toolName,
+				content: event.content,
+			});
+			if (!block) return;
+			return { content: [...event.content, block] };
+		} catch (err) {
+			log(
+				`tool_result hook failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	});

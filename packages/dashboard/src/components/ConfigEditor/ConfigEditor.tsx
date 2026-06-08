@@ -204,15 +204,6 @@ const FIELD_DEFS: FieldDef[] = [
       "Enable agent controlled reductions via ctx_reduce tool. When enabled, agent is prompted and nudged to choose what messages and tool calls to drop periodically. If disabled the system still works via auto drops based on message ages.",
     section: "General",
   },
-  {
-    key: "drop_tool_structure",
-    label: "Drop Tool Structure",
-    type: "boolean",
-    description:
-      "When enabled, dropped tool calls are fully removed. When disabled, tool input/output is truncated in place so tool structure stays visible.",
-    section: "General",
-    defaultValue: true,
-  },
   // Thresholds
   // cache_ttl and execute_threshold_percentage are rendered as custom PerModelField components
   {
@@ -228,13 +219,6 @@ const FIELD_DEFS: FieldDef[] = [
     label: "Protected Tags",
     type: "number",
     description: "Number of recent tags protected from drops.",
-    section: "Tags & Cleanup",
-  },
-  {
-    key: "auto_drop_tool_age",
-    label: "Auto Drop Tool Age",
-    type: "number",
-    description: "Tag age after which tool outputs are automatically dropped.",
     section: "Tags & Cleanup",
   },
   {
@@ -367,7 +351,6 @@ const RANGE_SLIDER_FIELDS = new Set([
   "history_budget_percentage",
   "nudge_interval_tokens",
   "protected_tags",
-  "auto_drop_tool_age",
   "clear_reasoning_age",
   "iteration_nudge_threshold",
   "historian_timeout_ms",
@@ -537,8 +520,6 @@ function ConfigForm(props: {
         return { min: 1000, max: 50000, step: 1000, suffix: " tokens", defaultValue: 10000 };
       case "protected_tags":
         return { min: 1, max: 100, step: 1, suffix: "", defaultValue: 20 };
-      case "auto_drop_tool_age":
-        return { min: 10, max: 200, step: 5, suffix: "", defaultValue: 100 };
       case "clear_reasoning_age":
         return { min: 10, max: 200, step: 5, suffix: "", defaultValue: 50 };
       case "iteration_nudge_threshold":

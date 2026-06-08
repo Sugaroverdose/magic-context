@@ -1,0 +1,209 @@
+// Tiered target-headroom emergency tool-output drop (Phase 2).
+//
+// This is the EMERGENCY floor that replaces the old `dropAllTools` nuke at the
+// 85% force-materialize pass. It is need-aware (tier-ordered) and target-driven
+// (reclaim down to ~30% of working space) instead of need-blind ("drop all" /
+// "older than X"). Selection is PURE here; the harness applies the returned
+// plan (drop primitive + `updateTagStatus(...,"dropped")` + watermark persist),
+// so OpenCode and Pi run identical selection logic.
+//
+// CACHE CONTRACT (see .alfonso/plans/ctx-reduce-phase2-v3.md):
+//   - The caller MUST invoke this only on the ≥85% force-materialize pass (a
+//     cache-busting pass, never a defer pass).
+//   - Each tag is dropped AT MOST ONCE: candidates are gated on
+//     `tagNumber > priorWatermark` AND `status==="active"`, and the watermark
+//     advances past every dropped tag. So the number of drop-induced cache
+//     busts over a session is bounded by the tool-tag count — no oscillation.
+//   - All accounting is in TOKENS. Tags store BYTES, so we convert with the one
+//     canonical estimator (`TOKENS_PER_BYTE`, shared with the Phase 1 nudge).
+
+import { TOKENS_PER_BYTE } from "./ctx-reduce-nudge";
+
+/** Reclaim target = fixedFloor + TARGET_FRACTION × (ceiling − fixedFloor). */
+export const TARGET_FRACTION = 0.3;
+
+/** Keep the newest `ceil(RESERVE × tierCount)` of T1/T2 as continuation context. */
+export const TIER_RECENCY_RESERVE = 0.2;
+
+/**
+ * Don't bust the cache for a trivial reclaim. If the computed reclaim is at or
+ * below this, the pass is a no-op (combined with the watermark, this prevents
+ * 85%-94.9% oscillation).
+ */
+export const EMERGENCY_REARM_MIN_TOKENS = 2000;
+
+export type Tier = 1 | 2 | 3;
+
+// Tier keys are matched against the normalized (lowercased, `mcp_`-stripped)
+// tool name. Verified against the production tag corpus: stored `tool_name`
+// values are bare (`read`, `edit`, `bash`, …) with no `mcp_` prefix; the strip
+// is defensive insurance for environments that surface MCP-prefixed names.
+const T1_TOOLS = new Set(["read", "todowrite", "task", "aft_outline", "aft_zoom"]);
+const T2_TOOLS = new Set(["edit", "write", "apply_patch", "grep", "glob", "aft_search"]);
+
+/** Normalize a stored tool name for tier matching. */
+function normalizeToolName(toolName: string | null): string {
+    if (!toolName) return "";
+    let name = toolName.toLowerCase();
+    if (name.startsWith("mcp_")) name = name.slice(4);
+    return name;
+}
+
+/**
+ * Classify a tool into its drop tier. T1 (keep longest) = navigation/structure
+ * the agent re-uses; T2 (medium) = edit-class continuation context; T3 (drop
+ * first) = everything else (the default — bash, ctx_reduce, inspect, web, …).
+ */
+export function resolveToolTier(toolName: string | null): Tier {
+    const name = normalizeToolName(toolName);
+    if (T1_TOOLS.has(name)) return 1;
+    if (T2_TOOLS.has(name)) return 2;
+    return 3;
+}
+
+/** Minimal tag shape the planner needs (subset of TagEntry, harness-agnostic). */
+export interface EmergencyDropTag {
+    tagNumber: number;
+    type: "message" | "tool" | "file";
+    status: "active" | "dropped" | "compacted";
+    toolName: string | null;
+    byteSize: number;
+    reasoningByteSize: number;
+}
+
+export interface EmergencyDropPlan {
+    /** Whether the caller should perform any drop this pass. */
+    shouldDrop: boolean;
+    /** Tool tag numbers to drop, in eviction order (T3→T2→T1, oldest-first). */
+    tagNumbers: number[];
+    /** Reclaim target in tokens (for logging). */
+    reclaimTokens: number;
+    /** New `last_emergency_drop_through_tag` to persist (>= prior). */
+    newWatermark: number;
+    /** Human-readable reason (no-op explanation or drop summary), for logs. */
+    reason: string;
+}
+
+function bytesToTokens(bytes: number): number {
+    return Math.round(bytes * TOKENS_PER_BYTE);
+}
+
+/**
+ * Plan a tiered target-headroom emergency drop. Pure: returns the ordered set of
+ * tool tag numbers to drop plus the new watermark; the caller applies them.
+ *
+ * fixedFloor is derived as `currentTotalInputTokens − Σ(active tag tokens)`.
+ * Tags cover exactly the live-tail content (messages, tool outputs, files,
+ * reasoning); system, tool defs, and m[0]/m[1] are untagged. So this difference
+ * IS `system + toolDefs + (primary ? m0 + m1 : 0)` — the irreducible prefix —
+ * with no extra plumbing, and it self-adjusts for subagents (no m0/m1 in their
+ * total) by construction.
+ */
+export function planEmergencyDrop(input: {
+    tags: readonly EmergencyDropTag[];
+    maxTag: number;
+    protectedTags: number;
+    currentTotalInputTokens: number;
+    /** ceiling = contextLimit × executeThreshold%. */
+    ceilingTokens: number;
+    /** last_emergency_drop_through_tag (0 if never dropped). */
+    priorWatermark: number;
+}): EmergencyDropPlan {
+    const { tags, maxTag, protectedTags, currentTotalInputTokens, ceilingTokens, priorWatermark } =
+        input;
+
+    const noop = (reason: string): EmergencyDropPlan => ({
+        shouldDrop: false,
+        tagNumbers: [],
+        reclaimTokens: 0,
+        newWatermark: priorWatermark,
+        reason,
+    });
+
+    // Guard: unknown / not-yet-resolved context limit → skip (the 95% block is
+    // the backstop). Never guess a limit.
+    if (!Number.isFinite(ceilingTokens) || ceilingTokens <= 0) {
+        return noop("unknown-ceiling");
+    }
+    if (!Number.isFinite(currentTotalInputTokens) || currentTotalInputTokens <= 0) {
+        return noop("unknown-usage");
+    }
+
+    // fixedFloor from the active-tag content (see doc-comment).
+    let tailTokens = 0;
+    for (const tag of tags) {
+        if (tag.status !== "active") continue;
+        tailTokens += bytesToTokens(tag.byteSize + tag.reasoningByteSize);
+    }
+    const fixedFloor = Math.max(currentTotalInputTokens - tailTokens, 0);
+    const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
+    const target = fixedFloor + TARGET_FRACTION * workingSpan;
+    const reclaimTokens = Math.round(currentTotalInputTokens - target);
+
+    // Already at/under target, or reclaim too small to justify a cache bust.
+    if (reclaimTokens <= EMERGENCY_REARM_MIN_TOKENS) {
+        return noop(`reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS})`);
+    }
+
+    const protectedCutoff = maxTag - protectedTags;
+
+    // Per-tier recency reserve (T1, T2 only): the newest ceil(20%) active tool
+    // tags of each tier are continuation context and never evictable.
+    const tierActive: Record<1 | 2, number[]> = { 1: [], 2: [] };
+    for (const tag of tags) {
+        if (tag.status !== "active" || tag.type !== "tool") continue;
+        const tier = resolveToolTier(tag.toolName);
+        if (tier === 1 || tier === 2) tierActive[tier].push(tag.tagNumber);
+    }
+    const reserved = new Set<number>();
+    for (const tier of [1, 2] as const) {
+        const nums = tierActive[tier];
+        if (nums.length === 0) continue;
+        nums.sort((a, b) => b - a); // newest first
+        const reserveCount = Math.ceil(TIER_RECENCY_RESERVE * nums.length);
+        for (let i = 0; i < reserveCount && i < nums.length; i++) {
+            reserved.add(nums[i]);
+        }
+    }
+
+    // Build evictable candidates per tier.
+    const byTier: Record<Tier, EmergencyDropTag[]> = { 1: [], 2: [], 3: [] };
+    for (const tag of tags) {
+        if (tag.status !== "active" || tag.type !== "tool") continue;
+        if (tag.tagNumber <= priorWatermark) continue; // dropped-once invariant
+        if (tag.tagNumber > protectedCutoff) continue; // global protected tail
+        const tier = resolveToolTier(tag.toolName);
+        if ((tier === 1 || tier === 2) && reserved.has(tag.tagNumber)) continue;
+        byTier[tier].push(tag);
+    }
+
+    // Walk T3 → T2 → T1, oldest-first within tier, until reclaim met.
+    const selected: number[] = [];
+    let reclaimed = 0;
+    let maxSelected = priorWatermark;
+    outer: for (const tier of [3, 2, 1] as const) {
+        const group = byTier[tier];
+        group.sort((a, b) => a.tagNumber - b.tagNumber); // oldest first
+        for (const tag of group) {
+            selected.push(tag.tagNumber);
+            if (tag.tagNumber > maxSelected) maxSelected = tag.tagNumber;
+            reclaimed += bytesToTokens(tag.byteSize);
+            if (reclaimed >= reclaimTokens) break outer;
+        }
+    }
+
+    if (selected.length === 0) {
+        // Nothing new to drop (all candidates dropped/reserved/protected). No
+        // cache bust — wait for the session to grow past the watermark or the
+        // 95% block to fire.
+        return noop("no-new-candidates");
+    }
+
+    return {
+        shouldDrop: true,
+        tagNumbers: selected,
+        reclaimTokens,
+        newWatermark: maxSelected,
+        reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})`,
+    };
+}

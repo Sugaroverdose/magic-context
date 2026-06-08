@@ -14,16 +14,6 @@ interface PersistedReasoningWatermarkRow {
     cleared_reasoning_through_tag: number;
 }
 
-interface PersistedNudgePlacementRow {
-    nudge_anchor_message_id: string;
-    nudge_anchor_text: string;
-}
-
-interface PersistedStickyTurnReminderRow {
-    sticky_turn_reminder_text: string;
-    sticky_turn_reminder_message_id: string;
-}
-
 interface PersistedNoteNudgeRow {
     note_nudge_trigger_pending: number;
     note_nudge_trigger_message_id: string;
@@ -41,11 +31,6 @@ interface PersistedHistorianFailureRow {
     historian_failure_count: number;
     historian_last_error: string | null;
     historian_last_failure_at: number | null;
-}
-
-export interface PersistedStickyTurnReminder {
-    text: string;
-    messageId: string | null;
 }
 
 export interface PersistedNoteNudge {
@@ -125,21 +110,6 @@ function isPersistedReasoningWatermarkRow(row: unknown): row is PersistedReasoni
     if (row === null || typeof row !== "object") return false;
     const r = row as Record<string, unknown>;
     return typeof r.cleared_reasoning_through_tag === "number";
-}
-
-function isPersistedNudgePlacementRow(row: unknown): row is PersistedNudgePlacementRow {
-    if (row === null || typeof row !== "object") return false;
-    const r = row as Record<string, unknown>;
-    return typeof r.nudge_anchor_message_id === "string" && typeof r.nudge_anchor_text === "string";
-}
-
-function isPersistedStickyTurnReminderRow(row: unknown): row is PersistedStickyTurnReminderRow {
-    if (row === null || typeof row !== "object") return false;
-    const r = row as Record<string, unknown>;
-    return (
-        typeof r.sticky_turn_reminder_text === "string" &&
-        typeof r.sticky_turn_reminder_message_id === "string"
-    );
 }
 
 function isPersistedNoteNudgeRow(row: unknown): row is PersistedNoteNudgeRow {
@@ -282,95 +252,151 @@ export function clearPersistedReasoningWatermark(db: Database, sessionId: string
     setPersistedReasoningWatermark(db, sessionId, 0);
 }
 
-export function getPersistedNudgePlacement(
-    db: Database,
-    sessionId: string,
-): { messageId: string; nudgeText: string } | null {
-    const result = db
-        .prepare(
-            "SELECT nudge_anchor_message_id, nudge_anchor_text FROM session_meta WHERE session_id = ?",
-        )
-        .get(sessionId);
-
-    if (!isPersistedNudgePlacementRow(result)) {
-        return null;
-    }
-
-    if (result.nudge_anchor_message_id.length === 0 || result.nudge_anchor_text.length === 0) {
-        return null;
-    }
-
-    return {
-        messageId: result.nudge_anchor_message_id,
-        nudgeText: result.nudge_anchor_text,
-    };
+// ---- Tiered emergency-drop watermark (Phase 2) ----
+// `last_emergency_drop_through_tag` is the highest tag number the tiered
+// emergency drop has evicted. The planner only considers tags strictly above
+// it, so each tag is dropped AT MOST ONCE and consecutive ≥85% passes converge
+// instead of re-deriving a different selection (which would bust the cache).
+// Reset to 0 on model / execute-threshold / tool-set / system-prompt-hash
+// change (the events that invalidate the drop rationale).
+interface PersistedEmergencyDropWatermarkRow {
+    last_emergency_drop_through_tag: number;
 }
 
-export function setPersistedNudgePlacement(
+function isEmergencyDropWatermarkRow(row: unknown): row is PersistedEmergencyDropWatermarkRow {
+    return (
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PersistedEmergencyDropWatermarkRow).last_emergency_drop_through_tag ===
+            "number"
+    );
+}
+
+export function getEmergencyDropWatermark(db: Database, sessionId: string): number {
+    const result = db
+        .prepare("SELECT last_emergency_drop_through_tag FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+    return isEmergencyDropWatermarkRow(result) ? result.last_emergency_drop_through_tag : 0;
+}
+
+export function setEmergencyDropWatermark(
     db: Database,
     sessionId: string,
-    messageId: string,
-    nudgeText: string,
+    tagNumber: number,
 ): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         db.prepare(
-            "UPDATE session_meta SET nudge_anchor_message_id = ?, nudge_anchor_text = ? WHERE session_id = ?",
-        ).run(messageId, nudgeText, sessionId);
+            "UPDATE session_meta SET last_emergency_drop_through_tag = ? WHERE session_id = ?",
+        ).run(Math.max(0, Math.round(tagNumber)), sessionId);
     })();
 }
 
-export function clearPersistedNudgePlacement(db: Database, sessionId: string): void {
-    db.prepare(
-        "UPDATE session_meta SET nudge_anchor_message_id = '', nudge_anchor_text = '' WHERE session_id = ?",
-    ).run(sessionId);
+export function clearEmergencyDropWatermark(db: Database, sessionId: string): void {
+    setEmergencyDropWatermark(db, sessionId, 0);
 }
 
-export function getPersistedStickyTurnReminder(
-    db: Database,
-    sessionId: string,
-): PersistedStickyTurnReminder | null {
+// ---- Channel 1 (in-turn tool-output ctx_reduce nudge) cadence watermark ----
+// `last_nudge_undropped` records the `undropped` byte estimate at the moment
+// Channel 1 last fired. We only re-fire once undropped has grown by another
+// CHANNEL1_REFIRE_INTERVAL since then, and reset it to 0 when undropped falls
+// (post-ctx_reduce/compaction) so re-accumulation re-arms the nudge.
+interface PersistedLastNudgeUndroppedRow {
+    last_nudge_undropped: number;
+}
+
+function isLastNudgeUndroppedRow(row: unknown): row is PersistedLastNudgeUndroppedRow {
+    return (
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PersistedLastNudgeUndroppedRow).last_nudge_undropped === "number"
+    );
+}
+
+export function getLastNudgeUndropped(db: Database, sessionId: string): number {
     const result = db
-        .prepare(
-            "SELECT sticky_turn_reminder_text, sticky_turn_reminder_message_id FROM session_meta WHERE session_id = ?",
-        )
+        .prepare("SELECT last_nudge_undropped FROM session_meta WHERE session_id = ?")
         .get(sessionId);
-
-    if (!isPersistedStickyTurnReminderRow(result)) {
-        return null;
-    }
-
-    if (result.sticky_turn_reminder_text.length === 0) {
-        return null;
-    }
-
-    return {
-        text: result.sticky_turn_reminder_text,
-        messageId:
-            result.sticky_turn_reminder_message_id.length > 0
-                ? result.sticky_turn_reminder_message_id
-                : null,
-    };
+    return isLastNudgeUndroppedRow(result) ? result.last_nudge_undropped : 0;
 }
 
-export function setPersistedStickyTurnReminder(
+export function setLastNudgeUndropped(db: Database, sessionId: string, value: number): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET last_nudge_undropped = ? WHERE session_id = ?").run(
+            Math.max(0, Math.round(value)),
+            sessionId,
+        );
+    })();
+}
+
+// ---- Channel 2 (synthetic-user-message ceiling) one-shot lease/outbox ----
+// State machine stored as a single string in `channel2_nudge_state`:
+//   ''         — no intent (initial)
+//   'pending'  — transform recorded the ceiling condition; deliver on next event
+//   'claimed'  — a delivery attempt is in flight (CAS-claimed before send)
+//   'delivered'— confirmed sent; the one ceiling nudge is consumed (terminal)
+// On send failure the caller reverts 'claimed' -> 'pending' so a transient error
+// does not permanently burn the single ceiling nudge.
+export type Channel2NudgeState = "" | "pending" | "claimed" | "delivered";
+
+interface PersistedChannel2StateRow {
+    channel2_nudge_state: string;
+}
+
+function isChannel2StateRow(row: unknown): row is PersistedChannel2StateRow {
+    return (
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PersistedChannel2StateRow).channel2_nudge_state === "string"
+    );
+}
+
+export function getChannel2NudgeState(db: Database, sessionId: string): Channel2NudgeState {
+    const result = db
+        .prepare("SELECT channel2_nudge_state FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+    if (!isChannel2StateRow(result)) return "";
+    const raw = result.channel2_nudge_state;
+    return raw === "pending" || raw === "claimed" || raw === "delivered" ? raw : "";
+}
+
+export function setChannel2NudgeState(
     db: Database,
     sessionId: string,
-    text: string,
-    messageId = "",
+    state: Channel2NudgeState,
 ): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        db.prepare(
-            "UPDATE session_meta SET sticky_turn_reminder_text = ?, sticky_turn_reminder_message_id = ? WHERE session_id = ?",
-        ).run(text, messageId, sessionId);
+        db.prepare("UPDATE session_meta SET channel2_nudge_state = ? WHERE session_id = ?").run(
+            state,
+            sessionId,
+        );
     })();
 }
 
-export function clearPersistedStickyTurnReminder(db: Database, sessionId: string): void {
-    db.prepare(
-        "UPDATE session_meta SET sticky_turn_reminder_text = '', sticky_turn_reminder_message_id = '' WHERE session_id = ?",
-    ).run(sessionId);
+/**
+ * Atomically move the Channel-2 lease from one state to another. Returns true
+ * only if the row was in `from` and is now `to` — a cross-process CAS so two
+ * concurrent processes can't both claim+deliver the single ceiling nudge.
+ */
+export function casChannel2NudgeState(
+    db: Database,
+    sessionId: string,
+    from: Channel2NudgeState,
+    to: Channel2NudgeState,
+): boolean {
+    let changed = false;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET channel2_nudge_state = ? WHERE session_id = ? AND channel2_nudge_state = ?",
+            )
+            .run(to, sessionId, from);
+        changed = (result.changes ?? 0) > 0;
+    })();
+    return changed;
 }
 
 export function getPersistedNoteNudge(db: Database, sessionId: string): PersistedNoteNudge {

@@ -18,8 +18,6 @@ import {
     appendNoteNudgeAnchor,
     buildCompartmentBlock,
     clearPendingOps,
-    clearPersistedNudgePlacement,
-    clearPersistedStickyTurnReminder,
     clearSession,
     closeDatabase,
     dismissNote,
@@ -28,8 +26,6 @@ import {
     getOrCreateSessionMeta,
     getPendingOps,
     getPendingSmartNotes,
-    getPersistedNudgePlacement,
-    getPersistedStickyTurnReminder,
     getSessionNotes,
     getSmartNotes,
     getTagById,
@@ -45,8 +41,6 @@ import {
     removeNoteNudgeAnchorByMessageId,
     removePendingOp,
     replaceAllSessionNotes,
-    setPersistedNudgePlacement,
-    setPersistedStickyTurnReminder,
     updateNote,
     updateSessionMeta,
     updateTagStatus,
@@ -391,59 +385,6 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getSmartNotes(db, "git:test-project")).toEqual([]);
-        closeQuietly(db);
-    });
-
-    it("persists and clears nudge anchors by session", () => {
-        //#given
-        const db = makeMemoryDatabase();
-        const sessionId = "ses-anchor";
-
-        //#when
-        setPersistedNudgePlacement(db, sessionId, "m-assistant", "\n[nudge]");
-
-        //#then
-        expect(getPersistedNudgePlacement(db, sessionId)).toEqual({
-            messageId: "m-assistant",
-            nudgeText: "\n[nudge]",
-        });
-
-        //#when
-        clearPersistedNudgePlacement(db, sessionId);
-
-        //#then
-        expect(getPersistedNudgePlacement(db, sessionId)).toBeNull();
-        closeQuietly(db);
-    });
-
-    it("persists and clears sticky turn reminders by session", () => {
-        //#given
-        const db = makeMemoryDatabase();
-        const sessionId = "ses-sticky-turn-reminder";
-
-        //#when
-        setPersistedStickyTurnReminder(db, sessionId, "\n[sticky reminder]");
-
-        //#then
-        expect(getPersistedStickyTurnReminder(db, sessionId)).toEqual({
-            text: "\n[sticky reminder]",
-            messageId: null,
-        });
-
-        //#when
-        setPersistedStickyTurnReminder(db, sessionId, "\n[sticky reminder]", "m-user");
-
-        //#then
-        expect(getPersistedStickyTurnReminder(db, sessionId)).toEqual({
-            text: "\n[sticky reminder]",
-            messageId: "m-user",
-        });
-
-        //#when
-        clearPersistedStickyTurnReminder(db, sessionId);
-
-        //#then
-        expect(getPersistedStickyTurnReminder(db, sessionId)).toBeNull();
         closeQuietly(db);
     });
 

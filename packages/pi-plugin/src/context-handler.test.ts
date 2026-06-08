@@ -15,13 +15,11 @@ import {
 	getOrCreateSessionMeta,
 	getPendingOps,
 	getPendingPiCompactionMarkerState,
-	getPersistedStickyTurnReminder,
 	getTagsBySession,
 	incrementHistorianFailure,
 	insertTag,
 	queuePendingOp,
 	setPendingPiCompactionMarkerState,
-	setPersistedStickyTurnReminder,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
@@ -40,10 +38,7 @@ import {
 	collectMessageEntryIdsStrict,
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
-	getPiToolUsageSinceUserTurnForTest,
-	recordPiCtxReduceExecution,
 	recordPiLiveModel,
-	recordPiToolExecution,
 	registerPiContextHandler,
 	resolvePiHistorianTriggerInputs,
 	signalPiDeferredHistoryRefresh,
@@ -51,6 +46,10 @@ import {
 	signalPiPendingMaterialization,
 	trackSessionForProject,
 } from "./context-handler";
+import {
+	getPiChannel1Baseline,
+	setPiChannel1Baseline,
+} from "./ctx-reduce-nudge-pi";
 import {
 	assistantMessage,
 	createFakePi,
@@ -75,18 +74,26 @@ describe("registerPiContextHandler", () => {
 		// Register a victim session with observable per-session state, then track
 		// >100 newer sessions so the victim is evicted via clearContextHandlerSession.
 		const victim = "ses-evict-victim";
-		recordPiToolExecution(victim);
+		setPiChannel1Baseline(victim, {
+			tailToolTokens: 1,
+			historyBudgetTokens: 0,
+			contextLimit: 0,
+			executeThresholdPercentage: 65,
+			lastInputTokens: 0,
+			turnToolTokens: 0,
+			reducedSinceRefresh: false,
+		});
 		trackSessionForProject("proj-evict", victim);
-		expect(getPiToolUsageSinceUserTurnForTest(victim)).toBe(1);
+		expect(getPiChannel1Baseline(victim)).toBeDefined();
 
 		// 100 newer sessions push the victim past the cap (it was tracked first).
 		for (let i = 0; i < 100; i++) {
 			trackSessionForProject("proj-evict", `ses-evict-${i}`);
 		}
 
-		// Victim's per-session tool-usage cache was cleared by eviction (the map
-		// entry is deleted, so the getter returns undefined).
-		expect(getPiToolUsageSinceUserTurnForTest(victim)).toBeUndefined();
+		// Victim's per-session Channel 1 baseline was cleared by eviction
+		// (clearContextHandlerSession → clearPiChannel1State).
+		expect(getPiChannel1Baseline(victim)).toBeUndefined();
 
 		// Cleanup the survivors.
 		clearContextHandlerSession(victim);
@@ -366,51 +373,6 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("injects a rolling nudge when the shared nudger band fires", async () => {
-		const db = createTestDb();
-		try {
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				ctxReduceEnabled: true,
-				nudge: {
-					protectedTags: 0,
-					nudgeIntervalTokens: 100,
-					iterationNudgeThreshold: 10,
-					executeThresholdPercentage: 65,
-				},
-			});
-			const handler = fake.handlers.get("context") as (
-				event: { messages: never[] },
-				ctx: never,
-			) => Promise<{ messages: never[] }>;
-			const ctx = {
-				...fakeContext("ses-context"),
-				getContextUsage: () => ({
-					tokens: 100,
-					percent: 30,
-					contextWindow: 10_000,
-				}),
-			};
-
-			const result = await handler(
-				{
-					messages: [
-						assistantMessage("answer", 1),
-						userMessage("latest prompt", 2),
-					] as never[],
-				},
-				ctx as never,
-			);
-
-			expect(result.messages).toHaveLength(3);
-			expect(textOf(result.messages[1] as never)).toContain("CONTEXT REMINDER");
-			expect(result.messages[2]?.role).toBe("user");
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
 	it("injects deferred-note text into the latest new user message", async () => {
 		const db = createTestDb();
 		try {
@@ -610,48 +572,6 @@ describe("registerPiContextHandler", () => {
 			expect(spy).toHaveBeenCalledTimes(1);
 		} finally {
 			spy.mockRestore();
-			closeQuietly(db);
-		}
-	});
-
-	it("preserves sticky anchors and avoids synthetic re-anchoring when branch resolution fails", async () => {
-		const db = createTestDb();
-		try {
-			const sessionId = "ses-sticky-ref-fail";
-			clearContextHandlerSession(sessionId);
-			setPersistedStickyTurnReminder(
-				db,
-				sessionId,
-				'\n\n<instruction name="ctx_reduce_turn_cleanup">persisted</instruction>',
-				"entry-old",
-			);
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				ctxReduceEnabled: true,
-				scheduler: { executeThresholdPercentage: 0 },
-			});
-			const handler = fake.handlers.get("context") as (
-				event: { messages: never[] },
-				ctx: never,
-			) => Promise<{ messages: never[] }>;
-			const msg = userMessage("new turn", 1);
-			await handler({ messages: [msg] as never[] }, {
-				...fakeContext(sessionId),
-				sessionManager: { getSessionId: () => sessionId },
-				getContextUsage: () => ({
-					tokens: 90_000,
-					percent: 90,
-					contextWindow: 100_000,
-				}),
-			} as never);
-
-			expect(getPersistedStickyTurnReminder(db, sessionId)).toEqual({
-				text: '\n\n<instruction name="ctx_reduce_turn_cleanup">persisted</instruction>',
-				messageId: "entry-old",
-			});
-		} finally {
-			clearContextHandlerSession("ses-sticky-ref-fail");
 			closeQuietly(db);
 		}
 	});
@@ -899,10 +819,8 @@ describe("registerPiContextHandler", () => {
 				executeThresholdPercentage: 65,
 				executeThresholdTokens: { default: 40_000 },
 				commitClusterTrigger: { enabled: false, min_clusters: 9 },
-				autoDropToolAge: 7,
 				protectedTags: 3,
 				clearReasoningAge: 11,
-				dropToolStructure: false,
 			};
 
 			const small = resolvePiHistorianTriggerInputs({
@@ -923,11 +841,11 @@ describe("registerPiContextHandler", () => {
 			expect(small).toMatchObject({
 				executeThresholdPercentage: 40,
 				triggerBudget: 5000,
-				autoDropToolAge: 7,
 				protectedTags: 3,
 				clearReasoningAge: 11,
-				dropToolStructure: false,
 				commitClusterTrigger: { enabled: false, min_clusters: 9 },
+				// ceiling = contextLimit(100k) × execThreshold(40%) = 40000
+				emergencyCeilingTokens: 40_000,
 			});
 			expect(large.triggerBudget).toBe(32_500);
 		} finally {
@@ -961,10 +879,8 @@ describe("registerPiContextHandler", () => {
 				historianChunkTokens: 8000,
 				executeThresholdPercentage,
 				commitClusterTrigger: { enabled: true, min_clusters: 3 },
-				autoDropToolAge: 100,
 				protectedTags: 20,
 				clearReasoningAge: 50,
-				dropToolStructure: true,
 			};
 			const piInputs = resolvePiHistorianTriggerInputs({
 				db,
@@ -987,10 +903,7 @@ describe("registerPiContextHandler", () => {
 						0,
 						executeThresholdPercentage,
 						triggerBudget,
-						100,
-						20,
 						50,
-						true,
 						{ enabled: true, min_clusters: 3 },
 					);
 					const piDecision = checkCompartmentTrigger(
@@ -1001,10 +914,7 @@ describe("registerPiContextHandler", () => {
 						0,
 						piInputs.executeThresholdPercentage,
 						piInputs.triggerBudget,
-						piInputs.autoDropToolAge,
-						piInputs.protectedTags,
 						piInputs.clearReasoningAge,
-						piInputs.dropToolStructure,
 						piInputs.commitClusterTrigger,
 					);
 
@@ -1017,90 +927,6 @@ describe("registerPiContextHandler", () => {
 				},
 			);
 		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("records ctx_reduce executions and suppresses rolling nudges during cooldown", async () => {
-		const db = createTestDb();
-		try {
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				ctxReduceEnabled: true,
-				nudge: {
-					protectedTags: 0,
-					nudgeIntervalTokens: 100,
-					iterationNudgeThreshold: 10,
-					executeThresholdPercentage: 65,
-				},
-			});
-			const handler = fake.handlers.get("context") as (
-				event: { messages: never[] },
-				ctx: never,
-			) => Promise<{ messages: never[] }>;
-			const ctx = {
-				...fakeContext("ses-context"),
-				getContextUsage: () => ({
-					tokens: 100,
-					percent: 30,
-					contextWindow: 10_000,
-				}),
-			};
-			recordPiCtxReduceExecution("ses-context");
-
-			const result = await handler(
-				{
-					messages: [
-						assistantMessage("answer", 1),
-						userMessage("latest prompt", 2),
-					] as never[],
-				},
-				ctx as never,
-			);
-
-			expect(result.messages).toHaveLength(2);
-			expect(textOf(result.messages[0] as never)).not.toContain(
-				"CONTEXT REMINDER",
-			);
-		} finally {
-			clearContextHandlerSession("ses-context");
-			closeQuietly(db);
-		}
-	});
-
-	it("sets sticky tool-heavy reminders on the next user turn and resets tool usage", async () => {
-		const db = createTestDb();
-		try {
-			const fake = createFakePi();
-			registerPiContextHandler(fake.pi as never, {
-				db,
-				ctxReduceEnabled: true,
-			});
-			const handler = fake.handlers.get("context") as (
-				event: { messages: never[] },
-				ctx: never,
-			) => Promise<{ messages: never[] }>;
-			for (let i = 0; i < 5; i += 1) {
-				recordPiToolExecution("ses-context");
-			}
-
-			const newTurnMsg = userMessage("new turn", 100);
-			await handler(
-				{ messages: [newTurnMsg] as never[] },
-				fakeContext(
-					"ses-context",
-					process.cwd(),
-					["entry-1"],
-					[newTurnMsg],
-				) as never,
-			);
-
-			const sticky = getPersistedStickyTurnReminder(db, "ses-context");
-			expect(sticky?.text).toContain("ctx_reduce_turn_cleanup");
-			expect(getPiToolUsageSinceUserTurnForTest("ses-context")).toBe(0);
-		} finally {
-			clearContextHandlerSession("ses-context");
 			closeQuietly(db);
 		}
 	});

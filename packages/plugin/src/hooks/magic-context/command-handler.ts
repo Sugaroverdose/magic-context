@@ -445,7 +445,6 @@ export function createMagicContextCommandHandler(deps: {
                     deps.db,
                     sessionId,
                     deps.protectedTags,
-                    deps.nudgeIntervalTokens,
                     deps.executeThresholdPercentage,
                     liveModelKey,
                     deps.historyBudgetPercentage,

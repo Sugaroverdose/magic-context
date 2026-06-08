@@ -1119,6 +1119,44 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 31,
+        description:
+            "Nudge redesign: Channel 1 cadence (last_nudge_undropped) + Channel 2 ceiling lease " +
+            "(channel2_nudge_state); zero legacy ctx_reduce-nudge sticky/anchor state (startup heal)",
+        up: (db: Database) => {
+            // Channel 1 (in-turn tool-output nudge) cadence watermark, and Channel 2
+            // (synthetic-user-message ceiling) one-shot lease state. Both replace the
+            // deleted rolling/iteration/sticky ctx_reduce-nudge paths, whose persisted
+            // state (sticky_turn_reminder_*, nudge_anchor_*) is now inert — no code
+            // reads it — but we zero it so an upgraded session can never replay a stale
+            // anchor (the Bust-B mechanism the redesign removes).
+            const hasSessionMeta = db
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta' LIMIT 1",
+                )
+                .get();
+            if (!hasSessionMeta) return;
+            ensureColumn(db, "session_meta", "last_nudge_undropped", "INTEGER DEFAULT 0");
+            ensureColumn(db, "session_meta", "channel2_nudge_state", "TEXT DEFAULT ''");
+            const columns = new Set(
+                (
+                    db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>
+                ).map((column) => column.name),
+            );
+            // Startup heal: blank the retired ctx_reduce-nudge anchor columns. Guarded
+            // per-column so a fixture that seeded a partial schema doesn't throw.
+            if (columns.has("sticky_turn_reminder_text")) {
+                db.prepare(
+                    `UPDATE session_meta SET
+                        sticky_turn_reminder_text = '',
+                        sticky_turn_reminder_message_id = '',
+                        nudge_anchor_message_id = '',
+                        nudge_anchor_text = ''`,
+                ).run();
+            }
+        },
+    },
 ];
 
 /**

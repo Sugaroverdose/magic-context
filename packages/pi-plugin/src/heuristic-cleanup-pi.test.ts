@@ -65,8 +65,6 @@ describe("applyPiHeuristicCleanup", () => {
 			const { transcript, targets } = tagMessages(sessionId, db, messages);
 
 			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
-				autoDropToolAge: 100,
-				dropToolStructure: true,
 				protectedTags: 0,
 			});
 			transcript.commit();
@@ -113,8 +111,6 @@ describe("applyPiHeuristicCleanup", () => {
 			const { transcript, targets } = tagMessages(sessionId, db, messages);
 
 			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
-				autoDropToolAge: 100,
-				dropToolStructure: true,
 				protectedTags: 0,
 			});
 			transcript.commit();
@@ -165,10 +161,10 @@ describe("applyPiHeuristicCleanup", () => {
 			const transcript = createPiTranscript(messages, sessionId);
 			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
 
+			// Stale-reduce cutoff is now the protected-tail window (maxTag -
+			// protectedTags); protectedTags:2 reproduces the old age-2 cutoff.
 			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
-				autoDropToolAge: 2,
-				dropToolStructure: true,
-				protectedTags: 0,
+				protectedTags: 2,
 			});
 			transcript.commit();
 
@@ -280,11 +276,10 @@ describe("applyPiHeuristicCleanup", () => {
 			const transcript = createPiTranscript(messages, sessionId);
 			const { targets } = tagTranscript(sessionId, transcript, tagger, db);
 
-			// Cutoff chosen so only the OLD ctx_reduce tag is below it.
+			// protectedTags:3 makes only the OLD ctx_reduce tag fall outside the
+			// protected tail (the fresh one near the end stays protected).
 			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
-				autoDropToolAge: 3,
-				dropToolStructure: true,
-				protectedTags: 0,
+				protectedTags: 3,
 			});
 			transcript.commit();
 

@@ -1,5 +1,4 @@
 import {
-    clearPersistedStickyTurnReminder,
     getPendingOps,
     removePendingOp,
     updateTagStatus,
@@ -28,10 +27,6 @@ export function executeFlush(db: Database, sessionId: string): string {
 
         const parts: string[] = [];
         if (dropped > 0) parts.push(`${dropped} dropped`);
-
-        if (dropped > 0) {
-            clearPersistedStickyTurnReminder(db, sessionId);
-        }
 
         return `Flushed: ${parts.join(", ")}. Changes take effect on next message.`;
     } catch (error) {

@@ -66,7 +66,6 @@ function buildHandler(opts?: {
         db: openDatabase(),
         protectedTags: 1,
         ctxReduceEnabled: true,
-        dropToolStructure: true,
         dreamerEnabled: opts?.dreamerEnabled ?? false,
         injectDocs: opts?.injectDocs ?? false,
         directory: opts?.directory ?? "/tmp",
@@ -394,6 +393,73 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
         const { handler } = buildHandler();
         await handler({ sessionID: sessionId }, { system: [HISTORIAN_HEAD] });
         expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).toBe("main-agent-hash-xyz");
+    });
+});
+
+/**
+ * Unit B: subagent self-management. A subagent session (isSubagent=true) with
+ * ctx_reduce enabled gets the MINIMAL §N§ + ctx_reduce block — not the full
+ * primary block, not the no-reduce block. Internal MC children still skip
+ * entirely (order invariant: the internal-child skip runs BEFORE the subagent
+ * branch).
+ */
+describe("system-prompt-hash subagent self-management (Unit B)", () => {
+    it("injects the MINIMAL block for a subagent with ctx_reduce enabled", async () => {
+        useTempDataHome("sph-subagent-min-");
+        const sessionId = "ses-subagent";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { isSubagent: true });
+
+        const { handler } = buildHandler();
+        const system = ["You are a general-purpose coding subagent."];
+        await handler({ sessionID: sessionId }, { system });
+
+        const joined = system.join("\n");
+        // Minimal block: marker + §N§ + ctx_reduce mechanics …
+        expect(joined).toContain("## Magic Context");
+        expect(joined).toContain("§N§ identifiers");
+        expect(joined).toContain("ctx_reduce");
+        // … but NONE of the primary's role/guidance.
+        expect(joined).not.toContain("long-term partner");
+        expect(joined).not.toContain("### Reduction Triggers");
+        expect(joined).not.toContain("ctx_memory");
+        expect(joined).not.toContain("ctx_search");
+    });
+
+    it("a PRIMARY (non-subagent) still gets the full long-term-partner block", async () => {
+        useTempDataHome("sph-primary-full-");
+        const sessionId = "ses-primary-full";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        // isSubagent defaults false.
+
+        const { handler } = buildHandler();
+        const system = ["You are the primary coding assistant."];
+        await handler({ sessionID: sessionId }, { system });
+
+        const joined = system.join("\n");
+        expect(joined).toContain("## Magic Context");
+        expect(joined).toContain("long-term partner");
+        expect(joined).toContain("ctx_memory");
+    });
+
+    it("ORDER INVARIANT: an internal MC child that is ALSO marked subagent still skips entirely", async () => {
+        useTempDataHome("sph-subagent-internal-");
+        const sessionId = "ses-internal-and-subagent";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { isSubagent: true });
+
+        const { handler } = buildHandler({
+            internalChildSessions: new Set<string>([sessionId]),
+        });
+        const system = ["Some internal MC prompt."];
+        await handler({ sessionID: sessionId }, { system });
+
+        // Internal-child skip wins — no block at all, despite isSubagent=true.
+        expect(system).toHaveLength(1);
+        expect(system.join("\n")).not.toContain("## Magic Context");
     });
 });
 

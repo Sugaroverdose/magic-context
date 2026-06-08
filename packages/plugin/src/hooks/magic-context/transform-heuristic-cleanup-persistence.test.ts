@@ -8,7 +8,7 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
-import { createNudgePlacementStore, createTransform } from "./transform";
+import { createTransform } from "./transform";
 
 type TestPart =
     | { type: "text"; text: string }
@@ -51,7 +51,8 @@ function buildMessages(): TestMessage[] {
                     type: "tool",
                     callID: "call-1",
                     state: {
-                        output: "very large prior output",
+                        // Large enough that the tiered emergency drop reclaims it.
+                        output: "z".repeat(200_000),
                         tool: "mcp_read",
                         input: { path: "a.ts" },
                     },
@@ -151,19 +152,16 @@ describe("createTransform heuristic cleanup persistence", () => {
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
                 [
                     "ses-heuristic-persist",
-                    { usage: { percentage: 45, inputTokens: 90_000 }, updatedAt: Date.now() },
+                    // >=85% so the tiered emergency drop fires on the execute pass.
+                    { usage: { percentage: 86, inputTokens: 172_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1,
-            dropToolStructure: true,
             client: undefined,
             directory: testDirectory,
             getHistorianChunkTokens: () => 20_000,
@@ -176,7 +174,7 @@ describe("createTransform heuristic cleanup persistence", () => {
         const executePass = buildMessages();
         await transform({}, { messages: executePass });
 
-        // With dropToolStructure: true, tool parts are fully removed on execute pass
+        // The large tool output is fully dropped by the tiered emergency drop.
         expect(getMessage(executePass, "m-tool")).toBeUndefined();
         const executeInjection = getMessage(executePass, "m-injection");
         expect(executeInjection).toBeDefined();
@@ -210,16 +208,12 @@ describe("createTransform heuristic cleanup persistence", () => {
                     { usage: { percentage: 45, inputTokens: 90_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 1,
-            autoDropToolAge: 1,
-            dropToolStructure: true,
             client: undefined,
             directory: testDirectory,
             getHistorianChunkTokens: () => 20_000,

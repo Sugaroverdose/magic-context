@@ -35,7 +35,7 @@ import type { PluginContext } from "../../plugin/types";
 import { clearModelsDevCache } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { createNudgePlacementStore, createTransform } from "./transform";
+import { createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
 type ToolPart = { type: "tool"; callID: string; state: { output: string } };
@@ -127,16 +127,12 @@ describe("createTransform", () => {
             tagger: createTagger(),
             scheduler,
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>(),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             client: {} as PluginContext["client"],
         });
 
@@ -158,14 +154,10 @@ describe("createTransform", () => {
         expect(isSessionReconciled("ses-reconcile")).toBe(true);
     });
 
-    it("tags text/tool content and appends nudge to the latest non-tool assistant message", async () => {
+    it("tags text/tool content without injecting any assistant-anchored nudge", async () => {
         //#given
         useTempDataHome("context-transform-tag-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        const nudger = mock(() => ({
-            type: "assistant" as const,
-            text: "Context at ~45%. Consider dropping old output.",
-        }));
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
             ["ses-1", { usage: { percentage: 46, inputTokens: 92_000 }, updatedAt: Date.now() }],
         ]);
@@ -174,16 +166,12 @@ describe("createTransform", () => {
             tagger: createTagger(),
             scheduler,
             contextUsageMap,
-            nudger,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -206,13 +194,11 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then
-        expect(text(messages[1], 0)).not.toContain("Context at ~45%");
-        expect(text(messages[2], 0)).toContain("Context at ~45%");
+        //#then — tagging happens, but the deleted rolling-nudge no longer appends.
+        expect(text(messages[2], 0)).not.toContain("Context at ~45%");
         expect(text(messages[0], 0)).toStartWith("§1§ ");
         expect(text(messages[1], 0)).toContain("§2§ ");
         expect(toolOutput(messages[1], 1)).toStartWith("§3§ ");
-        expect(nudger).toHaveBeenCalledTimes(1);
     });
 
     it("does not inject user messages for emergency nudges (handled by promptAsync)", async () => {
@@ -228,16 +214,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 81, inputTokens: 162_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -298,16 +280,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -358,16 +336,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 25, inputTokens: 50_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         await baselineTransform(
             {},
@@ -426,16 +400,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: flushedHistory,
             pendingMaterializationSessions: flushedMaterialization,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -496,16 +466,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -550,16 +516,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -583,11 +545,15 @@ describe("createTransform", () => {
         expect(messages).toHaveLength(2);
     });
 
-    it("forces tool dropping at 85% even without pending ops", async () => {
-        //#given
+    it("fires the tiered emergency drop at 85% on a reclaimable tail", async () => {
+        //#given a large tool output in the tail so there is something to reclaim.
+        // The tiered drop is target-driven: at 85% it reclaims down toward 30% of
+        // working space. A tiny tool output (as the old need-blind drop assumed)
+        // is correctly NOT dropped now — there must be real tail tokens to free.
         useTempDataHome("context-transform-force-materialize-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
         const db = openDatabase();
+        const bigOutput = "x".repeat(200_000); // ~50k tokens of reclaimable tail
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -597,16 +563,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 86, inputTokens: 172_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -615,76 +577,18 @@ describe("createTransform", () => {
             },
             {
                 info: { id: "m-assistant", role: "assistant" },
-                parts: [{ type: "tool", callID: "call-1", state: { output: "tool output" } }],
+                parts: [{ type: "tool", callID: "call-1", state: { output: bigOutput } }],
             },
         ];
 
         //#when
         await transform({}, { messages });
 
-        //#then — with dropToolStructure: true, tool parts are fully removed
+        //#then — the large tool output is fully dropped to reclaim headroom.
         expect(messages).toHaveLength(1);
         expect(messages[0]?.info.id).toBe("m-user");
         const tags = getTagsBySession(db, "ses-force-materialize");
         expect(tags.find((tag) => tag.type === "tool")?.status).toBe("dropped");
-    });
-
-    it("skips nudge injection when the latest assistant message only contains tool content", async () => {
-        //#given
-        useTempDataHome("context-transform-tool-only-nudge-");
-        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        const nudgeText = "Context at ~55%. Use ctx_reduce.";
-        const transform = createTransform({
-            tagger: createTagger(),
-            scheduler,
-            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
-                [
-                    "ses-tool-only",
-                    { usage: { percentage: 55, inputTokens: 110_000 }, updatedAt: Date.now() },
-                ],
-            ]),
-            nudger: () => ({ type: "assistant", text: nudgeText }),
-            db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
-            historyRefreshSessions: new Set<string>(),
-            pendingMaterializationSessions: new Set<string>(),
-            lastHeuristicsTurnId: new Map<string, string>(),
-            clearReasoningAge: 50,
-            protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
-        });
-        const messages: TestMessage[] = [
-            {
-                info: { id: "m-user-1", role: "user", sessionID: "ses-tool-only" },
-                parts: [{ type: "text", text: "First prompt" }],
-            },
-            {
-                info: { id: "m-assistant-safe", role: "assistant" },
-                parts: [{ type: "text", text: "Earlier plain answer" }],
-            },
-            {
-                info: { id: "m-user-2", role: "user", sessionID: "ses-tool-only" },
-                parts: [{ type: "text", text: "Run the command" }],
-            },
-            {
-                info: { id: "m-assistant-tool", role: "assistant" },
-                parts: [{ type: "tool", callID: "call-1", state: { output: "tool output" } }],
-            },
-            {
-                info: { id: "m-user-3", role: "user", sessionID: "ses-tool-only" },
-                parts: [{ type: "text", text: "Continue" }],
-            },
-        ];
-
-        //#when
-        await transform({}, { messages });
-
-        //#then
-        // Nudge IS appended to the earlier plain assistant message (walks backwards past tool-only)
-        expect(text(messages[1], 0)).toContain(nudgeText);
-        expect(toolOutput(messages[3], 0)).toStartWith("§4§ ");
-        expect(messages[3].parts).toHaveLength(1);
     });
 
     it("strips structural noise even when scheduler defers", async () => {
@@ -700,16 +604,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 10,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -757,16 +657,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 60, inputTokens: 120_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const firstPass: TestMessage[] = [
@@ -830,16 +726,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions,
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const firstPass: TestMessage[] = [
@@ -887,14 +779,10 @@ describe("createTransform", () => {
         expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
     });
 
-    it("keeps reduced magic-context support for subagent sessions", async () => {
+    it("Unit B: subagent with ctx_reduce enabled DOES get §N§ prefix (self-management)", async () => {
         //#given
         useTempDataHome("context-transform-subagent-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
-        const nudger = mock(() => ({
-            type: "assistant" as const,
-            text: "do not inject this nudge",
-        }));
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -904,16 +792,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 61, inputTokens: 122_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const db = openDatabase();
@@ -930,14 +814,12 @@ describe("createTransform", () => {
         await transform({}, { messages });
 
         //#then
-        // Subagents: DB tag records still exist so drops/heuristics work,
-        // but agent-visible §N§ prefix is skipped (subagents are treated as
-        // ctx_reduce_enabled=false since they have no nudge to act on tags).
-        expect(text(messages[0], 0)).toBe("do not touch");
-        expect(text(messages[0], 0)).not.toContain("do not inject this nudge");
+        // Unit B: subagents share the process-global ctx_reduce tool, so with
+        // ctx_reduce enabled (the default here) they DO get the §N§ prefix and
+        // self-manage tool bloat. DB tag records exist either way.
+        expect(text(messages[0], 0)).toStartWith("\u00a71\u00a7 ");
         expect(getTagsBySession(db, "ses-sub")).toHaveLength(1);
         expect(scheduler.shouldExecute).toHaveBeenCalled();
-        expect(nudger).not.toHaveBeenCalled();
     });
 
     it("fully skips the transform for Magic Context's own hidden children", async () => {
@@ -947,7 +829,6 @@ describe("createTransform", () => {
         // untouched.
         useTempDataHome("context-transform-internal-child-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
-        const nudger = mock(() => null);
         const internalChildSessions = new Set<string>(["ses-historian-child"]);
         const transform = createTransform({
             tagger: createTagger(),
@@ -958,16 +839,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 61, inputTokens: 122_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             internalChildSessions,
         });
 
@@ -990,7 +867,6 @@ describe("createTransform", () => {
         expect(text(messages[0], 0)).toBe("historian chunk prompt");
         expect(getTagsBySession(db, "ses-historian-child")).toHaveLength(0);
         expect(scheduler.shouldExecute).not.toHaveBeenCalled();
-        expect(nudger).not.toHaveBeenCalled();
     });
 
     it("injects empty m[0] and placeholder m[1] for first-pass primary sessions", async () => {
@@ -1008,16 +884,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 10, inputTokens: 1_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
             directory,
         });
         const messages: TestMessage[] = [
@@ -1070,15 +942,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 25, inputTokens: 50_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             directory: "/repo/project",
             memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
@@ -1125,15 +994,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 25, inputTokens: 50_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             directory: "/repo/project",
             memoryConfig: { enabled: true, injectionBudgetTokens: 500, autoPromote: true },
         });
@@ -1167,16 +1033,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 52, inputTokens: 104_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: mock(() => null),
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const firstPass: TestMessage[] = [
@@ -1206,124 +1068,154 @@ describe("createTransform", () => {
 
         await transform({}, { messages: secondPass });
 
-        // Sentinel replacement preserves array length. Subagent sessions
-        // skip §N§ prefix injection, so user text appears verbatim.
+        // Sentinel replacement preserves array length. Unit B: subagents with
+        // ctx_reduce enabled DO get the §N§ prefix on user text.
         // Test doesn't set providerID → `[dropped]` sentinel.
         expect(secondPass).toHaveLength(2);
-        expect(text(secondPass[0], 0)).toBe("keep this");
+        expect(text(secondPass[0], 0)).toStartWith("\u00a71\u00a7 ");
         expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });
 
-    it("re-runs heuristic cleanup on every execute pass for subagents (Oracle-overflow regression)", async () => {
-        // Regression: subagent sessions like Oracle perform 100s of tool calls
-        // within a single user turn from the parent's POV. Before the fix, the
-        // once-per-turn `lastHeuristicsTurnId` guard let heuristics fire only
-        // ONCE per subagent run — typically when context first crossed the
-        // execute threshold (~50%) — and 200+ tool calls then accumulated to
-        // overflow without further drops. The fix bypasses the guard for
-        // subagents (`!fullFeatureMode`) so heuristics re-fire on every execute
-        // pass within the same turn. Cache stability matters less for subagents
-        // because they have no provider-cache reuse to protect (short-lived,
-        // one-shot, tool-call bursts already invalidate cache).
+    it("fires the tiered emergency floor for subagents at >=85% (Phase 2 CRIT#5)", async () => {
+        // Merge-blocking guarantee: Phase 2 removed routine age-based tool drops,
+        // so the ONLY tool floor a subagent has is the tiered emergency drop. It
+        // must fire for subagents at >=85% (the force-materialize threshold) even
+        // though forceMaterialization/m[0] materialization stays primary-only.
+        // Without this, a subagent's context would grow unchecked to overflow.
         useTempDataHome("context-transform-subagent-rerun-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
         const db = openDatabase();
         updateSessionMeta(db, "ses-sub-rerun", { isSubagent: true });
-        // Shared `lastHeuristicsTurnId` map — same map across both passes,
-        // simulating the live runtime where this map is owned by the hook.
         const lastHeuristicsTurnId = new Map<string, string>();
+        const bigOutput = "y".repeat(200_000); // ~50k tokens of reclaimable tail
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
                 [
                     "ses-sub-rerun",
-                    { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
+                    { usage: { percentage: 86, inputTokens: 172_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: mock(() => null),
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
             protectedTags: 0,
-            // autoDropToolAge=1: aged tool becomes drop-eligible after ONE
-            // newer tag exists. Both tools below are eligible on second pass.
-            autoDropToolAge: 1,
-            dropToolStructure: true,
         });
 
-        // First pass: user turn opens with one tool call. Heuristics runs at
-        // execute threshold and marks turn id in lastHeuristicsTurnId. The
-        // tool tag itself is too fresh to drop (no newer tag yet).
-        const firstPass: TestMessage[] = [
+        const messages: TestMessage[] = [
             {
                 info: { id: "m-user-1", role: "user", sessionID: "ses-sub-rerun" },
                 parts: [{ type: "text", text: "user prompt" }],
             },
             {
                 info: { id: "m-assist-1", role: "assistant" },
-                parts: [
-                    {
-                        type: "tool",
-                        callID: "call-1",
-                        state: { output: "first tool output" },
-                    },
-                ],
-            },
-        ];
-        await transform({}, { messages: firstPass });
-        // Confirm turn id is set after first pass.
-        expect(lastHeuristicsTurnId.get("ses-sub-rerun")).toBe("m-user-1");
-
-        // Second pass: SAME user turn (`m-user-1` unchanged), assistant adds a
-        // second tool call. With autoDropToolAge=1, the first tool is now old
-        // enough to drop. With the once-per-turn bypass for subagents,
-        // heuristics MUST re-fire and drop the first tool's content to a
-        // sentinel. Without the bypass, the guard would block heuristics and
-        // the first tool's output would survive verbatim — that's the Oracle
-        // overflow bug.
-        const secondPass: TestMessage[] = [
-            {
-                info: { id: "m-user-1", role: "user", sessionID: "ses-sub-rerun" },
-                parts: [{ type: "text", text: "user prompt" }],
-            },
-            {
-                info: { id: "m-assist-1", role: "assistant" },
-                parts: [
-                    {
-                        type: "tool",
-                        callID: "call-1",
-                        state: { output: "first tool output" },
-                    },
-                ],
+                parts: [{ type: "tool", callID: "call-1", state: { output: bigOutput } }],
             },
             {
                 info: { id: "m-assist-2", role: "assistant" },
-                parts: [
-                    {
-                        type: "tool",
-                        callID: "call-2",
-                        state: { output: "second tool output" },
-                    },
-                ],
+                parts: [{ type: "tool", callID: "call-2", state: { output: bigOutput } }],
             },
         ];
-        await transform({}, { messages: secondPass });
+        await transform({}, { messages });
 
-        // Tag for first tool was dropped on the second pass — proves
-        // heuristics re-fired even though turn id matched. Without the
-        // subagent bypass, the once-per-turn guard would have blocked
-        // the second cleanup pass and the tag would still be `active`.
+        // The oldest large tool output is dropped by the tiered emergency drop —
+        // proves the floor fires for a subagent at 85%.
         const subagentTags = getTagsBySession(db, "ses-sub-rerun");
         const firstToolTag = subagentTags.find((t) => t.messageId === "call-1");
         expect(firstToolTag?.status).toBe("dropped");
-        // The second (newest) tool stays active (newest tag, no older neighbour).
-        const secondToolTag = subagentTags.find((t) => t.messageId === "call-2");
-        expect(secondToolTag?.status).toBe("active");
+    });
+
+    it("Unit B: subagent (ctx_reduce on) gets a Channel 1 baseline snapshot", async () => {
+        // Channel 1 (in-turn tool-output nudge) is gated on ctx_reduce being
+        // effective, NOT on fullFeatureMode — so subagents that share the
+        // process-global ctx_reduce tool DO get a baseline + nudges.
+        useTempDataHome("context-transform-sub-ch1-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-sub-ch1", { isSubagent: true });
+        const channel1StateBySession = new Map<
+            string,
+            import("./ctx-reduce-nudge").Channel1State
+        >();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-sub-ch1",
+                    { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            channel1StateBySession,
+        });
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: { id: "m-user", role: "user", sessionID: "ses-sub-ch1" },
+                        parts: [{ type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        );
+        // Baseline recorded → Channel 1 is active for this subagent.
+        expect(channel1StateBySession.has("ses-sub-ch1")).toBe(true);
+    });
+
+    it("Unit B: ctx_reduce_enabled:false primary gets NO Channel 1 baseline (latent-gap fix)", async () => {
+        // A primary with ctx_reduce disabled has no §N§ prefix and no tool to
+        // act on a nudge — it must NOT get a Channel 1 baseline (which would
+        // nudge it to call a tool it lacks). Pre-Unit-B this was gated on
+        // fullFeatureMode (true for this primary) and leaked.
+        useTempDataHome("context-transform-noreduce-ch1-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        const channel1StateBySession = new Map<
+            string,
+            import("./ctx-reduce-nudge").Channel1State
+        >();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-noreduce-ch1",
+                    { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            ctxReduceEnabled: false,
+            channel1StateBySession,
+        });
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: { id: "m-user", role: "user", sessionID: "ses-noreduce-ch1" },
+                        parts: [{ type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        );
+        // No baseline → Channel 1 correctly inert for a no-reduce primary.
+        expect(channel1StateBySession.has("ses-noreduce-ch1")).toBe(false);
     });
 
     it("preserves once-per-turn guard for primary sessions (does NOT re-run heuristics within one turn)", async () => {
@@ -1345,16 +1237,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: mock(() => null),
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId,
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1,
-            dropToolStructure: true,
         });
 
         const firstPass: TestMessage[] = [
@@ -1430,16 +1318,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         // Simulate content that context-injector would have prepended before this transform runs
@@ -1476,16 +1360,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const messages: TestMessage[] = [
@@ -1548,16 +1428,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 60, inputTokens: 120_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const firstPass: TestMessage[] = [
@@ -1609,7 +1485,6 @@ describe("createTransform", () => {
         //#given
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
         const tagger = createTagger();
-        const nudger = mock(() => null);
         const failingDb = {
             prepare: mock(() => {
                 throw new Error("session_meta unavailable");
@@ -1620,16 +1495,12 @@ describe("createTransform", () => {
             tagger,
             scheduler,
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>(),
-            nudger,
             db: failingDb,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -1643,14 +1514,12 @@ describe("createTransform", () => {
 
         //#then
         expect(text(messages[0], 0)).toBe("keep");
-        expect(nudger).not.toHaveBeenCalled();
     });
 
     it("fails open when tagger init fails", async () => {
         //#given
         useTempDataHome("context-transform-tagger-error-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        const nudger = mock(() => null);
         const db = openDatabase();
         const tagger = {
             ...createTagger(),
@@ -1667,16 +1536,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 40, inputTokens: 80_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -1688,12 +1553,11 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then
+        //#then — fail-open: message preserved despite tagger init failure.
         expect(text(messages[0], 0)).toBe("still works");
-        expect(nudger).toHaveBeenCalledTimes(1);
     });
 
-    it("fails open when scheduler throws and still appends nudge to assistant", async () => {
+    it("fails open when scheduler throws and still tags messages", async () => {
         //#given
         useTempDataHome("context-transform-scheduler-error-");
         const scheduler: Scheduler = {
@@ -1701,7 +1565,6 @@ describe("createTransform", () => {
                 throw new Error("scheduler failed");
             }),
         };
-        const nudgeText = "Use ctx_reduce now";
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -1711,16 +1574,12 @@ describe("createTransform", () => {
                     { usage: { percentage: 66, inputTokens: 132_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => ({ type: "assistant", text: nudgeText }),
             db: openDatabase(),
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -1733,21 +1592,17 @@ describe("createTransform", () => {
             },
         ];
 
-        //#when
+        //#when — must not throw despite the scheduler error.
         await transform({}, { messages });
 
-        //#then
-        expect(text(messages[1], 0)).toContain(nudgeText);
+        //#then — tagging still happened (fail-open).
+        expect(text(messages[0], 0)).toStartWith("§1§ ");
     });
 
     it("resets persisted usage on first pass then lazy-loads on second pass", async () => {
         //#given
         useTempDataHome("context-transform-lazy-load-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        const nudger = mock(() => ({
-            type: "assistant" as const,
-            text: "Your context is at ~50%.",
-        }));
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
         const db = openDatabase();
 
@@ -1760,16 +1615,12 @@ describe("createTransform", () => {
             tagger: createTagger(),
             scheduler,
             contextUsageMap,
-            nudger,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
         const messages: TestMessage[] = [
             {
@@ -1808,7 +1659,6 @@ describe("createTransform", () => {
         //#given
         useTempDataHome("context-transform-drops-no-usage-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-        const nudger = mock(() => null);
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
         const db = openDatabase();
 
@@ -1816,16 +1666,12 @@ describe("createTransform", () => {
             tagger: createTagger(),
             scheduler,
             contextUsageMap,
-            nudger,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
-            dropToolStructure: true,
         });
 
         const messages: TestMessage[] = [
@@ -1857,7 +1703,6 @@ describe("createTransform", () => {
 
         //#then — dropped tag's content is replaced even without usage data
         expect(toolOutput(messages[1], 1)).toBe("");
-        expect(nudger).toHaveBeenCalledTimes(2);
     });
 });
 
@@ -1946,15 +1791,12 @@ describe("createTransform protected tail", () => {
                     { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             client,
             directory: "/tmp",
         });
@@ -2006,15 +1848,12 @@ describe("createTransform protected tail", () => {
                     { usage: { percentage: 96, inputTokens: 192_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             client,
             directory: "/tmp",
         });
@@ -2048,15 +1887,12 @@ describe("createTransform protected tail", () => {
                     { usage: { percentage: 60, inputTokens: 120_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 10,
-            autoDropToolAge: 1000,
             client: {
                 session: {
                     get: mock(async () => ({ data: { directory: "/tmp" } })),
@@ -2115,15 +1951,12 @@ describe("createTransform historian failure handling", () => {
                     { usage: { percentage: 96, inputTokens: 192_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             client: { session: { abort, prompt } } as unknown as PluginContext["client"],
             directory: "/tmp",
         });
@@ -2211,15 +2044,12 @@ describe("createTransform historian failure handling", () => {
                     { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
                 ],
             ]),
-            nudger: () => null,
             db,
-            nudgePlacements: createNudgePlacementStore(),
             historyRefreshSessions: new Set<string>(),
             pendingMaterializationSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
-            autoDropToolAge: 1000,
             client: {
                 session: {
                     get: mock(async () => ({ data: { directory: "/tmp/recovery" } })),

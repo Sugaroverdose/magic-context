@@ -13,7 +13,7 @@
  *     only — no message mutation.
  *   - Injection happens in transform-postprocess-phase.ts AFTER tagging and
  *     AFTER applyPendingOperations, so the synthetic part never gets tagged
- *     and is invisible to ctx_reduce/heuristic-cleanup/auto_drop_tool_age.
+ *     and is invisible to ctx_reduce and heuristic cleanup.
  *   - The synthetic callID is deterministic (sha256(stateJson)) so a stable
  *     snapshot produces a stable wire shape across passes; on defer passes we
  *     re-inject the same part at the same anchor, idempotent via callID match.

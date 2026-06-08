@@ -260,6 +260,20 @@ export async function runAutoSearchHint(args: {
         return;
     }
 
+    // Live-tail gate: only compute a NEW hint when the meaningful user message is
+    // the actual last element of the array (a just-arrived user turn the assistant
+    // has not answered yet). `findLatestMeaningfulUserMessage` returns the latest
+    // user message even when it is BURIED behind a queued-message race or a
+    // mid-turn assistant tail — appending a fresh hint there would mutate an
+    // already-cached message and bust everything after it (the Bust-B class). On a
+    // non-tail pass we only replay persisted decisions (handled above); we never
+    // create a new one. A note-nudger-style `triggerMessageId` deferral would be
+    // wrong here: auto-search has no trigger event and runs every pass, so a
+    // deferral gate would either no-op or permanently suppress.
+    if (messages.length === 0 || messages[messages.length - 1].info.id !== userMsgId) {
+        return;
+    }
+
     const writeNoHintAndReconcile = (reason: AutoSearchHintNoHintReason): void => {
         const outcome = appendAutoSearchHintDecision(db, sessionId, {
             messageId: userMsgId,
@@ -328,19 +342,21 @@ export async function runAutoSearchHint(args: {
             AUTO_SEARCH_TIMEOUT_MS,
         );
     } catch (error) {
+        // Retryable failure — do NOT persist a permanent no-hint decision, or the
+        // hint would be suppressed forever for this message even though the next
+        // pass might succeed. Just skip this pass; a later pass re-evaluates.
         log(
-            `[auto-search] unified search failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+            `[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
         );
-        writeNoHintAndReconcile("error");
         return;
     }
 
     if (results === null) {
+        // Timeout is also retryable — skip without persisting a no-hint decision.
         sessionLog(
             sessionId,
-            `auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
+            `auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn (will retry)`,
         );
-        writeNoHintAndReconcile("timeout");
         return;
     }
 

@@ -242,8 +242,6 @@ export interface MagicContextConfig {
      *  matching provider input limits. Values above 80% × context_limit are clamped with a warning. */
     execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
     protected_tags: number;
-    auto_drop_tool_age: number;
-    drop_tool_structure: boolean;
     clear_reasoning_age: number;
     iteration_nudge_threshold: number;
     history_budget_percentage: number;
@@ -403,19 +401,6 @@ export const MagicContextConfigSchema = z
             .optional()
             .describe(
                 "Number of recent tags to protect from dropping (min: 1, max: 100, default: 20)",
-            ),
-        auto_drop_tool_age: z
-            .number()
-            .min(10)
-            .default(100)
-            .describe(
-                "Auto-drop tool outputs older than N tags during queue execution (default: 100)",
-            ),
-        drop_tool_structure: z
-            .boolean()
-            .default(true)
-            .describe(
-                "When true, dropped tool parts are fully removed instead of truncated in place (default: true)",
             ),
         clear_reasoning_age: z
             .number()

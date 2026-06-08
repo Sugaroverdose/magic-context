@@ -43,11 +43,8 @@ function estimateProjectedPostDropPercentage(
     sessionId: string,
     usage: ContextUsage,
     activeTags: readonly TagEntry[],
-    autoDropToolAge?: number,
-    protectedTags?: number,
     clearReasoningAge?: number,
     clearedReasoningThroughTag?: number,
-    dropToolStructure = true,
 ): number | null {
     // Denominator must include both text/tool bytes and reasoning bytes to match the numerator
     const totalActiveBytes = activeTags.reduce(
@@ -68,23 +65,11 @@ function estimateProjectedPostDropPercentage(
             .reduce((sum, tag) => sum + tag.byteSize + tag.reasoningByteSize, 0);
     }
 
-    // 2. Heuristic auto-drop: old tool outputs outside protected tail
-    // 3. Reasoning clearing: reasoning bytes on message tags between watermark and age cutoff
+    // 2. Reasoning clearing: reasoning bytes on message tags between watermark and age cutoff.
+    //    (Phase 2 removed routine age-based tool drops — tool outputs are no longer
+    //    projected as droppable here. The tiered emergency drop fires only at ≥85%,
+    //    which is above this trigger's window, so it is intentionally not modeled.)
     const maxTag = activeTags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
-    if (autoDropToolAge !== undefined && protectedTags !== undefined) {
-        const toolAgeCutoff = maxTag - autoDropToolAge;
-        const protectedCutoff = maxTag - protectedTags;
-
-        for (const tag of activeTags) {
-            // Skip already counted pending drops
-            if (pendingDropTagIds.has(tag.tagNumber)) continue;
-            if (tag.tagNumber > protectedCutoff) continue;
-            if (tag.type === "tool" && tag.tagNumber <= toolAgeCutoff) {
-                droppableBytes += estimateToolDropSavings(tag, dropToolStructure);
-            }
-        }
-    }
-
     if (clearReasoningAge !== undefined && clearedReasoningThroughTag !== undefined) {
         const reasoningAgeCutoff = maxTag - clearReasoningAge;
         for (const tag of activeTags) {
@@ -104,19 +89,6 @@ function estimateProjectedPostDropPercentage(
 
     const dropRatio = Math.min(droppableBytes / totalActiveBytes, 1);
     return usage.percentage * (1 - dropRatio);
-}
-
-function estimateToolDropSavings(
-    tag: { byteSize: number; reasoningByteSize: number; inputByteSize: number },
-    dropToolStructure: boolean,
-): number {
-    const fullDropBytes = tag.byteSize + tag.reasoningByteSize;
-    if (dropToolStructure) {
-        return fullDropBytes;
-    }
-
-    const truncatedStubEstimate = tag.inputByteSize > 500 ? 100 : tag.inputByteSize + 50;
-    return Math.max(fullDropBytes - truncatedStubEstimate, 0);
 }
 
 interface TailInfo {
@@ -188,10 +160,7 @@ export function checkCompartmentTrigger(
     _previousPercentage: number,
     executeThresholdPercentage: number,
     triggerBudget: number,
-    autoDropToolAge?: number,
-    protectedTagCount?: number,
     clearReasoningAge?: number,
-    dropToolStructure = true,
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
     preloadedActiveTags?: readonly TagEntry[],
 ): CompartmentTriggerResult {
@@ -234,11 +203,8 @@ export function checkCompartmentTrigger(
         sessionId,
         usage,
         preloadedActiveTags ?? getActiveTagsBySession(db, sessionId),
-        autoDropToolAge,
-        protectedTagCount,
         clearReasoningAge,
         sessionMeta.clearedReasoningThroughTag,
-        dropToolStructure,
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
 

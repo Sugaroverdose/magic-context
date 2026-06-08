@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 30;
+export const LATEST_SUPPORTED_VERSION = 31;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -548,6 +548,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       counter INTEGER DEFAULT 0,
       last_nudge_tokens INTEGER DEFAULT 0,
       last_nudge_band TEXT DEFAULT '',
+      last_nudge_undropped INTEGER DEFAULT 0,
+      channel2_nudge_state TEXT DEFAULT '',
+      last_emergency_drop_through_tag INTEGER DEFAULT 0,
       last_transform_error TEXT DEFAULT '',
       nudge_anchor_message_id TEXT DEFAULT '',
       nudge_anchor_text TEXT DEFAULT '',
@@ -715,6 +718,9 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
   `);
 
     ensureColumn(db, "session_meta", "last_nudge_band", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "last_nudge_undropped", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "channel2_nudge_state", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "last_emergency_drop_through_tag", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "last_transform_error", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "nudge_anchor_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "nudge_anchor_text", "TEXT DEFAULT ''");
@@ -1067,6 +1073,7 @@ function healNullIntegerColumns(db: Database): void {
         ["cache_alert_sent", 0],
         ["new_work_tokens", 0],
         ["total_input_tokens", 0],
+        ["last_emergency_drop_through_tag", 0],
     ];
     for (const [column, fallback] of columns) {
         try {

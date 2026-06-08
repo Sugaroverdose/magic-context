@@ -224,13 +224,14 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		);
 	});
 
-	test("sticky turn reminder is wired after runPipeline before note nudges", () => {
+	test("note nudges are wired after runPipeline", () => {
+		// The rolling/sticky reminders were removed in the ctx_reduce nudge
+		// redesign (replaced by Channel 1 tool-result append + Channel 2
+		// sendUserMessage). Note nudges still run after the pipeline completes.
 		const pipelineIdx = code.indexOf("const result = await runPipeline(");
-		const stickyIdx = code.indexOf("applyStickyTurnReminder(");
 		const noteIdx = code.indexOf("applyNoteNudges(");
 		expect(pipelineIdx).toBeGreaterThan(0);
-		expect(stickyIdx).toBeGreaterThan(pipelineIdx);
-		expect(noteIdx).toBeGreaterThan(stickyIdx);
+		expect(noteIdx).toBeGreaterThan(pipelineIdx);
 		expect(code).toContain("isCacheBusting || result.executedWorkThisPass");
 	});
 });

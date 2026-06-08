@@ -46,7 +46,6 @@ export interface StatusDialogDeps {
 	db: ContextDatabase;
 	projectIdentity: string;
 	protectedTags?: number;
-	nudgeIntervalTokens?: number;
 	executeThresholdPercentage?:
 		| number
 		| { default: number; [modelKey: string]: number };
@@ -85,8 +84,6 @@ interface StatusDialogDetail {
 	contextLimit: number;
 	executeThreshold: number;
 	protectedTagCount: number;
-	nudgeInterval: number;
-	nextNudgeAfter: number;
 	historyBlockTokens: number;
 	compressionBudget: number | null;
 	compressionUsage: string | null;
@@ -320,10 +317,10 @@ function renderInner(
 		`Active ${s.activeTags} (~${formatBytes(s.activeBytes)}) · Dropped ${s.droppedTags} · Total ${s.totalTags}`,
 	);
 
-	// Rolling nudges / context
-	lines.push(theme.fg("muted", "Rolling Nudges / Context"));
+	// Context / thresholds
+	lines.push(theme.fg("muted", "Context"));
 	lines.push(
-		`Execute threshold ${formatThresholdPercent(s.executeThreshold)}% · Anchor ${fmt(s.lastNudgeTokens)} tok · Interval ${fmt(s.nudgeInterval)} tok · Next ${fmt(s.nextNudgeAfter)} tok`,
+		`Execute threshold ${formatThresholdPercent(s.executeThreshold)}%`,
 	);
 	lines.push(
 		`Protected tags ${s.protectedTagCount} · Subagent ${s.isSubagent ? "yes" : "no"} · History block ~${fmt(s.historyBlockTokens)} tok${
@@ -564,8 +561,6 @@ export function buildPiStatusDetail(
 		contextLimit,
 		executeThreshold: threshold.percentage,
 		protectedTagCount: deps.protectedTags ?? 20,
-		nudgeInterval: deps.nudgeIntervalTokens ?? 20_000,
-		nextNudgeAfter: meta.lastNudgeTokens + (deps.nudgeIntervalTokens ?? 20_000),
 		historyBlockTokens,
 		compressionBudget,
 		compressionUsage:

@@ -8,7 +8,7 @@
  * transform pipeline (i.e. inside `runPostTransformPhase`, not inside
  * `tagMessages`). By that point:
  *   - queued user `ctx_reduce` ops have been applied
- *   - heuristic cleanup (auto_drop_tool_age, clear_reasoning_age) ran
+ *   - heuristic cleanup (emergency tiered drop, clear_reasoning_age) ran
  *   - sentinel/replay logic neutralized previously-stripped parts
  * So if a `ctx_note` read is still a real, non-sentinel part in the
  * messages array we're about to send, the agent will actually see it.

@@ -3,11 +3,7 @@ import {
     scheduleIncrementalIndex,
     scheduleReconciliation,
 } from "../../features/magic-context/message-index-async";
-import {
-    clearPersistedReasoningWatermark,
-    getPersistedStickyTurnReminder,
-    setPersistedStickyTurnReminder,
-} from "../../features/magic-context/storage";
+import { clearPersistedReasoningWatermark } from "../../features/magic-context/storage";
 import {
     getOrCreateSessionMeta,
     updateSessionMeta,
@@ -16,11 +12,21 @@ import {
     clearDetectedContextLimit,
     clearEmergencyRecovery,
     clearHistorianFailureState,
+    getLastNudgeUndropped,
+    setLastNudgeUndropped,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
 import { clearAutoSearchForSession } from "./auto-search-runner";
+import {
+    buildChannel1Reminder,
+    CHANNEL1_SENTINEL,
+    type Channel1State,
+    computePressure,
+    decideChannel1,
+    toolOutputTokens,
+} from "./ctx-reduce-nudge";
 import {
     getMessageUpdatedAssistantInfo,
     getMessageUpdatedInfo,
@@ -34,10 +40,6 @@ import {
 } from "./note-nudger";
 import { readRawSessionMessageById, readRawSessionMessages } from "./read-session-chunk";
 import { normalizeTodoStateJson } from "./todo-view";
-
-const TOOL_HEAVY_TURN_REMINDER_THRESHOLD = 5;
-const TOOL_HEAVY_TURN_REMINDER_TEXT =
-    '\n\n<instruction name="ctx_reduce_turn_cleanup">Also drop via `ctx_reduce` things you don\'t need anymore from the last turn before continuing.</instruction>';
 
 export type LiveModelBySession = Map<string, { providerID: string; modelID: string }>;
 export type VariantBySession = Map<string, string | undefined>;
@@ -183,22 +185,9 @@ export function createChatMessageHook(args: {
             });
         }
 
-        // Only set sticky turn reminders when ctx_reduce is enabled — the reminder
-        // tells the agent to use ctx_reduce, which doesn't exist when disabled.
-        if (args.ctxReduceEnabled !== false) {
-            const sessionMeta = getOrCreateSessionMeta(args.db, sessionId);
-            const turnUsage = args.toolUsageSinceUserTurn.get(sessionId);
-            const agentAlreadyReduced = args.recentReduceBySession.has(sessionId);
-            if (
-                !sessionMeta.isSubagent &&
-                !agentAlreadyReduced &&
-                getPersistedStickyTurnReminder(args.db, sessionId) === null &&
-                turnUsage !== undefined &&
-                turnUsage >= TOOL_HEAVY_TURN_REMINDER_THRESHOLD
-            ) {
-                setPersistedStickyTurnReminder(args.db, sessionId, TOOL_HEAVY_TURN_REMINDER_TEXT);
-            }
-        }
+        // The tool-heavy "sticky turn reminder" was replaced by the in-turn
+        // Channel 1 ctx_reduce nudge (injected into tool outputs). No per-user-turn
+        // reminder state to set here anymore.
         args.toolUsageSinceUserTurn.set(sessionId, 0);
 
         const previousVariant = args.variantBySession.get(sessionId);
@@ -399,12 +388,77 @@ export function createCommandExecuteBeforeHook(commandHandler: {
     };
 }
 
+/**
+ * Channel 1: append a ctx_reduce `<system-reminder>` to a native/plugin tool's
+ * string `output.output` when the metric warrants it. Mutating `output.output`
+ * here is persisted by OpenCode and replayed verbatim, so this is "free sticky"
+ * — no anchor store / CAS / replay machinery. Native + plugin tools deliver a
+ * string `output.output`; true MCP-server tools (`result.content[]`) are skipped.
+ */
+function maybeInjectChannel1Nudge(
+    args: {
+        db: Parameters<typeof getOrCreateSessionMeta>[0];
+        channel1StateBySession: Map<string, Channel1State>;
+    },
+    sessionId: string,
+    tool: string,
+    output: unknown,
+): void {
+    const state = args.channel1StateBySession.get(sessionId);
+    // No baseline → ctx_reduce is disabled for this session (primary with
+    // ctx_reduce off). Both primaries and subagents with ctx_reduce enabled get
+    // a baseline (set in transform.ts), so both can receive Channel 1 nudges.
+    if (!state) return;
+
+    // Output shape guard: only native/plugin tools with a non-empty string output.
+    if (output === null || typeof output !== "object") return;
+    const out = output as { output?: unknown };
+    if (typeof out.output !== "string" || out.output.length === 0) return;
+
+    // Content-based idempotency (robust to callID reuse on retries).
+    if (out.output.includes(CHANNEL1_SENTINEL)) return;
+
+    // Accumulate this tool's tokens into the per-turn accumulator (prospective:
+    // this output is not yet tagged/counted in the baseline).
+    const thisTurnTokens = toolOutputTokens(out.output);
+    state.turnToolTokens += thisTurnTokens;
+
+    if (state.reducedSinceRefresh) return; // suppress nagging right after a reduce
+
+    const undroppedTokens = state.tailToolTokens + state.turnToolTokens;
+    const pressure = computePressure({
+        lastInputTokens: state.lastInputTokens,
+        turnToolTokens: state.turnToolTokens,
+        contextLimit: state.contextLimit,
+        executeThresholdPercentage: state.executeThresholdPercentage,
+    });
+
+    const decision = decideChannel1({
+        undroppedTokens,
+        pressure,
+        historyBudgetTokens: state.historyBudgetTokens,
+        lastNudgeUndropped: getLastNudgeUndropped(args.db, sessionId),
+        hasRecentReduce: false, // handled by reducedSinceRefresh above
+    });
+
+    // Always persist the cadence watermark so a reduce-driven drop re-arms it.
+    setLastNudgeUndropped(args.db, sessionId, decision.nextLastNudge);
+    if (!decision.fire) return;
+
+    out.output += buildChannel1Reminder(decision.level, decision.undroppedTokens);
+    sessionLog(
+        sessionId,
+        `channel1 nudge fired: level=${decision.level} undropped~${Math.round(decision.undroppedTokens / 1000)}k tool=${tool}`,
+    );
+}
+
 export function createToolExecuteAfterHook(args: {
     db: Parameters<typeof getOrCreateSessionMeta>[0];
     recentReduceBySession: RecentReduceBySession;
     toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
+    channel1StateBySession: Map<string, Channel1State>;
 }) {
-    return async (input: unknown) => {
+    return async (input: unknown, output?: unknown) => {
         const typedInput = input as { tool?: string; sessionID?: string; args?: unknown };
         if (!typedInput.sessionID || !typedInput.tool) {
             return;
@@ -413,6 +467,22 @@ export function createToolExecuteAfterHook(args: {
         const turnUsage = args.toolUsageSinceUserTurn.get(typedInput.sessionID) ?? 0;
         if (typedInput.tool === "ctx_reduce") {
             args.recentReduceBySession.set(typedInput.sessionID, Date.now());
+            const state = args.channel1StateBySession.get(typedInput.sessionID);
+            if (state) state.reducedSinceRefresh = true;
+        } else {
+            // Channel 1: append an in-turn ctx_reduce nudge to this tool's output
+            // when reclaimable space + pressure warrant it. Auto-sticky via
+            // OpenCode's DB (the mutated output.output persists + replays). Fully
+            // guarded so an injection failure can never block the tool result.
+            try {
+                maybeInjectChannel1Nudge(args, typedInput.sessionID, typedInput.tool, output);
+            } catch (error) {
+                sessionLog(
+                    typedInput.sessionID,
+                    "channel1 nudge injection failed (ignored):",
+                    error,
+                );
+            }
         }
         if (typedInput.tool === "todowrite") {
             // Only trigger note nudge when ALL todo items are terminal (completed/cancelled).
