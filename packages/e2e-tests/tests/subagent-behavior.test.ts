@@ -18,19 +18,19 @@ import { TestHarness } from "../src/harness";
  *     entirely. `fullFeatureMode = false` short-circuits `runCompartmentPhase`
  *     and `prepareCompartmentInjection` in `transform.ts`.
  *
- *  3. **No §N§ prefix injection** — `skipPrefixInjection` is forced true when
- *     `reducedMode` is set, even though tags are still persisted so heuristic
- *     drops can target them.
+ *  3. **§N§ prefix injection (Unit B)** — subagents share the process-global
+ *     `ctx_reduce` tool, so when `ctx_reduce` is enabled they DO get §N§
+ *     prefixes + a minimal guidance block and self-manage their tool bloat.
+ *     (A ctx_reduce-disabled subagent gets no prefix — nothing to act on.)
  *
- *  4. **No 85% / 95% emergency paths, no nudges** — `forceMaterialization` is
- *     gated by `fullFeatureMode`. Nudger and note-nudger early-exit. Subagents
- *     rely on heuristic cleanup + natural provider-side overflow handling.
+ *  4. **No Channel 2 nudge, no note-nudges, no compartments** — the
+ *     synthetic-user ceiling nudge stays primary-only (`fullFeatureMode`).
+ *     Subagents rely on Channel 1 + the ≥85% tiered emergency floor.
  *
- *  5. **Heuristic cleanup runs at execute threshold** — this is the one
- *     reduction path subagents DO get. Tool tags older than
- *     `auto_drop_tool_age` get marked `status='dropped'` during transform
- *     when the scheduler returns "execute", even without user-queued ops.
- *     Without this, subagent context grows until provider overflow.
+ *  5. **Tiered emergency drop at ≥85%** — the subagent tool floor. At the
+ *     force-materialize pass, `planEmergencyDrop` evicts tool tags T3→T2→T1
+ *     to a target headroom (routine age-drops were removed). Without this,
+ *     subagent context grows until provider overflow.
  *
  *  6. **Subagents tolerate overflow errors** — when a subagent hits the
  *     provider's context limit, the plugin doesn't spin up historian to
@@ -89,10 +89,6 @@ beforeAll(async () => {
         modelContextLimit: 200_000,
         magicContextConfig: {
             execute_threshold_percentage: 40,
-            // Small age so heuristic cleanup has tool tags to drop in a
-            // short test. Default is 100 tags; we can't build that many
-            // tool uses fast enough, so give it a more aggressive window.
-            auto_drop_tool_age: 5,
             // Reasonable protected-tail that still leaves older tags eligible
             // for dropping once we cross execute threshold.
             protected_tags: 5,
@@ -161,8 +157,11 @@ describe("subagent behavior", () => {
     );
 
     it(
-        "subagent transform does NOT inject §N§ tag prefixes into messages",
+        "subagent WITH ctx_reduce enabled DOES inject §N§ tag prefixes (self-management)",
         async () => {
+            // Unit B: subagents share the process-global ctx_reduce tool, so
+            // with ctx_reduce enabled (the harness default) they get §N§
+            // prefixes and self-manage their own tool-output bloat.
             h.mock.setDefault({
                 text: "ok",
                 usage: {
@@ -184,22 +183,15 @@ describe("subagent behavior", () => {
             await h.sendPrompt(child, "subagent turn 1: hello from a child session");
             await h.sendPrompt(child, "subagent turn 2: another message");
 
-            // Tags ARE still recorded in SQLite — only the wire prefix is skipped.
             expect(h.countTags(child)).toBeGreaterThan(0);
 
             const requests = h.mock.requests();
             expect(requests.length).toBeGreaterThanOrEqual(2);
 
-            // NONE of the provider requests for this child session should
-            // carry a §N§ prefix in any user message.
-            const offenders = requests.filter((r) => hasTagPrefixedUserMessage(r.body));
-            if (offenders.length > 0) {
-                console.error(
-                    "Subagent request with §N§ prefix:",
-                    JSON.stringify(offenders[0]?.body.messages, null, 2).slice(0, 1000),
-                );
-            }
-            expect(offenders.length).toBe(0);
+            // At least one request for this child session should now carry a
+            // §N§ prefix on a user message (the later turn, once tags exist).
+            const tagged = requests.filter((r) => hasTagPrefixedUserMessage(r.body));
+            expect(tagged.length).toBeGreaterThan(0);
         },
         30_000,
     );

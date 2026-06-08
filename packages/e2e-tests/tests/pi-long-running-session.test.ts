@@ -238,7 +238,6 @@ describe("long-running Pi Magic Context session", () => {
             magicContextConfig: {
                 execute_threshold_percentage: 20,
                 protected_tags: 1,
-                auto_drop_tool_age: 10,
                 memory: {
                     enabled: true,
                     auto_promote: false,

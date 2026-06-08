@@ -300,8 +300,18 @@ export function applyPiHeuristicCleanup(
 	// so each tag drops once. Mirrors OpenCode `applyHeuristicCleanup`.
 	if (config.emergency) {
 		const priorWatermark = getEmergencyDropWatermark(db, sessionId);
+		// Plan ONLY over tags in the live window with a working drop target —
+		// keeps the floor math equal to the on-wire tail and ensures every
+		// selected tag actually reclaims its bytes (no phantom under-evict).
+		// Mirrors OpenCode applyHeuristicCleanup.
+		const droppableTags = tags.filter(
+			(t) =>
+				t.status === "active" &&
+				t.type === "tool" &&
+				targets.get(t.tagNumber)?.drop,
+		);
 		const plan = planEmergencyDrop({
-			tags: tags as readonly EmergencyDropTag[],
+			tags: droppableTags as readonly EmergencyDropTag[],
 			maxTag,
 			protectedTags: config.protectedTags,
 			currentTotalInputTokens: config.emergency.currentTotalInputTokens,
@@ -311,22 +321,22 @@ export function applyPiHeuristicCleanup(
 		if (plan.shouldDrop) {
 			const toDrop = new Set(plan.tagNumbers);
 			db.transaction(() => {
+				// Advance the watermark only past tags actually dropped.
+				let maxDropped = priorWatermark;
 				for (const tag of tags) {
 					if (!toDrop.has(tag.tagNumber)) continue;
 					if (tag.status !== "active" || tag.type !== "tool") continue;
 					const target = targets.get(tag.tagNumber);
 					const result = target?.drop?.() ?? "absent";
-					if (
-						result === "removed" ||
-						result === "truncated" ||
-						result === "absent"
-					) {
+					if (result === "removed" || result === "truncated") {
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 						droppedTools++;
+						if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
 					}
 				}
-				setEmergencyDropWatermark(db, sessionId, plan.newWatermark);
+				if (droppedTools > 0)
+					setEmergencyDropWatermark(db, sessionId, maxDropped);
 			})();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {

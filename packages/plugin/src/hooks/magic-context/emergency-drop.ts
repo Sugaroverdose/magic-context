@@ -68,7 +68,20 @@ export interface EmergencyDropTag {
     status: "active" | "dropped" | "compacted";
     toolName: string | null;
     byteSize: number;
+    /** Tool-arg bytes — `drop()` removes the invocation too, so these reclaim. */
+    inputByteSize: number;
     reasoningByteSize: number;
+}
+
+/**
+ * Bytes a drop actually reclaims for a tool tag: output + invocation args +
+ * preceding reasoning (the drop primitive removes all tool occurrences and
+ * clears the thinking parts). Used for BOTH the fixedFloor tail sum and the
+ * per-tag reclaim accumulator so they can never disagree (a mismatch is how
+ * the planner under-evicts into overflow).
+ */
+function tagReclaimBytes(tag: EmergencyDropTag): number {
+    return tag.byteSize + tag.inputByteSize + tag.reasoningByteSize;
 }
 
 export interface EmergencyDropPlan {
@@ -129,11 +142,16 @@ export function planEmergencyDrop(input: {
         return noop("unknown-usage");
     }
 
-    // fixedFloor from the active-tag content (see doc-comment).
+    // fixedFloor from the active-tag content (see doc-comment). The caller MUST
+    // pass only tags that are present in the live (visible) window AND have a
+    // working drop target — i.e. pre-filtered to `targets.has(tagNumber)`. That
+    // keeps this sum equal to the on-wire tail (so fixedFloor is the true
+    // prefix) and guarantees every selected tag below actually reclaims its
+    // bytes (no phantom/compacted tags counted as reclaimed → no under-evict).
     let tailTokens = 0;
     for (const tag of tags) {
         if (tag.status !== "active") continue;
-        tailTokens += bytesToTokens(tag.byteSize + tag.reasoningByteSize);
+        tailTokens += bytesToTokens(tagReclaimBytes(tag));
     }
     const fixedFloor = Math.max(currentTotalInputTokens - tailTokens, 0);
     const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
@@ -187,7 +205,9 @@ export function planEmergencyDrop(input: {
         for (const tag of group) {
             selected.push(tag.tagNumber);
             if (tag.tagNumber > maxSelected) maxSelected = tag.tagNumber;
-            reclaimed += bytesToTokens(tag.byteSize);
+            // Match the floor's tagReclaimBytes exactly: drop() removes output +
+            // invocation args + preceding reasoning, so all three reclaim.
+            reclaimed += bytesToTokens(tagReclaimBytes(tag));
             if (reclaimed >= reclaimTokens) break outer;
         }
     }

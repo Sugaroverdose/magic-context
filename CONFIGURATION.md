@@ -116,8 +116,6 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `nudge_interval_tokens` | `number` | `10000` | Minimum token growth between rolling nudges. |
 | `execute_threshold_percentage` | `number` (20–80) or `object` | `65` | Context usage that forces queued ops to execute. Capped at 80% max for cache safety. Supports per-model map. |
 | `execute_threshold_tokens` | `object` (per-model map) | — | **Optional absolute-tokens variant of `execute_threshold_percentage`.** Per-model map (e.g. `{ "default": 150000, "github-copilot/gpt-5.2-codex": 40000 }`). When set for a model, overrides the percentage-based threshold for that model. Clamped to `80% × context_limit` with a warn log. Requires a resolvable context limit — falls through to percentage if unavailable. See below. |
-| `auto_drop_tool_age` | `number` | `100` | Auto-drop tool outputs older than N tags during execution. |
-| `drop_tool_structure` | `boolean` | `true` | When `true`, dropped tool parts are fully removed from the transformed prompt. When `false`, tool call structure is preserved: tool name kept, tool inputs truncated to 5 chars + `...[truncated]`, tool output replaced with `[truncated]`. Preserving structure keeps the agent aware that prior tools ran (preventing hallucinated re-calls) at the cost of ~4K additional tokens per ~60 dropped tools. |
 | `clear_reasoning_age` | `number` | `50` | Clear thinking/reasoning blocks older than N tags. |
 | `iteration_nudge_threshold` | `number` | `15` | Consecutive assistant turns without user input before an iteration nudge. |
 | `historian_timeout_ms` | `number` | `300000` | Timeout per historian call (ms). |
@@ -632,8 +630,6 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "anthropic/claude-opus-4-6": 50
   },
   "protected_tags": 10,
-  "auto_drop_tool_age": 50,
-  "drop_tool_structure": true,
   "history_budget_percentage": 0.15,
   "temporal_awareness": true,
 

@@ -17,6 +17,7 @@ import {
 import {
     casChannel2NudgeState,
     clearDetectedContextLimit,
+    clearEmergencyDropWatermark,
     clearEmergencyRecovery,
     clearHistorianFailureState,
     clearPersistedReasoningWatermark,
@@ -444,6 +445,14 @@ export function createTransform(deps: TransformDeps) {
                     });
                     clearHistorianFailureState(db, sessionId);
                     clearPersistedReasoningWatermark(db, sessionId);
+                    // The emergency-drop watermark is keyed to the prior model's
+                    // ceiling (contextLimit × executeThreshold). A model change
+                    // moves the contextLimit → the drop target changes → reset so
+                    // the new model re-evaluates the full tail. (System-prompt /
+                    // tool-set hard busts keep the same ceiling, so the watermark
+                    // stays valid there — resetting would only re-drop already
+                    // reserved tags and add a needless bust.)
+                    clearEmergencyDropWatermark(db, sessionId);
                     // Clear any detected context limit from a prior overflow — the
                     // old limit was specific to the previous model and must not
                     // leak into pressure math for the new model. The recovery

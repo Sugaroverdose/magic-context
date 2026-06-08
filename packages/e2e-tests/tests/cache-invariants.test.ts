@@ -157,7 +157,6 @@ beforeEach(async () => {
         magicContextConfig: {
             execute_threshold_percentage: 20,
             protected_tags: 1,
-            auto_drop_tool_age: 4,
             dreamer: { disable: true },
             sidekick: { disable: true },
             compressor: { enabled: false },
@@ -350,7 +349,7 @@ describe("cache invariants — replay class", () => {
             it("#then the ctx_reduce message never vanishes mid-prefix and the prefix never busts", async () => {
                 //#given — a normal turn, then a turn that emits a real ctx_reduce
                 // tool call, then enough defer growth to push it well past
-                // protected_tags (1) and auto_drop_tool_age (4).
+                // protected_tags (1).
                 const sessionId = await h.createSession();
                 setDefer("A3 reply 1");
                 await h.sendPrompt(sessionId, "A3 turn 1: establish baseline content.");

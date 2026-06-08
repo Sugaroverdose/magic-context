@@ -103,6 +103,7 @@ import {
 import {
 	markPiChannel1Reduced,
 	maybeChannel1ReminderForToolResult,
+	maybeDeliverChannel2Pi,
 } from "./ctx-reduce-nudge-pi";
 import {
 	awaitInFlightDreamers,
@@ -1090,7 +1091,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// We let print mode skip the wait too. Users who want guaranteed
 	// historian completion in print mode should run interactive Pi
 	// instead.
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
 		// Synchronous return — DO NOT await background work here.
 		// awaitInFlightHistorians()/awaitInFlightDreamers() are still
 		// invoked at session_shutdown where they belong (and where pi
@@ -1099,6 +1100,19 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// (runPiHistorian wraps everything; spawnPiHistorianRun's
 		// .finally cleans up the inFlight map).
 		log("agent_end: returning synchronously (background work continues)");
+
+		// Channel 2 (ceiling) nudge delivery — the Pi analog of OpenCode's
+		// event-handler delivery on terminal message.updated. The pipeline
+		// records a `pending` intent near the threshold; deliver it here at the
+		// turn boundary via sendUserMessage(followUp). Internally CAS-gated to
+		// one delivery per session lifetime, and no-ops unless `pending`.
+		// Fire-and-forget; never block agent_end.
+		try {
+			const sessionId = ctx.sessionManager?.getSessionId?.();
+			if (sessionId && db) maybeDeliverChannel2Pi(pi, db, sessionId);
+		} catch (err) {
+			log(`agent_end: channel2 delivery skipped: ${String(err)}`);
+		}
 	});
 
 	// Tool-execution-start hook: detect note-nudge triggers from

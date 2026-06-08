@@ -20,6 +20,7 @@ function tag(
         status: "active",
         toolName,
         byteSize,
+        inputByteSize: 0,
         reasoningByteSize: 0,
         ...opts,
     };
@@ -123,6 +124,35 @@ describe("planEmergencyDrop — target math", () => {
         expect(plan.tagNumbers).not.toContain(20);
         // watermark advances to the highest dropped tag
         expect(plan.newWatermark).toBe(Math.max(...plan.tagNumbers));
+    });
+
+    it("counts tool input + reasoning bytes in BOTH floor and reclaim (no under-evict)", () => {
+        // A single huge-input/tiny-output tool (e.g. write/apply_patch): output
+        // is 400 bytes but the invocation args are 40000 bytes. The drop removes
+        // all of it, so reclaim must count input bytes — otherwise the planner
+        // sees ~no droppable tail and no-ops into overflow.
+        const big = tag(1, "write", 400, { inputByteSize: 40_000, reasoningByteSize: 8_000 });
+        const small = tag(2, "bash", 800);
+        const plan = planEmergencyDrop({
+            tags: [big, small],
+            maxTag: 2,
+            protectedTags: 0,
+            priorWatermark: 0,
+            // tail = (400+40000+8000 + 800) × 0.25 = 12300; floor = 20000-12300
+            // = 7700; ceiling 12000 → target 7700+0.3×4300 = 8990 →
+            // reclaim ≈ 11010. Dropping `big` alone reclaims (48400)×0.25 = 12100
+            // ≥ reclaim → met without touching `small`.
+            currentTotalInputTokens: 20_000,
+            ceilingTokens: 12_000,
+        });
+        expect(plan.shouldDrop).toBe(true);
+        // `big` (T2) is NOT dropped before T3 `small` — tier order wins — but
+        // the key assertion is that the plan reclaims enough: it must include
+        // `small` (T3, dropped first) and the math must recognize `big`'s value.
+        expect(plan.tagNumbers).toContain(2); // T3 dropped first
+        // The reclaim target (~11010) exceeds what output-only accounting would
+        // see for these tags (300 tokens), proving input/reasoning are counted.
+        expect(plan.reclaimTokens).toBeGreaterThan(10_000);
     });
 });
 

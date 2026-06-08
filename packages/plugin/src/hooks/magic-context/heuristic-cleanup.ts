@@ -86,8 +86,15 @@ export function applyHeuristicCleanup(
     // returned plan and advance the persisted watermark so each tag drops once.
     if (config.emergency) {
         const priorWatermark = getEmergencyDropWatermark(db, sessionId);
+        // Plan ONLY over tags that are in the live window AND have a working drop
+        // target. This keeps the floor math equal to the on-wire tail and means
+        // every selected tag actually reclaims its bytes — no phantom/compacted
+        // tags counted as reclaimed (which would under-evict into overflow).
+        const droppableTags = tags.filter(
+            (t) => t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.drop,
+        );
         const plan = planEmergencyDrop({
-            tags: tags as readonly EmergencyDropTag[],
+            tags: droppableTags as readonly EmergencyDropTag[],
             maxTag,
             protectedTags: config.protectedTags,
             currentTotalInputTokens: config.emergency.currentTotalInputTokens,
@@ -97,18 +104,23 @@ export function applyHeuristicCleanup(
         if (plan.shouldDrop) {
             const toDrop = new Set(plan.tagNumbers);
             db.transaction(() => {
+                // Advance the watermark ONLY past tags actually dropped (not
+                // merely selected). "absent"/"incomplete" reclaim nothing, so
+                // counting them would over-advance and falsely report reclaim.
+                let maxDropped = priorWatermark;
                 for (const tag of tags) {
                     if (!toDrop.has(tag.tagNumber)) continue;
                     if (tag.status !== "active" || tag.type !== "tool") continue;
                     const target = targets.get(tag.tagNumber);
                     const result = target?.drop?.() ?? "absent";
-                    if (result === "removed" || result === "truncated" || result === "absent") {
+                    if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                         updateTagDropMode(db, sessionId, tag.tagNumber, "full");
                         droppedTools++;
+                        if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
                     }
                 }
-                setEmergencyDropWatermark(db, sessionId, plan.newWatermark);
+                if (droppedTools > 0) setEmergencyDropWatermark(db, sessionId, maxDropped);
             })();
             sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
         } else {

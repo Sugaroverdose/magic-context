@@ -82,9 +82,11 @@ describe("agent_end handler (blocking-historian regression)", () => {
 
 	test("handler arrow function is NOT marked async", () => {
 		// async arrow returns a Promise; Pi awaits it. We need a
-		// synchronous arrow so Pi's await resolves immediately.
-		expect(body).toContain('pi.on("agent_end", () =>');
-		expect(body).not.toContain('pi.on("agent_end", async () =>');
+		// synchronous arrow so Pi's await resolves immediately. The handler
+		// takes (_event, ctx) to resolve the session for Channel 2 delivery,
+		// but MUST stay synchronous.
+		expect(body).toMatch(/pi\.on\("agent_end", \([^)]*\) =>/);
+		expect(body).not.toContain('pi.on("agent_end", async');
 	});
 
 	test("handler code does NOT call awaitInFlightHistorians", () => {
