@@ -28,6 +28,7 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
+    CTX_MEMORY_ACTIONS,
     CTX_MEMORY_DREAMER_ACTIONS,
     type CtxMemoryAction,
     type CtxMemoryArgs,
@@ -50,16 +51,14 @@ function normalizeLimit(limit?: number): number {
 
 // Audit Finding #7 hardening: when a caller omits `allowedActions`, fall back
 // to the least-privileged set instead of the dreamer's full action list. The
-// only production caller (`tool-registry.ts`) passes `["write", "delete"]`
-// explicitly, and dreamer child sessions are gated by the runtime
-// `toolContext.agent === DREAMER_AGENT` check below — they bypass
+// only production caller (`tool-registry.ts`) passes the primary set
+// (`CTX_MEMORY_ACTIONS`) explicitly, and dreamer child sessions are gated by the
+// runtime `toolContext.agent === DREAMER_AGENT` check below — they bypass
 // `allowedActions` entirely. A future caller that forgets the field would
-// previously have inadvertently let primary agents run `list/update/merge/
-// archive`; fail-closed default prevents that class of regression.
+// previously have inadvertently let primary agents run the dreamer-only `list`;
+// fail-closed default prevents that class of regression.
 function getAllowedActions(deps: CtxMemoryToolDeps): [CtxMemoryAction, ...CtxMemoryAction[]] {
-    const allowed = deps.allowedActions?.length
-        ? deps.allowedActions
-        : (["write", "delete"] as const);
+    const allowed = deps.allowedActions?.length ? deps.allowedActions : CTX_MEMORY_ACTIONS;
     return [...allowed] as [CtxMemoryAction, ...CtxMemoryAction[]];
 }
 
@@ -242,7 +241,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             id: tool.schema
                 .number()
                 .optional()
-                .describe("Memory ID (required for delete, update, archive)"),
+                .describe("Memory ID (required for archive, update)"),
             ids: tool.schema
                 .array(tool.schema.number())
                 .optional()
@@ -321,30 +320,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 });
 
                 return `Saved memory [ID: ${memory.id}] in ${category}.`;
-            }
-
-            if (args.action === "delete") {
-                if (typeof args.id !== "number" || !Number.isInteger(args.id)) {
-                    return "Error: 'id' is required when action is 'delete'.";
-                }
-
-                const memoryId = args.id;
-                const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
-                const memory = getMemoryById(deps.db, memoryId);
-                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
-                    return `Error: Memory with ID ${memoryId} was not found.`;
-                }
-
-                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
-                deps.db.transaction(() => {
-                    archiveMemory(deps.db, memoryId);
-                    queueMemoryMutation(deps.db, {
-                        projectPath: projectIdentity,
-                        mutationType: "delete",
-                        targetMemoryId: memoryId,
-                    });
-                })();
-                return `Archived memory [ID: ${memoryId}].`;
             }
 
             if (args.action === "list") {

@@ -46,4 +46,44 @@ describe("createCtxMemoryTool", () => {
 			closeQuietly(db);
 		}
 	});
+
+	it("allows a primary agent to archive (no longer dreamer-only)", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+
+			// write a memory as the primary agent, then archive it as the same
+			// primary agent — archive replaced the old `delete` alias and is no
+			// longer gated behind allowDreamerActions.
+			const written = await primary.execute(
+				"call-w",
+				{ action: "write", category: "ARCHITECTURE", content: "Stale fact." },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(written.isError).toBeUndefined();
+			const idMatch = written.content[0]?.text?.match(/ID:\s*(\d+)/);
+			const id = idMatch ? Number(idMatch[1]) : Number.NaN;
+			expect(Number.isInteger(id)).toBe(true);
+
+			const archived = await primary.execute(
+				"call-a",
+				{ action: "archive", id },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(archived.isError).toBeUndefined();
+			expect(archived.content[0]?.text).toContain("Archived memory");
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });

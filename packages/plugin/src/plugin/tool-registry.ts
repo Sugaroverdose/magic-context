@@ -10,7 +10,7 @@ import {
 } from "../features/magic-context/storage";
 import type { Database } from "../shared/sqlite";
 import { createCtxExpandTools } from "../tools/ctx-expand";
-import { createCtxMemoryTools } from "../tools/ctx-memory";
+import { CTX_MEMORY_ACTIONS, createCtxMemoryTools } from "../tools/ctx-memory";
 import { createCtxNoteTools } from "../tools/ctx-note";
 import { createCtxReduceTools } from "../tools/ctx-reduce";
 import { createCtxSearchTools } from "../tools/ctx-search";
@@ -87,7 +87,11 @@ export function createToolRegistry(args: {
             db,
             resolveProjectPath,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-            allowedActions: ["write", "delete"],
+            // Primary agents get the full mutation surface (write/archive/update/
+            // merge) on memories they can already see (with ids) in the injected
+            // <project-memory> block. Only `list` (bulk enumeration) stays
+            // dreamer-only — runtime-gated via toolContext.agent in tools.ts.
+            allowedActions: [...CTX_MEMORY_ACTIONS],
         }),
     };
 

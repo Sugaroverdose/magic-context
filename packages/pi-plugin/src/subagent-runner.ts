@@ -100,10 +100,10 @@ const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
 /**
  * Set of subagent agent ids that get the dreamer-only ctx_memory
- * action surface (update/merge/archive). Mirrors OpenCode's
- * `tool-registry.ts:114` allowedActions split: only the dreamer agent
- * gets the elevated surface; everyone else (historian, sidekick,
- * compressor, ad-hoc commands) gets write/delete/list only.
+ * `list` action. Mirrors OpenCode's `tool-registry.ts` allowedActions
+ * split: only the dreamer agent gets `list`; everyone else (historian,
+ * sidekick, compressor, ad-hoc commands) gets the primary set
+ * (write/archive/update/merge).
  *
  * Membership uses the SAME agent strings the Pi callers actually pass
  * (see e.g. `dreamer/index.ts` passing `"magic-context-dreamer"`). If

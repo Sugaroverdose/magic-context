@@ -1,15 +1,16 @@
 import type { MemorySourceType } from "../../features/magic-context/memory";
 import type { Database } from "../../shared/sqlite";
 
-export const CTX_MEMORY_ACTIONS = ["write", "delete"] as const;
+// Actions a PRIMARY (non-dreamer) agent may run. Primary agents see active
+// memories — with their ids — in the injected <project-memory> block, so they
+// can target a specific memory to archive/update/merge in-session without
+// waiting for the dreamer. `archive` is the single soft-remove action (sets
+// status='archived'); the former `delete` action was an exact alias of it and
+// was removed. Only `list` (bulk enumeration — large output, and unnecessary
+// since active memories are already in context) stays dreamer-only.
+export const CTX_MEMORY_ACTIONS = ["write", "archive", "update", "merge"] as const;
 
-export const CTX_MEMORY_DREAMER_ACTIONS = [
-    ...CTX_MEMORY_ACTIONS,
-    "list",
-    "update",
-    "merge",
-    "archive",
-] as const;
+export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list"] as const;
 
 export type CtxMemoryAction = (typeof CTX_MEMORY_DREAMER_ACTIONS)[number];
 

@@ -239,7 +239,10 @@ describe("createCtxMemoryTools", () => {
         });
     });
 
-    describe("#given delete action", () => {
+    describe("#given archive action by a PRIMARY agent", () => {
+        // archive is now a primary action (it replaced the redundant `delete`
+        // alias). A primary agent — no DREAMER_AGENT context — must be able to
+        // soft-remove a memory it sees in the injected project-memory block.
         it("archives the memory by ID", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
@@ -248,7 +251,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "delete", id: memory.id },
+                { action: "archive", id: memory.id },
                 toolContext(),
             );
             const updated = getMemoryById(db, memory.id);
@@ -257,12 +260,12 @@ describe("createCtxMemoryTools", () => {
             expect(updated?.status).toBe("archived");
             expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
             expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                { mutationType: "delete", targetMemoryId: memory.id },
+                { mutationType: "archive", targetMemoryId: memory.id },
             ]);
         });
 
         it("returns error when ID is missing", async () => {
-            const result = await tools.ctx_memory.execute({ action: "delete" }, toolContext());
+            const result = await tools.ctx_memory.execute({ action: "archive" }, toolContext());
 
             expect(result).toContain("Error");
             expect(result).toContain("'id' is required");
@@ -270,7 +273,7 @@ describe("createCtxMemoryTools", () => {
 
         it("returns error when memory not found", async () => {
             const result = await tools.ctx_memory.execute(
-                { action: "delete", id: 999 },
+                { action: "archive", id: 999 },
                 toolContext(),
             );
 
@@ -556,7 +559,7 @@ describe("createCtxMemoryTools", () => {
                     { action: "write", category: "USER_DIRECTIVES", content: "x" },
                     toolContext(),
                 ),
-                disabledTools.ctx_memory.execute({ action: "delete", id: 1 }, toolContext()),
+                disabledTools.ctx_memory.execute({ action: "archive", id: 1 }, toolContext()),
             ]);
 
             expect(results).toEqual([
@@ -567,30 +570,35 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given restricted actions", () => {
-        it("keeps dreamer actions in the schema so OpenCode can deliver them to execute", () => {
+        // Primary set = write/archive/update/merge. Only `list` is dreamer-only.
+        const PRIMARY_ACTIONS = ["write", "archive", "update", "merge"] as const;
+
+        it("keeps the dreamer-only `list` action in the schema so OpenCode can deliver it to execute", () => {
             const primaryTools = createCtxMemoryTools({
                 db,
                 resolveProjectPath: () => "/repo/project",
                 memoryEnabled: true,
                 embeddingEnabled: false,
-                allowedActions: ["write", "delete"],
+                allowedActions: [...PRIMARY_ACTIONS],
             });
 
             const actionSchema = primaryTools.ctx_memory.args.action as unknown as {
                 safeParse: (value: unknown) => { success: boolean };
             };
 
+            // The shared schema must still accept `list` (the runtime gate, not
+            // the schema, blocks it for primary agents).
             expect(actionSchema.safeParse("list").success).toBe(true);
             expect(actionSchema.safeParse("merge").success).toBe(true);
         });
 
-        it("rejects dreamer-only actions for primary-agent tool instances", async () => {
+        it("rejects the dreamer-only `list` action for primary-agent tool instances", async () => {
             const primaryTools = createCtxMemoryTools({
                 db,
                 resolveProjectPath: () => "/repo/project",
                 memoryEnabled: true,
                 embeddingEnabled: false,
-                allowedActions: ["write", "delete"],
+                allowedActions: [...PRIMARY_ACTIONS],
             });
 
             const result = await primaryTools.ctx_memory.execute({ action: "list" }, toolContext());
@@ -598,7 +606,30 @@ describe("createCtxMemoryTools", () => {
             expect(result).toContain("not allowed");
         });
 
-        it("allows dreamer sessions to use dreamer-only actions on the shared tool", async () => {
+        it("allows primary agents to use archive/update/merge (no longer dreamer-only)", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Stale fact the agent spotted mid-session.",
+            });
+            const primaryTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                allowedActions: [...PRIMARY_ACTIONS],
+            });
+
+            // archive by a primary agent (no dreamer context) must succeed.
+            const result = await primaryTools.ctx_memory.execute(
+                { action: "archive", id: memory.id },
+                toolContext(),
+            );
+
+            expect(result).toContain("Archived memory");
+        });
+
+        it("allows dreamer sessions to use the dreamer-only `list` action on the shared tool", async () => {
             insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "USER_DIRECTIVES",
@@ -609,7 +640,7 @@ describe("createCtxMemoryTools", () => {
                 resolveProjectPath: () => "/repo/project",
                 memoryEnabled: true,
                 embeddingEnabled: false,
-                allowedActions: ["write", "delete"],
+                allowedActions: [...PRIMARY_ACTIONS],
             });
 
             const result = await primaryTools.ctx_memory.execute(

@@ -19,8 +19,8 @@
  *
  * What this entry registers:
  *   - `ctx_search` — read-only search over shared memories/messages/git
- *   - `ctx_memory` — full action surface (write/delete/list + dreamer
- *      actions update/merge/archive when allowlist flag is set)
+ *   - `ctx_memory` — primary action surface (write/archive/update/merge)
+ *      plus the dreamer-only `list` action when the allowlist flag is set
  *   - `ctx_note` — write/read/dismiss/update simple AND smart notes
  *   - `ctx_expand` — decompress compartment ranges
  *
@@ -99,7 +99,8 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				// Subagents inherit the same dreamer-action allowlist
 				// the parent passed via the --magic-context-dreamer-actions
-				// flag. Default false → write/delete/list only.
+				// flag. Default false → primary set (write/archive/update/merge);
+				// only the dreamer-only `list` action is gated behind the flag.
 				allowDreamerActions: dreamerActionsEnabled,
 				// `--no-session` children resolve getSessionId() to the ephemeral
 				// child session, so session-scoped ctx_note/ctx_expand would write

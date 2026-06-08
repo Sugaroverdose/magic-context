@@ -4,15 +4,14 @@
  * Action surface mirrors OpenCode's `packages/plugin/src/tools/ctx-memory/tools.ts`.
  * Two tiers of actions:
  *
- *  Always-allowed (for any agent that can call ctx_memory):
+ *  Primary (for any agent that can call ctx_memory):
  *    - write: insert a new memory (or no-op + bump seenCount on dedup hit)
- *    - delete: archive the memory (soft delete via status = 'archived')
+ *    - archive: soft-delete a memory (status = 'archived'), optional reason
+ *    - update: rewrite a memory's content (recomputes normalized_hash + queues re-embed)
+ *    - merge: combine N memories into one canonical, supersede the rest
  *
  *  Dreamer-only (gated on `allowDreamerActions: true`):
  *    - list: list active memories for the current project
- *    - update: rewrite a memory's content (recomputes normalized_hash + queues re-embed)
- *    - merge: combine N memories into one canonical, supersede the rest
- *    - archive: soft-delete with optional reason (different from delete in that it can take a reason)
  *
  * Allowlist gating mirrors OpenCode's `allowedActions` deps field. In OpenCode,
  * the dreamer subagent gets the full action surface because `toolContext.agent
@@ -23,7 +22,7 @@
  * Parity reference (OpenCode):
  *   - `tools/ctx-memory/types.ts` for action enum
  *   - `tools/ctx-memory/tools.ts` for handler logic
- *   - `plugin/tool-registry.ts:114` for allowedActions = ["write", "delete"] default
+ *   - `plugin/tool-registry.ts` for the primary allowedActions (CTX_MEMORY_ACTIONS)
  *
  * Memories are project-scoped via `resolveProjectIdentity(ctx.cwd)` and stored
  * in the shared cortexkit DB, so a memory written from the pi-plugin is
@@ -71,22 +70,15 @@ function isMemoryCategory(value: string): value is MemoryCategory {
 	return VALID_CATEGORIES.has(value);
 }
 
-const ALL_ACTIONS = [
-	"write",
-	"delete",
-	"list",
-	"update",
-	"merge",
-	"archive",
-] as const;
+// Mirrors OpenCode CTX_MEMORY_DREAMER_ACTIONS. `delete` was removed — it was an
+// exact alias of `archive` (both soft-archive); `archive` is the single
+// soft-remove action. Primary agents get write/archive/update/merge on the
+// memories they already see (with ids) in the injected project-memory block;
+// only `list` (bulk enumeration) stays dreamer-only.
+const ALL_ACTIONS = ["write", "archive", "update", "merge", "list"] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
-const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set([
-	"list",
-	"update",
-	"merge",
-	"archive",
-]);
+const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
 
 const ParamsSchema = Type.Object({
 	action: Type.Union(
@@ -107,7 +99,7 @@ const ParamsSchema = Type.Object({
 	),
 	id: Type.Optional(
 		Type.Number({
-			description: "Memory ID (required for delete, update, archive)",
+			description: "Memory ID (required for archive, update)",
 		}),
 	),
 	ids: Type.Optional(
@@ -215,9 +207,9 @@ export interface CtxMemoryToolDeps {
 	) => Promise<void>;
 	memoryEnabled?: boolean;
 	embeddingEnabled?: boolean;
-	/** When true, dreamer-only actions (list, update, merge, archive) are exposed.
-	 *  Set by the subagent extension entry when the parent passes
-	 *  `--magic-context-dreamer-actions`. Default: false (write/delete only). */
+	/** When true, the dreamer-only `list` action is exposed. Set by the subagent
+	 *  extension entry when the parent passes `--magic-context-dreamer-actions`.
+	 *  Default: false (primary set only: write/archive/update/merge). */
 	allowDreamerActions?: boolean;
 }
 
@@ -228,10 +220,10 @@ export function createCtxMemoryTool(
 	const description = dreamerAllowed
 		? "Manage cross-session project memories. Memories persist across sessions and are " +
 			"shared with OpenCode sessions on the same project. " +
-			"Supported actions: write, delete, list, update, merge, archive."
+			"Supported actions: write, archive, update, merge, list."
 		: "Manage cross-session project memories. Memories persist across sessions and are " +
 			"shared with OpenCode sessions on the same project. " +
-			"Supported actions: write, delete.";
+			"Supported actions: write, archive, update, merge.";
 
 	return {
 		name: "ctx_memory",
@@ -311,28 +303,6 @@ export function createCtxMemoryTool(
 				// busting unrelated projects. Matches OpenCode's write path, which
 				// likewise does no cache invalidation.
 				return ok(`Saved memory [ID: ${memory.id}] in ${rawCategory}.`);
-			}
-
-			if (params.action === "delete") {
-				if (typeof params.id !== "number" || !Number.isInteger(params.id)) {
-					return err("Error: 'id' is required when action is 'delete'.");
-				}
-				const memory = getMemoryById(deps.db, params.id);
-				if (
-					!memory ||
-					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
-				) {
-					return err(`Error: Memory with ID ${params.id} was not found.`);
-				}
-				deps.db.transaction(() => {
-					archiveMemory(deps.db, params.id as number);
-					queueMemoryMutation(deps.db, {
-						projectPath: projectIdentity,
-						mutationType: "delete",
-						targetMemoryId: params.id as number,
-					});
-				})();
-				return ok(`Archived memory [ID: ${params.id}].`);
 			}
 
 			if (params.action === "list") {
