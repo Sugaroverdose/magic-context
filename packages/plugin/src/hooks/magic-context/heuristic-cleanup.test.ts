@@ -59,6 +59,7 @@ function makeMemoryDatabase(): Database {
       tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0,
       last_emergency_drop_through_tag INTEGER DEFAULT 0,
+      last_emergency_input_sample INTEGER DEFAULT 0,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
@@ -83,6 +84,9 @@ function makeTarget(message: { parts: unknown[] }): TagTarget {
             }
             return "absent" as const;
         },
+        // Mirrors the real target: droppable iff there's a tool part present
+        // (drop() would return "removed"). The emergency planner filters on this.
+        canDrop: () => message.parts.some((p: any) => p.type === "tool"),
         truncate: () => {
             const toolPart = message.parts.find((p: any) => p.type === "tool") as
                 | {

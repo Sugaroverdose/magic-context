@@ -69,6 +69,7 @@ import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-conte
 import {
 	clearDeferredExecutePendingIfMatches,
 	clearDetectedContextLimit,
+	clearEmergencyDropWatermark,
 	clearEmergencyRecovery,
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
@@ -1448,6 +1449,10 @@ export function registerPiContextHandler(
 				clearPersistedReasoningWatermark(options.db, sessionId);
 				clearDetectedContextLimit(options.db, sessionId);
 				clearEmergencyRecovery(options.db, sessionId);
+				// The emergency-drop watermark is keyed to the prior model's
+				// ceiling; a smaller new model must re-evaluate older tags.
+				// Mirrors OpenCode hook-handlers.ts model-change reset.
+				clearEmergencyDropWatermark(options.db, sessionId);
 				sessionMetaForUsage.clearedReasoningThroughTag = 0;
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
@@ -1861,13 +1866,16 @@ export function registerPiContextHandler(
 				usageContextLimit && usageContextLimit > 0
 					? Math.floor(
 							usageContextLimit *
+								// Ceiling from the SCHEDULER execute threshold (not
+								// options.historian, which falls back to 65 and ignores
+								// the user's execute_threshold_* when historian is off).
 								(resolveExecuteThreshold(
-									options.historian?.executeThresholdPercentage ?? 65,
+									schedulerConfig.executeThresholdPercentage ?? 65,
 									liveModelBySession.get(sessionId),
 									65,
 									{
 										tokensConfig:
-											options.historian?.executeThresholdTokens,
+											schedulerConfig.executeThresholdTokens,
 										contextLimit: usageContextLimit,
 										sessionId,
 									},
@@ -2110,13 +2118,22 @@ export function registerPiContextHandler(
 			// a missing baseline is how Channel 1 stays off for subagents.
 			try {
 				const sessionMetaForCh1 = getOrCreateSessionMeta(options.db, sessionId);
-				if (!sessionMetaForCh1.isSubagent) {
+				// Gate on ctx_reduce being effective AND not a subagent. Channel 1
+				// nudges the agent to call ctx_reduce; when ctx_reduce is disabled
+				// the tool isn't registered (index.ts), so a baseline/nudge would
+				// point at a missing tool. Mirrors OpenCode's ctxReduceEnabledEffective
+				// gate. A missing baseline is also how Channel 1 stays off.
+				if (options.ctxReduceEnabled && !sessionMetaForCh1.isSubagent) {
+					// Resolve through the SCHEDULER config (the real execute
+					// threshold), not options.historian — when historian is disabled
+					// the historian threshold falls back to 65 and ignores the user's
+					// execute_threshold_percentage / _tokens.
 					const resolvedExecuteThresholdPct = resolveExecuteThreshold(
-						options.historian?.executeThresholdPercentage ?? 65,
+						schedulerConfig.executeThresholdPercentage ?? 65,
 						liveModelBySession.get(sessionId),
 						65,
 						{
-							tokensConfig: options.historian?.executeThresholdTokens,
+							tokensConfig: schedulerConfig.executeThresholdTokens,
 							contextLimit: usageContextLimit ?? 0,
 						},
 					);
@@ -2125,9 +2142,12 @@ export function registerPiContextHandler(
 						usagePercentage,
 						usageInputTokens,
 						usageContextLimit,
+						// Execute threshold from the SCHEDULER config (its real
+						// home), so the budget denominator matches the threshold
+						// used for Channel severity even when historian is disabled.
 						executeThresholdPercentage:
-							options.historian?.executeThresholdPercentage,
-						executeThresholdTokens: options.historian?.executeThresholdTokens,
+							schedulerConfig.executeThresholdPercentage,
+						executeThresholdTokens: schedulerConfig.executeThresholdTokens,
 						modelKey: liveModelBySession.get(sessionId),
 					});
 					const tailToolTokens = computeTailToolTokensPi(

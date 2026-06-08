@@ -8,7 +8,8 @@ import {
 } from "../../features/magic-context/storage";
 import {
     getEmergencyDropWatermark,
-    setEmergencyDropWatermark,
+    getEmergencyInputSample,
+    setEmergencyDropResult,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
@@ -85,21 +86,25 @@ export function applyHeuristicCleanup(
     // cache-busting pass). Selection is pure (`planEmergencyDrop`); we apply the
     // returned plan and advance the persisted watermark so each tag drops once.
     if (config.emergency) {
+        const emergency = config.emergency;
         const priorWatermark = getEmergencyDropWatermark(db, sessionId);
-        // Plan ONLY over tags that are in the live window AND have a working drop
-        // target. This keeps the floor math equal to the on-wire tail and means
-        // every selected tag actually reclaims its bytes — no phantom/compacted
-        // tags counted as reclaimed (which would under-evict into overflow).
+        const priorInputSample = getEmergencyInputSample(db, sessionId);
+        // Plan ONLY over tags that are in the live window AND would ACTUALLY
+        // reclaim bytes (canDrop excludes absent/incomplete entries that drop()
+        // would no-op on). This keeps the floor math equal to the on-wire tail
+        // and guarantees every selected tag reclaims — no phantom tag counted as
+        // reclaimed (which makes the plan stop early and under-evict).
         const droppableTags = tags.filter(
-            (t) => t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.drop,
+            (t) => t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.canDrop?.(),
         );
         const plan = planEmergencyDrop({
             tags: droppableTags as readonly EmergencyDropTag[],
             maxTag,
             protectedTags: config.protectedTags,
-            currentTotalInputTokens: config.emergency.currentTotalInputTokens,
-            ceilingTokens: config.emergency.ceilingTokens,
+            currentTotalInputTokens: emergency.currentTotalInputTokens,
+            ceilingTokens: emergency.ceilingTokens,
             priorWatermark,
+            priorInputSample,
         });
         if (plan.shouldDrop) {
             const toDrop = new Set(plan.tagNumbers);
@@ -120,7 +125,17 @@ export function applyHeuristicCleanup(
                         if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
                     }
                 }
-                if (droppedTools > 0) setEmergencyDropWatermark(db, sessionId, maxDropped);
+                // Latch the watermark AND the usage sample together, so the next
+                // ≥85% pass on this same (stale) sample no-ops instead of
+                // over-dropping the remaining tail.
+                if (droppedTools > 0) {
+                    setEmergencyDropResult(
+                        db,
+                        sessionId,
+                        maxDropped,
+                        emergency.currentTotalInputTokens,
+                    );
+                }
             })();
             sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
         } else {

@@ -120,6 +120,9 @@ export type TagTarget = {
     getContent?: () => string | null;
     drop?: () => ToolDropResult;
     truncate?: () => ToolDropResult;
+    /** Non-mutating: would drop()/truncate() actually reclaim bytes? Tool
+     * targets only; absent on message/file targets. */
+    canDrop?: () => boolean;
     message?: MessageLike;
 };
 

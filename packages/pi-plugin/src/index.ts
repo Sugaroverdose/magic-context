@@ -1091,7 +1091,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// We let print mode skip the wait too. Users who want guaranteed
 	// historian completion in print mode should run interactive Pi
 	// instead.
-	pi.on("agent_end", (_event, ctx) => {
+	pi.on("agent_end", (event, ctx) => {
 		// Synchronous return — DO NOT await background work here.
 		// awaitInFlightHistorians()/awaitInFlightDreamers() are still
 		// invoked at session_shutdown where they belong (and where pi
@@ -1107,9 +1107,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// turn boundary via sendUserMessage(followUp). Internally CAS-gated to
 		// one delivery per session lifetime, and no-ops unless `pending`.
 		// Fire-and-forget; never block agent_end.
+		//
+		// Deliver ONLY on a clean final stop. Pi emits agent_end for error /
+		// aborted responses and for retry attempts too (agent-loop); delivering
+		// on those would inject the follow-up mid-retry and burn the one-shot cap
+		// before the turn actually completed. OpenCode's equivalent gates on
+		// finish === "stop". Mirror that with the final assistant's stopReason.
 		try {
-			const sessionId = ctx.sessionManager?.getSessionId?.();
-			if (sessionId && db) maybeDeliverChannel2Pi(pi, db, sessionId);
+			const msgs = (event as { messages?: Array<{ role?: string; stopReason?: string }> })
+				?.messages;
+			const lastAssistant = Array.isArray(msgs)
+				? [...msgs].reverse().find((m) => m?.role === "assistant")
+				: undefined;
+			if (lastAssistant?.stopReason === "stop") {
+				const sessionId = ctx.sessionManager?.getSessionId?.();
+				if (sessionId && db) maybeDeliverChannel2Pi(pi, db, sessionId);
+			}
 		} catch (err) {
 			log(`agent_end: channel2 delivery skipped: ${String(err)}`);
 		}

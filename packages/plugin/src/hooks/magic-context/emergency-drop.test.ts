@@ -61,6 +61,7 @@ describe("planEmergencyDrop — guards", () => {
         maxTag: 10,
         protectedTags: 0,
         priorWatermark: 0,
+            priorInputSample: 0,
     };
 
     it("skips when the ceiling is unknown/invalid", () => {
@@ -97,6 +98,7 @@ describe("planEmergencyDrop — target math", () => {
             maxTag: 10,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 30_000,
             ceilingTokens: 160_000,
         });
@@ -113,6 +115,7 @@ describe("planEmergencyDrop — target math", () => {
             maxTag: 20,
             protectedTags: 2,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 10_000,
             ceilingTokens: 6_000,
         });
@@ -124,6 +127,50 @@ describe("planEmergencyDrop — target math", () => {
         expect(plan.tagNumbers).not.toContain(20);
         // watermark advances to the highest dropped tag
         expect(plan.newWatermark).toBe(Math.max(...plan.tagNumbers));
+    });
+
+    it("is idempotent across consecutive ≥85% passes on the same usage sample (no over-drop)", () => {
+        // 20 T3 tags × 1000 bytes (≈250 tokens each). currentTotal 100k, ceiling
+        // 60k. First pass drops down to target and persists (watermark, sample).
+        const tags = Array.from({ length: 20 }, (_, i) => tag(i + 1, "bash", 1000));
+        const first = planEmergencyDrop({
+            tags,
+            maxTag: 20,
+            protectedTags: 0,
+            currentTotalInputTokens: 100_000,
+            ceilingTokens: 60_000,
+            priorWatermark: 0,
+            priorInputSample: 0,
+        });
+        expect(first.shouldDrop).toBe(true);
+        const droppedWatermark = first.newWatermark;
+        // Second ≥85% pass BEFORE the provider re-measures: same stale
+        // currentTotalInputTokens, watermark advanced. Must NO-OP — not re-derive
+        // and drop the rest of the tail (which would bust the cache again).
+        const second = planEmergencyDrop({
+            tags,
+            maxTag: 20,
+            protectedTags: 0,
+            currentTotalInputTokens: 100_000, // unchanged — provider hasn't re-measured
+            ceilingTokens: 60_000,
+            priorWatermark: droppedWatermark,
+            priorInputSample: 100_000, // latched from the first drop
+        });
+        expect(second.shouldDrop).toBe(false);
+        expect(second.reason).toContain("same-input-sample");
+        // A FRESH (lower) sample releases the latch so it can re-evaluate.
+        const third = planEmergencyDrop({
+            tags,
+            maxTag: 20,
+            protectedTags: 0,
+            currentTotalInputTokens: 95_000, // new measured pressure
+            ceilingTokens: 60_000,
+            priorWatermark: droppedWatermark,
+            priorInputSample: 100_000,
+        });
+        // Released (not the same-sample no-op); may or may not drop depending on
+        // remaining tail, but it is NOT short-circuited by the latch.
+        expect(third.reason).not.toContain("same-input-sample");
     });
 
     it("counts tool input + reasoning bytes in BOTH floor and reclaim (no under-evict)", () => {
@@ -138,6 +185,7 @@ describe("planEmergencyDrop — target math", () => {
             maxTag: 2,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             // tail = (400+40000+8000 + 800) × 0.25 = 12300; floor = 20000-12300
             // = 7700; ceiling 12000 → target 7700+0.3×4300 = 8990 →
             // reclaim ≈ 11010. Dropping `big` alone reclaims (48400)×0.25 = 12100
@@ -174,6 +222,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             maxTag: 6,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 6_000,
             ceilingTokens: 1_000,
         });
@@ -191,6 +240,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             maxTag: 10,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 20_000, // tail = 10×2000 = 20000
             ceilingTokens: 1_000, // target ≈ 300 → reclaim huge
         });
@@ -210,6 +260,7 @@ describe("planEmergencyDrop — tier ordering", () => {
             maxTag: 2,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 4_000,
             ceilingTokens: 500,
         });
@@ -227,7 +278,8 @@ describe("planEmergencyDrop — watermark idempotence (no oscillation)", () => {
             tags,
             maxTag: 10,
             protectedTags: 0,
-            priorWatermark: 5, // tags 1-5 already dropped in a prior pass
+            priorWatermark: 5,
+            priorInputSample: 0, // tags 1-5 already dropped in a prior pass
             currentTotalInputTokens: 10_000,
             ceilingTokens: 1_000,
         });
@@ -244,7 +296,8 @@ describe("planEmergencyDrop — watermark idempotence (no oscillation)", () => {
             tags,
             maxTag: 5,
             protectedTags: 0,
-            priorWatermark: 5, // everything already dropped
+            priorWatermark: 5,
+            priorInputSample: 0, // everything already dropped
             currentTotalInputTokens: 10_000,
             ceilingTokens: 1_000,
         });
@@ -264,6 +317,7 @@ describe("planEmergencyDrop — watermark idempotence (no oscillation)", () => {
             maxTag: 3,
             protectedTags: 0,
             priorWatermark: 0,
+            priorInputSample: 0,
             currentTotalInputTokens: 3_000,
             ceilingTokens: 200,
         });

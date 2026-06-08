@@ -293,7 +293,54 @@ export function setEmergencyDropWatermark(
 }
 
 export function clearEmergencyDropWatermark(db: Database, sessionId: string): void {
-    setEmergencyDropWatermark(db, sessionId, 0);
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET last_emergency_drop_through_tag = 0, last_emergency_input_sample = 0 WHERE session_id = ?",
+        ).run(sessionId);
+    })();
+}
+
+// `last_emergency_input_sample` is the `currentTotalInputTokens` reading at the
+// moment the tiered emergency drop last evicted. The drop reduces the wire, but
+// the provider hasn't re-measured it yet — the persisted usage stays at the
+// pre-drop value until the next assistant response lands. Without this latch a
+// second ≥85% pass on the SAME stale reading recomputes the floor from the
+// now-smaller active tail and over-drops the rest of the tail (and busts the
+// cache again). We only re-evaluate once a FRESH provider sample arrives (the
+// reading changes). Reset together with the watermark.
+interface PersistedEmergencyInputSampleRow {
+    last_emergency_input_sample: number;
+}
+
+function isEmergencyInputSampleRow(row: unknown): row is PersistedEmergencyInputSampleRow {
+    return (
+        typeof row === "object" &&
+        row !== null &&
+        typeof (row as PersistedEmergencyInputSampleRow).last_emergency_input_sample === "number"
+    );
+}
+
+export function getEmergencyInputSample(db: Database, sessionId: string): number {
+    const result = db
+        .prepare("SELECT last_emergency_input_sample FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+    return isEmergencyInputSampleRow(result) ? result.last_emergency_input_sample : 0;
+}
+
+/** Persist the watermark AND the usage sample atomically after a real drop. */
+export function setEmergencyDropResult(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    inputSample: number,
+): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET last_emergency_drop_through_tag = ?, last_emergency_input_sample = ? WHERE session_id = ?",
+        ).run(Math.max(0, Math.round(tagNumber)), Math.max(0, Math.round(inputSample)), sessionId);
+    })();
 }
 
 // ---- Channel 1 (in-turn tool-output ctx_reduce nudge) cadence watermark ----

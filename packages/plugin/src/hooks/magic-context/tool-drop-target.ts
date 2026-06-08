@@ -242,6 +242,15 @@ export function createToolDropTarget(
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
     truncate: () => ToolDropResult;
+    /**
+     * Non-mutating predicate: would drop()/truncate() actually remove bytes?
+     * False for an absent (compacted-away) or incomplete (invocation present,
+     * no result part) entry — both return early without reclaiming anything.
+     * The tiered emergency planner must filter on this, not on the mere
+     * presence of a drop() function: counting a no-reclaim tag as droppable
+     * makes the plan stop early and under-evict below the ceiling.
+     */
+    canDrop: () => boolean;
 } {
     const drop = (): ToolDropResult => {
         const entry = index.get(compositeKey);
@@ -292,5 +301,9 @@ export function createToolDropTarget(
         },
         drop,
         truncate,
+        canDrop: (): boolean => {
+            const entry = index.get(compositeKey);
+            return !!entry && entry.occurrences.length > 0 && entry.hasResult;
+        },
     };
 }

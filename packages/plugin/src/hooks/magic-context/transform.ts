@@ -447,11 +447,13 @@ export function createTransform(deps: TransformDeps) {
                     clearPersistedReasoningWatermark(db, sessionId);
                     // The emergency-drop watermark is keyed to the prior model's
                     // ceiling (contextLimit × executeThreshold). A model change
-                    // moves the contextLimit → the drop target changes → reset so
-                    // the new model re-evaluates the full tail. (System-prompt /
-                    // tool-set hard busts keep the same ceiling, so the watermark
-                    // stays valid there — resetting would only re-drop already
-                    // reserved tags and add a needless bust.)
+                    // moves the contextLimit → reset so the new model re-evaluates
+                    // the full tail. NOTE: on a LIVE mid-session switch this branch
+                    // is dead — hook-handlers.ts updates liveModelBySession first,
+                    // so knownModel already equals the new model by the time the
+                    // transform runs. The live clear lives in hook-handlers.ts; this
+                    // covers the fork / cold-start path where the transform itself
+                    // first observes the change.
                     clearEmergencyDropWatermark(db, sessionId);
                     // Clear any detected context limit from a prior overflow — the
                     // old limit was specific to the previous model and must not
@@ -1559,18 +1561,20 @@ export function createTransform(deps: TransformDeps) {
         // primary-only — see the fullFeatureMode guard on its trigger below.
         if (ctxReduceEnabledEffective && deps.channel1StateBySession) {
             try {
-                const resolvedExecuteThresholdPct =
-                    typeof deps.executeThresholdPercentage === "number"
-                        ? deps.executeThresholdPercentage
-                        : resolveExecuteThreshold(
-                              deps.executeThresholdPercentage ?? 65,
-                              deps.getModelKey?.(sessionId),
-                              65,
-                              {
-                                  tokensConfig: deps.executeThresholdTokens,
-                                  contextLimit: resolvedContextLimit ?? 0,
-                              },
-                          );
+                // Always resolve through resolveExecuteThreshold — even when the
+                // percentage config is a bare number — so an execute_threshold_tokens
+                // override is honored (a per-model absolute cap converts to an
+                // effective %). Skipping it for the numeric case made the Channel
+                // pressure math use the wrong threshold on token-configured models.
+                const resolvedExecuteThresholdPct = resolveExecuteThreshold(
+                    deps.executeThresholdPercentage ?? 65,
+                    deps.getModelKey?.(sessionId),
+                    65,
+                    {
+                        tokensConfig: deps.executeThresholdTokens,
+                        contextLimit: resolvedContextLimit ?? 0,
+                    },
+                );
                 const tailToolTokens = computeTailToolTokens(messages);
                 deps.channel1StateBySession.set(sessionId, {
                     tailToolTokens,

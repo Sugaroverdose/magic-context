@@ -121,9 +121,22 @@ export function planEmergencyDrop(input: {
     ceilingTokens: number;
     /** last_emergency_drop_through_tag (0 if never dropped). */
     priorWatermark: number;
+    /**
+     * last_emergency_input_sample — the `currentTotalInputTokens` reading at the
+     * previous emergency drop (0 if never dropped). Used as an idempotence latch
+     * (see the same-sample no-op below).
+     */
+    priorInputSample: number;
 }): EmergencyDropPlan {
-    const { tags, maxTag, protectedTags, currentTotalInputTokens, ceilingTokens, priorWatermark } =
-        input;
+    const {
+        tags,
+        maxTag,
+        protectedTags,
+        currentTotalInputTokens,
+        ceilingTokens,
+        priorWatermark,
+        priorInputSample,
+    } = input;
 
     const noop = (reason: string): EmergencyDropPlan => ({
         shouldDrop: false,
@@ -140,6 +153,17 @@ export function planEmergencyDrop(input: {
     }
     if (!Number.isFinite(currentTotalInputTokens) || currentTotalInputTokens <= 0) {
         return noop("unknown-usage");
+    }
+
+    // Idempotence latch. After a drop the wire is reduced, but the provider
+    // hasn't re-measured it — `currentTotalInputTokens` stays at the pre-drop
+    // value until the next assistant response. A second ≥85% pass on that SAME
+    // stale reading would recompute the floor from the now-smaller active tail
+    // and over-drop the rest of the tail (busting the cache again). So once we
+    // have dropped at a given usage sample, no-op until a FRESH sample arrives
+    // (the reading changes). New measured pressure ⇒ different sample ⇒ release.
+    if (priorWatermark > 0 && currentTotalInputTokens === priorInputSample) {
+        return noop("same-input-sample (awaiting fresh usage after prior drop)");
     }
 
     // fixedFloor from the active-tag content (see doc-comment). The caller MUST

@@ -389,6 +389,10 @@ function getToolPartByteSize(part: TranscriptPart, text: string): number {
 }
 
 function getNonTextToolResultByteSize(part: TranscriptPart): number {
+    // Prefer the adapter's exact raw-payload size when available (Pi's
+    // tool_result proxy can serialize the real content array, incl. images).
+    const raw = part.rawByteSize?.();
+    if (typeof raw === "number" && raw > 0) return raw;
     const record = isRecord(part) ? part : undefined;
     const content =
         record?.content ??
@@ -595,6 +599,13 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
                 }
             }
             return any ? "truncated" : "absent";
+        },
+        // Non-mutating reclaim predicate (Pi parity with OpenCode's canDrop).
+        // Pi sentinelizes BOTH halves, so unlike OpenCode there's no
+        // result-part requirement — a target reclaims as long as it still has
+        // at least one live occurrence to sentinelize.
+        canDrop(): boolean {
+            return occurrences.length > 0;
         },
         message: {
             info: { id: messageId, role },

@@ -55,7 +55,8 @@ import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-mess
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
 import {
 	getEmergencyDropWatermark,
-	setEmergencyDropWatermark,
+	getEmergencyInputSample,
+	setEmergencyDropResult,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { sessionLog } from "@magic-context/core/shared/logger";
 
@@ -299,24 +300,26 @@ export function applyPiHeuristicCleanup(
 	// pure (`planEmergencyDrop`); we apply it and advance the persisted watermark
 	// so each tag drops once. Mirrors OpenCode `applyHeuristicCleanup`.
 	if (config.emergency) {
+		const emergency = config.emergency;
 		const priorWatermark = getEmergencyDropWatermark(db, sessionId);
-		// Plan ONLY over tags in the live window with a working drop target —
-		// keeps the floor math equal to the on-wire tail and ensures every
-		// selected tag actually reclaims its bytes (no phantom under-evict).
-		// Mirrors OpenCode applyHeuristicCleanup.
+		const priorInputSample = getEmergencyInputSample(db, sessionId);
+		// Plan ONLY over tags in the live window that would ACTUALLY reclaim
+		// bytes (canDrop, not mere drop() presence) — keeps the floor math equal
+		// to the on-wire tail and avoids phantom under-evict. Mirrors OpenCode.
 		const droppableTags = tags.filter(
 			(t) =>
 				t.status === "active" &&
 				t.type === "tool" &&
-				targets.get(t.tagNumber)?.drop,
+				targets.get(t.tagNumber)?.canDrop?.(),
 		);
 		const plan = planEmergencyDrop({
 			tags: droppableTags as readonly EmergencyDropTag[],
 			maxTag,
 			protectedTags: config.protectedTags,
-			currentTotalInputTokens: config.emergency.currentTotalInputTokens,
-			ceilingTokens: config.emergency.ceilingTokens,
+			currentTotalInputTokens: emergency.currentTotalInputTokens,
+			ceilingTokens: emergency.ceilingTokens,
 			priorWatermark,
+			priorInputSample,
 		});
 		if (plan.shouldDrop) {
 			const toDrop = new Set(plan.tagNumbers);
@@ -335,8 +338,15 @@ export function applyPiHeuristicCleanup(
 						if (tag.tagNumber > maxDropped) maxDropped = tag.tagNumber;
 					}
 				}
+				// Latch watermark + usage sample together so the next ≥85% pass
+				// on the same stale sample no-ops (idempotence). Mirrors OpenCode.
 				if (droppedTools > 0)
-					setEmergencyDropWatermark(db, sessionId, maxDropped);
+					setEmergencyDropResult(
+						db,
+						sessionId,
+						maxDropped,
+						emergency.currentTotalInputTokens,
+					);
 			})();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {

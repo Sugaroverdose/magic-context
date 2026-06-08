@@ -474,6 +474,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             recentReduceBySession.delete(sessionId);
             toolUsageSinceUserTurn.delete(sessionId);
             internalChildSessions.delete(sessionId);
+            channel1StateBySession.delete(sessionId);
         },
     });
 

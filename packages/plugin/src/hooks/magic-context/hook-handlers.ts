@@ -10,6 +10,7 @@ import {
 } from "../../features/magic-context/storage-meta";
 import {
     clearDetectedContextLimit,
+    clearEmergencyDropWatermark,
     clearEmergencyRecovery,
     clearHistorianFailureState,
     getLastNudgeUndropped,
@@ -309,6 +310,13 @@ export function createEventHook(args: {
                     // (e.g. a 120K detected limit kept after switching to a 1M model).
                     clearDetectedContextLimit(args.db, assistantInfo.sessionID);
                     clearEmergencyRecovery(args.db, assistantInfo.sessionID);
+                    // The emergency-drop watermark is keyed to the prior model's
+                    // ceiling (contextLimit × executeThreshold). A switch to a
+                    // smaller model lowers the ceiling, so older tags below the
+                    // watermark must be re-evaluated. For the same delegation reason
+                    // as above, the transform-side reset is dead on a live switch —
+                    // clear it HERE.
+                    clearEmergencyDropWatermark(args.db, assistantInfo.sessionID);
                     updateSessionMeta(args.db, assistantInfo.sessionID, {
                         clearedReasoningThroughTag: 0,
                         observedSafeInputTokens: 0,

@@ -140,6 +140,17 @@ export interface TranscriptPart {
      * replaced (e.g. it's already a sentinel, or it's an image part).
      */
     replaceWithSentinel(sentinelText: string): boolean;
+
+    /**
+     * Optional: serialized byte size of the part's REAL payload, including
+     * non-text content (images, structured data) that `getText()` can't
+     * surface. Used by emergency-drop reclaim accounting so an image-only
+     * tool result is sized by its actual payload, not treated as ~0 bytes.
+     * Adapters that can compute this (e.g. Pi's tool_result proxy, which
+     * closes over the raw content array) should implement it; callers fall
+     * back to the text/JSON estimate when it's absent.
+     */
+    rawByteSize?(): number;
 }
 
 /**

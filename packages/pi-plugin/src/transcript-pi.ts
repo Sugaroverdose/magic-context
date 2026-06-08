@@ -813,6 +813,19 @@ function createPiToolResultPart(
 			markDirty(messageIndex);
 			return true;
 		},
+		rawByteSize(): number {
+			// Serialize the actual block so a non-text (image / structured)
+			// tool-result is sized by its real payload, not the ~0 bytes that
+			// getText() would report. Emergency-drop reclaim math depends on this.
+			const current = (working[messageIndex] as PiToolResultMessage).content;
+			const p = current[partIndex];
+			if (p?.type === "text") return Buffer.byteLength(p.text, "utf8");
+			try {
+				return Buffer.byteLength(JSON.stringify(p ?? null), "utf8");
+			} catch {
+				return 0;
+			}
+		},
 	};
 }
 
