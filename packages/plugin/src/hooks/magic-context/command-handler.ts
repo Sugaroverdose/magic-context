@@ -342,7 +342,6 @@ async function executeDreaming(
 export function createMagicContextCommandHandler(deps: {
     db: Database;
     protectedTags: number;
-    nudgeIntervalTokens?: number;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
     executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
     historyBudgetPercentage?: number;

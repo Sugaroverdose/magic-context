@@ -145,6 +145,7 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 63, inputTokens: 126_000 },
             62,
             65,
+            6500,
         );
 
         expect(result).toEqual({ shouldFire: true, reason: "projected_headroom" });
@@ -170,6 +171,7 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 63, inputTokens: 126_000 },
             62,
             65,
+            6500,
         );
 
         expect(result).toEqual({ shouldFire: false });
@@ -194,6 +196,7 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 82, inputTokens: 164_000 },
             79,
             65,
+            6500,
         );
 
         expect(result).toEqual({ shouldFire: false });
@@ -217,6 +220,7 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 63, inputTokens: 126_000 },
             62,
             65,
+            6500,
         );
 
         //#then: no eligible prefix — should not fire
@@ -249,6 +253,7 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 63, inputTokens: 126_000 },
             62,
             65,
+            6500,
         );
 
         //#then: fires because the eligible prefix (m-1 to m-6) is meaningful

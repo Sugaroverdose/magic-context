@@ -63,7 +63,6 @@ describe("isSecretKey — false positives we deliberately reject", () => {
         "token_budget",
         "execute_threshold_tokens",
         "injection_budget_tokens",
-        "nudge_interval_tokens",
         "key_files", // a sub-field of pin_key_files
         // Generic plain English compounds that aren't secrets.
         "key_value", // map-style label

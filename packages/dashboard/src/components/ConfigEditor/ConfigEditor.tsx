@@ -201,18 +201,11 @@ const FIELD_DEFS: FieldDef[] = [
     label: "Agent Controlled Reduction",
     type: "boolean",
     description:
-      "Enable agent controlled reductions via ctx_reduce tool. When enabled, agent is prompted and nudged to choose what messages and tool calls to drop periodically. If disabled the system still works via auto drops based on message ages.",
+      "Enable agent-controlled reductions via the ctx_reduce tool. When enabled, the agent is prompted and nudged to choose what messages and tool calls to drop. When disabled, the system still manages context automatically via historian comparting and the tiered emergency drop under pressure.",
     section: "General",
   },
   // Thresholds
   // cache_ttl and execute_threshold_percentage are rendered as custom PerModelField components
-  {
-    key: "nudge_interval_tokens",
-    label: "Nudge Interval (tokens)",
-    type: "number",
-    description: "Token interval between rolling ctx_reduce nudges.",
-    section: "General",
-  },
   // Tags & cleanup
   {
     key: "protected_tags",
@@ -227,13 +220,6 @@ const FIELD_DEFS: FieldDef[] = [
     type: "number",
     description: "Tag age after which reasoning blocks are cleared.",
     section: "Tags & Cleanup",
-  },
-  {
-    key: "iteration_nudge_threshold",
-    label: "Iteration Nudge Threshold",
-    type: "number",
-    description: "Number of consecutive tool calls before showing an iteration nudge.",
-    section: "General",
   },
   // Historian
   {
@@ -349,10 +335,8 @@ const SECTION_ICONS: Record<string, string> = {
 // Fields that should use range sliders (percentage or threshold values)
 const RANGE_SLIDER_FIELDS = new Set([
   "history_budget_percentage",
-  "nudge_interval_tokens",
   "protected_tags",
   "clear_reasoning_age",
-  "iteration_nudge_threshold",
   "historian_timeout_ms",
   "memory.injection_budget_tokens",
 ]);
@@ -516,14 +500,10 @@ function ConfigForm(props: {
         return { min: 20, max: 80, step: 1, suffix: "%", defaultValue: 65 };
       case "history_budget_percentage":
         return { min: 0.05, max: 0.5, step: 0.01, suffix: "", defaultValue: 0.15 };
-      case "nudge_interval_tokens":
-        return { min: 1000, max: 50000, step: 1000, suffix: " tokens", defaultValue: 10000 };
       case "protected_tags":
         return { min: 1, max: 100, step: 1, suffix: "", defaultValue: 20 };
       case "clear_reasoning_age":
         return { min: 10, max: 200, step: 5, suffix: "", defaultValue: 50 };
-      case "iteration_nudge_threshold":
-        return { min: 5, max: 30, step: 1, suffix: "", defaultValue: 15 };
       case "historian_timeout_ms":
         return { min: 60000, max: 600000, step: 30000, suffix: " ms", defaultValue: 300000 };
       case "memory.injection_budget_tokens":

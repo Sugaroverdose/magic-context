@@ -3,7 +3,6 @@ import { z } from "zod";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
-export const DEFAULT_NUDGE_INTERVAL_TOKENS = 10_000;
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
 // Explains WHY execute_threshold is hard-capped at 80% (not just "too big").
 // A single agent step can be large enough to overflow the context window before
@@ -235,7 +234,6 @@ export interface MagicContextConfig {
     historian?: HistorianConfig;
     dreamer?: DreamerConfig;
     cache_ttl: string | { default: string; [modelKey: string]: string };
-    nudge_interval_tokens: number;
     execute_threshold_percentage: number | { default: number; [modelKey: string]: number };
     /** Absolute token thresholds per model. When set for a given model (or via `default`),
      *  this overrides `execute_threshold_percentage` for that model. Useful for hard caps
@@ -243,7 +241,6 @@ export interface MagicContextConfig {
     execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
     protected_tags: number;
     clear_reasoning_age: number;
-    iteration_nudge_threshold: number;
     history_budget_percentage: number;
     historian_timeout_ms: number;
     commit_cluster_trigger: {
@@ -367,13 +364,6 @@ export const MagicContextConfigSchema = z
             .describe(
                 'Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" })',
             ),
-        nudge_interval_tokens: z
-            .number()
-            .min(1000)
-            .default(DEFAULT_NUDGE_INTERVAL_TOKENS)
-            .describe(
-                "Minimum token growth between low-priority rolling nudges (default: DEFAULT_NUDGE_INTERVAL_TOKENS)",
-            ),
         execute_threshold_percentage: z
             .union([
                 z.number().min(20).max(80, EXECUTE_THRESHOLD_CAP_MESSAGE),
@@ -407,13 +397,6 @@ export const MagicContextConfigSchema = z
             .min(10)
             .default(50)
             .describe("Clear reasoning/thinking blocks older than N tags (default: 50)"),
-        iteration_nudge_threshold: z
-            .number()
-            .min(5)
-            .default(15)
-            .describe(
-                "Number of consecutive assistant messages without user input to trigger iteration nudge (default: 15)",
-            ),
         history_budget_percentage: z
             .number()
             .min(0.05)

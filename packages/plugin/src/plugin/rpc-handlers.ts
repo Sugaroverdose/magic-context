@@ -529,9 +529,7 @@ export function buildStatusDetail(
         executeThreshold: 65,
         executeThresholdMode: "percentage",
         protectedTagCount: 20,
-        nudgeInterval: 20000,
         historyBudgetPercentage: 0.15,
-        nextNudgeAfter: 0,
         historyBlockTokens: 0,
         compressionBudget: null,
         compressionUsage: null,
@@ -623,9 +621,6 @@ export function buildStatusDetail(
             if (typeof config.protected_tag_count === "number") {
                 detail.protectedTagCount = config.protected_tag_count;
             }
-            if (typeof config.nudge_interval_tokens === "number") {
-                detail.nudgeInterval = config.nudge_interval_tokens;
-            }
             if (typeof config.history_budget_percentage === "number") {
                 detail.historyBudgetPercentage = config.history_budget_percentage;
             }
@@ -643,7 +638,6 @@ export function buildStatusDetail(
             detail.cacheRemainingMs = Math.max(0, detail.cacheTtlMs - elapsed);
             detail.cacheExpired = detail.cacheRemainingMs === 0;
         }
-        detail.nextNudgeAfter = detail.lastNudgeTokens + detail.nudgeInterval;
 
         // History compression
         try {

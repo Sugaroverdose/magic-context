@@ -20,8 +20,6 @@ export const RENDERED_PREFIXES: readonly string[] = [
   // General
   "enabled",
   "ctx_reduce_enabled",
-  "nudge_interval_tokens",
-  "iteration_nudge_threshold",
   // Thresholds (custom PerModelField widgets)
   "cache_ttl",
   "execute_threshold_percentage",

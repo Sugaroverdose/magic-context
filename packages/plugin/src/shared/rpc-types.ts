@@ -118,9 +118,7 @@ export interface StatusDetail extends SidebarSnapshot {
      */
     executeThresholdTokens?: number;
     protectedTagCount: number;
-    nudgeInterval: number;
     historyBudgetPercentage: number;
-    nextNudgeAfter: number;
     historyBlockTokens: number;
     compressionBudget: number | null;
     compressionUsage: string | null;

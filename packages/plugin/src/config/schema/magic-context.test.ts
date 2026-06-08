@@ -3,7 +3,6 @@ import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
     DEFAULT_LOCAL_EMBEDDING_MODEL,
-    DEFAULT_NUDGE_INTERVAL_TOKENS,
     type MagicContextConfig,
     MagicContextConfigSchema,
 } from "./magic-context";
@@ -16,11 +15,9 @@ describe("MagicContextConfigSchema", () => {
             expect(result).toMatchObject({
                 enabled: true,
                 cache_ttl: "5m",
-                nudge_interval_tokens: DEFAULT_NUDGE_INTERVAL_TOKENS,
                 execute_threshold_percentage: 65,
                 protected_tags: 20,
                 clear_reasoning_age: 50,
-                iteration_nudge_threshold: 15,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
                 historian_timeout_ms: DEFAULT_HISTORIAN_TIMEOUT_MS,
                 embedding: {
@@ -48,10 +45,8 @@ describe("MagicContextConfigSchema", () => {
                 ctx_reduce_enabled: true,
                 cache_ttl: "10m",
                 protected_tags: 3,
-                nudge_interval_tokens: 15_000,
                 execute_threshold_percentage: 75,
                 clear_reasoning_age: 60,
-                iteration_nudge_threshold: 20,
                 history_budget_percentage: 0.2,
                 historian_timeout_ms: 360_000,
                 commit_cluster_trigger: {
@@ -178,25 +173,8 @@ describe("MagicContextConfigSchema", () => {
             expect(MagicContextConfigSchema.parse({ protected_tags: 20 }).protected_tags).toBe(20);
         });
 
-        it("rejects nudge_interval_tokens below minimum", () => {
-            expect(() => MagicContextConfigSchema.parse({ nudge_interval_tokens: 999 })).toThrow();
-        });
-
-        it("accepts nudge_interval_tokens at minimum", () => {
-            expect(
-                MagicContextConfigSchema.parse({ nudge_interval_tokens: 1000 })
-                    .nudge_interval_tokens,
-            ).toBe(1000);
-        });
-
         it("rejects clear_reasoning_age below minimum", () => {
             expect(() => MagicContextConfigSchema.parse({ clear_reasoning_age: 9 })).toThrow();
-        });
-
-        it("rejects iteration_nudge_threshold below minimum", () => {
-            expect(() =>
-                MagicContextConfigSchema.parse({ iteration_nudge_threshold: 4 }),
-            ).toThrow();
         });
 
         it("rejects historian_timeout_ms below minimum", () => {

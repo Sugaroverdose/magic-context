@@ -385,12 +385,9 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 </box>
                 {/* Right column */}
                 <box flexDirection="column" flexGrow={1} flexBasis={0}>
-                    <text fg={t().text}><b>Rolling Nudges</b></text>
+                    <text fg={t().text}><b>Reductions</b></text>
                     <R t={t()} l="Execute threshold" v={`${formatThresholdPercent(s().executeThreshold)}%`} />
-                    <R t={t()} l="Nudge anchor" v={`${fmt(s().lastNudgeTokens)} tok`} />
-                    <R t={t()} l="Interval" v={`${fmt(s().nudgeInterval)} tok`} fg={t().textMuted} />
-                    <R t={t()} l="Next nudge after" v={`${fmt(s().nextNudgeAfter)} tok`} />
-                    {s().lastNudgeBand ? <R t={t()} l="Current band" v={s().lastNudgeBand} /> : null}
+                    <R t={t()} l="Last reduce anchor" v={`${fmt(s().lastNudgeTokens)} tok`} />
                     <box marginTop={1}>
                         <text fg={t().text}><b>Context Details</b></text>
                     </box>

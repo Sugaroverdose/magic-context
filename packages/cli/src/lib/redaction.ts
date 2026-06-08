@@ -7,7 +7,7 @@ function escapeRegex(value: string): string {
 // Whole-segment match: the key (or its components when split on common
 // separators) must BE one of these words, not merely contain them as a
 // substring. The previous bare-substring pattern wrongly redacted plain
-// config fields like `pin_key_files`, `token_budget`, `nudge_interval_tokens`,
+// config fields like `pin_key_files`, `token_budget`, `execute_threshold_tokens`,
 // `injection_budget_tokens`, etc. — none of which are secrets but all of
 // which contain a secret-related word as part of a compound name.
 //

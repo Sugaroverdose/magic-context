@@ -1,8 +1,5 @@
 import type { MagicContextPluginConfig } from "../../config";
-import {
-    DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
-    DEFAULT_NUDGE_INTERVAL_TOKENS,
-} from "../../config/schema/magic-context";
+import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
 import { createCompactionHandler } from "../../features/magic-context/compaction";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -45,11 +42,8 @@ export function createSessionHooks(args: {
             config: {
                 protected_tags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
                 ctx_reduce_enabled: pluginConfig.ctx_reduce_enabled,
-                nudge_interval_tokens:
-                    pluginConfig.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
                 cache_ttl: pluginConfig.cache_ttl,
                 clear_reasoning_age: pluginConfig.clear_reasoning_age,
-                iteration_nudge_threshold: pluginConfig.iteration_nudge_threshold,
                 execute_threshold_percentage:
                     pluginConfig.execute_threshold_percentage ??
                     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,

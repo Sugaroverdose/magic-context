@@ -7,7 +7,6 @@ import {
 } from "../../config/agent-disable";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
-    DEFAULT_NUDGE_INTERVAL_TOKENS,
     type DreamerConfig,
     type HistorianConfig,
     type SidekickConfig,
@@ -80,9 +79,7 @@ export interface MagicContextDeps {
     config: {
         protected_tags: number;
         ctx_reduce_enabled?: boolean;
-        nudge_interval_tokens?: number;
         clear_reasoning_age?: number;
-        iteration_nudge_threshold?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
         cache_ttl: string | Record<string, string>;
@@ -529,7 +526,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const commandHandler = createMagicContextCommandHandler({
         db,
         protectedTags: deps.config.protected_tags,
-        nudgeIntervalTokens: deps.config.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historyBudgetPercentage: deps.config.history_budget_percentage,

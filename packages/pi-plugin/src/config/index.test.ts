@@ -114,14 +114,14 @@ describe("loadPiConfig", () => {
 			cwd,
 			JSON.stringify({
 				memory: { injection_budget_tokens: 9000 },
-				nudge_interval_tokens: 5000,
+				clear_reasoning_age: 60,
 			}),
 		);
 		const userPath = writeUserConfig(
 			home,
 			JSON.stringify({
 				memory: { enabled: false, injection_budget_tokens: 2000 },
-				nudge_interval_tokens: 4000,
+				clear_reasoning_age: 40,
 			}),
 		);
 
@@ -129,7 +129,7 @@ describe("loadPiConfig", () => {
 
 		expect(result.config.memory.enabled).toBe(false);
 		expect(result.config.memory.injection_budget_tokens).toBe(9000);
-		expect(result.config.nudge_interval_tokens).toBe(5000);
+		expect(result.config.clear_reasoning_age).toBe(60);
 		expect(result.loadedFromPaths).toEqual([projectPath, userPath]);
 	});
 
@@ -155,17 +155,17 @@ describe("loadPiConfig", () => {
 			cwd,
 			JSON.stringify({
 				enabled: false,
-				nudge_interval_tokens: 50,
+				clear_reasoning_age: 3,
 			}),
 		);
 
 		const result = loadPiConfig({ cwd });
 
 		expect(result.config.enabled).toBe(false);
-		expect(result.config.nudge_interval_tokens).toBe(
-			MagicContextConfigSchema.parse({}).nudge_interval_tokens,
+		expect(result.config.clear_reasoning_age).toBe(
+			MagicContextConfigSchema.parse({}).clear_reasoning_age,
 		);
-		expect(result.warnings.join("\n")).toContain("nudge_interval_tokens");
+		expect(result.warnings.join("\n")).toContain("clear_reasoning_age");
 		expect(result.warnings.join("\n")).toContain("using default");
 	});
 
