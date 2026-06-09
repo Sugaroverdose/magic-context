@@ -64,6 +64,8 @@ export interface CompartmentRunnerDeps {
     historianTimeoutMs?: number;
     /** Immutable protected-tail boundary resolved by the trigger/force path. Tests may omit it and use the default-snapshot factory. */
     boundarySnapshot?: ProtectedTailBoundarySnapshot;
+    /** Current resolved main-model context limit used to reject stale boundary snapshots after model switches. */
+    currentContextLimit?: number;
     /** Resolved fallback chain for historian-family calls (historian + compressor). */
     fallbackModels?: readonly string[];
     directory: string;

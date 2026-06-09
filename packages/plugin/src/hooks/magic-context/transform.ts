@@ -51,6 +51,7 @@ import {
     hasRunnableCompartmentWindow,
     type ProtectedTailBoundarySnapshot,
     RECOVERY_NO_HEAD_LIMIT,
+    recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import { readRawSessionMessages } from "./read-session-chunk";
@@ -523,6 +524,9 @@ export function createTransform(deps: TransformDeps) {
         // clean state (0%) instead of stale values from a previous model/session.
         let contextUsageEarly = loadContextUsage(deps.contextUsageMap, db, sessionId);
 
+        let recoveryNoHeadEscapeActive = false;
+        let emergencyRecoveryArmed = false;
+
         // Overflow-triggered emergency recovery: if a prior provider response
         // included a context-overflow error, the event handler persisted
         // needs_emergency_recovery=1. On the very next transform pass we bump
@@ -534,13 +538,15 @@ export function createTransform(deps: TransformDeps) {
         if (fullFeatureMode) {
             try {
                 const overflowState = getOverflowState(db, sessionId);
-                if (contextUsageEarly.percentage < 80) {
+                emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
+                if (contextUsageEarly.percentage < 80 && !overflowState.needsEmergencyRecovery) {
                     resetProtectedTailNoEligibleHead(db, sessionId);
                 }
                 const protectedTailMeta = loadProtectedTailMeta(db, sessionId);
                 const noHeadEscape =
                     overflowState.needsEmergencyRecovery &&
                     protectedTailMeta.recoveryNoEligibleHeadCount >= RECOVERY_NO_HEAD_LIMIT;
+                recoveryNoHeadEscapeActive = noHeadEscape;
                 if (
                     overflowState.needsEmergencyRecovery &&
                     contextUsageEarly.percentage < 95 &&
@@ -554,7 +560,7 @@ export function createTransform(deps: TransformDeps) {
                         ...contextUsageEarly,
                         percentage: 95,
                     };
-                } else if (noHeadEscape && deps.client) {
+                } else if (recoveryNoHeadEscapeActive && deps.client) {
                     void sendIgnoredMessage(
                         deps.client,
                         sessionId,
@@ -761,7 +767,7 @@ export function createTransform(deps: TransformDeps) {
         const getEligibleHistoryForCompartment = (): boolean => {
             const snapshot = getRunnableBoundaryForCompartment();
             if (snapshot !== null && hasRunnableCompartmentWindow(snapshot)) return true;
-            if (process.env.NODE_ENV === "test") {
+            if (process.env.NODE_ENV === "test" && !emergencyRecoveryArmed) {
                 return hasRunnableCompartmentWindow(
                     createDefaultBoundarySnapshotForTests(sessionId),
                 );
@@ -778,6 +784,7 @@ export function createTransform(deps: TransformDeps) {
             }
             if (
                 process.env.NODE_ENV === "test" &&
+                !emergencyRecoveryArmed &&
                 (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot))
             ) {
                 const legacyTestSnapshot = createDefaultBoundarySnapshotForTests(sessionId);
@@ -804,6 +811,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionId,
                 historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
                 boundarySnapshot,
+                currentContextLimit: boundaryContextLimit,
                 historyBudgetTokens,
                 historianTimeoutMs: deps.historianTimeoutMs,
                 fallbackModels: deps.fallbackModels,
@@ -841,7 +849,8 @@ export function createTransform(deps: TransformDeps) {
         if (
             fullFeatureMode &&
             historianFailureState.failureCount > 0 &&
-            contextUsageEarly.percentage >= 95
+            contextUsageEarly.percentage >= 95 &&
+            !recoveryNoHeadEscapeActive
         ) {
             skipCompartmentAwaitForThisPass = true;
             const emergencyPercentage = contextUsageEarly.percentage.toFixed(1);
@@ -874,16 +883,19 @@ export function createTransform(deps: TransformDeps) {
             }
 
             const recoveryStarted = startRecoveryRun();
-            // If recovery can't start because there's no eligible pre-tail
-            // history to compact, the runner's own no-op clear (which disarms
-            // needs_emergency_recovery) never fires — so the flag would stay
-            // armed and force-bump every later pass to 95% forever (abort loop),
-            // even after the user manually frees context. Disarm here too,
-            // matching the runner's no-op semantics. Preserve detectedContextLimit
-            // (authoritative model data). Only do this for the no-eligible-history
-            // reason — an active run (startRecoveryRun false because one is already
-            // in flight) will clear the flag itself when it completes.
+            // If recovery can't start because there is no eligible pre-tail
+            // history to compact, the runner no-op that normally counts this
+            // condition never fires. Count it here too so a genuinely in-progress
+            // tail can escape the abort loop after a bounded number of passes;
+            // keep recovery armed so compaction still happens once the arc closes.
             if (!recoveryStarted && !getEligibleHistoryForCompartment()) {
+                const noHeadSnapshot =
+                    getRunnableBoundaryForCompartment(
+                        contextUsageEarly.percentage >= 95 ? 0.25 : 0.5,
+                    ) ?? getRunnableBoundaryForCompartment();
+                if (noHeadSnapshot) {
+                    recordHighPressureNoEligibleHead(db, noHeadSnapshot);
+                }
                 sessionLog(
                     sessionId,
                     "transform: emergency recovery remains armed — no complete eligible head before protected tail",
@@ -1282,6 +1294,10 @@ export function createTransform(deps: TransformDeps) {
             historianRunnable,
             sessionMeta,
             contextUsage,
+            boundaryContextLimit,
+            boundaryExecuteThresholdPercentage: boundaryExecuteThreshold,
+            boundaryUsage: boundaryUsageForProtectedTail,
+            boundaryUsageSource,
             client: deps.client,
             db,
             sessionId,

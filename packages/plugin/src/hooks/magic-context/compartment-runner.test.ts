@@ -20,6 +20,7 @@ import {
     getPendingOps,
     getTagsBySession,
     incrementHistorianFailure,
+    loadProtectedTailMeta,
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -1833,4 +1834,74 @@ describe("registerActiveCompartmentRun", () => {
         // finally must not have stomped it.
         expect(getActiveCompartmentRun(sessionId)).toBeDefined();
     });
+});
+
+it("rolls back protected-tail drain reservation when publish throws after historian success", async () => {
+    useTempDataHome("compartment-runner-drain-rollback-");
+    createOpenCodeDb("ses-drain-rollback", [
+        { id: "m-1", role: "user", text: "first small head" },
+        { id: "m-2", role: "assistant", text: "second" },
+        { id: "m-3", role: "user", text: "tail ".repeat(3000) },
+    ]);
+    const db = openDatabase();
+    db.exec(
+        "CREATE TRIGGER fail_compartment_insert BEFORE INSERT ON compartments BEGIN SELECT RAISE(ABORT, 'append fail'); END;",
+    );
+    const boundarySnapshot = {
+        sessionId: "ses-drain-rollback",
+        mode: "trigger" as const,
+        offset: 1,
+        rawMessageCountAtTrigger: 3,
+        rawLastMessageIdAtTrigger: "m-3",
+        protectedTailStart: 3,
+        eligibleEndOrdinal: 3,
+        N: 1_000,
+        usagePercentage: 95,
+        usageInputTokens: 7_600,
+        usageSource: "live" as const,
+        contextLimit: 8_000,
+        executeThresholdPercentage: 65,
+        triggerBudget: 5_200,
+        providerShapeVersion: "opencode-v1",
+        cacheNamespace: "test:ses-drain-rollback",
+        createdAt: Date.now(),
+        rawRangeFingerprint: "",
+        trueRawEligibleTokens: 500,
+        oversizeAtomicUnit: false,
+        boundaryReason: "size-walk",
+    };
+
+    const client = {
+        session: {
+            get: mock(async () => ({ data: { directory: "/tmp/parent" } })),
+            create: mock(async () => ({ data: { id: "ses-agent" } })),
+            prompt: mock(async () => ({})),
+            messages: mock(async () => ({
+                data: [
+                    {
+                        info: { role: "assistant", time: { created: 1 } },
+                        parts: [
+                            {
+                                type: "text",
+                                text: '<compartment start="1" end="2" title="Done">Summary</compartment>',
+                            },
+                        ],
+                    },
+                ],
+            })),
+            delete: mock(async () => ({})),
+        },
+    } as unknown as PluginContext["client"];
+
+    await runCompartmentAgentWithLease({
+        client,
+        db,
+        sessionId: "ses-drain-rollback",
+        historianChunkTokens: 10_000,
+        directory: "/tmp",
+        boundarySnapshot,
+        currentContextLimit: 8_000,
+    });
+
+    expect(loadProtectedTailMeta(db, "ses-drain-rollback").protectedTailDrainTokens).toBe(0);
 });

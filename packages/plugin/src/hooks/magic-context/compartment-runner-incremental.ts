@@ -56,9 +56,7 @@ import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import {
     createDefaultBoundarySnapshotForTests,
-    type ProtectedTailBoundarySnapshot,
     recordHighPressureNoEligibleHead,
-    resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
@@ -96,10 +94,10 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         getNotificationParams,
     } = deps;
     let completedSuccessfully = false;
+    let retainDrainReservationForRetryThrottle = false;
     let issueNotified = false;
     let stateFilePath: string | undefined;
     let drainReservation: ReturnType<typeof reserveProtectedTailDrainTokens>["reservation"] = null;
-    let historianAttempted = false;
 
     // historian_runs telemetry (migration v24). Captured across the run and
     // recorded ONCE in `finally` so every exit path (no-op, failure, success) is
@@ -205,22 +203,28 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 ? priorCompartments[priorCompartments.length - 1].endMessage + 1
                 : 1;
 
-        const boundarySnapshot: ProtectedTailBoundarySnapshot =
+        const boundarySnapshot =
             deps.boundarySnapshot ??
             (process.env.NODE_ENV === "test"
                 ? createDefaultBoundarySnapshotForTests(sessionId)
-                : resolveOpenCodeProtectedTailBoundary({
-                      db,
-                      sessionId,
-                      mode: "incremental-runner",
-                      contextLimit: 128_000,
-                      executeThresholdPercentage: 65,
-                      usage: null,
-                      usageSource: "provisional-zero",
-                  }));
+                : null);
+        if (!boundarySnapshot) {
+            telemetry.failureReason = "missing protected-tail boundary snapshot";
+            sessionLog(
+                sessionId,
+                "historian no-op: missing protected-tail boundary snapshot from trigger decision",
+            );
+            rollbackDrainReservation();
+            return;
+        }
         const validation =
             boundarySnapshot.rawRangeFingerprint.length > 0
-                ? validateBoundarySnapshot({ db, snapshot: boundarySnapshot })
+                ? validateBoundarySnapshot({
+                      db,
+                      snapshot: boundarySnapshot,
+                      currentContextLimit:
+                          deps.currentContextLimit ?? boundarySnapshot.contextLimit,
+                  })
                 : { ok: true };
         if (!validation.ok) {
             sessionLog(
@@ -379,7 +383,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         );
         const sequenceOffset = priorCompartments.length === 0 ? 0 : maxExistingSequence + 1;
 
-        historianAttempted = true;
+        retainDrainReservationForRetryThrottle = true;
         const validatedPass = await runValidatedHistorianPass({
             client,
             parentSessionId: sessionId,
@@ -407,6 +411,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             await notifyHistorianIssue(buildHistorianFailureNotice(failCount, validatedPass.error));
             return;
         }
+        retainDrainReservationForRetryThrottle = false;
 
         const emittedCompartments = validatedPass.compartments;
 
@@ -462,6 +467,8 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             );
             return;
         }
+
+        retainDrainReservationForRetryThrottle = false;
 
         // Plan v6 §4: when the runner is preserving the injection cache,
         // defer marker movement until a later materializing transform pass.
@@ -728,7 +735,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         }
     } finally {
         if (!completedSuccessfully) {
-            if (!historianAttempted) rollbackDrainReservation();
+            if (!retainDrainReservationForRetryThrottle) rollbackDrainReservation();
             updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         }
         // Record one historian_runs row for this attempt (every exit path).

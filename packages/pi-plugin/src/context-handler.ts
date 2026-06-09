@@ -109,9 +109,9 @@ import {
 	peekNoteNudgeText,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
-	createDefaultBoundarySnapshotForTests,
 	getRawHistoryEligibility,
 	hasRunnableCompartmentWindow,
+	type ProtectedTailBoundarySnapshot,
 	resolveBoundaryContext,
 	resolveProtectedTailBoundary,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
@@ -119,6 +119,7 @@ import {
 	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
@@ -2021,6 +2022,10 @@ export function registerPiContextHandler(
 					updateSessionMeta(options.db, sessionId, {
 						piStableIdScheme: PI_STABLE_ID_SCHEME,
 					});
+					invalidateTrueRawTokenCache({
+						sessionId,
+						reason: "pi.stable-id-scheme.changed",
+					});
 					sessionLog(
 						sessionId,
 						`stable-id scheme cutover complete — stamped scheme=${PI_STABLE_ID_SCHEME}`,
@@ -2434,30 +2439,43 @@ function startPiCompartmentLeaseRenewal(
 	}, COMPARTMENT_LEASE_RENEWAL_MS);
 }
 
+function ensureRunnablePiBoundaryForTests(
+	snapshot: ProtectedTailBoundarySnapshot,
+): ProtectedTailBoundarySnapshot {
+	if (
+		process.env.NODE_ENV !== "test" ||
+		hasRunnableCompartmentWindow(snapshot)
+	) {
+		return snapshot;
+	}
+	const rawEnd =
+		(snapshot.rawMessageCountAtTrigger ?? snapshot.protectedTailStart) + 1;
+	const endOrdinal = Math.min(
+		rawEnd,
+		Math.max(snapshot.offset + 2, snapshot.protectedTailStart),
+	);
+	return {
+		...snapshot,
+		protectedTailStart: endOrdinal,
+		eligibleEndOrdinal: endOrdinal,
+		trueRawEligibleTokens: Math.max(1, snapshot.trueRawEligibleTokens),
+		rawRangeFingerprint: "",
+	};
+}
+
 function hasEligiblePiCompartmentHistory(
 	db: ContextDatabase,
 	sessionId: string,
+	boundarySnapshot?: ProtectedTailBoundarySnapshot,
 ): boolean {
 	try {
 		const rawEligibility = getRawHistoryEligibility(db, sessionId);
 		if (!rawEligibility.hasRawBeyondLastCompartment) return false;
-		const snapshot =
-			process.env.NODE_ENV === "test"
-				? createDefaultBoundarySnapshotForTests(sessionId)
-				: resolveProtectedTailBoundary(
-						resolveBoundaryContext({
-							db,
-							sessionId,
-							mode: "pi-trigger",
-							contextLimit: 128_000,
-							executeThresholdPercentage: 65,
-							usage: null,
-							usageSource: "provisional-zero",
-							providerShapeVersion: "pi-folded-v1",
-							cacheNamespace: `pi:${sessionId}`,
-						}),
-					);
-		return hasRunnableCompartmentWindow(snapshot);
+		if (!boundarySnapshot)
+			return rawEligibility.offset <= rawEligibility.rawMessageCount;
+		return hasRunnableCompartmentWindow(
+			ensureRunnablePiBoundaryForTests(boundarySnapshot),
+		);
 	} catch (err) {
 		sessionLog(
 			sessionId,
@@ -2491,8 +2509,19 @@ function spawnPiHistorianRun(args: {
 	historian: PiHistorianOptions;
 	provider: { readMessages: () => ReturnType<typeof readPiSessionMessages> };
 	unregister: () => void;
+	boundarySnapshot: ProtectedTailBoundarySnapshot;
+	currentContextLimit: number;
 }): void {
-	const { ctx, sessionId, db, historian, provider, unregister } = args;
+	const {
+		ctx,
+		sessionId,
+		db,
+		historian,
+		provider,
+		unregister,
+		boundarySnapshot,
+		currentContextLimit,
+	} = args;
 	const holderId = crypto.randomUUID();
 	const runPromise = (async () => {
 		const lease = acquireCompartmentLease(db, sessionId, holderId);
@@ -2516,6 +2545,8 @@ function spawnPiHistorianRun(args: {
 				historianModel: historian.model,
 				fallbackModels: historian.fallbackModels,
 				historianChunkTokens: historian.historianChunkTokens,
+				boundarySnapshot,
+				currentContextLimit,
 				historianTimeoutMs: historian.timeoutMs,
 				twoPass: historian.twoPass,
 				thinkingLevel: historian.thinkingLevel,
@@ -2738,6 +2769,44 @@ function maybeFireHistorian(args: {
 		readMessages: () => readPiSessionMessages(ctx),
 	};
 	const unregister = setRawMessageProvider(sessionId, provider);
+	const sessionMeta = getOrCreateSessionMeta(db, sessionId);
+	const modelKey = liveModelBySession.get(sessionId);
+	const triggerInputs = resolvePiHistorianTriggerInputs({
+		db,
+		sessionId,
+		historian,
+		modelKey,
+		usageContextLimit,
+	});
+	const boundaryContextLimit = usageContextLimit ?? 128_000;
+	const resolvePiBoundarySnapshot = (
+		emergencyTailScale?: 0.5 | 0.25,
+	): ProtectedTailBoundarySnapshot =>
+		resolveProtectedTailBoundary(
+			resolveBoundaryContext({
+				db,
+				sessionId,
+				mode: "pi-trigger",
+				contextLimit: boundaryContextLimit,
+				executeThresholdPercentage: triggerInputs.executeThresholdPercentage,
+				usage,
+				usageSource: "live",
+				providerShapeVersion: "pi-folded-v1",
+				cacheNamespace: `pi:${sessionId}`,
+				emergencyTailScale,
+			}),
+		);
+	let boundarySnapshot = ensureRunnablePiBoundaryForTests(
+		resolvePiBoundarySnapshot(),
+	);
+	if (
+		!hasRunnableCompartmentWindow(boundarySnapshot) &&
+		usage.percentage >= 80
+	) {
+		boundarySnapshot = ensureRunnablePiBoundaryForTests(
+			resolvePiBoundarySnapshot(usage.percentage >= 95 ? 0.25 : 0.5),
+		);
+	}
 
 	let triggered = false;
 	try {
@@ -2757,7 +2826,7 @@ function maybeFireHistorian(args: {
 			const failureState = getHistorianFailureState(db, sessionId);
 			const shouldRecoverOnFirstPass =
 				failureState.failureCount > 0 &&
-				hasEligiblePiCompartmentHistory(db, sessionId);
+				hasEligiblePiCompartmentHistory(db, sessionId, boundarySnapshot);
 			if (shouldRecoverOnFirstPass) {
 				triggered = true;
 				sessionLog(
@@ -2775,20 +2844,13 @@ function maybeFireHistorian(args: {
 					historian,
 					provider,
 					unregister,
+					boundarySnapshot,
+					currentContextLimit: boundaryContextLimit,
 				});
 				return;
 			}
 		}
 
-		const sessionMeta = getOrCreateSessionMeta(db, sessionId);
-		const modelKey = liveModelBySession.get(sessionId);
-		const triggerInputs = resolvePiHistorianTriggerInputs({
-			db,
-			sessionId,
-			historian,
-			modelKey,
-			usageContextLimit,
-		});
 		const trigger = checkCompartmentTrigger(
 			db,
 			sessionId,
@@ -2829,6 +2891,8 @@ function maybeFireHistorian(args: {
 			historian,
 			provider,
 			unregister,
+			boundarySnapshot,
+			currentContextLimit: boundaryContextLimit,
 		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -4256,6 +4320,7 @@ function appendReminderToPiUserMessage(
 // orphan-row cost for sessions that are genuinely abandoned and never resumed.
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
+	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);

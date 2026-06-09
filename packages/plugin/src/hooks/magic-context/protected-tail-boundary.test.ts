@@ -217,3 +217,134 @@ it("manual full recomp protects an in-progress open tool arc", () => {
         closeQuietly(opencodeDb);
     }
 });
+
+import type { RawMessage } from "./read-session-raw";
+import {
+    buildToolArcs,
+    buildTrueRawTokenIndex,
+    computeRawRangeFingerprint,
+    fenceBoundaryForToolArcs,
+} from "./read-session-true-raw-tokens";
+
+it("fingerprints and true-raw tokens change when nested tool output grows with the same id and part count", () => {
+    const short: RawMessage[] = [
+        {
+            ordinal: 1,
+            id: "m1",
+            role: "assistant",
+            version: 1,
+            parts: [{ type: "tool", callID: "call-1", state: { output: "short" } }],
+        },
+    ];
+    const long: RawMessage[] = [
+        {
+            ordinal: 1,
+            id: "m1",
+            role: "assistant",
+            version: 1,
+            parts: [{ type: "tool", callID: "call-1", state: { output: "long ".repeat(2000) } }],
+        },
+    ];
+
+    expect(computeRawRangeFingerprint(short, 1, 2)).not.toBe(
+        computeRawRangeFingerprint(long, 1, 2),
+    );
+    const shortTokens = buildTrueRawTokenIndex("ses-cache", short, {
+        providerShapeVersion: "opencode-v1",
+        cacheNamespace: "same-session",
+    }).rangeTokens(1, 2);
+    const longTokens = buildTrueRawTokenIndex("ses-cache", long, {
+        providerShapeVersion: "opencode-v1",
+        cacheNamespace: "same-session",
+    }).rangeTokens(1, 2);
+    expect(longTokens).toBeGreaterThan(shortTokens);
+});
+
+it("moves a candidate boundary forward to the first later open tool invocation", () => {
+    expect(
+        fenceBoundaryForToolArcs(10, [{ callId: "open", invOrdinal: 20, resOrdinal: null }], 9),
+    ).toBe(20);
+});
+
+it("classifies property-presence tool states for open and null-output arcs", () => {
+    expect(
+        buildToolArcs([
+            {
+                ordinal: 1,
+                id: "m1",
+                role: "assistant",
+                parts: [{ type: "tool", callID: "empty-open", providerExecuted: false, state: {} }],
+            },
+        ]),
+    ).toEqual([{ callId: "empty-open", invOrdinal: 1, resOrdinal: null }]);
+
+    expect(
+        buildToolArcs([
+            {
+                ordinal: 1,
+                id: "m1",
+                role: "assistant",
+                parts: [
+                    { type: "tool", callID: "null-output", state: { input: { command: "x" } } },
+                ],
+            },
+            {
+                ordinal: 2,
+                id: "m2",
+                role: "user",
+                parts: [{ type: "tool", callID: "null-output", state: { output: null } }],
+            },
+        ]),
+    ).toEqual([{ callId: "null-output", invOrdinal: 1, resOrdinal: 2 }]);
+});
+
+it("bails a snapshot when the current context limit differs from the trigger limit", () => {
+    useBoundaryTempDataHome("protected-tail-model-switch-");
+    const sessionId = "ses-model-switch";
+    const opencodeDb = createBoundaryOpenCodeDb(sessionId, [
+        { id: "m1", role: "user", parts: [{ type: "text", text: "eligible" }] },
+        { id: "m2", role: "assistant", parts: [{ type: "text", text: "tail".repeat(2000) }] },
+    ]);
+    const db = createContextDb();
+    try {
+        const snapshot = resolveOpenCodeProtectedTailBoundary({
+            db,
+            sessionId,
+            mode: "trigger",
+            contextLimit: 1_000_000,
+            executeThresholdPercentage: 65,
+            usage: { percentage: 85, inputTokens: 500_000 },
+            usageSource: "live",
+        });
+        expect(validateBoundarySnapshot({ db, snapshot, currentContextLimit: 8_000 })).toEqual(
+            expect.objectContaining({ ok: false, reason: "model_or_limit_changed" }),
+        );
+    } finally {
+        closeQuietly(db);
+        closeQuietly(opencodeDb);
+    }
+});
+
+it("treats an emergency-scaled complete small head as runnable even below the force token floor", () => {
+    expect(
+        hasRunnableCompartmentWindow({
+            sessionId: "ses-small-head",
+            mode: "trigger",
+            offset: 1,
+            rawMessageCount: 2,
+            protectedTailStart: 2,
+            eligibleEndOrdinal: 2,
+            N: 2_000,
+            usableTokens: 7_800,
+            usagePercentage: 82,
+            usageInputTokens: 9_840,
+            usageSource: "live",
+            contextLimit: 12_000,
+            executeThresholdPercentage: 65,
+            trueRawEligibleTokens: 1,
+            trueRawTailTokens: 2_000,
+            boundaryReason: "size-walk",
+            rawRangeFingerprint: "stable",
+        }),
+    ).toBe(true);
+});

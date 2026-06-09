@@ -1,4 +1,5 @@
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
+import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
 import {
@@ -27,6 +28,10 @@ interface RunCompartmentPhaseArgs {
     historianRunnable?: boolean;
     sessionMeta: { compartmentInProgress: boolean };
     contextUsage: { percentage: number };
+    boundaryContextLimit: number;
+    boundaryExecuteThresholdPercentage: number;
+    boundaryUsage: ContextUsage;
+    boundaryUsageSource: "live" | "persisted" | "provisional-zero" | "manual-none";
     client?: PluginContext["client"];
     db: ContextDatabase;
     sessionId: string;
@@ -89,20 +94,31 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         return rawEligibility.hasRawBeyondLastCompartment;
     }
 
+    function resolveBoundarySnapshot(
+        emergencyTailScale?: 0.5 | 0.25,
+    ): ProtectedTailBoundarySnapshot {
+        return resolveOpenCodeProtectedTailBoundary({
+            db: args.db,
+            sessionId: args.resolvedSessionId,
+            mode: "transform-force",
+            contextLimit: args.boundaryContextLimit,
+            executeThresholdPercentage: args.boundaryExecuteThresholdPercentage,
+            usage: args.boundaryUsage,
+            usageSource: args.boundaryUsageSource,
+            emergencyTailScale,
+        });
+    }
+
     function getBoundarySnapshotForCompartment(): ProtectedTailBoundarySnapshot | null {
         if (!hasNewRawHistoryForCompartment()) return null;
         if (cachedBoundarySnapshot === null) {
-            cachedBoundarySnapshot = resolveOpenCodeProtectedTailBoundary({
-                db: args.db,
-                sessionId: args.resolvedSessionId,
-                mode: "transform-force",
-                contextLimit: 128_000,
-                executeThresholdPercentage: 65,
-                usage: { percentage: args.contextUsage.percentage, inputTokens: 0 },
-                usageSource: "live",
-                emergencyTailScale:
-                    args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : undefined,
-            });
+            let snapshot = resolveBoundarySnapshot();
+            if (!hasRunnableCompartmentWindow(snapshot) && args.contextUsage.percentage >= 80) {
+                snapshot = resolveBoundarySnapshot(
+                    args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5,
+                );
+            }
+            cachedBoundarySnapshot = snapshot;
         }
         return cachedBoundarySnapshot;
     }
@@ -186,6 +202,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 sessionId: args.sessionId,
                 historianChunkTokens: args.historianChunkTokens,
                 boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
+                currentContextLimit: args.boundaryContextLimit,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 fallbackModels: args.fallbackModels,
@@ -229,6 +246,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 sessionId: args.sessionId,
                 historianChunkTokens: args.historianChunkTokens,
                 boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
+                currentContextLimit: args.boundaryContextLimit,
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 fallbackModels: args.fallbackModels,

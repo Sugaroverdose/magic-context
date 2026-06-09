@@ -270,6 +270,34 @@ export function findLastModelKeyFromBranch(
 	return undefined;
 }
 
+function rawEntryVersion(entry: MessageEntry): string | number {
+	const record = entry as unknown as Record<string, unknown>;
+	const updated = record.updatedAt ?? record.updated_at ?? record.timestamp;
+	return typeof updated === "string" || typeof updated === "number"
+		? updated
+		: entry.id;
+}
+
+function attachPiPartVersion(
+	parts: unknown[],
+	version: string | number,
+): unknown[] {
+	return parts.map((part) => {
+		if (part === null || typeof part !== "object" || Array.isArray(part))
+			return part;
+		try {
+			Object.defineProperty(part, "__magicContextPartUpdatedAt", {
+				value: version,
+				enumerable: false,
+				configurable: true,
+			});
+		} catch {
+			// The recursive content fingerprint still changes when a part cannot be annotated.
+		}
+		return part;
+	});
+}
+
 /**
  * Pure conversion exposed for unit testing — call sites in production
  * always go through `readPiSessionMessages`.
@@ -297,6 +325,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 	//     marker written, JSONL grows unbounded, Bug X1) or returns an
 	//     unusable id.
 	let pendingFirstRealId = "";
+	let pendingFirstRealVersion: string | number = "";
 
 	for (const entry of entries) {
 		if (!isMessageEntry(entry)) {
@@ -310,9 +339,13 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 		const role = (msg as { role?: string }).role;
 
 		if (role === "toolResult") {
-			pendingToolParts.push(...synthesizeToolResultParts(msg));
+			const version = rawEntryVersion(entry);
+			pendingToolParts.push(
+				...attachPiPartVersion(synthesizeToolResultParts(msg), version),
+			);
 			if (pendingFirstRealId === "") {
 				pendingFirstRealId = entry.id;
+				pendingFirstRealVersion = version;
 			}
 			continue;
 		}
@@ -321,17 +354,20 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 			// Fold any pending tool-result parts into THIS user's parts
 			// (they precede the user's own content in real conversation
 			// order, matching OpenCode's flow).
+			const version = rawEntryVersion(entry);
 			const parts: unknown[] = [
 				...pendingToolParts,
-				...synthesizeUserParts(msg),
+				...attachPiPartVersion(synthesizeUserParts(msg), version),
 			];
 			pendingToolParts = [];
 			pendingFirstRealId = "";
+			pendingFirstRealVersion = "";
 			result.push({
 				ordinal: nextOrdinal++,
 				id: entry.id,
 				role: "user",
 				parts,
+				version,
 			});
 			continue;
 		}
@@ -350,16 +386,20 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 					id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
 					role: "user",
 					parts: pendingToolParts,
+					version: pendingFirstRealVersion,
 				});
 				pendingToolParts = [];
 				pendingFirstRealId = "";
+				pendingFirstRealVersion = "";
 			}
 
+			const version = rawEntryVersion(entry);
 			result.push({
 				ordinal: nextOrdinal++,
 				id: entry.id,
 				role: "assistant",
-				parts: synthesizeAssistantParts(msg),
+				parts: attachPiPartVersion(synthesizeAssistantParts(msg), version),
+				version,
 			});
 			continue;
 		}
@@ -372,6 +412,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 			id: entry.id,
 			role: typeof role === "string" ? role : "unknown",
 			parts: [],
+			version: rawEntryVersion(entry),
 		});
 	}
 
@@ -385,6 +426,7 @@ export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
 			id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
 			role: "user",
 			parts: pendingToolParts,
+			version: pendingFirstRealVersion,
 		});
 	}
 

@@ -5,17 +5,20 @@ export interface RawMessage {
     id: string;
     role: string;
     parts: unknown[];
+    version?: string | number | null;
 }
 
 interface RawMessageRow {
     id: string;
     data: string;
     time_created?: number;
+    time_updated?: number;
 }
 
 interface RawPartRow {
     message_id: string;
     data: string;
+    time_updated?: number;
 }
 
 interface OrdinalRow {
@@ -54,17 +57,33 @@ function parseJsonUnknown(value: string): unknown {
     }
 }
 
+function attachRawPartVersion(value: unknown, timeUpdated: number | undefined): unknown {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+    if (typeof timeUpdated !== "number") return value;
+    try {
+        Object.defineProperty(value, "__magicContextPartUpdatedAt", {
+            value: timeUpdated,
+            enumerable: false,
+            configurable: true,
+        });
+    } catch {
+        // Non-extensible provider objects are rare; the recursive byte-length
+        // fingerprint still catches content changes when metadata cannot attach.
+    }
+    return value;
+}
+
 export function readRawSessionMessagesFromDb(db: Database, sessionId: string): RawMessage[] {
     const messageRows = db
         .prepare(
-            "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+            "SELECT id, data, time_updated FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
         )
         .all(sessionId)
         .filter(isRawMessageRow);
 
     const partRows = db
         .prepare(
-            "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+            "SELECT message_id, data, time_updated FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC",
         )
         .all(sessionId)
         .filter(isRawPartRow);
@@ -72,7 +91,7 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
     const partsByMessageId = new Map<string, unknown[]>();
     for (const part of partRows) {
         const list = partsByMessageId.get(part.message_id) ?? [];
-        list.push(parseJsonUnknown(part.data));
+        list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
         partsByMessageId.set(part.message_id, list);
     }
 
@@ -93,6 +112,7 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
             id: row.id,
             role,
             parts: partsByMessageId.get(row.id) ?? [],
+            version: row.time_updated ?? null,
         };
     });
 }
@@ -103,7 +123,9 @@ export function readRawSessionMessageByIdFromDb(
     messageId: string,
 ): RawMessage | null {
     const row = db
-        .prepare("SELECT id, data, time_created FROM message WHERE session_id = ? AND id = ?")
+        .prepare(
+            "SELECT id, data, time_created, time_updated FROM message WHERE session_id = ? AND id = ?",
+        )
         .get(sessionId, messageId) as RawMessageRow | null;
     if (!row || !isRawMessageRow(row) || typeof row.time_created !== "number") {
         return null;
@@ -130,7 +152,7 @@ export function readRawSessionMessageByIdFromDb(
 
     const partRows = db
         .prepare(
-            "SELECT message_id, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
+            "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
         )
         .all(sessionId, messageId)
         .filter(isRawPartRow);
@@ -140,6 +162,9 @@ export function readRawSessionMessageByIdFromDb(
         ordinal,
         id: row.id,
         role,
-        parts: partRows.map((part) => parseJsonUnknown(part.data)),
+        parts: partRows.map((part) =>
+            attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated),
+        ),
+        version: row.time_updated ?? null,
     };
 }

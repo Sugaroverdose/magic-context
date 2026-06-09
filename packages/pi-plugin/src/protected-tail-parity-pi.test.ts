@@ -121,3 +121,45 @@ describe("Pi protected-tail true-raw parity", () => {
 		expect(piTotal).toBeLessThan(ocTotal);
 	});
 });
+
+import { computeRawRangeFingerprint } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
+import { convertEntriesToRawMessages } from "./read-session-pi";
+
+test("Pi raw conversion carries entry version metadata into protected-tail fingerprints", () => {
+	const baseEntries = [
+		{
+			type: "message",
+			id: "tool-result-1",
+			timestamp: 10,
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "short" }],
+			},
+		},
+	];
+	const updatedEntries = [
+		{
+			type: "message",
+			id: "tool-result-1",
+			timestamp: 11,
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "short" }],
+			},
+		},
+	];
+
+	expect(
+		computeRawRangeFingerprint(convertEntriesToRawMessages(baseEntries), 1, 2),
+	).not.toBe(
+		computeRawRangeFingerprint(
+			convertEntriesToRawMessages(updatedEntries),
+			1,
+			2,
+		),
+	);
+});

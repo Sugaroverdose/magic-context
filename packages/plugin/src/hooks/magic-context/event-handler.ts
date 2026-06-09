@@ -47,6 +47,7 @@ import {
 } from "./event-resolvers";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
+import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
 import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
@@ -348,8 +349,17 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // back to session-wide clear when the event lacks a message id.
             if (info.messageID) {
                 clearMessageTokensCache(info.sessionID, info.messageID);
+                invalidateTrueRawTokenCache({
+                    sessionId: info.sessionID,
+                    messageId: info.messageID,
+                    reason: "message.updated",
+                });
             } else {
                 clearMessageTokensCache(info.sessionID);
+                invalidateTrueRawTokenCache({
+                    sessionId: info.sessionID,
+                    reason: "message.updated",
+                });
             }
 
             let messageHadOverflowError = false;
@@ -635,6 +645,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 // Invalidate this message's cached token contribution so the
                 // next transform pass recomputes without stale data.
                 clearMessageTokensCache(info.sessionID, info.messageID);
+                invalidateTrueRawTokenCache({
+                    sessionId: info.sessionID,
+                    messageId: info.messageID,
+                    reason: "message.removed",
+                });
 
                 deps.onSessionCacheInvalidated?.(info.sessionID);
                 sessionLog(
@@ -686,6 +701,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // per-message token cache for the whole session so the next transform
             // pass recomputes against the new shape instead of serving stale counts.
             clearMessageTokensCache(sessionId);
+            invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
             deps.onSessionCacheInvalidated?.(sessionId);
             return;
         }
@@ -712,6 +728,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.contextUsageMap.delete(sessionId);
             deps.tagger.cleanup(sessionId);
             clearMessageTokensCache(sessionId);
+            invalidateTrueRawTokenCache({ sessionId, reason: "session.deleted" });
             return;
         }
     };

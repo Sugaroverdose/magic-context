@@ -5,7 +5,6 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
     createDefaultBoundarySnapshotForTests,
-    deriveMinForceEligibleTokens,
     getRawHistoryEligibility,
     hasRunnableCompartmentWindow,
     type ProtectedTailBoundarySnapshot,
@@ -290,10 +289,7 @@ export function checkCompartmentTrigger(
             usageSource: "live",
             emergencyTailScale: scale,
         });
-        if (
-            hasRunnableCompartmentWindow(scaledBoundary) &&
-            scaledBoundary.trueRawEligibleTokens >= deriveMinForceEligibleTokens(scaledBoundary.N)
-        ) {
+        if (hasRunnableCompartmentWindow(scaledBoundary)) {
             return { shouldFire: true, reason: "force_80" };
         }
         sessionLog(

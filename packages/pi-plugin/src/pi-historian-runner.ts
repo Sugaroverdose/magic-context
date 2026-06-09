@@ -82,9 +82,8 @@ import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/injec
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
 	createDefaultBoundarySnapshotForTests,
+	type ProtectedTailBoundarySnapshot,
 	recordHighPressureNoEligibleHead,
-	resolveBoundaryContext,
-	resolveProtectedTailBoundary,
 	validateBoundarySnapshot,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import {
@@ -163,6 +162,10 @@ export interface PiHistorianDeps {
 	fallbackModels?: readonly string[];
 	/** Historian context window — used to derive chunk token budget. */
 	historianChunkTokens: number;
+	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
+	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	/** Current resolved context limit used to reject stale snapshots after model switches. */
+	currentContextLimit?: number;
 	/** Optional per-call timeout (default 120s). */
 	historianTimeoutMs?: number;
 	/** When true, run a second editor pass after a successful first pass to
@@ -209,6 +212,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		historianModel,
 		fallbackModels,
 		historianChunkTokens,
+		boundarySnapshot: providedBoundarySnapshot,
+		currentContextLimit,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
 		twoPass,
 		thinkingLevel,
@@ -280,26 +285,24 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					: 1;
 
 			const boundarySnapshot =
-				process.env.NODE_ENV === "test"
+				providedBoundarySnapshot ??
+				(process.env.NODE_ENV === "test"
 					? createDefaultBoundarySnapshotForTests(sessionId)
-					: resolveProtectedTailBoundary(
-							resolveBoundaryContext({
-								db,
-								sessionId,
-								mode: "pi-runner",
-								contextLimit: 128_000,
-								executeThresholdPercentage: 65,
-								usage: null,
-								usageSource: "provisional-zero",
-								providerShapeVersion: "pi-folded-v1",
-								cacheNamespace: `pi:${sessionId}`,
-							}),
-						);
+					: null);
+			if (!boundarySnapshot) {
+				sessionLog(
+					sessionId,
+					"historian no-op: missing protected-tail boundary snapshot from Pi trigger decision",
+				);
+				return;
+			}
 			const validation =
 				boundarySnapshot.rawRangeFingerprint.length > 0
 					? validateBoundarySnapshot({
 							db,
 							snapshot: boundarySnapshot,
+							currentContextLimit:
+								currentContextLimit ?? boundarySnapshot.contextLimit,
 						})
 					: { ok: true as const };
 			if (!validation.ok) {

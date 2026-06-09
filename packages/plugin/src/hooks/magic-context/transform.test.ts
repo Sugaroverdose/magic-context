@@ -24,8 +24,10 @@ import {
     getTagById,
     getTagsBySession,
     incrementHistorianFailure,
+    loadProtectedTailMeta,
     openDatabase,
     queuePendingOp,
+    recordOverflowDetected,
     updateSessionMeta,
     updateTagStatus,
 } from "../../features/magic-context/storage";
@@ -1930,6 +1932,121 @@ describe("createTransform protected tail", () => {
 });
 
 describe("createTransform historian failure handling", () => {
+    it("lets an armed empty-head emergency proceed after the bounded no-head escape", async () => {
+        useTempDataHome("transform-empty-head-escape-");
+        createOpenCodeDbForTransform("ses-empty-head-escape", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+            { id: "m-raw-2", role: "user", text: "recent 2" },
+            { id: "m-raw-3", role: "user", text: "recent 3" },
+        ]);
+        const db = openDatabase();
+        incrementHistorianFailure(db, "ses-empty-head-escape", "historian failed");
+        recordOverflowDetected(db, "ses-empty-head-escape", 8_000);
+
+        const abort = mock(async () => ({}));
+        const prompt = mock(async () => ({}));
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    "ses-empty-head-escape",
+                    { usage: { percentage: 0, inputTokens: 0 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            client: { session: { abort, prompt } } as unknown as PluginContext["client"],
+            directory: "/tmp",
+        });
+
+        for (const id of ["first", "second", "third"]) {
+            await transform(
+                {},
+                {
+                    messages: [
+                        {
+                            info: {
+                                id: `m-user-${id}`,
+                                role: "user",
+                                sessionID: "ses-empty-head-escape",
+                            },
+                            parts: [{ type: "text", text: "continue" }],
+                        },
+                    ],
+                },
+            );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(abort).toHaveBeenCalledTimes(2);
+        expect(loadProtectedTailMeta(db, "ses-empty-head-escape").recoveryNoEligibleHeadCount).toBe(
+            2,
+        );
+    });
+
+    it("does not permanently abort a genuinely >=95% armed empty head", async () => {
+        useTempDataHome("transform-empty-head-escape-95-");
+        createOpenCodeDbForTransform("ses-empty-head-escape-95", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+            { id: "m-raw-2", role: "user", text: "recent 2" },
+            { id: "m-raw-3", role: "user", text: "recent 3" },
+        ]);
+        const db = openDatabase();
+        incrementHistorianFailure(db, "ses-empty-head-escape-95", "historian failed");
+        recordOverflowDetected(db, "ses-empty-head-escape-95", 8_000);
+
+        const abort = mock(async () => ({}));
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    "ses-empty-head-escape-95",
+                    { usage: { percentage: 96, inputTokens: 7_680 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            client: {
+                session: { abort, prompt: mock(async () => ({})) },
+            } as unknown as PluginContext["client"],
+            directory: "/tmp",
+        });
+
+        for (const id of ["first", "second", "third"]) {
+            await transform(
+                {},
+                {
+                    messages: [
+                        {
+                            info: {
+                                id: `m-user-95-${id}`,
+                                role: "user",
+                                sessionID: "ses-empty-head-escape-95",
+                            },
+                            parts: [{ type: "text", text: "continue" }],
+                        },
+                    ],
+                },
+            );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(abort).toHaveBeenCalledTimes(2);
+        expect(
+            loadProtectedTailMeta(db, "ses-empty-head-escape-95").recoveryNoEligibleHeadCount,
+        ).toBe(2);
+    });
+
     it("aborts at 95% and only sends the emergency notification once per failure count", async () => {
         useTempDataHome("transform-historian-emergency-");
         createOpenCodeDbForTransform("ses-emergency", [

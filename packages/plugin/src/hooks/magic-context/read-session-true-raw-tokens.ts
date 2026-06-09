@@ -150,6 +150,40 @@ function partType(part: Record<string, unknown>): string {
     return typeof part.type === "string" ? part.type : "";
 }
 
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+    return Object.hasOwn(record, key);
+}
+
+function recursiveByteLength(value: unknown): number {
+    if (value === null || value === undefined) return 0;
+    if (typeof value === "string") return value.length;
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+        return String(value).length;
+    }
+    if (Array.isArray(value)) {
+        return value.reduce((sum, item) => sum + recursiveByteLength(item), value.length);
+    }
+    if (isRecord(value)) {
+        let total = Object.keys(value).length;
+        for (const [key, child] of Object.entries(value)) {
+            total += key.length + recursiveByteLength(child);
+        }
+        return total;
+    }
+    return String(value).length;
+}
+
+function rawPartVersion(part: Record<string, unknown>): unknown {
+    return (
+        part.__magicContextPartUpdatedAt ??
+        part.updated_at ??
+        part.updatedAt ??
+        part.version ??
+        part.revision ??
+        ""
+    );
+}
+
 function callIdFromPart(part: Record<string, unknown>): string {
     const direct = firstStringField(part, ["callID", "callId", "toolCallId", "tool_call_id", "id"]);
     if (direct) return direct;
@@ -167,18 +201,25 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
     if (!callId && type !== "tool") return null;
 
     if (type === "tool") {
-        const hasInput = state !== null && state.input !== undefined;
-        const outputValue =
-            state?.output ??
-            (state?.output === undefined ? (state?.error ?? state?.result) : undefined);
-        const hasOutput = outputValue !== undefined;
+        const hasInput = state !== null && hasOwn(state, "input");
+        const outputKey = state
+            ? hasOwn(state, "output")
+                ? "output"
+                : hasOwn(state, "error")
+                  ? "error"
+                  : hasOwn(state, "result")
+                    ? "result"
+                    : null
+            : null;
+        const hasOutput = outputKey !== null;
+        const outputValue = outputKey && state ? state[outputKey] : undefined;
         const providerExecuted = part.providerExecuted === true;
-        const openInvocation = !providerExecuted && hasInput && !hasOutput;
+        const openInvocation = !providerExecuted && !hasOutput;
         return {
             callId,
             hasInput: hasInput || openInvocation,
             hasOutput,
-            inputText: hasInput ? stringValue(state?.input) : "",
+            inputText: hasInput && state ? stringValue(state.input) : "",
             outputText: hasOutput ? stringValue(outputValue) : "",
         };
     }
@@ -220,16 +261,10 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
 }
 
 function partCheapFingerprint(part: unknown): string {
-    if (!isRecord(part)) return `${typeof part}:${String(part).length}`;
-    const version = part.updated_at ?? part.updatedAt ?? part.version ?? part.revision ?? "";
+    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
-    let byteLength = 0;
-    for (const value of Object.values(part)) {
-        if (typeof value === "string") byteLength += value.length;
-        else if (Array.isArray(value)) byteLength += value.length;
-        else if (isRecord(value)) byteLength += Object.keys(value).length;
-    }
-    return `${type}:${String(version)}:${byteLength}`;
+    return `${type}:${String(version)}:${recursiveByteLength(part)}`;
 }
 
 function messageCacheKey(
@@ -424,7 +459,7 @@ export function fenceBoundaryForToolArcs(
             return arc.invOrdinal;
         }
         if (arc.invOrdinal >= boundary) {
-            return Math.min(boundary, arc.invOrdinal);
+            return arc.invOrdinal;
         }
     }
     return boundary;
@@ -535,7 +570,10 @@ export function computeRawRangeFingerprint(
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
         const root = isRecord(message) ? message : null;
         const version = root?.updated_at ?? root?.updatedAt ?? root?.version ?? "";
-        pieces.push(`${message.ordinal}:${message.id}:${String(version)}:${message.parts.length}`);
+        const partFingerprint = message.parts.map(partCheapFingerprint).join(",");
+        pieces.push(
+            `${message.ordinal}:${message.id}:${String(version)}:${message.parts.length}:${partFingerprint}`,
+        );
     }
     return pieces.join("|");
 }
