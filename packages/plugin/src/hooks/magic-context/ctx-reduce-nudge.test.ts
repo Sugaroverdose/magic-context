@@ -3,8 +3,8 @@ import {
     buildChannel1Reminder,
     buildChannel2Reminder,
     CHANNEL1_SENTINEL,
-    CHANNEL2_CEIL_UNDROPPED,
-    CHANNEL2_PRESSURE_NEAR,
+    CHANNEL2_MIN_RECLAIMABLE,
+    CHANNEL2_USABLE_FRACTION,
     computePressure,
     computeTailToolTokens,
     decideChannel1,
@@ -138,23 +138,40 @@ describe("buildChannel1Reminder", () => {
     });
 });
 
-describe("shouldTriggerChannel2 — ceiling", () => {
-    it("fires only when pressure is near threshold AND a large pile remains", () => {
+describe("shouldTriggerChannel2 — ceiling (reclaimable ≥ usable/3)", () => {
+    it("fires when reclaimable is at least a third of the usable working range", () => {
+        // usable=90k → third=30k; reclaimable=30k ⇒ fire
+        expect(shouldTriggerChannel2({ reclaimableTokens: 30_000, usableTokens: 90_000 })).toBe(
+            true,
+        );
+    });
+    it("the AFT regression: 54k reclaimable on a wide 1M session does NOT fire", () => {
+        // Big-context session: usable is large (lots of working room), so 54k is
+        // well under a third — the old absolute-40k gate wrongly fired here.
+        expect(shouldTriggerChannel2({ reclaimableTokens: 54_000, usableTokens: 300_000 })).toBe(
+            false,
+        );
+    });
+    it("the SAME 54k on a tight 120k usable session DOES fire (size-relative)", () => {
+        // usable=120k → third=40k; 54k ≥ 40k ⇒ fire. One rule, both contexts.
+        expect(shouldTriggerChannel2({ reclaimableTokens: 54_000, usableTokens: 120_000 })).toBe(
+            true,
+        );
+    });
+    it("stays quiet below the absolute reclaimable floor regardless of ratio", () => {
+        // usable tiny (near threshold) → ratio satisfied, but pile is trivial.
         expect(
             shouldTriggerChannel2({
-                undroppedTokens: CHANNEL2_CEIL_UNDROPPED,
-                pressure: CHANNEL2_PRESSURE_NEAR,
+                reclaimableTokens: CHANNEL2_MIN_RECLAIMABLE - 1,
+                usableTokens: 1_000,
             }),
-        ).toBe(true);
+        ).toBe(false);
     });
-    it("stays quiet when pressure is below the near-threshold", () => {
-        expect(shouldTriggerChannel2({ undroppedTokens: 100_000, pressure: 0.7 })).toBe(false);
+    it("escalates when at/over threshold (usable ≤ 0) with a real pile", () => {
+        expect(shouldTriggerChannel2({ reclaimableTokens: 50_000, usableTokens: 0 })).toBe(true);
     });
-    it("stays quiet when the reclaimable pile is below the ceiling floor", () => {
-        expect(shouldTriggerChannel2({ undroppedTokens: 20_000, pressure: 1.0 })).toBe(false);
-    });
-    it("early reading (low pressure, large pile) does NOT trigger the ceiling", () => {
-        expect(shouldTriggerChannel2({ undroppedTokens: 80_000, pressure: 0.4 })).toBe(false);
+    it("uses the 1/3 fraction constant", () => {
+        expect(CHANNEL2_USABLE_FRACTION).toBeCloseTo(1 / 3, 5);
     });
 });
 

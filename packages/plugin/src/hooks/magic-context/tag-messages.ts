@@ -1,5 +1,6 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
+import type { TagTokenCounts } from "../../features/magic-context/storage-tags";
 import {
     adoptNullOwnerToolTag,
     getCandidateToolOwners,
@@ -9,7 +10,9 @@ import {
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
+import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
+import { estimateTokens } from "./read-session-formatting";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import {
@@ -171,6 +174,22 @@ function getReasoningByteSize(parts: ThinkingLikePart[]): number {
     return reasoningBytes;
 }
 
+/**
+ * Real-tokenizer mirror of {@link getReasoningByteSize}. Computed once per tag
+ * (lazy thunk on fresh insert) and stored on the tag row so token-budget
+ * consumers SUM stored counts instead of re-tokenizing raw history every pass.
+ */
+function getReasoningTokenCount(parts: ThinkingLikePart[]): number {
+    let tokens = 0;
+    for (const part of parts) {
+        const content = part.thinking ?? part.text ?? "";
+        if (content && content !== "[cleared]") {
+            tokens += estimateTokens(content);
+        }
+    }
+    return tokens;
+}
+
 function estimateInputByteSize(input: unknown): number {
     try {
         return JSON.stringify(input).length;
@@ -179,9 +198,36 @@ function estimateInputByteSize(input: unknown): number {
     }
 }
 
-function extractToolTagMetadata(part: unknown): { toolName: string | null; inputByteSize: number } {
+/** Real-tokenizer count for a tool input payload (string or JSON-serializable). */
+function estimateInputTokenCount(input: unknown): number {
+    if (input === undefined || input === null) return 0;
+    try {
+        const s = typeof input === "string" ? input : JSON.stringify(input);
+        return s ? estimateTokens(s) : 0;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Real-tokenizer count for a text/file part's tag content. Images bill by
+ * visual tokens (same heuristic as the sidebar breakdown); plain text tokenizes
+ * directly. Mirrors the per-part logic so a tag's token_count matches what the
+ * content actually costs on the wire.
+ */
+function estimateTextTagTokenCount(text: string): number {
+    if (!text) return 0;
+    if (text.startsWith("data:image/")) return estimateImageTokensFromDataUrl(text);
+    return estimateTokens(text);
+}
+
+function extractToolTagMetadata(part: unknown): {
+    toolName: string | null;
+    inputByteSize: number;
+    inputTokenCount: number;
+} {
     if (!isRecord(part)) {
-        return { toolName: null, inputByteSize: 0 };
+        return { toolName: null, inputByteSize: 0, inputTokenCount: 0 };
     }
 
     const toolName =
@@ -198,6 +244,7 @@ function extractToolTagMetadata(part: unknown): { toolName: string | null; input
     return {
         toolName,
         inputByteSize: estimateInputByteSize(input),
+        inputTokenCount: estimateInputTokenCount(input),
     };
 }
 
@@ -396,6 +443,8 @@ export function tagMessages(
                 // those bindings if the resolver populated them.
                 resolver.resolve(messageId, "message", contentId, textOrdinal);
                 const reasoningBytes = textOrdinal === 0 ? getReasoningByteSize(thinkingParts) : 0;
+                const reasoningTokens =
+                    textOrdinal === 0 ? getReasoningTokenCount(thinkingParts) : 0;
                 const _tAssignText = performance.now();
                 const tagId = tagger.assignTag(
                     sessionId,
@@ -404,6 +453,16 @@ export function tagMessages(
                     byteSize(textPart.text),
                     db,
                     reasoningBytes,
+                    null,
+                    0,
+                    null,
+                    // Lazy: only fires on fresh insert. textPart.text is still the
+                    // pre-prefix source here (prependTag runs after assign).
+                    () => ({
+                        tokenCount: estimateTextTagTokenCount(stripTagPrefix(textPart.text)),
+                        inputTokenCount: null,
+                        reasoningTokenCount: reasoningTokens,
+                    }),
                 );
                 accAssignTag += performance.now() - _tAssignText;
                 // Prefer persisted source_contents over the existingTagId
@@ -452,7 +511,9 @@ export function tagMessages(
                 const toolPart = part;
                 const thinkingParts = precedingThinkingParts;
                 const reasoningBytes = getReasoningByteSize(thinkingParts);
-                const { toolName, inputByteSize } = extractToolTagMetadata(toolPart);
+                const reasoningTokens = getReasoningTokenCount(thinkingParts);
+                const { toolName, inputByteSize, inputTokenCount } =
+                    extractToolTagMetadata(toolPart);
 
                 // v3.3.1 Layer C: derive owner from the FIFO memo set
                 // earlier in this same loop iteration. The first tool
@@ -474,6 +535,15 @@ export function tagMessages(
                     reasoningBytes,
                     toolName,
                     inputByteSize,
+                    // Lazy: fires only on fresh insert. token_count = output tokens
+                    // (mirrors byte_size=output); input/reasoning stored separately.
+                    () => ({
+                        tokenCount: estimateTextTagTokenCount(
+                            stripTagPrefix(toolPart.state.output),
+                        ),
+                        inputTokenCount,
+                        reasoningTokenCount: reasoningTokens,
+                    }),
                 );
                 accAssignToolTag += performance.now() - _tAssignTool;
                 messageTagNumbers.set(
@@ -501,6 +571,15 @@ export function tagMessages(
                     "file",
                     byteSize(filePart.url),
                     db,
+                    0,
+                    null,
+                    0,
+                    null,
+                    () => ({
+                        tokenCount: estimateTextTagTokenCount(filePart.url),
+                        inputTokenCount: null,
+                        reasoningTokenCount: null,
+                    }),
                 );
                 accAssignTag += performance.now() - _tAssignFile;
                 if (existingTagId === undefined) {

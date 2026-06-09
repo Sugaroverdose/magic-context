@@ -52,7 +52,9 @@ function buildMessages(): TestMessage[] {
                     callID: "call-1",
                     state: {
                         // Large enough that the tiered emergency drop reclaims it.
-                        output: "z".repeat(200_000),
+                        // Realistic content, not a single repeated char (that is a
+                        // ~17s BPE tokenizer pathology under the per-tag token store).
+                        output: "const value = compute(input, options); // line\n".repeat(4200),
                         tool: "mcp_read",
                         input: { path: "a.ts" },
                     },

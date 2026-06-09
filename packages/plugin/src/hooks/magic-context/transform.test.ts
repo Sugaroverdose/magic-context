@@ -555,7 +555,13 @@ describe("createTransform", () => {
         useTempDataHome("context-transform-force-materialize-");
         const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
         const db = openDatabase();
-        const bigOutput = "x".repeat(200_000); // ~50k tokens of reclaimable tail
+        // Realistic ~200KB tool output (~50k tokens). NOT a single repeated char:
+        // BPE tokenizes "x".repeat(200k) pathologically slowly (~17s) AND yields
+        // only ~6k tokens, so it never matched the "~50k tokens" intent. Real
+        // content of the same size tokenizes in ~7ms and hits the real token mass.
+        const bigOutput = "const value = compute(input, options); // step output line\n".repeat(
+            3400,
+        );
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,
@@ -1090,7 +1096,11 @@ describe("createTransform", () => {
         const db = openDatabase();
         updateSessionMeta(db, "ses-sub-rerun", { isSubagent: true });
         const lastHeuristicsTurnId = new Map<string, string>();
-        const bigOutput = "y".repeat(200_000); // ~50k tokens of reclaimable tail
+        // Realistic ~200KB output (~50k tokens) — see the sibling test's note on
+        // why a single repeated char is a tokenizer pathology to avoid here.
+        const bigOutput = "const value = compute(input, options); // step output line\n".repeat(
+            3400,
+        );
         const transform = createTransform({
             tagger: createTagger(),
             scheduler,

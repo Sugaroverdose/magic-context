@@ -43,6 +43,7 @@
  * tagging+drops layer to use Transcript instances.
  */
 
+import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { isRecord } from "./record-type-guard";
 import type {
     Transcript,
@@ -129,7 +130,11 @@ function createOpenCodePart(
         setToolOutput(newText: string): boolean {
             return writeOpenCodeToolOutput(rawPart, newText);
         },
-        getToolMetadata(): { toolName: string | undefined; inputByteSize: number } {
+        getToolMetadata(): {
+            toolName: string | undefined;
+            inputByteSize: number;
+            inputTokenCount: number;
+        } {
             return readOpenCodeToolMetadata(rawPart);
         },
         replaceWithSentinel(sentinelText: string): boolean {
@@ -227,9 +232,10 @@ function writeOpenCodeToolOutput(part: unknown, newText: string): boolean {
 function readOpenCodeToolMetadata(part: unknown): {
     toolName: string | undefined;
     inputByteSize: number;
+    inputTokenCount: number;
 } {
-    if (!isRecord(part)) return { toolName: undefined, inputByteSize: 0 };
-    if (part.type !== "tool") return { toolName: undefined, inputByteSize: 0 };
+    if (!isRecord(part)) return { toolName: undefined, inputByteSize: 0, inputTokenCount: 0 };
+    if (part.type !== "tool") return { toolName: undefined, inputByteSize: 0, inputTokenCount: 0 };
 
     // OpenCode parts use `tool` as the tool name field; some legacy
     // shapes use `toolName` or `name`. Match all three for forward
@@ -247,13 +253,17 @@ function readOpenCodeToolMetadata(part: unknown): {
     const input = state?.input ?? part.args ?? part.input;
 
     let inputByteSize = 0;
+    let inputTokenCount = 0;
     if (input !== undefined && input !== null) {
         try {
-            inputByteSize = JSON.stringify(input).length;
+            const serialized = typeof input === "string" ? input : JSON.stringify(input);
+            inputByteSize = serialized.length;
+            inputTokenCount = serialized ? estimateTokens(serialized) : 0;
         } catch {
             inputByteSize = 0;
+            inputTokenCount = 0;
         }
     }
 
-    return { toolName, inputByteSize };
+    return { toolName, inputByteSize, inputTokenCount };
 }

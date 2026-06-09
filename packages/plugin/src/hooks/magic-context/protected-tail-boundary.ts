@@ -5,6 +5,7 @@ import {
     recordProtectedTailNoEligibleHead,
     resetProtectedTailNoEligibleHead,
 } from "../../features/magic-context/storage-meta-persisted";
+import { getAllStatusTagTokenTotalsFlat } from "../../features/magic-context/storage-tags";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { deriveTriggerBudget } from "./derive-budgets";
@@ -48,6 +49,15 @@ export interface ResolvedBoundaryContext {
     providerShapeVersion: "opencode-v1" | "pi-folded-v1";
     cacheNamespace: string;
     createdAt?: number;
+    /**
+     * Durable per-message token totals (sum of the message's active tag
+     * token_counts), keyed by real message id. When present, the boundary's
+     * token index reads these instead of re-tokenizing the raw session — the
+     * restart-durable fast path. A message missing here (or with a NULL-count
+     * tag) falls back to live tokenization. Built once in resolveBoundaryContext
+     * from the tag store; omitted (→ all-live) when the caller has no tag store.
+     */
+    storedTokenTotals?: Map<string, number>;
 }
 
 export interface ProtectedTailBoundarySnapshot {
@@ -293,9 +303,16 @@ export function resolveProtectedTailBoundary(
 ): ProtectedTailBoundarySnapshot {
     const createdAt = ctx.createdAt ?? Date.now();
     const messages = readRawSessionMessages(ctx.sessionId);
+    const storedTotals = ctx.storedTokenTotals;
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
+        storedTotalForMessage: storedTotals
+            ? (m) => {
+                  const v = storedTotals.get(m.id);
+                  return v === undefined ? null : v;
+              }
+            : undefined,
     });
     const rawMessageCount = index.rawMessageCount;
     const offset = Math.max(1, ctx.lastCompartmentEndOrdinal + 1);
@@ -503,6 +520,20 @@ export function resolveBoundaryContext(args: {
         meta = seedResult;
         migrationFloorActive = seedResult.seeded;
     }
+    // Durable token source: sum each message's precomputed tag token_counts so
+    // the boundary indexes raw messages without re-tokenizing 60k+ messages on
+    // a cold pass (the 16s→ms win). Best-effort: a store failure just falls back
+    // to all-live tokenization.
+    let storedTokenTotals: Map<string, number> | undefined;
+    try {
+        storedTokenTotals = getAllStatusTagTokenTotalsFlat(args.db, args.sessionId).totals;
+    } catch (error) {
+        sessionLog(
+            args.sessionId,
+            "protected-tail stored-token map unavailable (live fallback):",
+            error,
+        );
+    }
     return {
         sessionId: args.sessionId,
         mode: args.mode,
@@ -518,6 +549,7 @@ export function resolveBoundaryContext(args: {
         emergencyTailScale: args.emergencyTailScale,
         providerShapeVersion: args.providerShapeVersion ?? "opencode-v1",
         cacheNamespace: args.cacheNamespace ?? `opencode:${args.sessionId}`,
+        storedTokenTotals,
     };
 }
 

@@ -30,14 +30,14 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
-import { buildChannel2Reminder, CHANNEL2_CEIL_UNDROPPED } from "./ctx-reduce-nudge";
+import { buildChannel2Reminder, CHANNEL2_MIN_RECLAIMABLE } from "./ctx-reduce-nudge";
 
 export interface Channel2DeliveryDeps {
     db: Database;
     serverUrl?: string;
     directory: string;
-    /** Undropped tool tokens for the wording; falls back to the trigger floor. */
-    undroppedTokens?: number;
+    /** Reclaimable tool-output tokens for the wording + stale-intent revalidation. */
+    reclaimableTokens?: number;
 }
 
 /**
@@ -68,12 +68,12 @@ export async function maybeDeliverChannel2(
     // current undropped-tool count is known and has fallen below the trigger
     // floor, cancel the intent by resetting to '' — NOT 'delivered' — so the
     // cap is preserved and a genuinely high-pressure later turn can re-arm it.
-    if (deps.undroppedTokens !== undefined && deps.undroppedTokens < CHANNEL2_CEIL_UNDROPPED) {
+    if (deps.reclaimableTokens !== undefined && deps.reclaimableTokens < CHANNEL2_MIN_RECLAIMABLE) {
         try {
             casChannel2NudgeState(deps.db, sessionId, "pending", "");
             sessionLog(
                 sessionId,
-                `channel2 intent cleared pre-delivery (undropped ${deps.undroppedTokens} < ${CHANNEL2_CEIL_UNDROPPED}; re-armable)`,
+                `channel2 intent cleared pre-delivery (reclaimable ${deps.reclaimableTokens} < ${CHANNEL2_MIN_RECLAIMABLE}; re-armable)`,
             );
         } catch {
             // best-effort; if the CAS fails the next pass re-evaluates.
@@ -99,7 +99,7 @@ export async function maybeDeliverChannel2(
     try {
         const client = getLiveServerClient(serverUrl, deps.directory);
         const promptContext = await resolvePromptContext(client, sessionId);
-        const reminder = buildChannel2Reminder(deps.undroppedTokens ?? CHANNEL2_CEIL_UNDROPPED);
+        const reminder = buildChannel2Reminder(deps.reclaimableTokens ?? CHANNEL2_MIN_RECLAIMABLE);
 
         const body: Record<string, unknown> = {
             noReply: false,

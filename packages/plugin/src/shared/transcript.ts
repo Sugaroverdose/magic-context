@@ -121,10 +121,17 @@ export interface TranscriptPart {
      *   for non-tool parts.
      * - inputByteSize: serialized argument size; used by historian
      *   pressure projection to estimate post-drop savings.
+     * - inputTokenCount: real-tokenizer count of the same serialized
+     *   argument, stored on the tag so token-budget consumers SUM stored
+     *   counts instead of re-tokenizing. 0 for non-tool parts.
      *
-     * For non-tool parts both fields are undefined.
+     * For non-tool parts both byte fields are undefined/0.
      */
-    getToolMetadata(): { toolName: string | undefined; inputByteSize: number };
+    getToolMetadata(): {
+        toolName: string | undefined;
+        inputByteSize: number;
+        inputTokenCount: number;
+    };
 
     /**
      * Replace this part with a sentinel placeholder. Sentinels look like

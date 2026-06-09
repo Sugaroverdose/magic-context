@@ -259,6 +259,9 @@ export function initializeDatabase(db: Database): void {
       tag_number INTEGER,
       harness TEXT NOT NULL DEFAULT 'opencode',
       entry_fingerprint TEXT,
+      token_count INTEGER,
+      input_token_count INTEGER,
+      reasoning_token_count INTEGER,
       UNIQUE(session_id, tag_number)
     );
 
@@ -805,6 +808,19 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
             ON tags(session_id, entry_fingerprint)
             WHERE type='message' AND entry_fingerprint IS NOT NULL`,
     );
+    // Per-tag token counts (real Claude tokenizer), computed once when a tag is
+    // first inserted and never recomputed — the content a tag covers is final on
+    // first sight (assistant text is complete in history; a tool tag is created
+    // only once its output is present). These supersede byte_size as the size
+    // signal for token-budget consumers: the sidebar conversation/tool-call
+    // breakdown and the historian protected-tail true-raw measurement both SUM
+    // these instead of re-tokenizing the raw session every pass. NULL on rows
+    // created before this column existed; backfilled lazily on next tag insert
+    // for that session is not needed — readers treat NULL as "not yet measured"
+    // and fall back per-call. byte_size stays for caveman (char-count) thresholds.
+    ensureColumn(db, "tags", "token_count", "INTEGER");
+    ensureColumn(db, "tags", "input_token_count", "INTEGER");
+    ensureColumn(db, "tags", "reasoning_token_count", "INTEGER");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");

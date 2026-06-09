@@ -38,6 +38,16 @@ export interface ToolArc {
 
 export interface TrueRawTokenIndexBuildOptions extends TrueRawEstimateOptions {
     cacheNamespace: string;
+    /**
+     * Durable per-message token source. When provided and it returns a non-null
+     * value for a message, that value is used as the message's total instead of
+     * live-tokenizing its parts — this is how the protected-tail boundary reads
+     * the precomputed `tags.token_count` store (restart-durable) rather than
+     * re-tokenizing the whole raw session every cold pass. Returning null falls
+     * back to live tokenization for that message (untagged / legacy-NULL rows),
+     * which converges to the stored path once the tagger backfills.
+     */
+    storedTotalForMessage?: (message: RawMessage) => number | null;
 }
 
 interface CachedMessageEstimate {
@@ -489,7 +499,15 @@ export function buildTrueRawTokenIndex(
     const prefix = new Array<number>(rawMessageCount + 1).fill(0);
     for (let i = 0; i < rawMessageCount; i += 1) {
         const message = ordered[i];
-        const total = tokenForMessage(message, options).total;
+        // Prefer the durable stored total (tags.token_count) when available; it
+        // equals the live tokenization of the same content (the tagger stores
+        // estimateTokens of each part), so the prefix sums and cut point are
+        // identical to the live path while skipping per-message tokenization.
+        const stored = options.storedTotalForMessage?.(message);
+        const total =
+            stored !== undefined && stored !== null
+                ? stored
+                : tokenForMessage(message, options).total;
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);
         prefix[i + 1] = prefix[i] + total;

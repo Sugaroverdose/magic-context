@@ -2,11 +2,14 @@ import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import {
     adoptNullOwnerToolTag,
+    backfillTagTokenCounts,
     getMaxTagNumberBySession,
     getNullOwnerToolTag,
     getTagNumberByMessageId,
     getToolTagNumberByOwner,
     insertTag,
+    type TagTokenCounts,
+    tagTokenCountIsNull,
 } from "./storage-tags";
 import type { TagEntry } from "./types";
 
@@ -65,6 +68,13 @@ export interface Tagger {
          * stays NULL → no behavior change.
          */
         entryFingerprint?: string | null,
+        /**
+         * Lazy per-tag token computation, invoked by the tagger ONLY on the
+         * fresh-insert branch (never when an existing tag is rebound). This is
+         * what keeps tokenization "compute once, ever" — steady-state passes
+         * pay nothing. Returns the real-tokenizer counts for this tag's content.
+         */
+        tokenThunk?: () => TagTokenCounts,
     ): number;
     /**
      * Look up the tag number for a non-tool entity.
@@ -96,6 +106,8 @@ export interface Tagger {
         reasoningByteSize?: number,
         toolName?: string | null,
         inputByteSize?: number,
+        /** Lazy token computation — invoked only on fresh insert (see assignTag). */
+        tokenThunk?: () => TagTokenCounts,
     ): number;
     /**
      * Look up the tag number for a tool invocation by composite
@@ -338,6 +350,7 @@ export function createTagger(): Tagger {
         mapKey: string,
         dbExistingLookup: () => number | null,
         entryFingerprint: string | null = null,
+        tokenThunk?: () => TagTokenCounts,
     ): number {
         const sessionAssignments = getSessionAssignments(sessionId);
 
@@ -355,8 +368,26 @@ export function createTagger(): Tagger {
         if (dbExisting !== null) {
             sessionAssignments.set(mapKey, dbExisting);
             syncCounterAtLeast(sessionId, db, dbExisting);
+            // One-time token backfill for legacy rows (written before the token
+            // columns existed). Only fires when the row's token_count is still
+            // NULL, so a populated row never re-tokenizes — this is the single
+            // convergence point that lets both the sidebar and protected-tail
+            // consumers SUM stored counts after at most one cold pass per tag.
+            if (tokenThunk && tagTokenCountIsNull(db, sessionId, dbExisting)) {
+                try {
+                    backfillTagTokenCounts(db, sessionId, dbExisting, tokenThunk());
+                } catch {
+                    // Best-effort: a transient BUSY just defers backfill to the
+                    // next observation. Consumers fall back to live tokenization
+                    // for any message that still has a NULL tag this pass.
+                }
+            }
             return dbExisting;
         }
+
+        // Only past both fast-paths do we have a genuinely new tag — invoke the
+        // token thunk exactly once here so an existing tag never re-tokenizes.
+        const tokenCounts = tokenThunk?.() ?? null;
 
         // Allocation loop (see assignTag pre-Layer-C comment for rationale).
         for (let attempt = 0; attempt < MAX_TAG_ALLOC_RETRIES; attempt += 1) {
@@ -378,6 +409,7 @@ export function createTagger(): Tagger {
                         inputByteSize,
                         toolOwnerMessageId,
                         entryFingerprint,
+                        tokenCounts,
                     );
                     getUpsertCounterStatement(db).run(sessionId, next, getHarness());
                 })();
@@ -425,6 +457,7 @@ export function createTagger(): Tagger {
         toolName: string | null = null,
         inputByteSize: number = 0,
         entryFingerprint: string | null = null,
+        tokenThunk?: () => TagTokenCounts,
     ): number {
         // Defense-in-depth: TS narrowing already excludes "tool", but a
         // caller routing through `as any` could still hit this body.
@@ -447,6 +480,7 @@ export function createTagger(): Tagger {
             messageId,
             () => getTagNumberByMessageId(db, sessionId, messageId),
             entryFingerprint,
+            tokenThunk,
         );
     }
 
@@ -459,6 +493,7 @@ export function createTagger(): Tagger {
         reasoningByteSize: number = 0,
         toolName: string | null = null,
         inputByteSize: number = 0,
+        tokenThunk?: () => TagTokenCounts,
     ): number {
         const compositeKey = makeToolCompositeKey(ownerMsgId, callId);
         const sessionAssignments = getSessionAssignments(sessionId);
@@ -527,6 +562,8 @@ export function createTagger(): Tagger {
             ownerMsgId,
             compositeKey,
             () => getToolTagNumberByOwner(db, sessionId, callId, ownerMsgId),
+            null,
+            tokenThunk,
         );
     }
 

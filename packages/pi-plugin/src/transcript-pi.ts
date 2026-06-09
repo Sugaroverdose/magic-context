@@ -69,6 +69,7 @@
  * tagging+drops layer (which today only knows about MessageLike[]).
  */
 
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type {
 	Transcript,
@@ -520,8 +521,12 @@ function createPiUserStringPart(
 		setToolOutput(): boolean {
 			throw new Error("setToolOutput on user-text part");
 		},
-		getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
-			return { toolName: undefined, inputByteSize: 0 };
+		getToolMetadata(): {
+			toolName: undefined;
+			inputByteSize: 0;
+			inputTokenCount: 0;
+		} {
+			return { toolName: undefined, inputByteSize: 0, inputTokenCount: 0 };
 		},
 		replaceWithSentinel(sentinelText: string): boolean {
 			const msg = working[messageIndex] as PiUserMessage | undefined;
@@ -572,8 +577,12 @@ function createPiUserArrayPart(
 		setToolOutput(): boolean {
 			throw new Error("setToolOutput on non-tool-result part");
 		},
-		getToolMetadata(): { toolName: undefined; inputByteSize: 0 } {
-			return { toolName: undefined, inputByteSize: 0 };
+		getToolMetadata(): {
+			toolName: undefined;
+			inputByteSize: 0;
+			inputTokenCount: 0;
+		} {
+			return { toolName: undefined, inputByteSize: 0, inputTokenCount: 0 };
 		},
 		replaceWithSentinel(sentinelText: string): boolean {
 			const current = (working[messageIndex] as PiUserMessage).content;
@@ -676,19 +685,27 @@ function createPiAssistantPart(
 			// part is always a programming error.
 			throw new Error("setToolOutput on assistant part");
 		},
-		getToolMetadata(): { toolName: string | undefined; inputByteSize: number } {
+		getToolMetadata(): {
+			toolName: string | undefined;
+			inputByteSize: number;
+			inputTokenCount: number;
+		} {
 			const current = (working[messageIndex] as PiAssistantMessage).content;
 			const p = current[partIndex];
 			if (p?.type !== "toolCall") {
-				return { toolName: undefined, inputByteSize: 0 };
+				return { toolName: undefined, inputByteSize: 0, inputTokenCount: 0 };
 			}
 			let inputByteSize = 0;
+			let inputTokenCount = 0;
 			try {
-				inputByteSize = JSON.stringify(p.arguments).length;
+				const serialized = JSON.stringify(p.arguments);
+				inputByteSize = serialized.length;
+				inputTokenCount = serialized ? estimateTokens(serialized) : 0;
 			} catch {
 				inputByteSize = 0;
+				inputTokenCount = 0;
 			}
-			return { toolName: p.name, inputByteSize };
+			return { toolName: p.name, inputByteSize, inputTokenCount };
 		},
 		// Replace this assistant part's content with a sentinel placeholder.
 		//
@@ -796,10 +813,15 @@ function createPiToolResultPart(
 			markDirty(messageIndex);
 			return true;
 		},
-		getToolMetadata(): { toolName: string; inputByteSize: number } {
+		getToolMetadata(): {
+			toolName: string;
+			inputByteSize: number;
+			inputTokenCount: number;
+		} {
 			return {
 				toolName: (working[messageIndex] as PiToolResultMessage).toolName,
 				inputByteSize: 0,
+				inputTokenCount: 0,
 			};
 		},
 		replaceWithSentinel(sentinelText: string): boolean {

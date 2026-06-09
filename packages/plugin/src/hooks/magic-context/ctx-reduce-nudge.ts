@@ -207,21 +207,29 @@ function approxThousands(tokens: number): string {
 }
 
 // ---- Channel 2 (synthetic-user-message ceiling) ----
-// The ceiling fires only when BOTH hold: pressure is near the execute threshold
-// AND a large pile of reclaimable tool output remains. This is the "you're about
-// to force a comparting and you're sitting on reclaimable space" condition —
-// deliberately narrow so it's a rare, high-signal escalation, not a nag.
-export const CHANNEL2_PRESSURE_NEAR = 0.9;
-export const CHANNEL2_CEIL_UNDROPPED = 40_000;
+// The ceiling fires when reclaimable tool output is at least a THIRD of the
+// agent's usable working range — the span between the fixed overhead floor
+// (system + tool defs + m[0] + m[1]) and the execute-threshold ceiling, i.e.
+// "the range the agent is actually moving in". Scaling to usable (instead of an
+// absolute token count) is what makes one rule correct across context sizes: on
+// a 1M-context session 54k reclaimable is noise, on a 200k session it's a third
+// of the room. usable also shrinks as pressure rises (headroom→0 near
+// threshold), so the single ratio encodes BOTH "near comparting" and "sitting
+// on a big reclaimable pile" without a separate pressure gate.
+export const CHANNEL2_USABLE_FRACTION = 1 / 3;
+// Floor: never escalate to a synthetic-user interrupt for a trivially small
+// pile, even if usable is tiny (e.g. a small-context session already near
+// threshold) — Channel 1's in-turn reminder covers that case.
+export const CHANNEL2_MIN_RECLAIMABLE = 10_000;
 
 /** Pure decision: should the Channel 2 ceiling intent be recorded this pass? */
 export function shouldTriggerChannel2(input: {
-    undroppedTokens: number;
-    pressure: number;
+    reclaimableTokens: number;
+    usableTokens: number;
 }): boolean {
-    return (
-        input.pressure >= CHANNEL2_PRESSURE_NEAR && input.undroppedTokens >= CHANNEL2_CEIL_UNDROPPED
-    );
+    if (input.reclaimableTokens < CHANNEL2_MIN_RECLAIMABLE) return false;
+    if (input.usableTokens <= 0) return true; // at/over threshold with a real pile → escalate
+    return input.reclaimableTokens >= input.usableTokens * CHANNEL2_USABLE_FRACTION;
 }
 
 /** The synthetic user `<system-reminder>` body delivered by Channel 2. */

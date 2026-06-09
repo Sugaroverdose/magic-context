@@ -7,6 +7,8 @@ import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import {
     type ContextDatabase,
     getActiveTagsBySession,
+    getActiveTagTokenAggregate,
+    getActiveTagTokenTotalsByMessage,
     getHistorianFailureState,
     getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
@@ -1523,6 +1525,25 @@ export function createTransform(deps: TransformDeps) {
         // the next cache-busting pass; acceptable drift for a display
         // estimate.
         const msgTokens = getMessageTokensCache(sessionId);
+        // Durable second tier: the tag store holds per-message real-token counts
+        // computed ONCE at tag-insert time and persisted, so a cold pass (empty
+        // in-process cache after restart) reads them instead of re-tokenizing the
+        // tail. Injected m[0]/m[1] blocks and synthetic-todowrite are never
+        // tagged, so they fall through to the live walk below and stay counted in
+        // conversation_tokens — preserving the display-layer subtraction contract
+        // (the RPC handler subtracts compartments/memories/docs/profile from this
+        // total to isolate real conversation). A message with any NULL-count tag
+        // (legacy, mid-backfill) is absent here this pass and live-tokenizes,
+        // converging to the stored path once the tagger backfills it.
+        let storedByMessage: Map<
+            string,
+            { conversation: number; toolCall: number; hasNull: boolean }
+        >;
+        try {
+            storedByMessage = getActiveTagTokenTotalsByMessage(db, sessionId);
+        } catch {
+            storedByMessage = new Map();
+        }
         let conversationTokens = 0;
         let toolCallTokens = 0;
         for (const message of messages) {
@@ -1532,6 +1553,16 @@ export function createTransform(deps: TransformDeps) {
                 if (cached) {
                     conversationTokens += cached.conversation;
                     toolCallTokens += cached.toolCall;
+                    continue;
+                }
+                const stored = storedByMessage.get(mid);
+                if (stored && !stored.hasNull) {
+                    conversationTokens += stored.conversation;
+                    toolCallTokens += stored.toolCall;
+                    msgTokens.set(mid, {
+                        conversation: stored.conversation,
+                        toolCall: stored.toolCall,
+                    });
                     continue;
                 }
             }
@@ -1693,7 +1724,21 @@ export function createTransform(deps: TransformDeps) {
                         contextLimit: resolvedContextLimit ?? 0,
                     },
                 );
-                const tailToolTokens = computeTailToolTokens(messages);
+                // Real-tokenizer counts from the durable tag store (injected
+                // m[0]/m[1] blocks are never tagged, so this is the injected-free
+                // live tail). reclaimable = non-dropped tool OUTPUT; liveTail =
+                // conversation + tool I/O. Falls back to the byte-approx tail walk
+                // only if the store read fails. Replaces the old byte×0.25 path.
+                let tailToolTokens: number;
+                let liveTailTokens: number;
+                try {
+                    const agg = getActiveTagTokenAggregate(db, sessionId);
+                    tailToolTokens = agg.toolOutput;
+                    liveTailTokens = agg.conversation + agg.toolCall;
+                } catch {
+                    tailToolTokens = computeTailToolTokens(messages);
+                    liveTailTokens = tailToolTokens;
+                }
                 deps.channel1StateBySession.set(sessionId, {
                     tailToolTokens,
                     historyBudgetTokens: historyBudgetTokens ?? 0,
@@ -1718,15 +1763,28 @@ export function createTransform(deps: TransformDeps) {
                 // task() await is unverified for subagents. Subagents rely on
                 // Channel 1 + the ≥85% tiered floor. (Deferred behind an
                 // integration test — see plan.)
+                // usable = the agent's working range = the gap between the fixed
+                // overhead floor (everything that ISN'T live tail: system + tool
+                // defs + m[0] + m[1]) and the execute-threshold ceiling. Derived
+                // by identity: executeThresholdTokens − inputTokens + liveTail
+                // (inputTokens − liveTail IS the fixed overhead on the wire). As
+                // pressure rises, usable shrinks toward 0, so the single
+                // reclaimable ≥ usable/3 ratio encodes both "near comparting" and
+                // "big reclaimable pile" without a separate pressure gate.
+                const executeThresholdTokens = Math.round(
+                    ((resolvedContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
+                );
+                const usableTokens = Math.max(
+                    0,
+                    executeThresholdTokens - contextUsage.inputTokens + liveTailTokens,
+                );
                 if (
                     fullFeatureMode &&
                     resolvedContextLimit &&
                     resolvedExecuteThresholdPct > 0 &&
                     shouldTriggerChannel2({
-                        undroppedTokens: tailToolTokens,
-                        pressure:
-                            ((contextUsage.inputTokens / resolvedContextLimit) * 100) /
-                            resolvedExecuteThresholdPct,
+                        reclaimableTokens: tailToolTokens,
+                        usableTokens,
                     })
                 ) {
                     try {

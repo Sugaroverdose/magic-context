@@ -27,7 +27,7 @@ import {
 	buildChannel1Reminder,
 	buildChannel2Reminder,
 	CHANNEL1_SENTINEL,
-	CHANNEL2_CEIL_UNDROPPED,
+	CHANNEL2_MIN_RECLAIMABLE,
 	type Channel1State,
 	computePressure,
 	decideChannel1,
@@ -207,8 +207,8 @@ export function maybeDeliverChannel2Pi(
 	const baseline = channel1StateBySession.get(sessionId);
 	const undropped = baseline
 		? baseline.tailToolTokens + baseline.turnToolTokens
-		: CHANNEL2_CEIL_UNDROPPED;
-	if (baseline && undropped < CHANNEL2_CEIL_UNDROPPED) {
+		: CHANNEL2_MIN_RECLAIMABLE;
+	if (baseline && undropped < CHANNEL2_MIN_RECLAIMABLE) {
 		try {
 			casChannel2NudgeState(db, sessionId, "pending", "");
 		} catch {

@@ -124,7 +124,16 @@ const tokenizer = new Tokenizer(claudeEncoding);
 
 export function estimateTokens(text: string): number {
     if (!text) return 0;
-    return tokenizer.count(text);
+    // Encode with allowedSpecial="all" so literal special-token strings (e.g. a
+    // `<EOT>` substring inside real tool output / a file the agent read) are
+    // counted as ordinary characters instead of throwing
+    // ("Text contains disallowed special token"). `count()` uses the default
+    // disallowedSpecial="all" and would throw — which, on the hot tagging /
+    // boundary / sidebar paths that tokenize arbitrary content, is a real crash
+    // vector. Token counts for content WITHOUT special-token substrings are
+    // identical; for content WITH them we now count the literal bytes (correct,
+    // since the wire carries the literal string, not a real control token).
+    return tokenizer.encode(text, "all").length;
 }
 
 export function normalizeText(text: string): string {

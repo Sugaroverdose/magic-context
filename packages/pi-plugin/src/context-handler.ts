@@ -58,6 +58,7 @@ import {
 	clearPendingPiCompactionMarkerStateIf,
 	findAdoptableFallbackTags,
 	getActiveTagsBySession,
+	getActiveTagTokenAggregate,
 	getHistorianFailureState,
 	getPendingOps,
 	getPendingPiCompactionMarkerState,
@@ -2190,9 +2191,23 @@ export function registerPiContextHandler(
 						executeThresholdTokens: schedulerConfig.executeThresholdTokens,
 						modelKey: liveModelBySession.get(sessionId),
 					});
-					const tailToolTokens = computeTailToolTokensPi(
-						outputMessages as unknown[],
-					);
+					// Real-tokenizer counts from the durable tag store (injected
+					// m[0]/m[1] blocks are never tagged → injected-free live tail).
+					// reclaimable = non-dropped tool OUTPUT; liveTail = conv + tool
+					// I/O. Falls back to the byte-approx walk only if the store read
+					// fails. Mirrors OpenCode's transform path exactly.
+					let tailToolTokens: number;
+					let liveTailTokens: number;
+					try {
+						const agg = getActiveTagTokenAggregate(options.db, sessionId);
+						tailToolTokens = agg.toolOutput;
+						liveTailTokens = agg.conversation + agg.toolCall;
+					} catch {
+						tailToolTokens = computeTailToolTokensPi(
+							outputMessages as unknown[],
+						);
+						liveTailTokens = tailToolTokens;
+					}
 					setPiChannel1Baseline(sessionId, {
 						tailToolTokens,
 						historyBudgetTokens: historyBudgetTokens ?? 0,
@@ -2203,20 +2218,26 @@ export function registerPiContextHandler(
 						reducedSinceRefresh: false,
 					});
 
-					// Channel 2 (ceiling) trigger — record a one-shot pending intent
-					// when pressure is near the execute threshold AND a large pile of
-					// reclaimable tool output remains. Delivery happens on `agent_end`
-					// via pi.sendUserMessage. Only escalate from '' so an in-flight
-					// claim/delivery is never reset.
+					// Channel 2 (ceiling) trigger — fire when reclaimable tool output
+					// is at least a third of the usable working range (the gap
+					// between fixed overhead and the execute-threshold ceiling).
+					// usable = executeThresholdTokens − inputTokens + liveTail.
+					// Delivery happens on `agent_end` via pi.sendUserMessage. Only
+					// escalate from '' so an in-flight claim/delivery is never reset.
+					const executeThresholdTokensPi = Math.round(
+						((usageContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
+					);
+					const usableTokensPi = Math.max(
+						0,
+						executeThresholdTokensPi - usageInputTokens + liveTailTokens,
+					);
 					if (
 						usageContextLimit &&
 						usageContextLimit > 0 &&
 						resolvedExecuteThresholdPct > 0 &&
 						shouldTriggerChannel2({
-							undroppedTokens: tailToolTokens,
-							pressure:
-								((usageInputTokens / usageContextLimit) * 100) /
-								resolvedExecuteThresholdPct,
+							reclaimableTokens: tailToolTokens,
+							usableTokens: usableTokensPi,
 						})
 					) {
 						casChannel2NudgeState(options.db, sessionId, "", "pending");

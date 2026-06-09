@@ -141,7 +141,7 @@ async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: strin
             db: deps.db,
             serverUrl: deps.serverUrl,
             directory: deps.directory ?? ".",
-            undroppedTokens: baseline
+            reclaimableTokens: baseline
                 ? baseline.tailToolTokens + baseline.turnToolTokens
                 : undefined,
         });

@@ -206,10 +206,14 @@ export {
     type SubagentTotals,
 } from "./storage-subagent-invocations";
 export {
+    type ActiveTagTokenAggregate,
     adoptFallbackTagMessageId,
     deleteTagsByMessageId,
     findAdoptableFallbackTags,
     getActiveTagsBySession,
+    getActiveTagTokenAggregate,
+    getActiveTagTokenTotalsByMessage,
+    getAllStatusTagTokenTotalsFlat,
     getMaxDroppedTagNumber,
     getMaxTagNumberBySession,
     getTagById,
@@ -217,6 +221,7 @@ export {
     getTagsBySession,
     getTopNBySize,
     insertTag,
+    type MessageTokenTotal,
     updateCavemanDepth,
     updateTagDropMode,
     updateTagMessageId,

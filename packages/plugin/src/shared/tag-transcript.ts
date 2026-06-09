@@ -47,8 +47,16 @@
 
 import type { ContextDatabase } from "../features/magic-context/storage";
 import { saveSourceContent } from "../features/magic-context/storage-source";
-import { updateTagByteSize, updateTagInputByteSize } from "../features/magic-context/storage-tags";
+import {
+    type TagTokenCounts,
+    updateTagByteSize,
+    updateTagInputByteSize,
+    updateTagInputTokenCount,
+    updateTagTokenCount,
+} from "../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
+import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-token-estimate";
+import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import {
     byteSize,
     prependTag,
@@ -132,10 +140,14 @@ interface ToolAggregate {
     occurrences: ToolOccurrence[];
     /** Largest byteSize seen across occurrences — used as the tag size. */
     maxByteSize: number;
+    /** Token count paired with maxByteSize (the same output occurrence). */
+    maxTokenCount: number;
     /** Tool name from the first occurrence we see one on. */
     toolName: string | null;
     /** Input byte size from the invocation occurrence (for storage projection). */
     inputByteSize: number;
+    /** Whether input_token_count has been persisted (from the tool_use occurrence). */
+    inputTokenStored: boolean;
 }
 
 export function tagTranscript(
@@ -216,7 +228,9 @@ export function tagTranscript(
                 const callId = part.id;
                 const text = part.getText() ?? "";
                 const toolByteSize = getToolPartByteSize(part, text);
+                const toolTokenCount = getToolPartTokenCount(part, text);
                 const meta = part.getToolMetadata();
+                const inputTokenCount = meta.inputTokenCount;
 
                 if (typeof callId !== "string" || callId.length === 0) {
                     activeToolResultRun = undefined;
@@ -270,7 +284,11 @@ export function tagTranscript(
                     // which assigns the tool tag on the result path.
                     if (part.kind === "tool_result" && toolByteSize > existing.maxByteSize) {
                         existing.maxByteSize = toolByteSize;
+                        existing.maxTokenCount = toolTokenCount;
                         updateTagByteSize(db, sessionId, existing.tagId, toolByteSize);
+                        // Keep token_count in lockstep with the byte bump so the
+                        // grown output's tokens aren't undercounted by readers.
+                        updateTagTokenCount(db, sessionId, existing.tagId, toolTokenCount);
                     }
                     if (existing.toolName === null && meta.toolName) {
                         existing.toolName = meta.toolName;
@@ -282,6 +300,14 @@ export function tagTranscript(
                     ) {
                         existing.inputByteSize = meta.inputByteSize;
                         updateTagInputByteSize(db, sessionId, existing.tagId, meta.inputByteSize);
+                    }
+                    if (
+                        !existing.inputTokenStored &&
+                        part.kind === "tool_use" &&
+                        inputTokenCount > 0
+                    ) {
+                        existing.inputTokenStored = true;
+                        updateTagInputTokenCount(db, sessionId, existing.tagId, inputTokenCount);
                     }
                     // Inject §N§ prefix into this tool_result occurrence
                     // (matches OpenCode behavior — only result gets the prefix).
@@ -312,6 +338,8 @@ export function tagTranscript(
                     // inputByteSize + reasoning) from double-counting args when the
                     // first occurrence is a large tool_use. Mirrors OpenCode.
                     const outputByteSize = part.kind === "tool_result" ? toolByteSize : 0;
+                    const outputTokenCount = part.kind === "tool_result" ? toolTokenCount : 0;
+                    const firstInputTokenCount = part.kind === "tool_use" ? inputTokenCount : 0;
                     const tagId = tagger.assignToolTag(
                         sessionId,
                         callId,
@@ -321,6 +349,11 @@ export function tagTranscript(
                         0,
                         meta.toolName ?? null,
                         meta.inputByteSize,
+                        () => ({
+                            tokenCount: outputTokenCount,
+                            inputTokenCount: firstInputTokenCount,
+                            reasoningTokenCount: null,
+                        }),
                     );
                     const aggregate = {
                         callId,
@@ -333,8 +366,10 @@ export function tagTranscript(
                             },
                         ],
                         maxByteSize: outputByteSize,
+                        maxTokenCount: outputTokenCount,
                         toolName: meta.toolName ?? null,
                         inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
+                        inputTokenStored: part.kind === "tool_use" && firstInputTokenCount > 0,
                     };
                     toolAggregates.set(aggregateKey, aggregate);
                     if (part.kind === "tool_use") {
@@ -395,10 +430,52 @@ function markToolAggregateResolved(
     openToolAggregateKeysByCallId.set(callId, nextPendingKeys);
 }
 
+/** Real-tokenizer count for tagged text (images bill by visual tokens). */
+function estimateTagTextTokens(text: string): number {
+    if (!text) return 0;
+    if (text.startsWith("data:image/")) return estimateImageTokensFromDataUrl(text);
+    return estimateTokens(text);
+}
+
+/** Real-tokenizer count for a tool input payload (string or JSON-serializable). */
+function estimateToolInputTokens(input: unknown): number {
+    if (input === undefined || input === null) return 0;
+    try {
+        const s = typeof input === "string" ? input : JSON.stringify(input);
+        return s ? estimateTokens(s) : 0;
+    } catch {
+        return 0;
+    }
+}
+
 function getToolPartByteSize(part: TranscriptPart, text: string): number {
     const textByteSize = byteSize(text);
     if (textByteSize > 0 || part.kind !== "tool_result") return textByteSize;
     return getNonTextToolResultByteSize(part);
+}
+
+/**
+ * Real-tokenizer mirror of {@link getToolPartByteSize}: token count of a tool
+ * part's output text (falling back to the raw payload for non-text results,
+ * matching the byte path so token_count stays consistent with byte_size).
+ */
+function getToolPartTokenCount(part: TranscriptPart, text: string): number {
+    if (text.length > 0 || part.kind !== "tool_result") return estimateTokens(text);
+    const raw = part.rawByteSize?.();
+    if (typeof raw === "number" && raw > 0) {
+        const record = isRecord(part) ? part : undefined;
+        const content =
+            record?.content ??
+            record?.rawContent ??
+            record?.rawPart ??
+            record?.part ??
+            record?.data ??
+            record?.image ??
+            record?.source;
+        const serialized = safeJsonStringify(content ?? part);
+        return serialized === undefined ? 0 : estimateTokens(serialized);
+    }
+    return 0;
 }
 
 function getNonTextToolResultByteSize(part: TranscriptPart): number {
@@ -458,6 +535,13 @@ function tagTextPart(args: TagTextPartArgs): void {
         null,
         0,
         args.entryFingerprint,
+        // Lazy: fires only on fresh insert. Strip any §N§ prefix so a re-tag
+        // from already-prefixed text still tokenizes the pristine content.
+        () => ({
+            tokenCount: estimateTagTextTokens(stripTagPrefix(text)),
+            inputTokenCount: null,
+            reasoningTokenCount: null,
+        }),
     );
 
     // Persist the original (pre-tagged) source content so caveman
@@ -507,6 +591,7 @@ function tagToolPart(args: TagToolPartArgs): void {
     const contentId = stableId ?? `${args.messageId}:t${args.partIndex}`;
     const text = args.part.getText() ?? "";
     const toolByteSize = getToolPartByteSize(args.part, text);
+    const toolTokenCount = getToolPartTokenCount(args.part, text);
     const meta = args.part.getToolMetadata();
     // v3.3.1 Layer C: synthetic ownership for the no-callId Pi
     // fallback. Owner == callId == contentId. The composite key
@@ -523,6 +608,11 @@ function tagToolPart(args: TagToolPartArgs): void {
         0,
         meta.toolName ?? null,
         meta.inputByteSize,
+        () => ({
+            tokenCount: toolTokenCount,
+            inputTokenCount: meta.inputTokenCount,
+            reasoningTokenCount: null,
+        }),
     );
 
     // For tool parts, the visible payload is the tool result text. We

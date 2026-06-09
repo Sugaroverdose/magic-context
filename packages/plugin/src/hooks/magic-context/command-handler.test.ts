@@ -24,6 +24,9 @@ function createTestDb(): Database {
             harness TEXT NOT NULL DEFAULT 'opencode',
       tool_owner_message_id TEXT DEFAULT NULL,
       entry_fingerprint TEXT,
+      token_count INTEGER,
+      input_token_count INTEGER,
+      reasoning_token_count INTEGER,
       UNIQUE(session_id, tag_number)
     );
 

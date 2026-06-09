@@ -322,7 +322,7 @@ export function checkCompartmentTrigger(
     if (tailInfo.trueRawEligibleTokens >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER) {
         sessionLog(
             sessionId,
-            `compartment trigger: tail-size fire — ~${tailInfo.tokenEstimate} tokens exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
+            `compartment trigger: tail-size fire — ~${tailInfo.trueRawEligibleTokens} true-raw tokens (TC-estimate ~${tailInfo.tokenEstimate}) exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
         );
         return {
             shouldFire: true,

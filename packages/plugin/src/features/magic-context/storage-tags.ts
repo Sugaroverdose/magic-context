@@ -15,7 +15,7 @@ function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness, tool_owner_message_id, entry_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness, tool_owner_message_id, entry_fingerprint, token_count, input_token_count, reasoning_token_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertTagStatements.set(db, stmt);
     }
@@ -82,6 +82,137 @@ export function updateTagByteSize(
 }
 
 /**
+ * Per-owning-message token totals for the ACTIVE tags of a session, keyed by
+ * the real message id (not the synthetic content id). Both the sidebar
+ * breakdown and the protected-tail true-raw measurement index into this by the
+ * message ids they already hold (their window / eligible slice), so the result
+ * is window-scoped by construction — it never overcounts a still-active tag
+ * that has been trimmed out of the live window.
+ *
+ * Owner derivation:
+ *   - tool tags: `tool_owner_message_id` (the assistant message that invoked).
+ *   - message/file tags: `message_id` is the content id `${msgId}:pN` /
+ *     `${msgId}:fileN`; the real message id is the prefix before the last
+ *     `:p`/`:file` segment.
+ *
+ * Each entry carries the conversation/toolCall split (reasoning always folds
+ * into conversation, mirroring the live per-part walk) plus `hasNull`: true
+ * when any contributing tag still has a NULL token_count (legacy row written
+ * before the column existed), signalling the caller to tokenize+backfill that
+ * message this pass instead of trusting the stored sum.
+ */
+export interface MessageTokenTotal {
+    conversation: number;
+    toolCall: number;
+    /**
+     * Tool OUTPUT tokens only (the ctx_reduce-droppable payload), excluding tool
+     * input args — this is the "reclaimable" figure the nudge channels gate on,
+     * matching the legacy `computeTailToolTokens` semantics (which summed
+     * `state.output`). `toolCall` = this + input args, for the sidebar bucket.
+     */
+    toolOutput: number;
+    hasNull: boolean;
+}
+
+const CONTENT_ID_SUFFIX = /:(?:p|file)\d+$/;
+
+function ownerMessageIdForTagRow(row: {
+    type: string;
+    message_id: string;
+    tool_owner_message_id: string | null;
+}): string {
+    if (row.type === "tool") {
+        return row.tool_owner_message_id ?? row.message_id;
+    }
+    return row.message_id.replace(CONTENT_ID_SUFFIX, "");
+}
+
+/**
+ * Session-level aggregate of ACTIVE tag token counts — the real live-tail
+ * weight EXCLUDING injected m[0]/m[1] blocks (which are never tagged). This is
+ * the single source for the nudge channels:
+ *   - liveTail   = conversation + toolCall  (real user/assistant + tool I/O)
+ *   - reclaimable = toolOutput              (non-dropped, ctx_reduce-droppable)
+ *   - usable      = executeThresholdTokens − inputTokens + liveTail
+ * `nullCount` > 0 means some active tags are legacy/un-backfilled this pass; the
+ * caller may fall back to the byte-approx path until they converge.
+ */
+export interface ActiveTagTokenAggregate {
+    conversation: number;
+    toolCall: number;
+    toolOutput: number;
+    nullCount: number;
+}
+
+export function getActiveTagTokenAggregate(
+    db: Database,
+    sessionId: string,
+): ActiveTagTokenAggregate {
+    const row = db
+        .prepare(
+            `SELECT
+                COALESCE(SUM(CASE WHEN type != 'tool' THEN COALESCE(token_count, 0) ELSE 0 END), 0)
+                    + COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0) AS conversation,
+                COALESCE(SUM(CASE WHEN type = 'tool' THEN COALESCE(token_count, 0) + COALESCE(input_token_count, 0) ELSE 0 END), 0) AS tool_call,
+                COALESCE(SUM(CASE WHEN type = 'tool' THEN COALESCE(token_count, 0) ELSE 0 END), 0) AS tool_output,
+                COALESCE(SUM(CASE WHEN token_count IS NULL THEN 1 ELSE 0 END), 0) AS null_count
+             FROM tags
+             WHERE session_id = ? AND status = 'active'`,
+        )
+        .get(sessionId) as
+        | { conversation: number; tool_call: number; tool_output: number; null_count: number }
+        | undefined;
+    return {
+        conversation: row?.conversation ?? 0,
+        toolCall: row?.tool_call ?? 0,
+        toolOutput: row?.tool_output ?? 0,
+        nullCount: row?.null_count ?? 0,
+    };
+}
+
+export function getActiveTagTokenTotalsByMessage(
+    db: Database,
+    sessionId: string,
+): Map<string, MessageTokenTotal> {
+    const rows = db
+        .prepare(
+            `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+             FROM tags
+             WHERE session_id = ? AND status = 'active'`,
+        )
+        .all(sessionId) as Array<{
+        type: string;
+        message_id: string;
+        tool_owner_message_id: string | null;
+        token_count: number | null;
+        input_token_count: number | null;
+        reasoning_token_count: number | null;
+    }>;
+    const out = new Map<string, MessageTokenTotal>();
+    for (const row of rows) {
+        const owner = ownerMessageIdForTagRow(row);
+        let entry = out.get(owner);
+        if (!entry) {
+            entry = { conversation: 0, toolCall: 0, toolOutput: 0, hasNull: false };
+            out.set(owner, entry);
+        }
+        const reasoning = row.reasoning_token_count ?? 0;
+        if (row.type === "tool") {
+            const output = row.token_count ?? 0;
+            entry.toolCall += output + (row.input_token_count ?? 0);
+            entry.toolOutput += output;
+        } else {
+            entry.conversation += row.token_count ?? 0;
+        }
+        // Reasoning always counts as conversation (mirrors the live walk),
+        // regardless of which tag type it was stored on.
+        entry.conversation += reasoning;
+        if (row.token_count === null) entry.hasNull = true;
+    }
+    return out;
+}
+
+/**
  * Bump a tag's input_byte_size when a tool_use occurrence is seen
  * after the result occurrence (rare in practice; supports both
  * orderings).
@@ -93,6 +224,145 @@ export function updateTagInputByteSize(
     newInputByteSize: number,
 ): void {
     getUpdateTagInputByteSizeStatement(db).run(newInputByteSize, sessionId, tagNumber);
+}
+
+const updateTagTokenCountStatements = new WeakMap<Database, PreparedStatement>();
+const updateTagInputTokenCountStatements = new WeakMap<Database, PreparedStatement>();
+
+function getUpdateTagTokenCountStatement(db: Database): PreparedStatement {
+    let stmt = updateTagTokenCountStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "UPDATE tags SET token_count = ? WHERE session_id = ? AND tag_number = ?",
+        );
+        updateTagTokenCountStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getUpdateTagInputTokenCountStatement(db: Database): PreparedStatement {
+    let stmt = updateTagInputTokenCountStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "UPDATE tags SET input_token_count = ? WHERE session_id = ? AND tag_number = ?",
+        );
+        updateTagInputTokenCountStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+/**
+ * Bump a tag's token_count when a later occurrence of the same call_id carries a
+ * larger output payload — the token mirror of `updateTagByteSize`, called from
+ * the same site so the cached token count tracks the grown tool result.
+ */
+export function updateTagTokenCount(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    newTokenCount: number,
+): void {
+    getUpdateTagTokenCountStatement(db).run(newTokenCount, sessionId, tagNumber);
+}
+
+/**
+ * Flat per-message ORIGINAL token map for the protected-tail boundary, keyed by
+ * real message id. Sums every tag's stored token weight (output + input +
+ * reasoning) for a message REGARDLESS of drop status, because the boundary
+ * measures true-raw tokens — the original content the historian re-reads to
+ * compact, which lives in opencode.db even when the wire shows a `[dropped]`
+ * sentinel. (An active-only sum would undercount the eligible range whenever a
+ * tool output had been ctx_reduce-dropped in the live tail.)
+ *
+ * A message with ANY tag still carrying a NULL token_count (legacy, not yet
+ * backfilled) is reported in `nullMessageIds` and omitted from `totals`, so the
+ * boundary live-tokenizes it this pass and converges to the stored path after
+ * the tagger backfills. Pre-boundary (`compacted`) messages cancel out of the
+ * boundary's prefix-difference math, so including them here is harmless.
+ */
+export function getAllStatusTagTokenTotalsFlat(
+    db: Database,
+    sessionId: string,
+): { totals: Map<string, number>; nullMessageIds: Set<string> } {
+    const rows = db
+        .prepare(
+            `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+             FROM tags
+             WHERE session_id = ?`,
+        )
+        .all(sessionId) as Array<{
+        type: string;
+        message_id: string;
+        tool_owner_message_id: string | null;
+        token_count: number | null;
+        input_token_count: number | null;
+        reasoning_token_count: number | null;
+    }>;
+    const totals = new Map<string, number>();
+    const nullMessageIds = new Set<string>();
+    for (const row of rows) {
+        const owner = ownerMessageIdForTagRow(row);
+        if (row.token_count === null) {
+            nullMessageIds.add(owner);
+            totals.delete(owner);
+            continue;
+        }
+        if (nullMessageIds.has(owner)) continue;
+        const weight =
+            (row.token_count ?? 0) +
+            (row.input_token_count ?? 0) +
+            (row.reasoning_token_count ?? 0);
+        totals.set(owner, (totals.get(owner) ?? 0) + weight);
+    }
+    return { totals, nullMessageIds };
+}
+
+/** Bump a tag's input_token_count — the token mirror of `updateTagInputByteSize`. */
+export function updateTagInputTokenCount(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    newInputTokenCount: number,
+): void {
+    getUpdateTagInputTokenCountStatement(db).run(newInputTokenCount, sessionId, tagNumber);
+}
+
+/**
+ * True when a tag row still has a NULL token_count — i.e. it was written before
+ * the token columns existed (legacy) and needs a one-time backfill. Used by the
+ * tagger's DB-existing (post-restart cold) path to decide whether to invoke the
+ * tokenizer thunk; populated rows skip it so a restart never re-tokenizes.
+ */
+export function tagTokenCountIsNull(db: Database, sessionId: string, tagNumber: number): boolean {
+    const row = db
+        .prepare("SELECT token_count FROM tags WHERE session_id = ? AND tag_number = ?")
+        .get(sessionId, tagNumber) as { token_count: number | null } | undefined;
+    return row !== undefined && row.token_count === null;
+}
+
+/**
+ * One-time backfill of a legacy tag's token columns. Guarded by
+ * `token_count IS NULL` so it is idempotent and a no-op once populated (a later
+ * pass / restart cannot clobber a real count). Mirrors the byte columns set at
+ * insert time.
+ */
+export function backfillTagTokenCounts(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    counts: TagTokenCounts,
+): void {
+    db.prepare(
+        `UPDATE tags
+            SET token_count = ?, input_token_count = ?, reasoning_token_count = ?
+            WHERE session_id = ? AND tag_number = ? AND token_count IS NULL`,
+    ).run(
+        counts.tokenCount ?? null,
+        counts.inputTokenCount ?? null,
+        counts.reasoningTokenCount ?? null,
+        sessionId,
+        tagNumber,
+    );
 }
 
 function getUpdateTagMessageIdStatement(db: Database): PreparedStatement {
@@ -233,6 +503,17 @@ function escapeLikePattern(value: string): string {
     return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
+/**
+ * Per-tag token counts (real Claude tokenizer), computed once at insert time.
+ * `null` fields mean "not measured" (legacy callers / rows predating the
+ * columns); readers treat NULL as a fall-back-per-call signal.
+ */
+export interface TagTokenCounts {
+    tokenCount: number | null;
+    inputTokenCount: number | null;
+    reasoningTokenCount: number | null;
+}
+
 export function insertTag(
     db: Database,
     sessionId: string,
@@ -245,6 +526,7 @@ export function insertTag(
     inputByteSize: number = 0,
     toolOwnerMessageId: string | null = null,
     entryFingerprint: string | null = null,
+    tokenCounts: TagTokenCounts | null = null,
 ): number {
     getInsertTagStatement(db).run(
         sessionId,
@@ -258,6 +540,9 @@ export function insertTag(
         getHarness(),
         toolOwnerMessageId,
         entryFingerprint,
+        tokenCounts?.tokenCount ?? null,
+        tokenCounts?.inputTokenCount ?? null,
+        tokenCounts?.reasoningTokenCount ?? null,
     );
 
     return tagNumber;
