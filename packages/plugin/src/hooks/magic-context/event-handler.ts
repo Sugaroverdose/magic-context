@@ -39,7 +39,6 @@ import {
 import {
     resolveCacheTtl,
     resolveContextLimit,
-    resolveExecuteThreshold,
     resolveModelKey,
     resolveSessionId,
 } from "./event-resolvers";
