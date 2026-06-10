@@ -9,7 +9,11 @@ import { getAllStatusTagTokenTotalsFlat } from "../../features/magic-context/sto
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { deriveTriggerBudget } from "./derive-budgets";
-import { getLegacyProtectedTailStartOrdinal, readRawSessionMessages } from "./read-session-chunk";
+import {
+    getCachedAbsoluteMessageCount,
+    getLegacyProtectedTailStartOrdinal,
+    readRawSessionMessages,
+} from "./read-session-chunk";
 import { hasMeaningfulUserText } from "./read-session-formatting";
 import {
     buildToolArcs,
@@ -304,9 +308,15 @@ export function resolveProtectedTailBoundary(
     const createdAt = ctx.createdAt ?? Date.now();
     const messages = readRawSessionMessages(ctx.sessionId);
     const storedTotals = ctx.storedTokenTotals;
+    // When a tail-only slice is primed, `messages` holds just the eligible tail
+    // with absolute ordinals; the index must be sized to the ABSOLUTE total so
+    // every offset-forward query matches a whole-session read. null → whole
+    // session (index uses messages.length, unchanged).
+    const absoluteMessageCount = getCachedAbsoluteMessageCount(ctx.sessionId) ?? undefined;
     const index = buildTrueRawTokenIndex(ctx.sessionId, messages, {
         providerShapeVersion: ctx.providerShapeVersion,
         cacheNamespace: ctx.cacheNamespace,
+        absoluteMessageCount,
         storedTotalForMessage: storedTotals
             ? (m) => {
                   const v = storedTotals.get(m.id);
@@ -562,7 +572,12 @@ export function resolveOpenCodeProtectedTailBoundary(
 export function getRawHistoryEligibility(db: Database, sessionId: string): RawHistoryEligibility {
     const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
     const offset = Math.max(1, lastCompartmentEnd + 1);
-    const rawMessageCount = readRawSessionMessages(sessionId).length;
+    // When a tail-only slice is primed in scope, its `.length` is the tail size,
+    // not the absolute total — read the stashed absolute count instead. Without a
+    // tail slice (whole-session array or Pi provider) this is null and we use the
+    // array length exactly as before.
+    const absoluteCount = getCachedAbsoluteMessageCount(sessionId);
+    const rawMessageCount = absoluteCount ?? readRawSessionMessages(sessionId).length;
     return {
         lastCompartmentEnd,
         offset,

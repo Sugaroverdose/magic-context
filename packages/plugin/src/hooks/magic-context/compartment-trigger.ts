@@ -1,5 +1,13 @@
-import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
-import { getActiveTagsBySession, getPendingOps } from "../../features/magic-context/storage";
+import {
+    getLastCompartmentEndMessage,
+    getLastCompartmentEndMessageId,
+} from "../../features/magic-context/compartment-storage";
+import {
+    getActiveTagsBySession,
+    getActiveTagTokenAggregate,
+    getPendingOps,
+    loadProtectedTailMeta,
+} from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
@@ -10,7 +18,11 @@ import {
     type ProtectedTailBoundarySnapshot,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
-import { readSessionChunk, withRawSessionMessageCache } from "./read-session-chunk";
+import {
+    primeTailRawMessageCache,
+    readSessionChunk,
+    withRawSessionMessageCache,
+} from "./read-session-chunk";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -132,6 +144,27 @@ function getUnsummarizedTailInfo(
 ): TailInfo {
     return withRawSessionMessageCache(() => {
         try {
+            // Prime the scoped cache with a TAIL-ONLY read so the boundary
+            // resolution and chunk scan below read only messages after the last
+            // compartment — never the whole session (the O(session) read that
+            // froze the JS event loop ~3s on a large session and made every
+            // parallel tool.definition hook measure multi-second durations). The
+            // boundary math is offset-forward only, so a tail slice anchored at
+            // lastCompartmentEnd+1 yields an identical trigger decision. Skipped
+            // (full read) when the protected-tail policy hasn't migrated to v3
+            // yet, because the one-time v3 seed (getLegacyProtectedTailStartOrdinal)
+            // scans ALL user-message parts; once seeded it never runs again.
+            // No-op for Pi (provider-backed) and in test/no-DB environments, and
+            // when no usable boundary anchor exists (falls through to full read).
+            const policyVersion = loadProtectedTailMeta(db, sessionId).protectedTailPolicyVersion;
+            if (policyVersion >= 3) {
+                primeTailRawMessageCache({
+                    sessionId,
+                    lastCompartmentEnd: getLastCompartmentEndMessage(db, sessionId),
+                    anchorMessageId: getLastCompartmentEndMessageId(db, sessionId),
+                });
+            }
+
             const rawEligibility = getRawHistoryEligibility(db, sessionId);
             if (!rawEligibility.hasRawBeyondLastCompartment) {
                 return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal: rawEligibility.offset };
@@ -212,6 +245,53 @@ export function checkCompartmentTrigger(
             `compartment trigger: skipped — historian already in progress (usage=${usage.percentage.toFixed(1)}%)`,
         );
         return { shouldFire: false };
+    }
+
+    // Cheap pre-gate (avoids the full-session raw read on every message.updated).
+    //
+    // getUnsummarizedTailInfo's very first step reads + parses the ENTIRE raw
+    // session (getRawHistoryEligibility → readRawSessionMessages) to resolve the
+    // protected-tail boundary — ~3s of synchronous SQLite on a 50k-message
+    // session, which freezes the whole JS event loop and is what makes every
+    // parallel `tool.definition` hook measure multi-second durations. But below
+    // the proactive floor, the ONLY triggers that can fire are the size-based
+    // ones (commit_clusters needs eligible TC-tokens ≥ triggerBudget; tail_size
+    // needs true-raw eligible ≥ triggerBudget×MULT). The active-tag token sum is
+    // a cheap, conservative UPPER BOUND on the eligible-tail tokens (eligible ⊆
+    // the post-compaction live tail covered by active tags; any pre-boundary
+    // still-active tag only inflates it), so if even that bound is below the
+    // smallest size-trigger floor, neither size trigger can possibly fire and we
+    // can skip the expensive read entirely. Only trust the bound when the tag
+    // store is fully backfilled (nullCount === 0); a cold/partial store
+    // undercounts and could wrongly bail, so we fall through to the
+    // authoritative path until the next pass backfills it.
+    const proactiveFloorForGate = getProactiveCompartmentTriggerPercentage(
+        executeThresholdPercentage,
+    );
+    if (usage.percentage < proactiveFloorForGate) {
+        try {
+            const agg = getActiveTagTokenAggregate(db, sessionId);
+            if (agg.nullCount === 0) {
+                const eligibleUpperBound = agg.conversation + agg.toolCall;
+                // Smallest token floor any size trigger needs is triggerBudget
+                // (commit_clusters). tail_size needs even more. If the upper
+                // bound is under it, neither can fire.
+                if (eligibleUpperBound < triggerBudget) {
+                    sessionLog(
+                        sessionId,
+                        `compartment trigger: cheap-skip at ${usage.percentage.toFixed(1)}% (below proactive floor ${proactiveFloorForGate}%) — live-tail upper bound ${eligibleUpperBound} < triggerBudget ${triggerBudget}; no size trigger possible, skipped full raw read`,
+                    );
+                    return { shouldFire: false };
+                }
+            }
+        } catch (error) {
+            // Best-effort gate: any failure falls through to the authoritative
+            // (expensive) path, never changing behavior — only its cost.
+            sessionLog(
+                sessionId,
+                `compartment trigger: cheap-gate skipped (falling through to full read): ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
     }
 
     const tailInfo = getUnsummarizedTailInfo(

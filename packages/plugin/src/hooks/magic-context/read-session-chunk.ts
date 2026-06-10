@@ -22,6 +22,7 @@ import {
     type RawMessage,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessagesFromDb,
+    readRawSessionTailFromDb,
 } from "./read-session-raw";
 import { isFilePart, isTextPart } from "./tag-part-guards";
 import { extractToolCallObservation } from "./tool-drop-target";
@@ -29,6 +30,12 @@ import { extractToolCallObservation } from "./tool-drop-target";
 export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
 
 let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
+// Parallel to activeRawMessageCache, lifecycle-bound to the same scope. Holds the
+// ABSOLUTE session message count when the cached array is a TAIL-ONLY slice (so
+// `.length` would undercount). Consumers that need the true total read it via
+// getCachedAbsoluteMessageCount; null means "no tail slice active → use the
+// array length".
+let activeAbsoluteCountCache: Map<string, number> | null = null;
 
 /**
  * Per-session source override for raw message reading.
@@ -143,6 +150,7 @@ export function withRawSessionMessageCache<T>(fn: () => T): T {
     const outerCache = activeRawMessageCache;
     if (!outerCache) {
         activeRawMessageCache = new Map();
+        activeAbsoluteCountCache = new Map();
     }
 
     try {
@@ -150,6 +158,7 @@ export function withRawSessionMessageCache<T>(fn: () => T): T {
     } finally {
         if (!outerCache) {
             activeRawMessageCache = null;
+            activeAbsoluteCountCache = null;
         }
     }
 }
@@ -167,6 +176,64 @@ export function readRawSessionMessages(sessionId: string): RawMessage[] {
     }
 
     return readRawSessionMessagesFromSource(sessionId);
+}
+
+/**
+ * Prime the active raw-message cache with a TAIL-ONLY read (only messages
+ * at/after the last compartment boundary), so subsequent
+ * `readRawSessionMessages(sessionId)` calls in this scope reuse it instead of
+ * reading the whole session.
+ *
+ * This is the O(tail) path: the compartment-trigger boundary resolution is
+ * offset-forward only (its candidate / suffix / range / head-cap / chunk-scan
+ * reads never cross below `baseOrdinal+1`), and the absolute message count it
+ * needs is recovered from the tail reader (`baseOrdinal + tail`), NOT from
+ * counting pre-boundary rows. On a months-long session the full read grows
+ * O(session); this stays flat at the tail size.
+ *
+ * The cached array carries ABSOLUTE ordinals (`baseOrdinal+1 …`) so every
+ * downstream absolute-ordinal computation matches the full read; the true total
+ * is stashed in the parallel absolute-count cache for `.length`-style consumers.
+ *
+ * No-op (returns false) when a provider is registered (Pi: in-memory branch read
+ * is already cheap and authoritative), no OpenCode DB exists, the cache is
+ * already populated, or no usable boundary anchor exists (e.g. no compartments,
+ * or the anchor message was deleted) — in which case the caller falls through to
+ * the full read, which is correct (everything is eligible / nothing to skip).
+ */
+export function primeTailRawMessageCache(args: {
+    sessionId: string;
+    lastCompartmentEnd: number;
+    anchorMessageId: string | null;
+}): boolean {
+    const { sessionId, lastCompartmentEnd, anchorMessageId } = args;
+    if (!activeRawMessageCache) return false;
+    if (activeRawMessageCache.has(sessionId)) return false;
+    // A registered provider (Pi) is the authoritative in-memory source and is
+    // already cheap; never shadow it with a DB read.
+    if (sessionProviders.has(sessionId)) return false;
+    if (!openCodeDbExists()) return false;
+    // Need a real boundary + anchor to read the tail; otherwise fall through to
+    // the full read (correct for the no-compartment / #132 case).
+    if (lastCompartmentEnd < 1 || !anchorMessageId) return false;
+
+    const result = withReadOnlySessionDb((db) =>
+        readRawSessionTailFromDb(db, sessionId, lastCompartmentEnd, anchorMessageId),
+    );
+    if (!result) return false; // anchor not found → caller uses full read
+    activeRawMessageCache.set(sessionId, result.messages);
+    activeAbsoluteCountCache?.set(sessionId, result.absoluteMessageCount);
+    return true;
+}
+
+/**
+ * Absolute session message count for the active scope. Returns the tail-prime's
+ * stashed absolute count when a tail slice is cached; otherwise null, signalling
+ * callers to use `readRawSessionMessages(sessionId).length` (whole-session
+ * array) as before.
+ */
+export function getCachedAbsoluteMessageCount(sessionId: string): number | null {
+    return activeAbsoluteCountCache?.get(sessionId) ?? null;
 }
 
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {

@@ -48,6 +48,21 @@ export interface TrueRawTokenIndexBuildOptions extends TrueRawEstimateOptions {
      * which converges to the stored path once the tagger backfills.
      */
     storedTotalForMessage?: (message: RawMessage) => number | null;
+    /**
+     * Absolute total message count for the session, when `messages` is a
+     * TAIL-ONLY slice carrying absolute ordinals (e.g. only messages after the
+     * last compartment boundary). The prefix/suffix machinery is sized to this
+     * count and ordinals outside the supplied slice contribute zero tokens —
+     * which is exactly correct for every offset-forward query the protected-tail
+     * boundary makes (its candidate, suffix, range, and head-cap reads never
+     * cross below the eligible offset). Lets the boundary resolve from only the
+     * eligible tail instead of reading the whole session every pass.
+     *
+     * Omitted for whole-session callers: defaults to `messages.length`, and with
+     * contiguous 1..N ordinals the result is byte-identical to the prior
+     * index-positional fill.
+     */
+    absoluteMessageCount?: number;
 }
 
 interface CachedMessageEstimate {
@@ -493,12 +508,20 @@ export function buildTrueRawTokenIndex(
     options: TrueRawTokenIndexBuildOptions,
 ): TrueRawTokenIndex {
     const ordered = [...messages].sort((a, b) => a.ordinal - b.ordinal);
-    const rawMessageCount = ordered.length;
+    // `rawMessageCount` is the ABSOLUTE session message count. When the caller
+    // passes a tail-only slice it supplies the real total via
+    // absoluteMessageCount; otherwise it equals the slice length (whole-session
+    // path — unchanged). The prefix array is sized to the absolute count and
+    // filled BY ORDINAL (not by array position), so a tail slice with absolute
+    // ordinals base+1..N leaves the pre-base prefix flat at 0. Every
+    // offset-forward query (the only kind the boundary makes) is byte-identical
+    // because the pre-offset prefix term cancels in the suffix/range subtraction.
+    const sliceCount = ordered.length;
+    const rawMessageCount = Math.max(sliceCount, options.absoluteMessageCount ?? sliceCount);
     const tokensByOrdinal = new Map<number, number>();
     const idsByOrdinal = new Map<number, string>();
     const prefix = new Array<number>(rawMessageCount + 1).fill(0);
-    for (let i = 0; i < rawMessageCount; i += 1) {
-        const message = ordered[i];
+    for (const message of ordered) {
         // Prefer the durable stored total (tags.token_count) when available; it
         // equals the live tokenization of the same content (the tagger stores
         // estimateTokens of each part), so the prefix sums and cut point are
@@ -510,7 +533,15 @@ export function buildTrueRawTokenIndex(
                 : tokenForMessage(message, options).total;
         tokensByOrdinal.set(message.ordinal, total);
         idsByOrdinal.set(message.ordinal, message.id);
-        prefix[i + 1] = prefix[i] + total;
+        // Park the token at its absolute-ordinal slot; cumulate below.
+        if (message.ordinal >= 1 && message.ordinal <= rawMessageCount) {
+            prefix[message.ordinal] = total;
+        }
+    }
+    // Convert the per-ordinal tokens into a cumulative prefix sum. O(N) integer
+    // adds (no I/O, no parse) — negligible versus the avoided full-session read.
+    for (let k = 1; k <= rawMessageCount; k += 1) {
+        prefix[k] += prefix[k - 1];
     }
     const ordinalToIndex = (ordinal: number): number =>
         Math.max(0, Math.min(rawMessageCount, ordinal - 1));

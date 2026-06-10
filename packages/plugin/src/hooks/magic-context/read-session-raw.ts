@@ -117,6 +117,118 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
     });
 }
 
+interface AnchorRow {
+    time_created: number;
+    id: string;
+}
+
+function isAnchorRow(row: unknown): row is AnchorRow {
+    return (
+        row !== null &&
+        typeof row === "object" &&
+        typeof (row as { time_created?: unknown }).time_created === "number" &&
+        typeof (row as { id?: unknown }).id === "string"
+    );
+}
+
+/**
+ * Read ONLY the eligible tail — messages at/after the last compartment boundary
+ * — assigning them their correct ABSOLUTE ordinals (continuing from
+ * `baseOrdinal`), and return the absolute session message count alongside.
+ *
+ * This is the O(tail) read: it never touches the ~63k pre-boundary rows that the
+ * full reader scans just to recover the tail's ordinal base — a number the
+ * compaction marker already stores (`end_message` ordinal + `end_message_id`
+ * anchor). On a months-long session the full read is O(session) and grows
+ * unbounded; this stays flat at the tail size.
+ *
+ * Anchor semantics: reads rows with `(time_created, id) >= anchor` (INCLUSIVE of
+ * the boundary message), in the same sort order as the full reader, filters
+ * compaction-summary rows identically, and numbers the kept messages
+ * `baseOrdinal, baseOrdinal+1, …`. Including the anchor keeps
+ * `messageIdAtOrdinal(baseOrdinal)` real (the full reader has it too) so
+ * boundary-edge message ids match.
+ *
+ * Returns null when the anchor message id isn't found (deleted / legacy
+ * compartment without `end_message_id`); the caller then falls back to the full
+ * read. `absoluteMessageCount` = `baseOrdinal + (keptTail - 1)` = the exact
+ * count the full reader would produce, so every absolute-ordinal consumer lines
+ * up.
+ */
+export function readRawSessionTailFromDb(
+    db: Database,
+    sessionId: string,
+    baseOrdinal: number,
+    anchorMessageId: string,
+): { messages: RawMessage[]; absoluteMessageCount: number } | null {
+    const anchorRow = db
+        .prepare("SELECT time_created, id FROM message WHERE id = ? AND session_id = ?")
+        .get(anchorMessageId, sessionId);
+    if (!isAnchorRow(anchorRow)) return null;
+
+    const messageRows = db
+        .prepare(
+            `SELECT id, data, time_updated FROM message
+             WHERE session_id = ?
+               AND (time_created > ? OR (time_created = ? AND id >= ?))
+             ORDER BY time_created ASC, id ASC`,
+        )
+        .all(sessionId, anchorRow.time_created, anchorRow.time_created, anchorRow.id)
+        .filter(isRawMessageRow);
+
+    // Identical compaction-summary filter to the full reader, applied BEFORE
+    // ordinal assignment.
+    const filtered = messageRows.filter((row) => {
+        const info = parseJsonRecord(row.data);
+        return !(info?.summary === true && info?.finish === "stop");
+    });
+
+    const ids = filtered.map((row) => row.id);
+    const partsByMessageId = new Map<string, unknown[]>();
+    if (ids.length > 0) {
+        const CHUNK = 800;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+            const slice = ids.slice(i, i + CHUNK);
+            const placeholders = slice.map(() => "?").join(",");
+            const partRows = db
+                .prepare(
+                    `SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id IN (${placeholders}) ORDER BY time_created ASC, id ASC`,
+                )
+                .all(sessionId, ...slice)
+                .filter(isRawPartRow);
+            for (const part of partRows) {
+                const list = partsByMessageId.get(part.message_id) ?? [];
+                list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
+                partsByMessageId.set(part.message_id, list);
+            }
+        }
+    }
+
+    const messages: RawMessage[] = [];
+    let ord = baseOrdinal;
+    for (const row of filtered) {
+        const info = parseJsonRecord(row.data);
+        if (!info) {
+            // Mirror the full reader: a malformed row keeps its ordinal slot but
+            // yields no element.
+            ord += 1;
+            continue;
+        }
+        messages.push({
+            ordinal: ord,
+            id: row.id,
+            role: typeof info.role === "string" ? info.role : "unknown",
+            parts: partsByMessageId.get(row.id) ?? [],
+            version: row.time_updated ?? null,
+        });
+        ord += 1;
+    }
+
+    // ord now points one past the last assigned ordinal, so the absolute count is
+    // ord - 1 (== baseOrdinal + keptIncludingMalformed - 1).
+    return { messages, absoluteMessageCount: Math.max(0, ord - 1) };
+}
+
 export function readRawSessionMessageByIdFromDb(
     db: Database,
     sessionId: string,

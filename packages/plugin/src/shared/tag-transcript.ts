@@ -48,7 +48,6 @@
 import type { ContextDatabase } from "../features/magic-context/storage";
 import { saveSourceContent } from "../features/magic-context/storage-source";
 import {
-    type TagTokenCounts,
     updateTagByteSize,
     updateTagInputByteSize,
     updateTagInputTokenCount,
@@ -435,17 +434,6 @@ function estimateTagTextTokens(text: string): number {
     if (!text) return 0;
     if (text.startsWith("data:image/")) return estimateImageTokensFromDataUrl(text);
     return estimateTokens(text);
-}
-
-/** Real-tokenizer count for a tool input payload (string or JSON-serializable). */
-function estimateToolInputTokens(input: unknown): number {
-    if (input === undefined || input === null) return 0;
-    try {
-        const s = typeof input === "string" ? input : JSON.stringify(input);
-        return s ? estimateTokens(s) : 0;
-    } catch {
-        return 0;
-    }
 }
 
 function getToolPartByteSize(part: TranscriptPart, text: string): number {

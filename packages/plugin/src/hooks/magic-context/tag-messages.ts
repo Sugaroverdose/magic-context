@@ -1,6 +1,5 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
-import type { TagTokenCounts } from "../../features/magic-context/storage-tags";
 import {
     adoptNullOwnerToolTag,
     getCandidateToolOwners,
