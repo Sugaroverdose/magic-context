@@ -179,8 +179,18 @@ interface PiSendUserMessage {
 
 /**
  * Deliver a pending Channel 2 ceiling nudge for `sessionId`, if any. Safe to
- * call on every `agent_end`; no-ops unless a `pending` intent exists. Pi is
- * single-process so `sendUserMessage` coalesces natively — no #28202 workaround.
+ * call from BOTH delivery sites; no-ops unless a `pending` intent exists. Pi
+ * is single-process so `sendUserMessage` coalesces natively — no #28202
+ * workaround.
+ *
+ * Delivery sites + mode:
+ * - `tool_result` (mid-turn, the primary site): deliverAs "steer" — Pi queues
+ *   the message and the agent loop pulls it at the NEXT STEP boundary, so the
+ *   agent is warned while the pile is still growing and can act THIS turn.
+ *   Waiting for idle would deliver the warning after all the growth happened.
+ * - `agent_end` (idle fallback): catches the intent when the turn ended before
+ *   a tool boundary could deliver it; sendUserMessage starts a fresh turn.
+ *
  * Lease: pending → claimed → delivered (revert to pending on failure so a
  * transient error doesn't burn the one-shot cap). Returns true on delivery.
  */
@@ -188,6 +198,7 @@ export function maybeDeliverChannel2Pi(
 	pi: PiSendUserMessage,
 	db: Database,
 	sessionId: string,
+	deliverAs: "steer" | "followUp" = "followUp",
 ): boolean {
 	let state: string;
 	try {
@@ -232,7 +243,7 @@ export function maybeDeliverChannel2Pi(
 
 	try {
 		pi.sendUserMessage(buildChannel2Reminder(undropped), {
-			deliverAs: "followUp",
+			deliverAs,
 		});
 		casChannel2NudgeState(db, sessionId, "claimed", "delivered");
 		return true;

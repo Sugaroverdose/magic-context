@@ -3,8 +3,12 @@
 // The transform records a one-shot `pending` intent in `session_meta`
 // (`channel2_nudge_state`) when pressure is near the execute threshold and a
 // large pile of reclaimable tool output remains. This module DELIVERS that
-// intent from the event handler (`message.updated`), because `promptAsync`
-// must run on an event boundary, not mid-transform.
+// intent from the event handler (`message.updated`, both mid-turn
+// "tool-calls" and final "stop" events), because `promptAsync` must run on an
+// event boundary, not mid-transform. Mid-turn delivery is deliberate: the
+// queued user message is picked up by OpenCode's run loop at the next step
+// boundary, warning the agent WHILE the reclaimable pile is growing instead
+// of after the turn already ballooned.
 //
 // Lease state machine (cross-process CAS): pending -> claimed -> delivered.
 //   - claim `pending -> claimed` before send (so two processes can't both send)

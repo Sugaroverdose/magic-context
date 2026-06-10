@@ -1270,6 +1270,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		try {
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
+			// Channel 2 mid-turn delivery: a pending ceiling intent steers a
+			// queued user message into the NEXT STEP of the in-flight turn so
+			// the agent is warned while the pile is still growing (agent_end
+			// stays as the idle fallback). No-ops unless pending + revalidated.
+			if (db) maybeDeliverChannel2Pi(pi, db, sessionId, "steer");
 			const block = maybeChannel1ReminderForToolResult({
 				db,
 				sessionId,

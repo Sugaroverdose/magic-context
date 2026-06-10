@@ -182,13 +182,16 @@ the harness I/O differs:
 - **Channel 2 (synthetic-user ceiling nudge).** OpenCode MUST use a live-server
   `createOpencodeClient(serverUrl)` + `/session` probe to dodge the plugin
   runner-split bug (anomalyco/opencode#28202); Pi just calls the native
-  `pi.sendUserMessage(reminder, { deliverAs: "followUp" })`. **Pi has no #28202
+  `pi.sendUserMessage(reminder, { deliverAs: ... })`. **Pi has no #28202
   workaround, no live-server client, and no probe** — it is single-process, so
   `sendUserMessage` coalesces natively and the message lands at the tail after the
   current turn. The shared `channel2_nudge_state` lease (pending→claimed→delivered,
   revert-on-failure) is used identically for the one-ceiling-per-lifetime cap; only
-  the delivery call differs. OpenCode delivers from `message.updated` (finish=stop);
-  Pi delivers from `agent_end`.
+  the delivery call differs. Both deliver MID-TURN at step boundaries (the point
+  of the channel: warn while the pile grows): OpenCode from `message.updated`
+  (finish=tool-calls OR stop, queued message drains at the next run-loop step);
+  Pi primarily from `tool_result` with deliverAs "steer" (queued, pulled at the
+  next step), with `agent_end` + "followUp" as the idle fallback.
 
 - **Removed in this redesign (both harnesses):** the rolling/iteration nudge
   (`nudger`/`injectPiNudge`/`nudge-injector.ts`) and the tool-heavy sticky reminder

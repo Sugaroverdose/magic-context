@@ -550,13 +550,25 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 sessionLog(info.sessionID, "event message.updated persistence failed:", error);
             }
 
-            // Channel 2 ceiling nudge delivery. Fire only on a final-stop assistant
-            // turn (finish === "stop"); a mid-turn "tool-calls" event still has the
-            // turn in flight. The delivery itself no-ops unless a `pending` intent
-            // exists and the live server is reachable, so this is cheap.
+            // Channel 2 ceiling nudge delivery. Fire on STEP boundaries — both
+            // mid-turn ("tool-calls") and turn-end ("stop") assistant events.
+            // Mid-turn delivery is the point of the channel: the reclaimable
+            // pile grows WHILE the agent works, and a queued user message is
+            // picked up by OpenCode's run loop at the next step boundary
+            // (runLoop re-reads the message table every iteration), so the
+            // agent gets warned while it can still act this turn — waiting for
+            // idle would deliver the warning after all the growth already
+            // happened. promptAsync is mid-turn-safe: the live-server client
+            // coalesces into the in-flight run, never splicing mid-prefix.
+            // The delivery itself no-ops unless a `pending` intent exists and
+            // the live server is reachable, so this is cheap per event.
             // deliverChannel2IfPending guards isSubagent internally (subagent
             // Channel 2 is deferred). Fire-and-forget — never block the event loop.
-            if (info.finish === "stop" && deps.serverUrl && deps.channel1StateBySession) {
+            if (
+                (info.finish === "stop" || info.finish === "tool-calls") &&
+                deps.serverUrl &&
+                deps.channel1StateBySession
+            ) {
                 void deliverChannel2IfPending(deps, info.sessionID);
             }
             return;
