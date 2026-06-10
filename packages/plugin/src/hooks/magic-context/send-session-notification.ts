@@ -96,6 +96,19 @@ export async function sendIgnoredMessage(
             sessionLog(sessionId, "TUI showToast failed, falling back to ignored message");
         }
     }
+    // Title-safety guard (issue #129): an ignored message is hidden from the
+    // LLM but NOT `synthetic`, so OpenCode's title gate counts it as a real
+    // user message — one post into a not-yet-titled session permanently
+    // suppresses that session's title generation. Only persist into sessions
+    // that already have a real title (the toast path above is unaffected).
+    // Mid-session callers (historian failures, recomp outcomes) always pass
+    // immediately because their sessions are titled.
+    const { waitForSafeNotificationTarget } = await import("../../shared/safe-notification-target");
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") {
+        sessionLog(sessionId, "notification skipped (session not titled yet)");
+        return;
+    }
+
     const agent = params.agent || undefined;
     const variant = params.variant || undefined;
     const model =

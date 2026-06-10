@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
+import { waitForSafeNotificationTarget } from "../shared/safe-notification-target";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Magic Context is disabled due to conflicting configuration:";
 const SCHEMA_FENCE_MARKER = "⚠️ Magic Context is disabled — database is newer than this version";
@@ -205,6 +206,12 @@ export async function sendConflictWarning(
         return;
     }
 
+    // Never post into a session that hasn't been titled yet — an extra
+    // (non-synthetic) user message in a fresh session permanently suppresses
+    // OpenCode's title generation (issue #129). Conflict detection re-fires on
+    // every startup, so skipping here just retries on the next launch.
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
+
     const warningText = formatConflictShort(conflictResult);
 
     log(
@@ -312,7 +319,10 @@ export async function cleanupConflictWarnings(
         }
     }
 
-    // Send a brief "enabled" confirmation so the user sees the conflict is resolved
+    // Send a brief "enabled" confirmation so the user sees the conflict is resolved.
+    // Same title-safety guard as all ignored-message posts (issue #129); the
+    // warning cleanup above already ran — only the confirmation is skippable.
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
     const enabledText = `${ENABLED_MARKER}. Enjoy! ✨`;
     try {
         const c = client as {
@@ -418,6 +428,10 @@ export async function sendTuiSetupNotification(
     const { sessionId } = getDesktopState(directory);
     if (!sessionId) return;
 
+    // Title-safety guard (issue #129): one-shot informational notice — losing
+    // it beats suppressing a fresh session's title forever.
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
+
     const text = [
         `${TUI_SETUP_MARKER}`,
         "",
@@ -499,6 +513,10 @@ export async function sendSchemaFenceWarning(
     const { sessionId } = getDesktopState(directory);
     if (!sessionId) return;
 
+    // Title-safety guard (issue #129): the fence re-fires on every startup
+    // while the version mismatch persists, so a skip retries next launch.
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
+
     const text = [
         `${SCHEMA_FENCE_MARKER}`,
         "",
@@ -556,6 +574,10 @@ export async function sendStartupAnnouncement(
         // The persistence file is the same across surfaces, so this is correct.
         return;
     }
+
+    // Title-safety guard (issue #129): markSeen only runs after successful
+    // delivery below, so skipping here re-attempts on the next startup.
+    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
 
     // NOTE: OpenCode Desktop renders user messages through HighlightedText
     // (packages/ui/src/components/message-part.tsx ~L1184), which is plain
