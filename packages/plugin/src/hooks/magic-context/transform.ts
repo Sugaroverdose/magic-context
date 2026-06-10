@@ -38,8 +38,13 @@ import { applyMidTurnDeferral, detectMidTurnBypassReason } from "./boundary-exec
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
-import { FORCE_MATERIALIZE_PERCENTAGE } from "./compartment-trigger";
+import {
+    buildTriggerInMemoryTail,
+    checkCompartmentTrigger,
+    FORCE_MATERIALIZE_PERCENTAGE,
+} from "./compartment-trigger";
 import { computeTailToolTokens, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
+import { deriveTriggerBudget } from "./derive-budgets";
 import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
 import type { LiveModelBySession } from "./hook-handlers";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
@@ -59,6 +64,7 @@ import {
 import { readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { extractInMemoryMessageViews } from "./read-session-raw";
 import { sendIgnoredMessage } from "./send-session-notification";
 import {
     replayClearedReasoning,
@@ -176,6 +182,8 @@ export interface TransformDeps {
      */
     ctxReduceEnabled?: boolean;
     clearReasoningAge: number;
+    /** Commit-cluster historian trigger config (`commit_cluster_trigger`). */
+    commitClusterTrigger?: { enabled: boolean; min_clusters: number };
     /**
      * One-shot signal that `<session-history>` injection cache is stale and
      * `prepareCompartmentInjection` should rebuild on this pass. Drained
@@ -953,6 +961,61 @@ export function createTransform(deps: TransformDeps) {
             projectIdentity ??
             (sessionDirectory ? resolveProjectIdentity(sessionDirectory) : deps.projectPath);
 
+        // Historian trigger decision — relocated here from the message.updated
+        // event handler. The event handler has no message array, so it re-read
+        // the session tail from opencode.db on EVERY streaming delta (~186ms of
+        // synchronous SQLite per event on a large session, freezing the event
+        // loop and making parallel hooks like tool.definition measure seconds).
+        // The transform already receives the post-compaction-marker tail —
+        // the exact eligible window — as parsed objects, so the inspection runs
+        // from memory with zero opencode.db reads (live-verified byte-identical
+        // boundary on every decision field before the cutover). Cadence is
+        // once per LLM request (this hook) instead of per streaming delta,
+        // which is when the decision inputs actually change. Runs here because
+        // `messages` is still the clean pre-injection, pre-mutation tail.
+        // On shouldFire we set the flag AND mutate the local sessionMeta so
+        // runCompartmentPhase starts the historian in this same pass (the same
+        // pass it would have started under the event-handler flow). The
+        // resolved boundary snapshot is handed through so the phase doesn't
+        // re-resolve it.
+        let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
+        if (fullFeatureMode && historianRunnable && !sessionMeta.compartmentInProgress) {
+            const tTrigger = performance.now();
+            try {
+                const inMemoryTail = buildTriggerInMemoryTail(
+                    db,
+                    sessionId,
+                    extractInMemoryMessageViews(messages),
+                );
+                const triggerResult = checkCompartmentTrigger(
+                    db,
+                    sessionId,
+                    sessionMeta,
+                    boundaryUsageForProtectedTail,
+                    sessionMeta.lastContextPercentage,
+                    boundaryExecuteThreshold,
+                    deriveTriggerBudget(boundaryContextLimit, boundaryExecuteThreshold),
+                    deps.clearReasoningAge,
+                    deps.commitClusterTrigger,
+                    undefined,
+                    boundaryContextLimit,
+                    inMemoryTail,
+                );
+                if (triggerResult.shouldFire) {
+                    sessionLog(
+                        sessionId,
+                        `compartment trigger: firing (reason=${triggerResult.reason})`,
+                    );
+                    updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+                    sessionMeta.compartmentInProgress = true;
+                    triggerBoundarySnapshot = triggerResult.boundarySnapshot;
+                }
+            } catch (error) {
+                sessionLog(sessionId, "compartment trigger failed (non-fatal):", error);
+            }
+            logTransformTiming(sessionId, "compartmentTrigger", tTrigger);
+        }
+
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;
         let rebuiltHistoryFromInitialPrepare = false;
         if (fullFeatureMode) {
@@ -1300,6 +1363,7 @@ export function createTransform(deps: TransformDeps) {
             boundaryExecuteThresholdPercentage: boundaryExecuteThreshold,
             boundaryUsage: boundaryUsageForProtectedTail,
             boundaryUsageSource,
+            preResolvedBoundarySnapshot: triggerBoundarySnapshot,
             client: deps.client,
             db,
             sessionId,

@@ -959,7 +959,7 @@ describe("registerPiContextHandler", () => {
 
 					expect(piInputs.triggerBudget).toBe(triggerBudget);
 					expect(piDecision).toEqual(opencodeDecision);
-					expect(piDecision).toEqual({
+					expect(piDecision).toMatchObject({
 						shouldFire: true,
 						reason: "projected_headroom",
 					});

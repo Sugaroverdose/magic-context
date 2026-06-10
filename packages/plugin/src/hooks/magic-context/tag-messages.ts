@@ -525,6 +525,17 @@ export function tagMessages(
                 const compositeKey = makeToolCompositeKey(ownerMsgId, toolPart.callID);
 
                 const _tAssignTool = performance.now();
+                // No growth-bump on the existing-tag path here (unlike Pi's
+                // tag-transcript, which bumps byte_size/token_count when a later
+                // occurrence is larger). The asymmetry is structural: OpenCode
+                // only tags once `state.output` is a string — i.e. after the tool
+                // completed — and OpenCode writes tool output exactly once, so a
+                // tagged output never grows afterwards. Pi tags the INVOCATION
+                // occurrence first (byte_size=0) and must bump when the result
+                // lands. Verified empirically: 100,670 tool tags across the two
+                // largest live sessions show zero byte_size drift vs the current
+                // opencode.db output. Adding a per-part size compare here would
+                // cost every hot pass to defend an unreachable case.
                 const tagId = tagger.assignToolTag(
                     sessionId,
                     toolPart.callID,

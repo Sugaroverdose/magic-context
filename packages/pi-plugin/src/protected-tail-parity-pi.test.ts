@@ -125,39 +125,55 @@ describe("Pi protected-tail true-raw parity", () => {
 import { computeRawRangeFingerprint } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
-test("Pi raw conversion carries entry version metadata into protected-tail fingerprints", () => {
-	const baseEntries = [
+test("protected-tail fingerprints are content-stable: metadata-only drift matches, content drift does not", () => {
+	// The fingerprint deliberately hashes ONLY content-bearing fields (text /
+	// tool input+output lengths), not entry timestamps or version metadata.
+	// The same logical message is observed through different views — Pi's
+	// getBranch() entries, OpenCode DB rows, and OpenCode's in-memory
+	// args.messages (which carries no timestamps) — and a snapshot computed
+	// from one view must revalidate against another. Metadata sensitivity
+	// would falsely reject every cross-view snapshot as stale. Content edits
+	// still change the fingerprint, which is the staleness that matters for
+	// the historian's chunk.
+	const entry = (timestamp: number, text: string) => [
 		{
 			type: "message",
 			id: "tool-result-1",
-			timestamp: 10,
+			timestamp,
 			message: {
 				role: "toolResult",
 				toolCallId: "call-1",
 				toolName: "read",
-				content: [{ type: "text", text: "short" }],
-			},
-		},
-	];
-	const updatedEntries = [
-		{
-			type: "message",
-			id: "tool-result-1",
-			timestamp: 11,
-			message: {
-				role: "toolResult",
-				toolCallId: "call-1",
-				toolName: "read",
-				content: [{ type: "text", text: "short" }],
+				content: [{ type: "text", text }],
 			},
 		},
 	];
 
+	// Metadata-only drift (timestamp bump, same content) → SAME fingerprint.
 	expect(
-		computeRawRangeFingerprint(convertEntriesToRawMessages(baseEntries), 1, 2),
+		computeRawRangeFingerprint(
+			convertEntriesToRawMessages(entry(10, "short")),
+			1,
+			2,
+		),
+	).toBe(
+		computeRawRangeFingerprint(
+			convertEntriesToRawMessages(entry(11, "short")),
+			1,
+			2,
+		),
+	);
+
+	// Content drift (output text changed) → DIFFERENT fingerprint.
+	expect(
+		computeRawRangeFingerprint(
+			convertEntriesToRawMessages(entry(10, "short")),
+			1,
+			2,
+		),
 	).not.toBe(
 		computeRawRangeFingerprint(
-			convertEntriesToRawMessages(updatedEntries),
+			convertEntriesToRawMessages(entry(10, "short but longer now")),
 			1,
 			2,
 		),

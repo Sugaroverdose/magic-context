@@ -3,8 +3,12 @@
 import { describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { readRawSessionMessagesFromDb, readRawSessionTailFromDb } from "./read-session-raw";
-import { buildTrueRawTokenIndex } from "./read-session-true-raw-tokens";
+import {
+    buildInMemoryTailRawMessages,
+    readRawSessionMessagesFromDb,
+    readRawSessionTailFromDb,
+} from "./read-session-raw";
+import { buildTrueRawTokenIndex, computeRawRangeFingerprint } from "./read-session-true-raw-tokens";
 
 // Locks the O(tail) protected-tail read: reading only the messages after the
 // last compartment boundary (anchored at the marker) must produce the exact same
@@ -172,6 +176,126 @@ describe("tail read equivalence (O(tail) protected-tail read)", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+
+    it("in-memory tail (args.messages view) == DB tail reader for all boundary inputs", () => {
+        const db = makeDb();
+        try {
+            const msgs = buildSession(40);
+            seed(db, SES, msgs);
+            const full = readRawSessionMessagesFromDb(db, SES);
+            const base = 30;
+            const anchorId = full[base - 1].id;
+            const dbTail = readRawSessionTailFromDb(db, SES, base, anchorId);
+            if (!dbTail) throw new Error("tail null");
+
+            // Simulate the transform's args.messages: OpenCode hands the
+            // post-marker tail (anchor onward) as in-memory objects.
+            const views = msgs.slice(base - 1).map((m) => ({
+                id: m.id,
+                role: m.role,
+                parts: m.parts,
+                summary: m.summary,
+                finish: m.finish,
+            }));
+            const mem = buildInMemoryTailRawMessages({
+                messages: views,
+                lastCompartmentEnd: base,
+                anchorMessageId: anchorId,
+            });
+            if (!mem) throw new Error("mem null");
+            expect(mem.anchorFound).toBe(true);
+            expect(mem.absoluteMessageCount).toBe(dbTail.absoluteMessageCount);
+            expect(mem.messages.length).toBe(dbTail.messages.length);
+            for (let i = 0; i < dbTail.messages.length; i += 1) {
+                expect(mem.messages[i].id).toBe(dbTail.messages[i].id);
+                expect(mem.messages[i].ordinal).toBe(dbTail.messages[i].ordinal);
+                expect(JSON.stringify(mem.messages[i].parts)).toBe(
+                    JSON.stringify(dbTail.messages[i].parts),
+                );
+            }
+
+            // Token index byte-identity over both sources.
+            const opts = { providerShapeVersion: "opencode-v1" as const };
+            const dbIdx = buildTrueRawTokenIndex(SES, dbTail.messages, {
+                ...opts,
+                cacheNamespace: "eq-db",
+                absoluteMessageCount: dbTail.absoluteMessageCount,
+            });
+            const memIdx = buildTrueRawTokenIndex(SES, mem.messages, {
+                ...opts,
+                cacheNamespace: "eq-mem",
+                absoluteMessageCount: mem.absoluteMessageCount,
+            });
+            for (let o = base; o <= full.length + 1; o += 1) {
+                expect(memIdx.tokenForOrdinal(o)).toBe(dbIdx.tokenForOrdinal(o));
+                expect(memIdx.suffixTokensFromOrdinal(o)).toBe(dbIdx.suffixTokensFromOrdinal(o));
+            }
+
+            // Content-stable fingerprint identity (the staleness check must not
+            // reject a memory-derived snapshot when revalidating from the DB).
+            expect(computeRawRangeFingerprint(mem.messages, base, full.length + 1)).toBe(
+                computeRawRangeFingerprint(dbTail.messages, base, full.length + 1),
+            );
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("in-memory converter: marker lag drops the pre-anchor prefix; anchor-absent returns anchorFound=false; no-compartment starts at 1", () => {
+        const msgs = buildSession(12);
+        // Marker lag: args.messages starts BEFORE the anchor (extra older rows).
+        const anchorIdx = 4; // anchor = 5th message
+        const lagged = msgs.map((m) => ({ id: m.id, role: m.role, parts: m.parts }));
+        const laggedResult = buildInMemoryTailRawMessages({
+            messages: lagged,
+            lastCompartmentEnd: 200, // arbitrary absolute ordinal of the anchor
+            anchorMessageId: msgs[anchorIdx].id,
+        });
+        if (!laggedResult) throw new Error("lagged null");
+        expect(laggedResult.anchorFound).toBe(true);
+        // Anchor keeps its absolute ordinal; the pre-anchor prefix is dropped.
+        expect(laggedResult.messages[0].id).toBe(msgs[anchorIdx].id);
+        expect(laggedResult.messages[0].ordinal).toBe(200);
+        expect(laggedResult.messages.length).toBe(msgs.length - anchorIdx);
+        expect(laggedResult.absoluteMessageCount).toBe(200 + (msgs.length - anchorIdx) - 1);
+
+        // Anchor absent → anchorFound=false (caller falls back to DB path).
+        const absent = buildInMemoryTailRawMessages({
+            messages: lagged,
+            lastCompartmentEnd: 200,
+            anchorMessageId: "missing-anchor",
+        });
+        if (!absent) throw new Error("absent null");
+        expect(absent.anchorFound).toBe(false);
+
+        // No-compartment session: ordinals from 1 over the whole array.
+        const fresh = buildInMemoryTailRawMessages({
+            messages: lagged,
+            lastCompartmentEnd: 0,
+            anchorMessageId: null,
+        });
+        if (!fresh) throw new Error("fresh null");
+        expect(fresh.messages[0].ordinal).toBe(1);
+        expect(fresh.absoluteMessageCount).toBe(msgs.length);
+
+        // Summary rows are filtered BEFORE ordinal assignment; malformed rows
+        // keep their ordinal slot without an element (DB reader contract).
+        const withNoise = [
+            { id: "n-1", role: "user", parts: [{ type: "text", text: "a" }] },
+            { id: "n-sum", role: "assistant", summary: true, finish: "stop", parts: [] },
+            { id: "", role: "assistant", parts: [{ type: "text", text: "malformed" }] },
+            { id: "n-2", role: "assistant", parts: [{ type: "text", text: "b" }] },
+        ];
+        const noisy = buildInMemoryTailRawMessages({
+            messages: withNoise,
+            lastCompartmentEnd: 0,
+            anchorMessageId: null,
+        });
+        if (!noisy) throw new Error("noisy null");
+        expect(noisy.messages.map((m) => m.id)).toEqual(["n-1", "n-2"]);
+        expect(noisy.messages.map((m) => m.ordinal)).toEqual([1, 3]);
+        expect(noisy.absoluteMessageCount).toBe(3);
     });
 
     it("skips compaction-summary rows in the tail identically to the full reader", () => {

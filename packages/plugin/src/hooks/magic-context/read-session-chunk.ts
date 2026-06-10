@@ -236,6 +236,34 @@ export function getCachedAbsoluteMessageCount(sessionId: string): number | null 
     return activeAbsoluteCountCache?.get(sessionId) ?? null;
 }
 
+/**
+ * Prime the active raw-message cache with an IN-MEMORY tail built from the
+ * transform's `args.messages` — no opencode.db read at all. This is the hot-path
+ * goal: the transform already receives the post-marker tail (the eligible
+ * window) as parsed objects, so the boundary resolver can consume it directly.
+ *
+ * The caller supplies the already-converted absolute-ordinal `RawMessage[]` (via
+ * `buildInMemoryTailRawMessages`) plus its absolute count. Same scope/lifecycle
+ * rules as the other prime helpers: only inside a `withRawSessionMessageCache`
+ * scope, never shadows a registered provider (Pi), and is a no-op if the cache is
+ * already populated for the session.
+ *
+ * Returns true when it primed the cache.
+ */
+export function primeInMemoryTailRawMessageCache(args: {
+    sessionId: string;
+    messages: RawMessage[];
+    absoluteMessageCount: number;
+}): boolean {
+    const { sessionId, messages, absoluteMessageCount } = args;
+    if (!activeRawMessageCache) return false;
+    if (activeRawMessageCache.has(sessionId)) return false;
+    if (sessionProviders.has(sessionId)) return false;
+    activeRawMessageCache.set(sessionId, messages);
+    activeAbsoluteCountCache?.set(sessionId, absoluteMessageCount);
+    return true;
+}
+
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
     const provider = sessionProviders.get(sessionId);
     if (provider?.readMessageById) {
@@ -380,6 +408,12 @@ export function readSessionChunk(
     eligibleEndOrdinal?: number,
 ): SessionChunk {
     const messages = readRawSessionMessages(sessionId);
+    // When a tail-only slice is primed, `messages.length` is just the slice
+    // size while ordinals are ABSOLUTE — comparing an absolute `lastOrdinal`
+    // against the slice length would wrongly report hasMore=true forever
+    // (historian re-fires on an already-finished session). Use the absolute
+    // session count whenever the prime recorded one.
+    const totalMessageCount = getCachedAbsoluteMessageCount(sessionId) ?? messages.length;
     const startOrdinal = Math.max(1, offset);
     const lines: string[] = [];
     const lineMeta: SessionChunkLine[] = [];
@@ -562,8 +596,8 @@ export function readSessionChunk(
         hasMore:
             lastOrdinal <
             (eligibleEndOrdinal !== undefined
-                ? Math.min(eligibleEndOrdinal - 1, messages.length)
-                : messages.length),
+                ? Math.min(eligibleEndOrdinal - 1, totalMessageCount)
+                : totalMessageCount),
         text: lines.join("\n"),
         lines: lineMeta,
         commitClusterCount: commitClusters,

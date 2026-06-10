@@ -347,6 +347,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
+        commitClusterTrigger: deps.config.commit_cluster_trigger,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,
         pendingMaterializationSessions,

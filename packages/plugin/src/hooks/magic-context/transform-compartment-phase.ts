@@ -65,6 +65,15 @@ interface RunCompartmentPhaseArgs {
     autoPromote?: boolean;
     /** Forwarded to compartment runner — see CompartmentRunnerDeps.onCompartmentStatePublished. */
     onCompartmentStatePublished?: (sessionId: string) => void;
+    /**
+     * Boundary snapshot already resolved by THIS pass's trigger decision
+     * (transform-located trigger). When present and runnable, the phase uses it
+     * instead of re-resolving — one boundary resolution per pass, and the
+     * historian starts from exactly the snapshot the fire decision saw. The
+     * ≥80% emergency re-scale fallback below still re-resolves when this
+     * snapshot has no runnable window.
+     */
+    preResolvedBoundarySnapshot?: ProtectedTailBoundarySnapshot;
 }
 
 export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promise<{
@@ -112,7 +121,11 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     function getBoundarySnapshotForCompartment(): ProtectedTailBoundarySnapshot | null {
         if (!hasNewRawHistoryForCompartment()) return null;
         if (cachedBoundarySnapshot === null) {
-            let snapshot = resolveBoundarySnapshot();
+            let snapshot =
+                args.preResolvedBoundarySnapshot &&
+                hasRunnableCompartmentWindow(args.preResolvedBoundarySnapshot)
+                    ? args.preResolvedBoundarySnapshot
+                    : resolveBoundarySnapshot();
             if (!hasRunnableCompartmentWindow(snapshot) && args.contextUsage.percentage >= 80) {
                 snapshot = resolveBoundarySnapshot(
                     args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5,

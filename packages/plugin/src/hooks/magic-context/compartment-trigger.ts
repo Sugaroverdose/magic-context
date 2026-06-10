@@ -19,10 +19,16 @@ import {
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
 import {
+    primeInMemoryTailRawMessageCache,
     primeTailRawMessageCache,
     readSessionChunk,
     withRawSessionMessageCache,
 } from "./read-session-chunk";
+import {
+    buildInMemoryTailRawMessages,
+    type InMemoryMessageView,
+    type RawMessage,
+} from "./read-session-raw";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -44,6 +50,69 @@ export {
 export interface CompartmentTriggerResult {
     shouldFire: boolean;
     reason?: "projected_headroom" | "force_80" | "commit_clusters" | "tail_size";
+    /**
+     * The protected-tail boundary snapshot the decision was computed from.
+     * Present whenever the tail inspection ran. Callers that start the
+     * historian in the SAME pass (transform path) should hand this to
+     * runCompartmentPhase so it doesn't re-resolve the boundary — one
+     * resolution per pass, and the historian sees exactly the snapshot the
+     * decision saw.
+     */
+    boundarySnapshot?: ProtectedTailBoundarySnapshot;
+}
+
+/**
+ * In-memory tail source for the trigger — the transform's `args.messages`
+ * converted to absolute-ordinal RawMessages (via `buildInMemoryTailRawMessages`
+ * with `anchorFound=true`). When supplied, the tail inspection primes the
+ * raw-message cache from memory and performs ZERO opencode.db reads on the hot
+ * path. Callers must only pass an ANCHORED conversion — an unanchored one has
+ * assumed ordinals; leave it undefined to fall through to the DB-primed path.
+ */
+export interface InMemoryTailSource {
+    messages: RawMessage[];
+    absoluteMessageCount: number;
+}
+
+/**
+ * Convert the transform's in-memory `args.messages` into a trigger tail source,
+ * applying the anchored-only gate:
+ *
+ * - Compartments exist + boundary has a message id → require the anchor to be
+ *   FOUND in the array (`anchorFound`). OpenCode's `filterCompacted` stops at
+ *   our compaction marker (the boundary message), so the anchor is normally the
+ *   array head; when the marker drain lags, the anchor sits a few messages in
+ *   and the converter drops the already-compartmentalized prefix. If it isn't
+ *   present at all (deleted, or the marker advanced past it), ordinal
+ *   assignment would be an unverified guess → return undefined so the caller
+ *   falls through to the DB-primed read.
+ * - Compartments exist but the boundary row has NO message id (legacy rows) →
+ *   undefined (DB path, as before).
+ * - No compartments (#132 early-session) → the whole array is the session;
+ *   ordinals from 1, no anchor needed.
+ *
+ * Live-verified byte-identical to the DB path on every boundary decision field
+ * (offset, protectedTailStart, eligibleEndOrdinal, N, trueRawEligibleTokens,
+ * arc fencing) across real sessions before the cutover.
+ */
+export function buildTriggerInMemoryTail(
+    db: Database,
+    sessionId: string,
+    messages: readonly InMemoryMessageView[],
+): InMemoryTailSource | undefined {
+    if (messages.length === 0) return undefined;
+    const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
+    const anchorMessageId = getLastCompartmentEndMessageId(db, sessionId);
+    if (lastCompartmentEnd >= 1 && !anchorMessageId) return undefined;
+
+    const built = buildInMemoryTailRawMessages({
+        messages,
+        lastCompartmentEnd,
+        anchorMessageId,
+    });
+    if (!built) return undefined;
+    if (lastCompartmentEnd >= 1 && anchorMessageId && !built.anchorFound) return undefined;
+    return { messages: built.messages, absoluteMessageCount: built.absoluteMessageCount };
 }
 
 export function getProactiveCompartmentTriggerPercentage(
@@ -141,10 +210,14 @@ function getUnsummarizedTailInfo(
     usage: ContextUsage,
     executeThresholdPercentage: number,
     contextLimit?: number,
+    inMemoryTail?: InMemoryTailSource,
 ): TailInfo {
     return withRawSessionMessageCache(() => {
         try {
-            // Prime the scoped cache with a TAIL-ONLY read so the boundary
+            // Prime the scoped cache from MEMORY when the transform supplied its
+            // own `args.messages` tail (live-verified byte-identical to the DB
+            // read on every boundary decision field) — zero opencode.db reads.
+            // Otherwise prime with the TAIL-ONLY DB read so the boundary
             // resolution and chunk scan below read only messages after the last
             // compartment — never the whole session (the O(session) read that
             // froze the JS event loop ~3s on a large session and made every
@@ -156,13 +229,25 @@ function getUnsummarizedTailInfo(
             // scans ALL user-message parts; once seeded it never runs again.
             // No-op for Pi (provider-backed) and in test/no-DB environments, and
             // when no usable boundary anchor exists (falls through to full read).
-            const policyVersion = loadProtectedTailMeta(db, sessionId).protectedTailPolicyVersion;
-            if (policyVersion >= 3) {
-                primeTailRawMessageCache({
+            const memoryPrimed = inMemoryTail
+                ? primeInMemoryTailRawMessageCache({
+                      sessionId,
+                      messages: inMemoryTail.messages,
+                      absoluteMessageCount: inMemoryTail.absoluteMessageCount,
+                  })
+                : false;
+            if (!memoryPrimed) {
+                const policyVersion = loadProtectedTailMeta(
+                    db,
                     sessionId,
-                    lastCompartmentEnd: getLastCompartmentEndMessage(db, sessionId),
-                    anchorMessageId: getLastCompartmentEndMessageId(db, sessionId),
-                });
+                ).protectedTailPolicyVersion;
+                if (policyVersion >= 3) {
+                    primeTailRawMessageCache({
+                        sessionId,
+                        lastCompartmentEnd: getLastCompartmentEndMessage(db, sessionId),
+                        anchorMessageId: getLastCompartmentEndMessageId(db, sessionId),
+                    });
+                }
             }
 
             const rawEligibility = getRawHistoryEligibility(db, sessionId);
@@ -238,6 +323,7 @@ export function checkCompartmentTrigger(
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
     preloadedActiveTags?: readonly TagEntry[],
     contextLimit?: number,
+    inMemoryTail?: InMemoryTailSource,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         sessionLog(
@@ -245,6 +331,22 @@ export function checkCompartmentTrigger(
             `compartment trigger: skipped — historian already in progress (usage=${usage.percentage.toFixed(1)}%)`,
         );
         return { shouldFire: false };
+    }
+
+    // The in-memory tail is only usable AFTER the one-time v3 protected-tail
+    // policy seed: the legacy seed (getLegacyProtectedTailStartOrdinal) must
+    // scan ALL user messages of the session, which a tail slice cannot provide.
+    // Mirror the DB tail-prime's gate — before the seed, fall through to the
+    // full DB read (which runs the seed once); afterwards (policyVersion >= 3,
+    // the steady state) the in-memory path applies. Live-capture verified: the
+    // only migrationFloor divergences were on un-seeded sessions.
+    if (inMemoryTail) {
+        try {
+            const policyVersion = loadProtectedTailMeta(db, sessionId).protectedTailPolicyVersion;
+            if (policyVersion < 3) inMemoryTail = undefined;
+        } catch {
+            inMemoryTail = undefined;
+        }
     }
 
     // Cheap pre-gate (avoids the full-session raw read on every message.updated).
@@ -268,7 +370,12 @@ export function checkCompartmentTrigger(
     const proactiveFloorForGate = getProactiveCompartmentTriggerPercentage(
         executeThresholdPercentage,
     );
-    if (usage.percentage < proactiveFloorForGate) {
+    // The pre-gate exists ONLY to avoid the expensive DB read; with an
+    // in-memory tail the inspection is cheap, and the tag-aggregate bound can
+    // under-count the newest not-yet-tagged messages (the transform trigger
+    // runs BEFORE tagging) — skipping it here avoids wrongly suppressing a
+    // size trigger at the budget edge.
+    if (!inMemoryTail && usage.percentage < proactiveFloorForGate) {
         try {
             const agg = getActiveTagTokenAggregate(db, sessionId);
             if (agg.nullCount === 0) {
@@ -301,6 +408,7 @@ export function checkCompartmentTrigger(
         usage,
         executeThresholdPercentage,
         contextLimit,
+        inMemoryTail,
     );
     if (!tailInfo.hasNewRawHistory) {
         // Diagnostic data collection is best-effort. The helpers can throw if
@@ -356,21 +464,34 @@ export function checkCompartmentTrigger(
             return {
                 shouldFire: true,
                 reason: "force_80",
+                boundarySnapshot: tailInfo.boundarySnapshot,
             };
         }
         const scale = usage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE ? 0.25 : 0.5;
-        const scaledBoundary = resolveOpenCodeProtectedTailBoundary({
-            db,
-            sessionId,
-            mode: "trigger",
-            contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
-            executeThresholdPercentage,
-            usage,
-            usageSource: "live",
-            emergencyTailScale: scale,
+        // Scaled re-resolution must read from the same source as the primary
+        // inspection: prime from the in-memory tail when supplied (zero DB
+        // reads), otherwise this rare ≥80% path does its own full read as before.
+        const scaledBoundary = withRawSessionMessageCache(() => {
+            if (inMemoryTail) {
+                primeInMemoryTailRawMessageCache({
+                    sessionId,
+                    messages: inMemoryTail.messages,
+                    absoluteMessageCount: inMemoryTail.absoluteMessageCount,
+                });
+            }
+            return resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
+                executeThresholdPercentage,
+                usage,
+                usageSource: "live",
+                emergencyTailScale: scale,
+            });
         });
         if (hasRunnableCompartmentWindow(scaledBoundary)) {
-            return { shouldFire: true, reason: "force_80" };
+            return { shouldFire: true, reason: "force_80", boundarySnapshot: scaledBoundary };
         }
         sessionLog(
             sessionId,
@@ -395,6 +516,7 @@ export function checkCompartmentTrigger(
         return {
             shouldFire: true,
             reason: "commit_clusters",
+            boundarySnapshot: tailInfo.boundarySnapshot,
         };
     }
 
@@ -407,6 +529,7 @@ export function checkCompartmentTrigger(
         return {
             shouldFire: true,
             reason: "tail_size",
+            boundarySnapshot: tailInfo.boundarySnapshot,
         };
     }
 
@@ -448,5 +571,6 @@ export function checkCompartmentTrigger(
     return {
         shouldFire: true,
         reason: "projected_headroom",
+        boundarySnapshot: tailInfo.boundarySnapshot,
     };
 }

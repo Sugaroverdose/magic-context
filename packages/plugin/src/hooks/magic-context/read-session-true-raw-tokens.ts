@@ -609,6 +609,32 @@ export function buildTrueRawTokenIndex(
     };
 }
 
+/**
+ * Content-stable part fingerprint for the boundary-staleness check.
+ *
+ * Deliberately hashes ONLY the content-bearing fields the tokenizer counts
+ * (text / thinking / tool input+output text), NOT the JSON envelope or
+ * updated-at metadata. The same logical message is observed through two
+ * different views — the DB rows (`readRawSession*FromDb`) and the transform's
+ * in-memory `args.messages` (which carries extra runtime fields and no
+ * timestamps) — and the fingerprint computed at trigger time from one view
+ * must match the one recomputed at historian-start from the other, or every
+ * memory-derived snapshot would be rejected as stale. Content edits and
+ * message insertion/removal still change the fingerprint (lengths/ids/
+ * ordinals), which is exactly the staleness the check exists to catch;
+ * metadata-only drift never affects the historian's chunk content.
+ */
+function partContentFingerprint(part: unknown): string {
+    if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
+    const type = partType(part);
+    const tool = toolSignalFromPart(part);
+    if (tool) {
+        return `${type}:${tool.callId}:${tool.inputText.length}:${tool.outputText.length}`;
+    }
+    const text = firstStringField(part, ["text", "thinking", "reasoning", "content", "url"]) ?? "";
+    return `${type}:${text.length}`;
+}
+
 export function computeRawRangeFingerprint(
     messages: readonly RawMessage[],
     startInclusive: number,
@@ -617,12 +643,8 @@ export function computeRawRangeFingerprint(
     const pieces: string[] = [];
     for (const message of messages) {
         if (message.ordinal < startInclusive || message.ordinal >= endExclusive) continue;
-        const root = isRecord(message) ? message : null;
-        const version = root?.updated_at ?? root?.updatedAt ?? root?.version ?? "";
-        const partFingerprint = message.parts.map(partCheapFingerprint).join(",");
-        pieces.push(
-            `${message.ordinal}:${message.id}:${String(version)}:${message.parts.length}:${partFingerprint}`,
-        );
+        const partFingerprint = message.parts.map(partContentFingerprint).join(",");
+        pieces.push(`${message.ordinal}:${message.id}:${message.parts.length}:${partFingerprint}`);
     }
     return pieces.join("|");
 }

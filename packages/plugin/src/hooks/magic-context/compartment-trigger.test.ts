@@ -148,7 +148,7 @@ describe("checkCompartmentTrigger", () => {
             6500,
         );
 
-        expect(result).toEqual({ shouldFire: true, reason: "projected_headroom" });
+        expect(result).toMatchObject({ shouldFire: true, reason: "projected_headroom" });
     });
 
     it("does not fire proactively when pending drops already project usage below the post-drop target", () => {
@@ -257,6 +257,6 @@ describe("checkCompartmentTrigger", () => {
         );
 
         //#then: fires because the eligible prefix (m-1 to m-6) is meaningful
-        expect(result).toEqual({ shouldFire: true, reason: "projected_headroom" });
+        expect(result).toMatchObject({ shouldFire: true, reason: "projected_headroom" });
     });
 });

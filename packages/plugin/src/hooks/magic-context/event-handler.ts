@@ -29,8 +29,6 @@ import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
-import { checkCompartmentTrigger } from "./compartment-trigger";
-import { deriveTriggerBudget } from "./derive-budgets";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
@@ -534,49 +532,17 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         );
                     }
 
-                    const previousPercentage = sessionMeta.lastContextPercentage;
-                    if (!sessionMeta.isSubagent) {
-                        const effectiveExecuteThreshold = resolveExecuteThreshold(
-                            deps.config.execute_threshold_percentage ?? 65,
-                            modelKey,
-                            65,
-                            {
-                                tokensConfig: deps.config.execute_threshold_tokens,
-                                contextLimit,
-                                sessionId: info.sessionID,
-                            },
-                        );
-                        // Derive trigger_budget from the MAIN model's usable working
-                        // space (contextLimit × executeThreshold). This drives the
-                        // size-based historian triggers (tail_size, commit_clusters).
-                        const triggerBudget = deriveTriggerBudget(
-                            contextLimit,
-                            effectiveExecuteThreshold,
-                        );
-                        const triggerResult = checkCompartmentTrigger(
-                            deps.db,
-                            info.sessionID,
-                            sessionMeta,
-                            { percentage, inputTokens: totalInputTokens },
-                            previousPercentage,
-                            effectiveExecuteThreshold,
-                            triggerBudget,
-                            deps.config.clear_reasoning_age ?? 50,
-                            deps.config.commit_cluster_trigger,
-                            undefined,
-                            contextLimit,
-                        );
-
-                        if (triggerResult.shouldFire) {
-                            sessionLog(
-                                info.sessionID,
-                                `compartment trigger: firing (reason=${triggerResult.reason})`,
-                            );
-                            updateSessionMeta(deps.db, info.sessionID, {
-                                compartmentInProgress: true,
-                            });
-                        }
-                    }
+                    // NOTE: the historian trigger decision used to run here on
+                    // every message.updated event — but this handler has no
+                    // message array, so it re-read the session tail from
+                    // opencode.db per streaming delta (~186ms of synchronous
+                    // SQLite on a large session, freezing the event loop and
+                    // making parallel hooks like tool.definition measure
+                    // seconds). The decision moved into the transform
+                    // (transform.ts, before prepareCompartmentInjection), which
+                    // receives the post-marker tail in memory and runs once per
+                    // LLM request — the cadence at which the decision inputs
+                    // actually change. This handler keeps usage tracking only.
                 }
 
                 updateSessionMeta(deps.db, info.sessionID, updates);

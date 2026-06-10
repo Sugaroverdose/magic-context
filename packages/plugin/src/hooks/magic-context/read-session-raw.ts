@@ -229,6 +229,129 @@ export function readRawSessionTailFromDb(
     return { messages, absoluteMessageCount: Math.max(0, ord - 1) };
 }
 
+/**
+ * Minimal structural view of an in-memory transform message, extracted from
+ * OpenCode's `MessageLike` by the caller. Kept dependency-free so this module
+ * doesn't import the transform/tagging layer.
+ */
+export interface InMemoryMessageView {
+    id: string;
+    role: string;
+    parts: unknown[];
+    /** From the message `info` if present; used to mirror the DB summary filter. */
+    summary?: boolean;
+    finish?: string;
+}
+
+export interface InMemoryTailResult {
+    messages: RawMessage[];
+    absoluteMessageCount: number;
+    /** True when the compaction anchor id was located within the array. */
+    anchorFound: boolean;
+}
+
+/**
+ * Extract the minimal structural view from OpenCode transform messages
+ * (`args.messages`, MessageLike-shaped: `{ info, parts }`). Tolerates missing
+ * fields — a message without a string id becomes an empty-id view, which
+ * `buildInMemoryTailRawMessages` treats as a malformed row (ordinal slot kept,
+ * no element), mirroring the DB reader.
+ */
+export function extractInMemoryMessageViews(
+    messages: readonly { info?: unknown; parts?: unknown }[],
+): InMemoryMessageView[] {
+    return messages.map((m) => {
+        const info = (m.info ?? {}) as Record<string, unknown>;
+        return {
+            id: typeof info.id === "string" ? info.id : "",
+            role: typeof info.role === "string" ? info.role : "unknown",
+            parts: Array.isArray(m.parts) ? m.parts : [],
+            summary: info.summary === true ? true : undefined,
+            finish: typeof info.finish === "string" ? info.finish : undefined,
+        };
+    });
+}
+
+/**
+ * Build an absolute-ordinal `RawMessage[]` tail from the in-memory transform
+ * messages (`args.messages`), mirroring {@link readRawSessionTailFromDb} so the
+ * boundary resolver produces an identical result without any opencode.db read.
+ *
+ * OpenCode hands the transform the post-compaction-marker tail, i.e. the eligible
+ * window, already parsed. Ordinals are anchored at the last compartment boundary:
+ *
+ * - If `anchorMessageId` is found at index k, that message IS the boundary
+ *   (ordinal `lastCompartmentEnd`); messages k, k+1, … get ordinals
+ *   `lastCompartmentEnd, lastCompartmentEnd+1, …`. Messages before k (compaction
+ *   marker lag — already compartmentalized) are dropped, matching the DB tail
+ *   which starts AT the anchor.
+ * - If the anchor isn't present (it was a summary row OpenCode already filtered,
+ *   or marker is ahead), the array is assumed to start at `lastCompartmentEnd+1`
+ *   and ordinals run `lastCompartmentEnd+1, …`. `anchorFound=false` flags this so
+ *   callers can choose the DB fallback if they don't trust the assumption.
+ * - No compartments yet (#132): pass `lastCompartmentEnd=0`,
+ *   `anchorMessageId=null` → ordinals from 1 over the whole array.
+ *
+ * Mirrors the DB reader's contracts: compaction-summary rows
+ * (`summary===true && finish==='stop'`) are filtered BEFORE ordinal assignment;
+ * a malformed message (no string id) keeps its ordinal slot but yields no element;
+ * `absoluteMessageCount` equals what the DB reader would report for the same tail.
+ *
+ * Returns null when there are no usable messages.
+ */
+export function buildInMemoryTailRawMessages(args: {
+    messages: readonly InMemoryMessageView[];
+    lastCompartmentEnd: number;
+    anchorMessageId: string | null;
+}): InMemoryTailResult | null {
+    const { messages, lastCompartmentEnd, anchorMessageId } = args;
+
+    // Mirror the DB reader's compaction-summary filter, applied BEFORE ordinal
+    // assignment. (These rows are normally already absent post-filterCompacted,
+    // but filtering defensively keeps ordinals aligned if one slips through.)
+    const filtered = messages.filter((m) => !(m.summary === true && m.finish === "stop"));
+    if (filtered.length === 0) return null;
+
+    let startIndex = 0;
+    let baseOrdinal: number;
+    let anchorFound = false;
+    if (anchorMessageId) {
+        const anchorIndex = filtered.findIndex((m) => m.id === anchorMessageId);
+        if (anchorIndex >= 0) {
+            anchorFound = true;
+            startIndex = anchorIndex;
+            baseOrdinal = lastCompartmentEnd; // the anchor row IS lastCompartmentEnd
+        } else {
+            // Anchor filtered out / marker ahead: assume array starts just past it.
+            baseOrdinal = Math.max(1, lastCompartmentEnd + 1);
+        }
+    } else {
+        // No-compartment (#132) case: whole array is eligible from ordinal 1.
+        baseOrdinal = Math.max(1, lastCompartmentEnd + 1);
+    }
+
+    const out: RawMessage[] = [];
+    let ord = baseOrdinal;
+    for (let i = startIndex; i < filtered.length; i += 1) {
+        const m = filtered[i];
+        if (!m.id || typeof m.id !== "string") {
+            // Mirror the DB reader: malformed row keeps its ordinal slot, no element.
+            ord += 1;
+            continue;
+        }
+        out.push({
+            ordinal: ord,
+            id: m.id,
+            role: typeof m.role === "string" ? m.role : "unknown",
+            parts: m.parts ?? [],
+            version: null,
+        });
+        ord += 1;
+    }
+
+    return { messages: out, absoluteMessageCount: Math.max(0, ord - 1), anchorFound };
+}
+
 export function readRawSessionMessageByIdFromDb(
     db: Database,
     sessionId: string,
