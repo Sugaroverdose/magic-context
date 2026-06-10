@@ -27,10 +27,10 @@ import {
 	buildChannel1Reminder,
 	buildChannel2Reminder,
 	CHANNEL1_SENTINEL,
-	CHANNEL2_MIN_RECLAIMABLE,
 	type Channel1State,
 	computePressure,
 	decideChannel1,
+	shouldTriggerChannel2,
 	tailToolTokensFromStrings,
 	toolOutputTokens,
 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
@@ -200,15 +200,26 @@ export function maybeDeliverChannel2Pi(
 	// Revalidate before delivering (parity with OpenCode channel2-delivery).
 	// The `pending` intent was recorded at high pressure during a context pass;
 	// by this agent_end the agent may have run ctx_reduce (markPiChannel1Reduced
-	// + the next pass refreshes the baseline), so the ceiling condition no longer
-	// holds. Firing anyway injects a stale follow-up AND burns the one-per-session
-	// cap. When the current undropped tail is known and below the trigger floor,
-	// reset to '' (re-armable) instead — NOT 'delivered' — preserving the cap.
+	// + the next pass refreshes the baseline), so the ceiling condition may no
+	// longer hold. Firing anyway injects a stale follow-up AND burns the
+	// one-per-session cap.
+	//
+	// Two rules, both cap-preserving (mirrors OpenCode):
+	// - UNKNOWN baseline → do NOT deliver, do NOT touch the lease: leave
+	//   `pending` for a later agent_end with a real measurement. Never
+	//   substitute a default and burn the cap on an unvalidated condition.
+	// - KNOWN baseline → re-run the FULL trigger predicate (floor AND the
+	//   reclaimable ≥ usable/3 ratio that armed the intent), not just the
+	//   floor. Predicate false → cancel to '' (re-armable).
 	const baseline = channel1StateBySession.get(sessionId);
-	const undropped = baseline
-		? baseline.tailToolTokens + baseline.turnToolTokens
-		: CHANNEL2_MIN_RECLAIMABLE;
-	if (baseline && undropped < CHANNEL2_MIN_RECLAIMABLE) {
+	if (!baseline) return false;
+	const undropped = baseline.tailToolTokens + baseline.turnToolTokens;
+	if (
+		!shouldTriggerChannel2({
+			reclaimableTokens: undropped,
+			usableTokens: baseline.usableTokens,
+		})
+	) {
 		try {
 			casChannel2NudgeState(db, sessionId, "pending", "");
 		} catch {

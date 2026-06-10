@@ -45,10 +45,49 @@ describe("maybeDeliverChannel2", () => {
             db,
             serverUrl: SERVER,
             directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
         });
         expect(delivered).toBe(false);
         // Intent stays pending — Channel 2 is simply disabled here, not consumed.
         expect(getChannel2NudgeState(db, "ses-tui")).toBe("pending");
+    });
+
+    it("does NOT deliver and leaves pending when the baseline is unknown", async () => {
+        useTempDataHome("ch2-unknown-");
+        const db = openDatabase()!;
+        setChannel2NudgeState(db, "ses-unknown", "pending");
+        setLiveServerWakeAvailable(SERVER, true);
+        const delivered = await maybeDeliverChannel2("ses-unknown", {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            // No reclaimable/usable measurement at this event.
+        });
+        // Unknown pressure must never burn the one-shot cap NOR cancel the
+        // intent — a later final-stop with a real measurement decides.
+        expect(delivered).toBe(false);
+        expect(getChannel2NudgeState(db, "ses-unknown")).toBe("pending");
+    });
+
+    it("cancels (re-armable) when the full trigger predicate no longer holds", async () => {
+        useTempDataHome("ch2-stale-");
+        const db = openDatabase()!;
+        setChannel2NudgeState(db, "ses-stale", "pending");
+        setLiveServerWakeAvailable(SERVER, true);
+        // 11k reclaimable >= 10k floor but < usable/3 (44k/3 ≈ 14.7k): the
+        // audit repro — floor-only validation delivered this stale nudge and
+        // permanently burned the one-per-session cap.
+        const delivered = await maybeDeliverChannel2("ses-stale", {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 11_000,
+            usableTokens: 44_000,
+        });
+        expect(delivered).toBe(false);
+        // Cancelled to '' (re-armable), NOT 'delivered' — cap preserved.
+        expect(getChannel2NudgeState(db, "ses-stale")).toBe("");
     });
 
     it("delivers via the live-server client and consumes the one-shot cap", async () => {
@@ -68,7 +107,13 @@ describe("maybeDeliverChannel2", () => {
         }));
 
         const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
-        const delivered = await deliver("ses-go", { db, serverUrl: SERVER, directory: "." });
+        const delivered = await deliver("ses-go", {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
+        });
 
         expect(delivered).toBe(true);
         expect(promptAsync).toHaveBeenCalledTimes(1);
@@ -102,7 +147,13 @@ describe("maybeDeliverChannel2", () => {
         }));
 
         const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
-        const delivered = await deliver("ses-fail", { db, serverUrl: SERVER, directory: "." });
+        const delivered = await deliver("ses-fail", {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
+        });
 
         expect(delivered).toBe(false);
         // Reverted to pending so a later event retries — the single nudge isn't lost.

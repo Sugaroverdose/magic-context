@@ -581,3 +581,54 @@ with the default, so they read `''` (verified `IS NULL → 0`), and the
 trigger/delivery CAS matches. A wedged `'claimed'` lease (crash mid-delivery) is
 healed to `'pending'` on every process boot by `healWedgedChannel2Claims`
 (`storage-db.ts`). Accepted as correct.
+
+### A37. `NORMAL_HYSTERESIS_TOKENS` (256) eligible-head snap is deliberate (boundary-straddle wobble accepted)
+
+`protected-tail-boundary.ts` snaps `protectedTailStart` to `offset` when the
+eligible head is ≤256 tokens. An audit may flag that a session whose eligible
+head straddles ~256 tokens can flip `eligibleEndOrdinal` between passes (a
+defer-pass fingerprint change → one cache bust). Accepted: the clamp IS the
+cache-stabilizing mechanism (pins sub-256 heads to offset so tiny heads never
+produce a 1-message historian arc), the straddle case requires the head to sit
+exactly at the threshold while ALSO being below every size trigger, and the cost
+is one bust on the pass where it flips — not a recurring drift. Widening the
+threshold only moves the straddle point; hysteresizing boundary identity would
+add cross-pass state to a deliberately stateless resolver. Re-evaluate only with
+live evidence of repeated flip-flop busts on a real session.
+
+### A38. `protectedTailStart` has no `priorBoundaryOrdinal` floor on non-migration passes (deliberately stateless)
+
+An audit may suggest persisting the previous pass's boundary as a monotonic
+floor to prevent "backward drift under multi-process races". Deliberate
+non-goal: the v3 boundary is a pure function of (messages, usage, budget) — the
+anchor-based offset (`lastCompartmentEnd+1`) already provides the durable floor
+that matters (never re-eligible below the last compartment), backward relaxation
+of the USER-TURN component is a designed feature (#132 sparse-session deadlock),
+and a persisted high-watermark would reintroduce the ratchet-starvation class
+the redesign removed. Cross-process boundary skew is bounded by the shared
+compartment anchor and resolves on the next publish.
+
+### A39. Tool-tag token_count is computed once (no growth bump on OpenCode) — verified unreachable, intentional
+
+Audits flag that `assignToolTag` returns early on the existing-tag fast path
+without re-measuring `token_count`, so a tool output that "grows on a later
+pass" would keep a stale count and skew boundary math. On OpenCode this growth
+is UNREACHABLE: tags are only created once `state.output` is a string — i.e.
+after the tool COMPLETED — and OpenCode writes tool output exactly once
+(Channel-1 reminder appends happen in `tool.execute.after`, before persistence
+and before any transform observes the part). Verified empirically across
+100,670 tool tags on the two largest live sessions: zero byte_size drift vs the
+current opencode.db output. Pi DOES bump (tag-transcript.ts) because it tags
+the invocation occurrence first (byte_size=0) and must update when the result
+lands — that asymmetry is structural, documented at the OpenCode call site
+(tag-messages.ts). Adding a per-part size compare to OpenCode's hot path would
+cost every pass to defend a case that cannot occur.
+
+### A40. `estimateTokens` counts embedded special-token literals as ordinary text (accepted accuracy tradeoff)
+
+Content containing literal special-token strings (e.g. `<EOT>` inside tokenizer
+source code) is encoded as plain text — the provider may count such literals
+differently, so boundary sizes can be off by tens of tokens for files dense in
+them. This replaced a production CRASH (encode threw on special tokens) and the
+residual error is far below the boundary's natural estimator-vs-provider delta.
+Accepted; do not re-introduce special-token parsing.

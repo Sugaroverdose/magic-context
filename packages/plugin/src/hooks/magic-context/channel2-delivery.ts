@@ -30,7 +30,7 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
-import { buildChannel2Reminder, CHANNEL2_MIN_RECLAIMABLE } from "./ctx-reduce-nudge";
+import { buildChannel2Reminder, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
 
 export interface Channel2DeliveryDeps {
     db: Database;
@@ -38,6 +38,12 @@ export interface Channel2DeliveryDeps {
     directory: string;
     /** Reclaimable tool-output tokens for the wording + stale-intent revalidation. */
     reclaimableTokens?: number;
+    /**
+     * The usable working range measured at the same Channel-1 baseline refresh
+     * (see Channel1State.usableTokens). Required to re-run the FULL trigger
+     * predicate at delivery time.
+     */
+    usableTokens?: number;
 }
 
 /**
@@ -62,18 +68,32 @@ export async function maybeDeliverChannel2(
     // Revalidate before delivering. The `pending` intent was recorded at high
     // pressure during a transform pass; between then and this terminal
     // message.updated the agent may have run ctx_reduce (or a later turn shrank
-    // the reclaimable tail), so the ceiling condition no longer holds. Firing
-    // the synthetic nudge anyway would inject a stale "you have N tokens to
-    // drop" message AND consume the one-per-session cap for nothing. When the
-    // current undropped-tool count is known and has fallen below the trigger
-    // floor, cancel the intent by resetting to '' — NOT 'delivered' — so the
-    // cap is preserved and a genuinely high-pressure later turn can re-arm it.
-    if (deps.reclaimableTokens !== undefined && deps.reclaimableTokens < CHANNEL2_MIN_RECLAIMABLE) {
+    // the reclaimable tail), so the ceiling condition may no longer hold.
+    // Firing the synthetic nudge anyway would inject a stale "you have N tokens
+    // to drop" message AND consume the one-per-session cap for nothing.
+    //
+    // Two rules, both cap-preserving:
+    // - UNKNOWN baseline (no fresh measurement at this event) → do NOT deliver
+    //   and do NOT touch the lease: leave `pending` for a later final-stop that
+    //   has a real measurement. Never substitute a default and burn the cap on
+    //   an unvalidated condition.
+    // - KNOWN baseline → re-run the FULL trigger predicate (floor AND the
+    //   reclaimable ≥ usable/3 ratio — the same one that armed the intent),
+    //   not just the floor. Predicate false → cancel to '' (re-armable).
+    if (deps.reclaimableTokens === undefined || deps.usableTokens === undefined) {
+        return false;
+    }
+    if (
+        !shouldTriggerChannel2({
+            reclaimableTokens: deps.reclaimableTokens,
+            usableTokens: deps.usableTokens,
+        })
+    ) {
         try {
             casChannel2NudgeState(deps.db, sessionId, "pending", "");
             sessionLog(
                 sessionId,
-                `channel2 intent cleared pre-delivery (reclaimable ${deps.reclaimableTokens} < ${CHANNEL2_MIN_RECLAIMABLE}; re-armable)`,
+                `channel2 intent cleared pre-delivery (reclaimable ${deps.reclaimableTokens}, usable ${deps.usableTokens} — trigger no longer holds; re-armable)`,
             );
         } catch {
             // best-effort; if the CAS fails the next pass re-evaluates.
@@ -99,7 +119,9 @@ export async function maybeDeliverChannel2(
     try {
         const client = getLiveServerClient(serverUrl, deps.directory);
         const promptContext = await resolvePromptContext(client, sessionId);
-        const reminder = buildChannel2Reminder(deps.reclaimableTokens ?? CHANNEL2_MIN_RECLAIMABLE);
+        // reclaimableTokens is guaranteed defined here (unknown-baseline path
+        // returned above), so the wording always reflects a real measurement.
+        const reminder = buildChannel2Reminder(deps.reclaimableTokens);
 
         const body: Record<string, unknown> = {
             noReply: false,

@@ -220,6 +220,7 @@ export {
     getTagsByNumbers,
     getTagsBySession,
     getTopNBySize,
+    getTriggerTagTokenUpperBound,
     insertTag,
     type MessageTokenTotal,
     updateCavemanDepth,

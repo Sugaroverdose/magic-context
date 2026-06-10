@@ -133,9 +133,24 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(sent).toBe(0);
 	});
 
+	/** A baseline whose measurement still satisfies the full Channel-2 trigger. */
+	function armStrongBaseline(sessionId: string): void {
+		setPiChannel1Baseline(sessionId, {
+			tailToolTokens: 30_000,
+			historyBudgetTokens: 0,
+			contextLimit: 200_000,
+			executeThresholdPercentage: 65,
+			lastInputTokens: 120_000,
+			turnToolTokens: 0,
+			usableTokens: 60_000, // 30k >= 60k/3 -> trigger holds
+			reducedSinceRefresh: false,
+		});
+	}
+
 	it("delivers via sendUserMessage(followUp) and consumes the one-shot cap", () => {
 		const db = createTestDb();
 		setChannel2NudgeState(db, SESSION, "pending");
+		armStrongBaseline(SESSION);
 		let capturedContent = "";
 		let capturedDeliverAs = "";
 		const delivered = maybeDeliverChannel2Pi(
@@ -155,9 +170,64 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
+	it("does NOT deliver and leaves pending when no baseline measurement exists", () => {
+		const db = createTestDb();
+		const session = "ses-ch2-pi-unknown";
+		setChannel2NudgeState(db, session, "pending");
+		clearPiChannel1State(session);
+		let sent = 0;
+		const delivered = maybeDeliverChannel2Pi(
+			{
+				sendUserMessage: () => {
+					sent += 1;
+				},
+			},
+			db,
+			session,
+		);
+		// Unknown pressure must never burn the one-shot cap NOR cancel the
+		// intent — a later agent_end with a real measurement decides.
+		expect(delivered).toBe(false);
+		expect(sent).toBe(0);
+		expect(getChannel2NudgeState(db, session)).toBe("pending");
+	});
+
+	it("cancels (re-armable) when the full trigger predicate no longer holds", () => {
+		const db = createTestDb();
+		const session = "ses-ch2-pi-stale";
+		setChannel2NudgeState(db, session, "pending");
+		// 11k reclaimable >= 10k floor, but < usable/3 (44k/3 ~ 14.7k) — the
+		// audit repro: floor-only validation would deliver and burn the cap.
+		setPiChannel1Baseline(session, {
+			tailToolTokens: 11_000,
+			historyBudgetTokens: 0,
+			contextLimit: 200_000,
+			executeThresholdPercentage: 65,
+			lastInputTokens: 100_000,
+			turnToolTokens: 0,
+			usableTokens: 44_000,
+			reducedSinceRefresh: false,
+		});
+		let sent = 0;
+		const delivered = maybeDeliverChannel2Pi(
+			{
+				sendUserMessage: () => {
+					sent += 1;
+				},
+			},
+			db,
+			session,
+		);
+		expect(delivered).toBe(false);
+		expect(sent).toBe(0);
+		// Cancelled to '' (re-armable), NOT 'delivered' — cap preserved.
+		expect(getChannel2NudgeState(db, session)).toBe("");
+	});
+
 	it("reverts to pending on send failure (cap not burned)", () => {
 		const db = createTestDb();
 		setChannel2NudgeState(db, SESSION, "pending");
+		armStrongBaseline(SESSION);
 		const delivered = maybeDeliverChannel2Pi(
 			{
 				sendUserMessage: () => {

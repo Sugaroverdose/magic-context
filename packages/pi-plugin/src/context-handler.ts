@@ -2208,22 +2208,10 @@ export function registerPiContextHandler(
 						);
 						liveTailTokens = tailToolTokens;
 					}
-					setPiChannel1Baseline(sessionId, {
-						tailToolTokens,
-						historyBudgetTokens: historyBudgetTokens ?? 0,
-						contextLimit: usageContextLimit ?? 0,
-						executeThresholdPercentage: resolvedExecuteThresholdPct,
-						lastInputTokens: usageInputTokens,
-						turnToolTokens: 0,
-						reducedSinceRefresh: false,
-					});
-
-					// Channel 2 (ceiling) trigger — fire when reclaimable tool output
-					// is at least a third of the usable working range (the gap
-					// between fixed overhead and the execute-threshold ceiling).
-					// usable = executeThresholdTokens − inputTokens + liveTail.
-					// Delivery happens on `agent_end` via pi.sendUserMessage. Only
-					// escalate from '' so an in-flight claim/delivery is never reset.
+					// usable = executeThresholdTokens − inputTokens + liveTail (the
+					// agent's working range). Computed BEFORE the baseline write so
+					// it persists with the same measurement — Channel-2 delivery
+					// revalidates the full trigger predicate from this snapshot.
 					const executeThresholdTokensPi = Math.round(
 						((usageContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
 					);
@@ -2231,6 +2219,22 @@ export function registerPiContextHandler(
 						0,
 						executeThresholdTokensPi - usageInputTokens + liveTailTokens,
 					);
+					setPiChannel1Baseline(sessionId, {
+						tailToolTokens,
+						historyBudgetTokens: historyBudgetTokens ?? 0,
+						contextLimit: usageContextLimit ?? 0,
+						executeThresholdPercentage: resolvedExecuteThresholdPct,
+						lastInputTokens: usageInputTokens,
+						turnToolTokens: 0,
+						usableTokens: usableTokensPi,
+						reducedSinceRefresh: false,
+					});
+
+					// Channel 2 (ceiling) trigger — fire when reclaimable tool output
+					// is at least a third of the usable working range (the gap
+					// between fixed overhead and the execute-threshold ceiling).
+					// Delivery happens on `agent_end` via pi.sendUserMessage. Only
+					// escalate from '' so an in-flight claim/delivery is never reset.
 					if (
 						usageContextLimit &&
 						usageContextLimit > 0 &&

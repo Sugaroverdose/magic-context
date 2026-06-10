@@ -170,6 +170,34 @@ export function getActiveTagTokenAggregate(
     };
 }
 
+/**
+ * Upper bound on the historian's true-raw ELIGIBLE tokens for the cheap
+ * trigger pre-gate. Sums `active` AND `dropped` tags: a ctx_reduce/emergency
+ * drop removes a tool output from the wire (and the active set) but its raw
+ * content stays in OpenCode's DB and still counts toward the historian's
+ * chunk size — an active-only bound undercounts after drops and wrongly
+ * suppresses real tail-size triggers. `compacted` tags are excluded: they sit
+ * before the last compartment boundary by construction, so they can't be in
+ * the eligible window (including them would only make the gate uselessly
+ * conservative). nullCount spans the same active+dropped set — the bound is
+ * only trustworthy when every contributing row has a cached token count.
+ */
+export function getTriggerTagTokenUpperBound(
+    db: Database,
+    sessionId: string,
+): { bound: number; nullCount: number } {
+    const row = db
+        .prepare(
+            `SELECT
+                COALESCE(SUM(COALESCE(token_count, 0) + COALESCE(input_token_count, 0) + COALESCE(reasoning_token_count, 0)), 0) AS bound,
+                COALESCE(SUM(CASE WHEN token_count IS NULL THEN 1 ELSE 0 END), 0) AS null_count
+             FROM tags
+             WHERE session_id = ? AND status IN ('active', 'dropped')`,
+        )
+        .get(sessionId) as { bound: number; null_count: number } | undefined;
+    return { bound: row?.bound ?? 0, nullCount: row?.null_count ?? 0 };
+}
+
 export function getActiveTagTokenTotalsByMessage(
     db: Database,
     sessionId: string,
@@ -301,6 +329,16 @@ export function getAllStatusTagTokenTotalsFlat(
     const totals = new Map<string, number>();
     const nullMessageIds = new Set<string>();
     for (const row of rows) {
+        // NULL-owner tool rows (pre-v10 unadopted orphans): `ownerMessageIdForTagRow`
+        // would key them under the bare callId, which `storedTotalForMessage`
+        // (real message ids) never queries — their tokens would be silently
+        // attributed to a key nobody reads, making that MESSAGE's stored total
+        // an undercount. Treat the row as unresolvable instead: we can't know
+        // which message it belongs to, so we can't mark that message NULL
+        // either — skipping is the conservative choice (the affected message's
+        // total simply lacks this orphan's contribution until lazy adoption
+        // resolves the owner, after which it lands under the real id).
+        if (row.type === "tool" && row.tool_owner_message_id === null) continue;
         const owner = ownerMessageIdForTagRow(row);
         if (row.token_count === null) {
             nullMessageIds.add(owner);

@@ -103,15 +103,31 @@ function bytesToTokens(bytes: number): number {
  * Plan a tiered target-headroom emergency drop. Pure: returns the ordered set of
  * tool tag numbers to drop plus the new watermark; the caller applies them.
  *
- * fixedFloor is derived as `currentTotalInputTokens − Σ(active tag tokens)`.
+ * fixedFloor is derived as `currentTotalInputTokens − Σ(active floor-tag tokens)`.
  * Tags cover exactly the live-tail content (messages, tool outputs, files,
  * reasoning); system, tool defs, and m[0]/m[1] are untagged. So this difference
  * IS `system + toolDefs + (primary ? m0 + m1 : 0)` — the irreducible prefix —
  * with no extra plumbing, and it self-adjusts for subagents (no m0/m1 in their
  * total) by construction.
+ *
+ * The two tag sets serve DIFFERENT contracts and must not be conflated:
+ * - `floorTags`: the ENTIRE active live-window tag set (all types, including
+ *   non-droppable tool tags). Only their token sum matters — it makes
+ *   `fixedFloor` the true irreducible prefix. Passing a narrower set (e.g.
+ *   tool-only) folds real conversation/reasoning tail into the "floor",
+ *   raising the target and systematically under-evicting at ≥85%.
+ * - `tags`: the evictable candidates — active tool tags whose drop target
+ *   would actually reclaim bytes (caller pre-filters on `canDrop()` so no
+ *   phantom tag is counted as reclaimed).
  */
 export function planEmergencyDrop(input: {
+    /** Evictable candidates: active tool tags with a working drop target. */
     tags: readonly EmergencyDropTag[];
+    /**
+     * FULL active live-window tag set (all types) — floor accounting only.
+     * See the fixedFloor contract above.
+     */
+    floorTags: readonly EmergencyDropTag[];
     maxTag: number;
     protectedTags: number;
     currentTotalInputTokens: number;
@@ -132,6 +148,7 @@ export function planEmergencyDrop(input: {
 }): EmergencyDropPlan {
     const {
         tags,
+        floorTags,
         maxTag,
         protectedTags,
         currentTotalInputTokens,
@@ -167,14 +184,13 @@ export function planEmergencyDrop(input: {
         return noop("same-input-sample (awaiting fresh usage after prior drop)");
     }
 
-    // fixedFloor from the active-tag content (see doc-comment). The caller MUST
-    // pass only tags that are present in the live (visible) window AND have a
-    // working drop target — i.e. pre-filtered to `targets.has(tagNumber)`. That
-    // keeps this sum equal to the on-wire tail (so fixedFloor is the true
-    // prefix) and guarantees every selected tag below actually reclaims its
-    // bytes (no phantom/compacted tags counted as reclaimed → no under-evict).
+    // fixedFloor from the FULL active live-window content (floorTags — see the
+    // contract above). The evictable `tags` set stays tool-only+canDrop so every
+    // selected tag below actually reclaims its bytes; the floor sum deliberately
+    // includes everything else (message text, files, reasoning, non-droppable
+    // tools) because those bytes are on the wire and NOT irreducible prefix.
     let tailTokens = 0;
-    for (const tag of tags) {
+    for (const tag of floorTags) {
         if (tag.status !== "active") continue;
         tailTokens += bytesToTokens(tagReclaimBytes(tag));
     }

@@ -8,6 +8,17 @@ import {
     TARGET_FRACTION,
 } from "./emergency-drop";
 
+// Most tests exercise selection/latch logic where the floor set equals the
+// candidate set; planWithFloor keeps them on the old single-set shape. The
+// floorTags/tags split itself is covered by the dedicated regression test.
+function planWithFloor(
+    input: Omit<Parameters<typeof planEmergencyDrop>[0], "floorTags"> & {
+        floorTags?: readonly EmergencyDropTag[];
+    },
+) {
+    return planEmergencyDrop({ ...input, floorTags: input.floorTags ?? input.tags });
+}
+
 function tag(
     tagNumber: number,
     toolName: string | null,
@@ -65,7 +76,7 @@ describe("planEmergencyDrop — guards", () => {
     };
 
     it("skips when the ceiling is unknown/invalid", () => {
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             ...base,
             tags: [tag(1, "bash", 4000)],
             currentTotalInputTokens: 100_000,
@@ -76,13 +87,74 @@ describe("planEmergencyDrop — guards", () => {
     });
 
     it("no-ops when already at/under target (reclaim <= min)", () => {
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             ...base,
             tags: [tag(1, "bash", 4000)],
             currentTotalInputTokens: 1_000,
             ceilingTokens: 100_000,
         });
         expect(plan.shouldDrop).toBe(false);
+    });
+});
+
+describe("planEmergencyDrop — floorTags/tags split", () => {
+    it("reclaims to the true target when substantial non-tool tail exists (audit repro)", () => {
+        // Audit repro: 170k total, 130k ceiling, live tail = 60k active
+        // non-tool (conversation/reasoning) + 80k droppable tool; true fixed
+        // overhead = 30k. Correct: floor=30k → target=60k → reclaim=110k →
+        // ALL tool tags must go. The old tool-only floor computed floor=90k →
+        // target=102k → reclaim=68k and left tool output behind.
+        const TOKENS_PER_BYTE = 0.25; // mirror of emergency-drop internal ratio
+        const toTokens = (bytes: number) => Math.round(bytes * TOKENS_PER_BYTE);
+
+        // 80k tokens of droppable tool output across 8 tags (10k tokens each).
+        const toolTags = Array.from({ length: 8 }, (_, i) =>
+            tag(i + 1, "bash", 10_000 / TOKENS_PER_BYTE),
+        );
+        // 60k tokens of active message/file tail — floor accounting only.
+        const messageTags = Array.from({ length: 6 }, (_, i) =>
+            tag(i + 101, null, 10_000 / TOKENS_PER_BYTE, { type: "message" }),
+        );
+        expect(toolTags.reduce((s, t) => s + toTokens(t.byteSize), 0)).toBe(80_000);
+        expect(messageTags.reduce((s, t) => s + toTokens(t.byteSize), 0)).toBe(60_000);
+
+        const plan = planEmergencyDrop({
+            tags: toolTags,
+            floorTags: [...toolTags, ...messageTags],
+            maxTag: 200,
+            protectedTags: 0,
+            currentTotalInputTokens: 170_000,
+            ceilingTokens: 130_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+        });
+
+        expect(plan.shouldDrop).toBe(true);
+        // floor = 170k − 140k = 30k; target = 30k + 0.3·100k = 60k; reclaim 110k.
+        expect(plan.reclaimTokens).toBe(110_000);
+        // Reclaim need (110k) exceeds the whole droppable pile (80k) → every
+        // tool tag is selected; non-tool tags are never selected.
+        expect(plan.tagNumbers.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    });
+
+    it("never selects non-tool tags even when they dominate the floor set", () => {
+        const toolTags = [tag(1, "bash", 40_000)];
+        const messageTags = [
+            tag(50, null, 400_000, { type: "message" }),
+            tag(51, null, 400_000, { type: "file" }),
+        ];
+        const plan = planEmergencyDrop({
+            tags: toolTags,
+            floorTags: [...toolTags, ...messageTags],
+            maxTag: 60,
+            protectedTags: 0,
+            currentTotalInputTokens: 300_000,
+            ceilingTokens: 200_000,
+            priorInputSample: 0,
+            hasPriorDrop: false,
+        });
+        expect(plan.shouldDrop).toBe(true);
+        expect(plan.tagNumbers).toEqual([1]);
     });
 });
 
@@ -93,7 +165,7 @@ describe("planEmergencyDrop — target math", () => {
         // workingSpan 140000, target = 20000 + 0.30×140000 = 62000,
         // reclaim = 30000 - 62000 < 0 → no-op (under target).
         const tags = Array.from({ length: 10 }, (_, i) => tag(i + 1, "bash", 4000));
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 10,
             protectedTags: 0,
@@ -110,7 +182,7 @@ describe("planEmergencyDrop — target math", () => {
         // 20 tags × 2000 bytes × 0.25 = 10000 tail tokens; usage 10000,
         // fixedFloor ≈ 0, ceiling 6000 → target 1800 → reclaim ≈ 8200.
         const tags = Array.from({ length: 20 }, (_, i) => tag(i + 1, "bash", 2000));
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 20,
             protectedTags: 2,
@@ -131,7 +203,7 @@ describe("planEmergencyDrop — target math", () => {
         // 20 T3 tags × 1000 bytes (≈250 tokens each). currentTotal 100k, ceiling
         // 60k. First pass drops down to target and latches the usage sample.
         const tags = Array.from({ length: 20 }, (_, i) => tag(i + 1, "bash", 1000));
-        const first = planEmergencyDrop({
+        const first = planWithFloor({
             tags,
             maxTag: 20,
             protectedTags: 0,
@@ -144,7 +216,7 @@ describe("planEmergencyDrop — target math", () => {
         // Second ≥85% pass BEFORE the provider re-measures: same stale
         // currentTotalInputTokens, sample latched. Must NO-OP — not re-derive
         // and drop the rest of the tail (which would bust the cache again).
-        const second = planEmergencyDrop({
+        const second = planWithFloor({
             tags,
             maxTag: 20,
             protectedTags: 0,
@@ -156,7 +228,7 @@ describe("planEmergencyDrop — target math", () => {
         expect(second.shouldDrop).toBe(false);
         expect(second.reason).toContain("same-input-sample");
         // A FRESH (lower) sample releases the latch so it can re-evaluate.
-        const third = planEmergencyDrop({
+        const third = planWithFloor({
             tags,
             maxTag: 20,
             protectedTags: 0,
@@ -177,7 +249,7 @@ describe("planEmergencyDrop — target math", () => {
         // sees ~no droppable tail and no-ops into overflow.
         const big = tag(1, "write", 400, { inputByteSize: 40_000, reasoningByteSize: 8_000 });
         const small = tag(2, "bash", 800);
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags: [big, small],
             maxTag: 2,
             protectedTags: 0,
@@ -214,7 +286,7 @@ describe("planEmergencyDrop — tier ordering", () => {
         ];
         // tail = 6×1000 = 6000 tokens; usage 6000, ceiling 1000 →
         // target 300 → reclaim ≈ 5700 → must drop almost everything.
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 6,
             protectedTags: 0,
@@ -232,7 +304,7 @@ describe("planEmergencyDrop — tier ordering", () => {
     it("reserves the newest 20% of T1/T2 tiers (ceil), never T3", () => {
         // 10 T2 edits. reserve = ceil(0.2×10) = 2 newest (tags 9,10).
         const tags = Array.from({ length: 10 }, (_, i) => tag(i + 1, "edit", 8000));
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 10,
             protectedTags: 0,
@@ -252,7 +324,7 @@ describe("planEmergencyDrop — tier ordering", () => {
     it("a tiny T1/T2 tier reserves all of it (ceil keeps >=1)", () => {
         const tags = [tag(1, "read", 8000), tag(2, "bash", 8000)];
         // tail 4000 tokens, usage 4000, ceiling 500 → reclaim huge.
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 2,
             protectedTags: 0,
@@ -280,7 +352,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
             ),
             ...Array.from({ length: 5 }, (_, i) => tag(i + 6, "bash", 4000)),
         ];
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 10,
             protectedTags: 0,
@@ -299,7 +371,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
         const tags = Array.from({ length: 5 }, (_, i) =>
             tag(i + 1, "bash", 4000, { status: "dropped" as const }),
         );
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 5,
             protectedTags: 0,
@@ -319,7 +391,7 @@ describe("planEmergencyDrop — idempotence via status='active' (no scalar water
             tag(2, "bash", 4000),
             tag(3, "bash", 4000),
         ];
-        const plan = planEmergencyDrop({
+        const plan = planWithFloor({
             tags,
             maxTag: 3,
             protectedTags: 0,

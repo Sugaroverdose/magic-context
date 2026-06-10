@@ -4,8 +4,8 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import {
     getActiveTagsBySession,
-    getActiveTagTokenAggregate,
     getPendingOps,
+    getTriggerTagTokenUpperBound,
     loadProtectedTailMeta,
 } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-context/types";
@@ -377,9 +377,14 @@ export function checkCompartmentTrigger(
     // size trigger at the budget edge.
     if (!inMemoryTail && usage.percentage < proactiveFloorForGate) {
         try {
-            const agg = getActiveTagTokenAggregate(db, sessionId);
-            if (agg.nullCount === 0) {
-                const eligibleUpperBound = agg.conversation + agg.toolCall;
+            // Bound must include DROPPED tags: ctx_reduce/emergency drops
+            // remove tool output from the wire but the raw content still
+            // counts toward the historian's true-raw chunk size — an
+            // active-only bound undercounts after drops and suppresses real
+            // tail-size triggers.
+            const { bound, nullCount } = getTriggerTagTokenUpperBound(db, sessionId);
+            if (nullCount === 0) {
+                const eligibleUpperBound = bound;
                 // Smallest token floor any size trigger needs is triggerBudget
                 // (commit_clusters). tail_size needs even more. If the upper
                 // bound is under it, neither can fire.

@@ -517,7 +517,17 @@ export function buildTrueRawTokenIndex(
     // offset-forward query (the only kind the boundary makes) is byte-identical
     // because the pre-offset prefix term cancels in the suffix/range subtraction.
     const sliceCount = ordered.length;
-    const rawMessageCount = Math.max(sliceCount, options.absoluteMessageCount ?? sliceCount);
+    // Guard against ordinal GAPS: malformed rows keep their ordinal slot but
+    // produce no array element (both the DB reader and the in-memory converter
+    // share this contract), so `messages.length` can be smaller than the
+    // highest ordinal. Sizing by length alone would silently drop every valid
+    // message past a gap from the prefix sums. Size by the max of all three.
+    const maxOrdinal = ordered.length > 0 ? ordered[ordered.length - 1].ordinal : 0;
+    const rawMessageCount = Math.max(
+        sliceCount,
+        maxOrdinal,
+        options.absoluteMessageCount ?? sliceCount,
+    );
     const tokensByOrdinal = new Map<number, number>();
     const idsByOrdinal = new Map<number, string>();
     const prefix = new Array<number>(rawMessageCount + 1).fill(0);

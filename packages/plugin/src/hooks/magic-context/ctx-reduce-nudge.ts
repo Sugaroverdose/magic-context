@@ -37,6 +37,14 @@ export interface Channel1State {
     lastInputTokens: number;
     turnToolTokens: number;
     /**
+     * The usable working range (executeThresholdTokens − inputTokens +
+     * liveTail) measured at the same baseline refresh. Carried so Channel-2
+     * delivery can revalidate the FULL trigger predicate (reclaimable ≥
+     * usable/3), not just the 10k floor — a floor-only recheck let a stale
+     * intent deliver and permanently burn the one-per-session ceiling cap.
+     */
+    usableTokens: number;
+    /**
      * True once the agent calls `ctx_reduce` after the last baseline refresh.
      * Suppresses Channel 1 until the next transform recomputes `tailToolTokens`
      * from the now-reduced messages (the in-flight baseline still shows the

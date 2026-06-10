@@ -1803,6 +1803,13 @@ export function createTransform(deps: TransformDeps) {
                     tailToolTokens = computeTailToolTokens(messages);
                     liveTailTokens = tailToolTokens;
                 }
+                const executeThresholdTokens = Math.round(
+                    ((resolvedContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
+                );
+                const usableTokens = Math.max(
+                    0,
+                    executeThresholdTokens - contextUsage.inputTokens + liveTailTokens,
+                );
                 deps.channel1StateBySession.set(sessionId, {
                     tailToolTokens,
                     historyBudgetTokens: historyBudgetTokens ?? 0,
@@ -1810,6 +1817,7 @@ export function createTransform(deps: TransformDeps) {
                     executeThresholdPercentage: resolvedExecuteThresholdPct,
                     lastInputTokens: contextUsage.inputTokens,
                     turnToolTokens: 0,
+                    usableTokens,
                     reducedSinceRefresh: false,
                 });
 
@@ -1835,13 +1843,8 @@ export function createTransform(deps: TransformDeps) {
                 // pressure rises, usable shrinks toward 0, so the single
                 // reclaimable ≥ usable/3 ratio encodes both "near comparting" and
                 // "big reclaimable pile" without a separate pressure gate.
-                const executeThresholdTokens = Math.round(
-                    ((resolvedContextLimit ?? 0) * resolvedExecuteThresholdPct) / 100,
-                );
-                const usableTokens = Math.max(
-                    0,
-                    executeThresholdTokens - contextUsage.inputTokens + liveTailTokens,
-                );
+                // (executeThresholdTokens/usableTokens computed above, alongside
+                // the Channel-1 baseline they're persisted with.)
                 if (
                     fullFeatureMode &&
                     resolvedContextLimit &&

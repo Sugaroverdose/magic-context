@@ -484,6 +484,30 @@ export function createTagger(): Tagger {
         );
     }
 
+    /**
+     * One-time token backfill on the tool existing-row paths (DB hit, lazy
+     * adoption, adoption-race recheck). Without this, pre-token-column tool
+     * rows stay NULL forever — the non-tool path backfills in allocateTag,
+     * but the tool fast paths return before reaching it, so legacy sessions
+     * never converge and nullCount keeps the cheap trigger gate disabled.
+     */
+    function backfillToolTokensIfNull(
+        db: Database,
+        sessionId: string,
+        tagNumber: number,
+        tokenThunk?: () => TagTokenCounts,
+    ): void {
+        if (!tokenThunk) return;
+        try {
+            if (tagTokenCountIsNull(db, sessionId, tagNumber)) {
+                backfillTagTokenCounts(db, sessionId, tagNumber, tokenThunk());
+            }
+        } catch {
+            // Best-effort: a transient BUSY defers backfill to the next
+            // observation; consumers fall back to live tokenization meanwhile.
+        }
+    }
+
     function assignToolTag(
         sessionId: string,
         callId: string,
@@ -510,6 +534,7 @@ export function createTagger(): Tagger {
         if (dbHit !== null) {
             sessionAssignments.set(compositeKey, dbHit);
             syncCounterAtLeast(sessionId, db, dbHit);
+            backfillToolTokensIfNull(db, sessionId, dbHit, tokenThunk);
             return dbHit;
         }
 
@@ -530,6 +555,7 @@ export function createTagger(): Tagger {
             if (claimed) {
                 sessionAssignments.set(compositeKey, orphan.tagNumber);
                 syncCounterAtLeast(sessionId, db, orphan.tagNumber);
+                backfillToolTokensIfNull(db, sessionId, orphan.tagNumber, tokenThunk);
                 return orphan.tagNumber;
             }
 
@@ -540,6 +566,7 @@ export function createTagger(): Tagger {
             if (recheck !== null) {
                 sessionAssignments.set(compositeKey, recheck);
                 syncCounterAtLeast(sessionId, db, recheck);
+                backfillToolTokensIfNull(db, sessionId, recheck, tokenThunk);
                 return recheck;
             }
             // Otherwise loop: there may be more NULL-owner rows for this

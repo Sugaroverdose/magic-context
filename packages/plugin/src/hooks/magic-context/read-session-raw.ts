@@ -162,9 +162,19 @@ export function readRawSessionTailFromDb(
     anchorMessageId: string,
 ): { messages: RawMessage[]; absoluteMessageCount: number } | null {
     const anchorRow = db
-        .prepare("SELECT time_created, id FROM message WHERE id = ? AND session_id = ?")
+        .prepare("SELECT time_created, id, data FROM message WHERE id = ? AND session_id = ?")
         .get(anchorMessageId, sessionId);
     if (!isAnchorRow(anchorRow)) return null;
+
+    // Defensive: if the anchor itself is a compaction-summary row, the ordinal
+    // mapping is ill-defined — summary rows are filtered out BEFORE ordinal
+    // assignment in the full numbering, so a summary anchor has no ordinal and
+    // `baseOrdinal` cannot correspond to it. Unreachable from current callers
+    // (compartment boundaries come from ordinal walks over non-summary rows),
+    // but if it ever happens, bail to the full reader rather than produce an
+    // off-by-one window.
+    const anchorInfo = parseJsonRecord((anchorRow as { data?: string }).data ?? "");
+    if (anchorInfo?.summary === true && anchorInfo?.finish === "stop") return null;
 
     const messageRows = db
         .prepare(

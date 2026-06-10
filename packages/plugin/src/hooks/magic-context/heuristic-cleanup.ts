@@ -96,8 +96,13 @@ export function applyHeuristicCleanup(
             (t) =>
                 t.status === "active" && t.type === "tool" && targets.get(t.tagNumber)?.canDrop?.(),
         );
+        // Floor accounting needs the FULL active live-window set (all types) —
+        // narrowing it to the droppable subset folds real conversation/
+        // reasoning tail into the "irreducible prefix" and under-evicts.
+        const activeTags = tags.filter((t) => t.status === "active");
         const plan = planEmergencyDrop({
             tags: droppableTags as readonly EmergencyDropTag[],
+            floorTags: activeTags as readonly EmergencyDropTag[],
             maxTag,
             protectedTags: config.protectedTags,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
