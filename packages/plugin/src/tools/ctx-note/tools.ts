@@ -61,11 +61,34 @@ function formatNoteLine(note: Note): string {
 
 const DISMISS_FOOTER = '\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
 
+/** Default page size for read. Long-running sessions accumulate hundreds of
+ *  notes; dumping all of them burns output tokens and buries the recent ones,
+ *  so read pages newest-first and tells the caller how to reach older pages. */
+const DEFAULT_READ_LIMIT = 25;
+
+function paginateNewestFirst(
+    notes: Note[],
+    limit: number,
+    offset: number,
+): { page: Note[]; total: number; footer: string | null } {
+    const total = notes.length;
+    const newestFirst = [...notes].reverse();
+    const page = newestFirst.slice(offset, offset + limit);
+    const remaining = total - offset - page.length;
+    const footer =
+        remaining > 0
+            ? `Showing ${page.length} of ${total} (newest first) — ${remaining} older: ctx_note(action="read", offset=${offset + page.length})`
+            : null;
+    return { page, total, footer };
+}
+
 function buildReadSections(args: {
     db: Database;
     sessionId: string;
     projectIdentity?: string;
     filter?: CtxNoteReadFilter;
+    limit: number;
+    offset: number;
 }): string[] {
     if (args.filter === undefined) {
         const sessionNotes = getSessionNotes(args.db, args.sessionId);
@@ -75,11 +98,13 @@ function buildReadSections(args: {
         const sections: string[] = [];
 
         if (sessionNotes.length > 0) {
-            sections.push(
-                `## Session Notes\n\n${sessionNotes.map((note) => formatNoteLine(note)).join("\n")}`,
-            );
+            const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
+            const lines = page.map((note) => formatNoteLine(note)).join("\n");
+            sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
         }
 
+        // Ready smart notes are few by construction (condition-gated) and
+        // time-sensitive — always show all of them, unpaged.
         if (readySmartNotes.length > 0) {
             sections.push(
                 `## 🔔 Ready Smart Notes\n\n${readySmartNotes
@@ -122,15 +147,15 @@ function buildReadSections(args: {
     const sections: string[] = [];
 
     if (sessionNotes.length > 0) {
-        sections.push(
-            `## Session Notes\n\n${sessionNotes.map((note) => formatNoteLine(note)).join("\n")}`,
-        );
+        const { page, footer } = paginateNewestFirst(sessionNotes, args.limit, args.offset);
+        const lines = page.map((note) => formatNoteLine(note)).join("\n");
+        sections.push(`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
     }
 
     if (smartNotes.length > 0) {
-        sections.push(
-            `## Smart Notes\n\n${smartNotes.map((note) => formatNoteLine(note)).join("\n\n")}`,
-        );
+        const { page, footer } = paginateNewestFirst(smartNotes, args.limit, args.offset);
+        const lines = page.map((note) => formatNoteLine(note)).join("\n\n");
+        sections.push(`## Smart Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
     }
 
     return sections;
@@ -162,6 +187,14 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 .describe(
                     "Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
                 ),
+            limit: tool.schema
+                .number()
+                .optional()
+                .describe("Max notes per section for read, newest first (default: 25)"),
+            offset: tool.schema
+                .number()
+                .optional()
+                .describe("Skip this many newest notes for read — page older ones (default: 0)"),
             note_id: tool.schema
                 .number()
                 .optional()
@@ -210,7 +243,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
 
                 // Simple session note
                 const note = addNote(deps.db, "session", { sessionId, content, anchorOrdinal });
-                return `Saved session note #${note.id}. Historian will rewrite or deduplicate notes as needed.`;
+                return `Saved session note #${note.id}.`;
             }
 
             if (action === "dismiss") {
@@ -259,11 +292,19 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 return `Updated note #${noteId}:\n${parts.join("\n")}`;
             }
 
+            const limit =
+                typeof args.limit === "number" && args.limit > 0
+                    ? Math.floor(args.limit)
+                    : DEFAULT_READ_LIMIT;
+            const offset =
+                typeof args.offset === "number" && args.offset > 0 ? Math.floor(args.offset) : 0;
             const sections = buildReadSections({
                 db: deps.db,
                 filter: args.filter,
                 projectIdentity,
                 sessionId,
+                limit,
+                offset,
             });
 
             // Record read watermark so note-nudger can suppress reminders

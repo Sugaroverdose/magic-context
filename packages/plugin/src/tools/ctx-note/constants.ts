@@ -1,31 +1,16 @@
-export const CTX_NOTE_DESCRIPTION = `Save or inspect durable session notes that persist for this session.
-Use this for short goals, constraints, decisions, or reminders worth carrying forward.
+export const CTX_NOTE_DESCRIPTION = `Working notes for this session's future — reminders, follow-ups, and things to revisit later.
+
+Use a note when something matters LATER but not in the next few steps: "revisit the retry logic after the release", "user wants the dashboard polish batched", "flaky test to investigate when touching CI". Don't use notes for active multi-step work (use todos) or for durable project knowledge that should outlive this session (use ctx_memory). Notes resurface automatically at natural work boundaries and whenever you read them.
 
 Actions:
-- \`write\`: Append one note. Optionally provide \`surface_condition\` to create a smart note.
-- \`read\`: Show current notes. Defaults to active session notes + ready smart notes; use \`filter\` to inspect all, pending, ready, active, or dismissed notes.
-- \`dismiss\`: Dismiss a note by \`note_id\`.
-- \`update\`: Update a note by \`note_id\`.
+- write: save a note (content). Add surface_condition to make it a smart note (below).
+- read: list notes, newest first. Default: latest active session notes + ready smart notes; page older ones with limit/offset, or inspect other states with filter.
+- update / dismiss: change or retire a note by note_id.
 
-**Smart Notes**: When \`surface_condition\` is provided with \`write\`, the note becomes a project-scoped smart note. A separate background process (the dreamer) periodically checks the condition using ONLY external, verifiable signals: GitHub state via \`gh\` CLI, web pages, files on disk, git history, etc. The dreamer cannot read your current conversation, cannot detect when the user says something, and has no memory of context that lives only in this session.
+Smart notes: pass surface_condition and the note stays hidden until a background checker confirms the condition — using ONLY externally verifiable signals (GitHub state via gh, files on disk, git history, web pages). It cannot see this conversation, so the condition must be checkable from outside:
+✓ "When PR #42 in cortexkit/magic-context is merged"
+✓ "When the latest release tag is >= v0.22.0"
+✓ "When packages/plugin/src/foo.ts contains a function named bar"
+✗ "When the user mentions X" / "when we revisit Y" / "after we finish this refactor" — no external signal; write a regular note instead.
 
-Write a smart note ONLY when the surface_condition is something an external agent with read-only tools can definitively check:
-
-✓ GOOD conditions (externally verifiable):
-- "When PR #42 in cortexkit/magic-context is merged"
-- "When the file packages/plugin/src/foo.ts contains a function named bar"
-- "When the latest release tag is >= v0.22.0"
-- "When the GitHub Actions workflow runs/123 succeeds"
-
-✗ BAD conditions (require knowing this session's context):
-- "When the user mentions the worktree system has landed"  → dreamer cannot see user messages
-- "When they ask to re-run the audit fixes"                → dreamer cannot see future requests
-- "When we revisit this code path"                         → no observable signal
-- "When relevant to the current discussion"                → no observable signal
-- "After we finish the current refactor"                   → no externally checkable boundary
-
-If you want context that surfaces based on what's happening in your session, use a regular note (omit surface_condition) — those show up on natural work boundaries within this session. If you want a reminder tied to your future work without a clean external trigger, just write a regular note describing what to do; you'll see it when you read notes later.
-
-Example: \`ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 in cortexkit/magic-context is merged")\`
-
-Historian reads these notes, deduplicates them, and rewrites the remaining useful notes over time.`;
+Example: ctx_note(action="write", content="Re-run the perf benchmark once the boundary rework ships", surface_condition="When the latest release tag is >= v0.23.0")`;

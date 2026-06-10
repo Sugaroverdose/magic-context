@@ -1,5 +1,13 @@
 export const CTX_MEMORY_TOOL_NAME = "ctx_memory";
-export const CTX_MEMORY_DESCRIPTION = `Manage cross-session project memories. Primary sessions can write, archive, update, and merge memories (targeting the memory ids shown in the injected project-memory block). Only the dreamer can list all memories. Memories persist across sessions and are automatically injected into new sessions.
+export const CTX_MEMORY_DESCRIPTION = `Durable project knowledge shared across every session on this project.
 
-Supported actions: write, archive, update, merge (primary); list (dreamer only).`;
+Your active memories are already visible in <project-memory> (each with its id), and every future session starts with them — write one when you learn something future sessions must know: a project rule, an architectural fact, a hard-won constraint, a config value, or a naming convention. Keep each memory one standalone fact, phrased to make sense without this session's context.
+
+Actions:
+- write: save a new memory (content + category).
+- update: rewrite one memory whose fact changed (ids: [one], content).
+- archive: retire wrong or obsolete memories (ids: [one or more], optional reason).
+- merge: collapse duplicates into one memory (ids: [two or more], content).
+
+Example: ctx_memory(action="write", category="CONSTRAINTS", content="Pi stores sessions as JSONL under ~/.pi/agent/sessions/, not SQLite")`;
 export const DEFAULT_SEARCH_LIMIT = 10;

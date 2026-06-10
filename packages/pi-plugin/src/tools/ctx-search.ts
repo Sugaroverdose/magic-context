@@ -27,6 +27,7 @@ import {
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
+import { CTX_SEARCH_DESCRIPTION } from "@magic-context/core/tools/ctx-search/constants";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIMIT = 10;
@@ -137,18 +138,7 @@ export function createCtxSearchTool(
 	return {
 		name: "ctx_search",
 		label: "Magic Context: Search",
-		description:
-			"Search across project memories, indexed git commits, and raw conversation history.\n\n" +
-			"Sources:\n" +
-			"- memory: curated cross-session knowledge for this project\n" +
-			"- message: raw user/assistant messages from older compartmentalized history\n" +
-			"- git_commit: HEAD git commits (when git commit indexing is enabled)\n\n" +
-			"Narrow via the `sources` param when the question maps to a specific channel:\n" +
-			'- "was this working before / when did this break" → ["git_commit", "message"]\n' +
-			'- "when did we change this" → ["git_commit"]\n' +
-			'- "what is our naming convention" → ["memory"]\n' +
-			'- "did we discuss this earlier" → ["message"]\n' +
-			"Omit sources for a broad search across all enabled channels.",
+		description: CTX_SEARCH_DESCRIPTION,
 		parameters: ParamsSchema,
 		async execute(
 			_toolCallId,

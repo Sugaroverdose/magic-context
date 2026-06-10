@@ -51,20 +51,20 @@ Use \`ctx_reduce\` to manage context size. It supports one operation:
 Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Last ${protectedTags} tags are protected.
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 ${CTX_NOTE_GUIDANCE}
-Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
+Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → \`ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")\`
-- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="WORKFLOW_RULES", content="Always use scripts/release.sh for releases")\`
+- Found a project's source code path after searching → \`ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")\`
+- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")\`
 - Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
-Use \`ctx_search\` to search across project memories, session facts, and conversation history from one query.
-Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start="N" end="M">\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
+Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
+Use \`ctx_expand\` to recover the raw conversation behind a \`<compartment>\` summary in \`<session-history>\` — pass its \`start\`/\`end\` attributes when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
 - Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
 - Need a config value, API key location, or environment detail → \`ctx_search(query="embedding provider configuration")\`
 - Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work")\`
 - Want to recall what was decided in an earlier conversation → \`ctx_search(query="dashboard release signing setup")\`
-\`ctx_search\` returns ranked results from memories, session facts, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
+\`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
 NEVER drop user messages — they are short and will be summarized by compartmentalization automatically. Dropping them loses context the historian needs.
@@ -77,20 +77,20 @@ Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outp
  *  a tagging system they can't observe just wastes tokens and (empirically) primes
  *  some models to emit malformed `§N">§` tokens at the start of their own text. */
 const BASE_INTRO_NO_REDUCE = (): string => `${CTX_NOTE_GUIDANCE}
-Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
+Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
-- Found a project's source code path after searching → \`ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")\`
-- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="WORKFLOW_RULES", content="Always use scripts/release.sh for releases")\`
+- Found a project's source code path after searching → \`ctx_memory(action="write", category="CONFIG_VALUES", content="OpenCode source is at ~/Work/OSS/opencode")\`
+- Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="PROJECT_RULES", content="Always use scripts/release.sh for releases")\`
 - Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
-Use \`ctx_search\` to search across project memories, session facts, and conversation history from one query.
-Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start="N" end="M">\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
+Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
+Use \`ctx_expand\` to recover the raw conversation behind a \`<compartment>\` summary in \`<session-history>\` — pass its \`start\`/\`end\` attributes when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
 - Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
 - Need a config value, API key location, or environment detail → \`ctx_search(query="embedding provider configuration")\`
 - Looking for how something was implemented previously → \`ctx_search(query="how does the dreamer lease work")\`
 - Want to recall what was decided in an earlier conversation → \`ctx_search(query="dashboard release signing setup")\`
-\`ctx_search\` returns ranked results from memories, session facts, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
+\`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}`;
 
 const GENERIC_SECTION = `

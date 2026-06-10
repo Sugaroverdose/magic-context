@@ -251,4 +251,39 @@ describe("createCtxNoteTools", () => {
         expect(readAllResult).toContain("Implement the cleanup after the schema settles.");
         expect(readAllResult).toContain("When PR #108 is merged");
     });
+
+    it("pages read newest-first with limit/offset and a continuation footer", async () => {
+        for (let i = 1; i <= 30; i += 1) {
+            await tools.ctx_note.execute(
+                { action: "write", content: `note number ${i}` },
+                toolContext(),
+            );
+        }
+
+        // Default read: newest 25, footer pointing at the 5 older ones.
+        const firstPage = await tools.ctx_note.execute({ action: "read" }, toolContext());
+        expect(firstPage).toContain("note number 30"); // newest present
+        expect(firstPage).toContain("note number 6"); // 25th newest present
+        expect(firstPage).not.toContain("note number 5\n"); // older than page 1
+        expect(firstPage).toContain(
+            'Showing 25 of 30 (newest first) — 5 older: ctx_note(action="read", offset=25)',
+        );
+
+        // Older page via offset.
+        const secondPage = await tools.ctx_note.execute(
+            { action: "read", offset: 25 },
+            toolContext(),
+        );
+        expect(secondPage).toContain("note number 5");
+        expect(secondPage).toContain("note number 1");
+        expect(secondPage).not.toContain("note number 30");
+        expect(secondPage).not.toContain("older: ctx_note"); // no further pages
+
+        // Custom limit caps the page.
+        const small = await tools.ctx_note.execute({ action: "read", limit: 3 }, toolContext());
+        expect(small).toContain("note number 30");
+        expect(small).toContain("note number 28");
+        expect(small).not.toContain("note number 27\n");
+        expect(small).toContain("Showing 3 of 30");
+    });
 });

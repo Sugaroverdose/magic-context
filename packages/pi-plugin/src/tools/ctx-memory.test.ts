@@ -79,7 +79,7 @@ describe("createCtxMemoryTool", () => {
 
 			const archived = await primary.execute(
 				"call-a",
-				{ action: "archive", id },
+				{ action: "archive", ids: [id] },
 				new AbortController().signal,
 				undefined,
 				ctx,

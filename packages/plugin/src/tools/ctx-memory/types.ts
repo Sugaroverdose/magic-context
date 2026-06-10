@@ -18,7 +18,11 @@ export interface CtxMemoryArgs {
     action: CtxMemoryAction;
     content?: string;
     category?: string;
-    id?: number;
+    /**
+     * Target memory id(s). One unified parameter for all id-taking actions:
+     * update requires exactly one, archive one or more (batch), merge two or
+     * more. The former scalar `id` param was folded in here.
+     */
     ids?: number[];
     limit?: number;
     reason?: string;

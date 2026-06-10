@@ -31,6 +31,7 @@ import {
 	setNoteLastReadAt,
 	updateNote,
 } from "@magic-context/core/features/magic-context/storage";
+import { CTX_NOTE_DESCRIPTION } from "@magic-context/core/tools/ctx-note/constants";
 import { type Static, Type } from "typebox";
 
 const FILTER_VALUES = [
@@ -63,7 +64,7 @@ const ParamsSchema = Type.Object({
 	surface_condition: Type.Optional(
 		Type.String({
 			description:
-				"Open-ended condition for smart notes. When provided, creates a project-scoped smart note that the dreamer evaluates nightly. The note surfaces when the condition is met.",
+				"Externally verifiable condition for smart notes. A background checker verifies it using ONLY outside signals (GitHub state via gh, files on disk, git history, web) — it cannot see this conversation. Use for PR/issue state, release tags, file contents, workflow runs. NOT for 'when the user mentions X' / 'when we revisit Y' — write a regular note instead.",
 		}),
 	),
 	note_id: Type.Optional(
@@ -79,6 +80,17 @@ const ParamsSchema = Type.Object({
 					"Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
 			},
 		),
+	),
+	limit: Type.Optional(
+		Type.Number({
+			description: "Max notes per section for read, newest first (default: 25)",
+		}),
+	),
+	offset: Type.Optional(
+		Type.Number({
+			description:
+				"Skip this many newest notes for read — page older ones (default: 0)",
+		}),
 	),
 });
 
@@ -136,6 +148,27 @@ function formatNoteLine(note: Note): string {
 const DISMISS_FOOTER =
 	'\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
 
+/** Default page size for read. Long-running sessions accumulate hundreds of
+ *  notes; read pages newest-first and points the caller at older pages.
+ *  Mirrors OpenCode's ctx-note tool. */
+const DEFAULT_READ_LIMIT = 25;
+
+function paginateNewestFirst(
+	notes: Note[],
+	limit: number,
+	offset: number,
+): { page: Note[]; total: number; footer: string | null } {
+	const total = notes.length;
+	const newestFirst = [...notes].reverse();
+	const page = newestFirst.slice(offset, offset + limit);
+	const remaining = total - offset - page.length;
+	const footer =
+		remaining > 0
+			? `Showing ${page.length} of ${total} (newest first) — ${remaining} older: ctx_note(action="read", offset=${offset + page.length})`
+			: null;
+	return { page, total, footer };
+}
+
 export interface CtxNoteToolDeps {
 	db: ContextDatabase;
 	/** When true, smart notes (with `surface_condition`) are accepted and
@@ -151,17 +184,7 @@ export function createCtxNoteTool(
 	return {
 		name: "ctx_note",
 		label: "Magic Context: Notes",
-		description:
-			"Save or inspect durable session notes that persist for this session.\n" +
-			"Use this for short goals, constraints, decisions, or reminders worth carrying forward.\n\n" +
-			"Actions:\n" +
-			"- `write`: Append one note. Optionally provide `surface_condition` to create a smart note.\n" +
-			"- `read`: Show current notes. Defaults to active session notes + ready smart notes; use `filter` to inspect all, pending, ready, active, or dismissed notes.\n" +
-			"- `dismiss`: Dismiss a note by `note_id`.\n" +
-			"- `update`: Update a note by `note_id`.\n\n" +
-			"**Smart Notes**: When `surface_condition` is provided with `write`, the note becomes a project-scoped smart note. " +
-			"The dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met. " +
-			'Example: `ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")`',
+		description: CTX_NOTE_DESCRIPTION,
 		parameters: ParamsSchema,
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {
 			const sessionId = ctx.sessionManager.getSessionId();
@@ -275,11 +298,21 @@ export function createCtxNoteTool(
 			// (b) explicit filter="active" = ALL active notes of both
 			//     types (which includes active smart notes that haven't
 			//     been promoted to ready yet)
+			const limit =
+				typeof params.limit === "number" && params.limit > 0
+					? Math.floor(params.limit)
+					: DEFAULT_READ_LIMIT;
+			const offset =
+				typeof params.offset === "number" && params.offset > 0
+					? Math.floor(params.offset)
+					: 0;
 			const sections = readNotes({
 				db: deps.db,
 				sessionId,
 				cwd: ctx.cwd,
 				filter: params.filter,
+				limit,
+				offset,
 			});
 
 			// Best-effort watermark write so any future note nudge logic
@@ -322,6 +355,8 @@ function readNotes(args: {
 	sessionId: string;
 	cwd: string;
 	filter: CtxNoteReadFilter | undefined;
+	limit: number;
+	offset: number;
 }): string[] {
 	const projectIdentity = resolveProjectIdentity(args.cwd);
 
@@ -344,10 +379,18 @@ function readNotes(args: {
 			: [];
 		const sections: string[] = [];
 		if (sessionNotes.length > 0) {
+			const { page, footer } = paginateNewestFirst(
+				sessionNotes,
+				args.limit,
+				args.offset,
+			);
+			const lines = page.map(formatNoteLine).join("\n");
 			sections.push(
-				`## Session Notes\n\n${sessionNotes.map(formatNoteLine).join("\n")}`,
+				`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`,
 			);
 		}
+		// Ready smart notes are few by construction (condition-gated) and
+		// time-sensitive — always show all of them, unpaged.
 		if (readySmartNotes.length > 0) {
 			sections.push(
 				`## 🔔 Ready Smart Notes\n\n${readySmartNotes.map(formatNoteLine).join("\n\n")}`,
@@ -383,14 +426,24 @@ function readNotes(args: {
 
 	const sections: string[] = [];
 	if (sessionNotes.length > 0) {
+		const { page, footer } = paginateNewestFirst(
+			sessionNotes,
+			args.limit,
+			args.offset,
+		);
+		const lines = page.map(formatNoteLine).join("\n");
 		sections.push(
-			`## Session Notes\n\n${sessionNotes.map(formatNoteLine).join("\n")}`,
+			`## Session Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`,
 		);
 	}
 	if (smartNotes.length > 0) {
-		sections.push(
-			`## Smart Notes\n\n${smartNotes.map(formatNoteLine).join("\n\n")}`,
+		const { page, footer } = paginateNewestFirst(
+			smartNotes,
+			args.limit,
+			args.offset,
 		);
+		const lines = page.map(formatNoteLine).join("\n\n");
+		sections.push(`## Smart Notes\n\n${lines}${footer ? `\n\n${footer}` : ""}`);
 	}
 	return sections;
 }

@@ -13,6 +13,7 @@ import {
     saveEmbedding,
     supersededMemory,
     updateMemorySeenCount,
+    V2_MEMORY_CATEGORIES,
 } from "../../features/magic-context/memory";
 import {
     embedTextForProject,
@@ -227,33 +228,30 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // schema visible to the runtime and enforce primary-session safety below.
             action: tool.schema
                 .enum([...CTX_MEMORY_DREAMER_ACTIONS])
-                .describe("Action to perform on memories"),
+                .describe("What to do: write, update, archive, or merge"),
             content: tool.schema
                 .string()
                 .optional()
-                .describe("Memory content (required for write, update, merge)"),
+                .describe(
+                    "The memory text — one standalone fact (required for write, update, merge)",
+                ),
             category: tool.schema
-                .string()
+                .enum([...V2_MEMORY_CATEGORIES])
                 .optional()
                 .describe(
-                    "Memory category (required for write, optional filter for list, optional override for merge)",
+                    "What kind of fact this is (required for write; optional merge override)",
                 ),
-            id: tool.schema
-                .number()
-                .optional()
-                .describe("Memory ID (required for archive, update)"),
             ids: tool.schema
                 .array(tool.schema.number())
                 .optional()
-                .describe("Memory IDs to merge (required for merge)"),
-            limit: tool.schema
-                .number()
-                .optional()
-                .describe("Maximum results to return for list (default: 10)"),
+                .describe(
+                    "Target memory id(s) from <project-memory>: update takes exactly one, archive one or more, merge two or more",
+                ),
+            limit: tool.schema.number().optional().describe("Max results for list (default: 10)"),
             reason: tool.schema
                 .string()
                 .optional()
-                .describe("Archive reason (optional for archive)"),
+                .describe("Why the memory is being archived (optional, recommended)"),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
             if (toolContext.agent !== DREAMER_AGENT && !allowedActions.includes(args.action)) {
@@ -334,19 +332,21 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "update") {
-                if (typeof args.id !== "number" || !Number.isInteger(args.id)) {
-                    return "Error: 'id' is required when action is 'update'.";
+                const updateIds = args.ids?.filter((id): id is number => Number.isInteger(id));
+                if (!updateIds || updateIds.length !== 1) {
+                    return "Error: 'ids' must contain exactly one memory ID when action is 'update'.";
                 }
+                const updateId = updateIds[0];
 
                 const content = args.content?.trim();
                 if (!content) {
                     return "Error: 'content' is required when action is 'update'.";
                 }
 
-                const rawProjectPath = projectPathForMemoryId(deps.db, args.id);
-                const memory = getMemoryById(deps.db, args.id);
+                const rawProjectPath = projectPathForMemoryId(deps.db, updateId);
+                const memory = getMemoryById(deps.db, updateId);
                 if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
-                    return `Error: Memory with ID ${args.id} was not found.`;
+                    return `Error: Memory with ID ${updateId} was not found.`;
                 }
 
                 const normalizedHash = computeNormalizedHash(content);
@@ -553,29 +553,46 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "archive") {
-                if (typeof args.id !== "number" || !Number.isInteger(args.id)) {
-                    return "Error: 'id' is required when action is 'archive'.";
+                const archiveIds = args.ids?.filter((id): id is number => Number.isInteger(id));
+                if (!archiveIds || archiveIds.length === 0) {
+                    return "Error: 'ids' must contain at least one memory ID when action is 'archive'.";
                 }
 
-                const memoryId = args.id;
-                const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
-                const memory = getMemoryById(deps.db, memoryId);
-                if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
-                    return `Error: Memory with ID ${memoryId} was not found.`;
-                }
-
-                const projectIdentity = projectIdentityForStoredPath(rawProjectPath);
-                deps.db.transaction(() => {
-                    archiveMemory(deps.db, memoryId, args.reason);
-                    queueMemoryMutation(deps.db, {
-                        projectPath: projectIdentity,
-                        mutationType: "archive",
-                        targetMemoryId: memoryId,
+                // Validate the whole batch BEFORE mutating anything so a typo'd
+                // id can't half-archive a batch (all-or-nothing, matching the
+                // single-transaction write below).
+                const targets: Array<{ memoryId: number; projectIdentity: string }> = [];
+                for (const memoryId of archiveIds) {
+                    const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
+                    const memory = getMemoryById(deps.db, memoryId);
+                    if (
+                        !memory ||
+                        !rawProjectPath ||
+                        !memoryBelongsToProject(memory, projectPath)
+                    ) {
+                        return `Error: Memory with ID ${memoryId} was not found.`;
+                    }
+                    targets.push({
+                        memoryId,
+                        projectIdentity: projectIdentityForStoredPath(rawProjectPath),
                     });
+                }
+
+                deps.db.transaction(() => {
+                    for (const target of targets) {
+                        archiveMemory(deps.db, target.memoryId, args.reason);
+                        queueMemoryMutation(deps.db, {
+                            projectPath: target.projectIdentity,
+                            mutationType: "archive",
+                            targetMemoryId: target.memoryId,
+                        });
+                    }
                 })();
+                const idList = targets.map((t) => t.memoryId).join(", ");
+                const plural = targets.length > 1 ? "memories" : "memory";
                 return args.reason?.trim()
-                    ? `Archived memory [ID: ${memoryId}] (${args.reason.trim()}).`
-                    : `Archived memory [ID: ${memoryId}].`;
+                    ? `Archived ${plural} [ID: ${idList}] (${args.reason.trim()}).`
+                    : `Archived ${plural} [ID: ${idList}].`;
             }
 
             return "Error: Unknown action.";

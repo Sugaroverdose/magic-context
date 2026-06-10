@@ -9,9 +9,9 @@ You run during scheduled dream windows to maintain a project's cross-session mem
 
 **Memory operations** (ctx_memory with extended dreamer actions):
 - \`action="list"\` — browse all active memories, optionally filter by category
-- \`action="update", id=N, content="..."\` — rewrite a memory's content
+- \`action="update", ids=[N], content="..."\` — rewrite a memory's content
 - \`action="merge", ids=[N,M,...], content="...", category="..."\` — consolidate duplicates into one canonical memory
-- \`action="archive", id=N, reason="..."\` — remove a stale memory (soft-archive, with provenance)
+- \`action="archive", ids=[N], reason="..."\` — remove a stale memory (soft-archive, with provenance)
 - \`action="write", category="...", content="..."\` — create a new memory
 
 **Codebase tools** (standard OpenCode tools):
@@ -96,8 +96,8 @@ Check verifiable memories against actual repository state. Update stale wording,
 3. **For each verifiable memory:**
    - Read the actual file or grep for the pattern
    - If the memory is correct: leave it alone
-   - If the wording is stale but the fact is true: \`ctx_memory(action="update", id=N, content="corrected wording")\`
-   - If the memory is clearly wrong: \`ctx_memory(action="archive", id=N, reason="...")\`
+   - If the wording is stale but the fact is true: \`ctx_memory(action="update", ids=[N], content="corrected wording")\`
+   - If the memory is clearly wrong: \`ctx_memory(action="archive", ids=[N], reason="...")\`
 4. **Be conservative.** If you cannot find the referenced code but it might be in a location you haven't checked, do NOT archive. Move on.
 
 ### Verification examples
@@ -174,7 +174,7 @@ ${userProfileBlock}
    - Check if the file/tool/path actually exists
    - For CONFIG_VALUES: confirm the value isn't a transient measurement
    - If the reference is ambiguous, leave it alone
-4. **Archive** with \`ctx_memory(action="archive", id=N, reason="...")\`. Always include a specific reason.
+4. **Archive** with \`ctx_memory(action="archive", ids=[N], reason="...")\`. Always include a specific reason.
 
 ### Category-specific rules
 - **CONSTRAINTS**: archive ONLY when provably redundant with another specific constraint (not just thematically similar), OR when it describes an OUR-OWN-code bug that is fixed (not an external limit). Each genuine external constraint guards against a real limit — losing it means re-hitting it.
@@ -211,7 +211,7 @@ Rewrite verbose, narrative, or poorly-structured memories into terse operational
    - Vague memories without file paths or specifics → add paths if you can find them, or archive if meaningless
    - Session-local language: "in this session", "after the refactor" → remove temporal context
    - Redundant qualifiers: "It's important to note that..." → drop
-3. **Rewrite** with \`ctx_memory(action="update", id=N, content="...")\`.
+3. **Rewrite** with \`ctx_memory(action="update", ids=[N], content="...")\`.
 4. **Split compound memories:** If one memory contains two distinct facts, update it to keep the first fact and \`action="write"\` a new memory for the second.
 
 ### Good memory format

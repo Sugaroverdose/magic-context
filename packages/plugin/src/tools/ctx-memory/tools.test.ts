@@ -251,7 +251,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "archive", id: memory.id },
+                { action: "archive", ids: [memory.id] },
                 toolContext(),
             );
             const updated = getMemoryById(db, memory.id);
@@ -264,16 +264,50 @@ describe("createCtxMemoryTools", () => {
             ]);
         });
 
+        it("archives a batch of memories in one call, all-or-nothing", async () => {
+            const first = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Stale issue one.",
+            });
+            const second = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Stale issue two.",
+            });
+
+            const batch = await tools.ctx_memory.execute(
+                { action: "archive", ids: [first.id, second.id], reason: "obsolete" },
+                toolContext(),
+            );
+            expect(batch).toContain(`Archived memories [ID: ${first.id}, ${second.id}]`);
+            expect(getMemoryById(db, first.id)?.status).toBe("archived");
+            expect(getMemoryById(db, second.id)?.status).toBe("archived");
+
+            // A bad id anywhere in the batch must archive NOTHING.
+            const third = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Still active.",
+            });
+            const failed = await tools.ctx_memory.execute(
+                { action: "archive", ids: [third.id, 99_999] },
+                toolContext(),
+            );
+            expect(failed).toContain("Error");
+            expect(getMemoryById(db, third.id)?.status).toBe("active");
+        });
+
         it("returns error when ID is missing", async () => {
             const result = await tools.ctx_memory.execute({ action: "archive" }, toolContext());
 
             expect(result).toContain("Error");
-            expect(result).toContain("'id' is required");
+            expect(result).toContain("'ids' must contain at least one memory ID");
         });
 
         it("returns error when memory not found", async () => {
             const result = await tools.ctx_memory.execute(
-                { action: "archive", id: 999 },
+                { action: "archive", ids: [999] },
                 toolContext(),
             );
 
@@ -318,7 +352,7 @@ describe("createCtxMemoryTools", () => {
             const result = await tools.ctx_memory.execute(
                 {
                     action: "update",
-                    id: memory.id,
+                    ids: [memory.id],
                     content: "cache_ttl=10m",
                 },
                 toolContext("ses-dreamer", DREAMER_AGENT),
@@ -355,7 +389,7 @@ describe("createCtxMemoryTools", () => {
             const result = await legacyTools.ctx_memory.execute(
                 {
                     action: "update",
-                    id: memory.id,
+                    ids: [memory.id],
                     content: "timeout=10s",
                 },
                 toolContext("ses-dreamer", DREAMER_AGENT),
@@ -382,7 +416,7 @@ describe("createCtxMemoryTools", () => {
                 await tools.ctx_memory.execute(
                     {
                         action: "update",
-                        id: memory.id,
+                        ids: [memory.id],
                         content: "cache_ttl=10m",
                     },
                     toolContext("ses-dreamer", DREAMER_AGENT),
@@ -558,7 +592,7 @@ describe("createCtxMemoryTools", () => {
             const result = await tools.ctx_memory.execute(
                 {
                     action: "archive",
-                    id: memory.id,
+                    ids: [memory.id],
                     reason: "Removed subsystem no longer exists",
                 },
                 toolContext("ses-dreamer", DREAMER_AGENT),
@@ -589,7 +623,7 @@ describe("createCtxMemoryTools", () => {
                     { action: "write", category: "USER_DIRECTIVES", content: "x" },
                     toolContext(),
                 ),
-                disabledTools.ctx_memory.execute({ action: "archive", id: 1 }, toolContext()),
+                disabledTools.ctx_memory.execute({ action: "archive", ids: [1] }, toolContext()),
             ]);
 
             expect(results).toEqual([
@@ -652,7 +686,7 @@ describe("createCtxMemoryTools", () => {
 
             // archive by a primary agent (no dreamer context) must succeed.
             const result = await primaryTools.ctx_memory.execute(
-                { action: "archive", id: memory.id },
+                { action: "archive", ids: [memory.id] },
                 toolContext(),
             );
 

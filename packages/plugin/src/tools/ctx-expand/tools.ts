@@ -15,10 +15,14 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
         args: {
             start: tool.schema
                 .number()
-                .describe("Start message ordinal (from compartment start attribute)"),
+                .describe(
+                    'First message ordinal to expand — a compartment\'s start="N" attribute, or an ordinal from a ctx_search message hit',
+                ),
             end: tool.schema
                 .number()
-                .describe("End message ordinal (from compartment end attribute)"),
+                .describe(
+                    'Last message ordinal to expand (inclusive) — a compartment\'s end="M" attribute',
+                ),
         },
         async execute(args: CtxExpandArgs, toolContext) {
             const sessionId = toolContext.sessionID;

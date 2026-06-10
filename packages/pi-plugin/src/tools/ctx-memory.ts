@@ -33,7 +33,6 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
 	archiveMemory,
-	CATEGORY_PRIORITY,
 	getMemoriesByProject,
 	getMemoryByHash,
 	getMemoryById,
@@ -45,6 +44,7 @@ import {
 	supersededMemory,
 	updateMemoryContent,
 	updateMemorySeenCount,
+	V2_MEMORY_CATEGORIES,
 } from "@magic-context/core/features/magic-context/memory";
 import {
 	embedTextForProject,
@@ -61,14 +61,10 @@ import {
 	queueMemoryMutation,
 } from "@magic-context/core/features/magic-context/storage";
 import { log } from "@magic-context/core/shared/logger";
+import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIST_LIMIT = 10;
-const VALID_CATEGORIES = new Set<string>(CATEGORY_PRIORITY);
-
-function isMemoryCategory(value: string): value is MemoryCategory {
-	return VALID_CATEGORIES.has(value);
-}
 
 // Mirrors OpenCode CTX_MEMORY_DREAMER_ACTIONS. `delete` was removed — it was an
 // exact alias of `archive` (both soft-archive); `archive` is the single
@@ -83,37 +79,38 @@ const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
 const ParamsSchema = Type.Object({
 	action: Type.Union(
 		ALL_ACTIONS.map((a) => Type.Literal(a)),
-		{ description: "Action to perform on memories" },
+		{ description: "What to do: write, update, archive, or merge" },
 	),
 	content: Type.Optional(
 		Type.String({
-			description: "Memory content (required for write, update, merge)",
+			description:
+				"The memory text — one standalone fact (required for write, update, merge)",
 		}),
 	),
 	category: Type.Optional(
-		Type.String({
-			description:
-				"Memory category (required for write, optional filter for list, optional override for merge). One of: " +
-				CATEGORY_PRIORITY.join(", "),
-		}),
-	),
-	id: Type.Optional(
-		Type.Number({
-			description: "Memory ID (required for archive, update)",
-		}),
+		Type.Union(
+			V2_MEMORY_CATEGORIES.map((c) => Type.Literal(c)),
+			{
+				description:
+					"What kind of fact this is (required for write; optional merge override)",
+			},
+		),
 	),
 	ids: Type.Optional(
 		Type.Array(Type.Number(), {
-			description: "Memory IDs to merge (required for merge)",
+			description:
+				"Target memory id(s) from <project-memory>: update takes exactly one, archive one or more, merge two or more",
 		}),
 	),
 	limit: Type.Optional(
 		Type.Number({
-			description: "Maximum results to return for list (default: 10)",
+			description: "Max results for list (default: 10)",
 		}),
 	),
 	reason: Type.Optional(
-		Type.String({ description: "Archive reason (optional for archive)" }),
+		Type.String({
+			description: "Why the memory is being archived (optional, recommended)",
+		}),
 	),
 });
 
@@ -218,12 +215,8 @@ export function createCtxMemoryTool(
 ): ToolDefinition<typeof ParamsSchema> {
 	const dreamerAllowed = deps.allowDreamerActions === true;
 	const description = dreamerAllowed
-		? "Manage cross-session project memories. Memories persist across sessions and are " +
-			"shared with OpenCode sessions on the same project. " +
-			"Supported actions: write, archive, update, merge, list."
-		: "Manage cross-session project memories. Memories persist across sessions and are " +
-			"shared with OpenCode sessions on the same project. " +
-			"Supported actions: write, archive, update, merge.";
+		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).`
+		: CTX_MEMORY_DESCRIPTION;
 
 	return {
 		name: "ctx_memory",
@@ -262,14 +255,9 @@ export function createCtxMemoryTool(
 				if (!content)
 					return err("Error: 'content' is required when action is 'write'.");
 
-				const rawCategory = params.category?.trim();
+				const rawCategory = params.category;
 				if (!rawCategory) {
 					return err("Error: 'category' is required when action is 'write'.");
-				}
-				if (!isMemoryCategory(rawCategory)) {
-					return err(
-						`Error: Unknown memory category '${rawCategory}'. Valid: ${CATEGORY_PRIORITY.join(", ")}`,
-					);
 				}
 
 				const existing = getMemoryByHash(
@@ -308,7 +296,7 @@ export function createCtxMemoryTool(
 			if (params.action === "list") {
 				const limit = normalizeLimit(params.limit);
 				const filtered = getMemoriesByProject(deps.db, projectIdentity);
-				const category = params.category?.trim();
+				const category = params.category;
 				const filtered2 = category
 					? filtered.filter((m) => m.category === category)
 					: filtered;
@@ -316,20 +304,26 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "update") {
-				if (typeof params.id !== "number" || !Number.isInteger(params.id)) {
-					return err("Error: 'id' is required when action is 'update'.");
+				const updateIds = params.ids?.filter((id): id is number =>
+					Number.isInteger(id),
+				);
+				if (!updateIds || updateIds.length !== 1) {
+					return err(
+						"Error: 'ids' must contain exactly one memory ID when action is 'update'.",
+					);
 				}
+				const updateId = updateIds[0];
 				const content = params.content?.trim();
 				if (!content) {
 					return err("Error: 'content' is required when action is 'update'.");
 				}
 
-				const memory = getMemoryById(deps.db, params.id);
+				const memory = getMemoryById(deps.db, updateId);
 				if (
 					!memory ||
 					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
 				) {
-					return err(`Error: Memory with ID ${params.id} was not found.`);
+					return err(`Error: Memory with ID ${updateId} was not found.`);
 				}
 
 				const normalizedHash = computeNormalizedHash(content);
@@ -398,16 +392,9 @@ export function createCtxMemoryTool(
 					}
 				}
 
-				const requestedCategory = params.category?.trim();
-				if (requestedCategory && !isMemoryCategory(requestedCategory)) {
-					return err(
-						`Error: Unknown memory category '${requestedCategory}'. Valid: ${CATEGORY_PRIORITY.join(", ")}`,
-					);
-				}
+				// Schema-validated literal union — no runtime re-check needed.
 				const requestedCategoryTyped: MemoryCategory | undefined =
-					requestedCategory && isMemoryCategory(requestedCategory)
-						? requestedCategory
-						: undefined;
+					params.category;
 				const fallbackCategory = sourceMemories[0]?.category;
 				const category: MemoryCategory | undefined =
 					requestedCategoryTyped ?? fallbackCategory;
@@ -564,26 +551,39 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "archive") {
-				if (typeof params.id !== "number" || !Number.isInteger(params.id)) {
-					return err("Error: 'id' is required when action is 'archive'.");
+				const archiveIds = params.ids?.filter((id): id is number =>
+					Number.isInteger(id),
+				);
+				if (!archiveIds || archiveIds.length === 0) {
+					return err(
+						"Error: 'ids' must contain at least one memory ID when action is 'archive'.",
+					);
 				}
-				const memory = getMemoryById(deps.db, params.id);
-				if (
-					!memory ||
-					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
-				) {
-					return err(`Error: Memory with ID ${params.id} was not found.`);
+				// Validate the whole batch BEFORE mutating so a typo'd id can't
+				// half-archive a batch (all-or-nothing, matching the transaction).
+				for (const memoryId of archiveIds) {
+					const memory = getMemoryById(deps.db, memoryId);
+					if (
+						!memory ||
+						!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
+					) {
+						return err(`Error: Memory with ID ${memoryId} was not found.`);
+					}
 				}
 				deps.db.transaction(() => {
-					archiveMemory(deps.db, params.id as number, params.reason);
-					queueMemoryMutation(deps.db, {
-						projectPath: projectIdentity,
-						mutationType: "archive",
-						targetMemoryId: params.id as number,
-					});
+					for (const memoryId of archiveIds) {
+						archiveMemory(deps.db, memoryId, params.reason);
+						queueMemoryMutation(deps.db, {
+							projectPath: projectIdentity,
+							mutationType: "archive",
+							targetMemoryId: memoryId,
+						});
+					}
 				})();
 				const reasonSuffix = params.reason ? ` (${params.reason})` : "";
-				return ok(`Archived memory [ID: ${params.id}]${reasonSuffix}.`);
+				const idList = archiveIds.join(", ");
+				const plural = archiveIds.length > 1 ? "memories" : "memory";
+				return ok(`Archived ${plural} [ID: ${idList}]${reasonSuffix}.`);
 			}
 
 			return err("Error: Unknown action.");

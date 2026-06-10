@@ -1,5 +1,19 @@
 import type { MemoryCategory } from "./types";
 
+/**
+ * The v2 world taxonomy — the only categories agents may WRITE today. Exposed
+ * as the ctx_memory schema enum so invalid categories fail at validation
+ * instead of bouncing off a runtime check. Legacy 9-cat values remain readable
+ * (CATEGORY_PRIORITY) for pre-v2 rows but are not accepted for new writes.
+ */
+export const V2_MEMORY_CATEGORIES = [
+    "PROJECT_RULES",
+    "ARCHITECTURE",
+    "CONSTRAINTS",
+    "CONFIG_VALUES",
+    "NAMING",
+] as const satisfies readonly MemoryCategory[];
+
 export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
     // v2 world taxonomy (what the historian emits today)
     "PROJECT_RULES",
