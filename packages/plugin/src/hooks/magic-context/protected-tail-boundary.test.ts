@@ -151,12 +151,49 @@ describe("protected-tail boundary integration", () => {
         }
     });
 
+    it("accepts a fresh zero-compartment snapshot (offset clamp parity with the resolver)", () => {
+        // Regression: the resolver clamps offset = max(1, lastCompartmentEnd+1),
+        // so a zero-compartment session resolves offset=1 (lastEnd=-1 → 0 → 1).
+        // validateBoundarySnapshot recomputed the expectation WITHOUT the clamp
+        // (-1+1 = 0 ≠ 1) and rejected every first-compartment snapshot as
+        // "last compartment moved: offset 1 -> 0" — a fresh session could never
+        // publish its first compartment (caught by the historian-success e2e).
+        useBoundaryTempDataHome("protected-tail-first-");
+        const sessionId = "ses-first-compartment";
+        const opencodeDb = createBoundaryOpenCodeDb(sessionId, [
+            { id: "m1", role: "user", parts: [{ type: "text", text: "eligible".repeat(800) }] },
+            { id: "m2", role: "assistant", parts: [{ type: "text", text: "reply".repeat(800) }] },
+            { id: "m3", role: "user", parts: [{ type: "text", text: "protected".repeat(2000) }] },
+        ]);
+        const db = createContextDb();
+        try {
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 12_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 95, inputTokens: 7_400 },
+                usageSource: "live",
+            });
+            expect(snapshot.offset).toBe(1);
+            expect(validateBoundarySnapshot({ db, snapshot })).toEqual({ ok: true });
+        } finally {
+            closeQuietly(db);
+            closeQuietly(opencodeDb);
+        }
+    });
+
     it("bails out when a boundary snapshot's eligible raw range changes", () => {
         useBoundaryTempDataHome("protected-tail-stale-");
         const sessionId = "ses-stale-boundary";
+        // m1/m2 carry REAL content mass: the eligible head must exceed the
+        // 256-token hysteresis snap or the eligible range collapses to empty
+        // and there is no fingerprint to invalidate (this test then passes
+        // vacuously 2014 it did for a while, masked by the offset-clamp bug).
         const opencodeDb = createBoundaryOpenCodeDb(sessionId, [
-            { id: "m1", role: "user", parts: [{ type: "text", text: "eligible" }] },
-            { id: "m2", role: "assistant", parts: [{ type: "text", text: "also eligible" }] },
+            { id: "m1", role: "user", parts: [{ type: "text", text: "eligible ".repeat(400) }] },
+            { id: "m2", role: "assistant", parts: [{ type: "text", text: "also eligible ".repeat(400) }] },
             { id: "m3", role: "user", parts: [{ type: "text", text: "protected".repeat(2000) }] },
         ]);
         const db = createContextDb();

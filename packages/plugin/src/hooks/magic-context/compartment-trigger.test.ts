@@ -259,4 +259,96 @@ describe("checkCompartmentTrigger", () => {
         //#then: fires because the eligible prefix (m-1 to m-6) is meaningful
         expect(result).toMatchObject({ shouldFire: true, reason: "projected_headroom" });
     });
+
+    it("does NOT tail_size-fire a tool-heavy tail whose narratable (TC) content is thin", () => {
+        //#given: a low-pressure session whose eligible head is dominated by huge
+        // tool OUTPUT (stripped to one-line TC: summaries in the chunked view).
+        // True-raw is enormous; the narratable content is a few hundred tokens.
+        // Pre-fix, tail_size fired on true-raw at 25% usage and produced a
+        // confetti compartment per few file reads (observed live on Pi:
+        // spans degraded 155 -> 27 messages/compartment over one session).
+        useTempDataHome("compartment-trigger-tool-heavy-");
+        const sessionId = "ses-tool-heavy-thin";
+        const messages: Array<{ id: string; role: string; text?: string }> = [];
+        for (let i = 1; i <= 6; i++) {
+            messages.push({ id: `m-u${i}`, role: "user", text: `short question ${i}` });
+            // Assistant turn whose part is a tool result carrying ~40K chars of
+            // output — counts fully toward true-raw, collapses to a TC: line.
+            messages.push({ id: `m-a${i}`, role: "assistant", text: undefined });
+        }
+        // Protected tail filler.
+        for (let i = 1; i <= 5; i++) {
+            messages.push({ id: `m-p${i}`, role: "user", text: `protected ${i}` });
+        }
+        createOpenCodeDb(sessionId, messages);
+        // Attach the huge tool outputs as tool parts on the assistant messages.
+        const ocPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+        const oc = new Database(ocPath);
+        try {
+            const insertPart = oc.prepare(
+                "INSERT INTO part (message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            );
+            for (let i = 1; i <= 6; i++) {
+                insertPart.run(
+                    `m-a${i}`,
+                    sessionId,
+                    i * 2,
+                    i * 2,
+                    JSON.stringify({
+                        type: "tool",
+                        callID: `read:${i}`,
+                        tool: "read",
+                        state: {
+                            status: "completed",
+                            input: { filePath: `/tmp/file-${i}.ts` },
+                            output: `line of file content ${i} `.repeat(1600),
+                        },
+                    }),
+                );
+            }
+        } finally {
+            closeQuietly(oc);
+        }
+        const db = openDatabase();
+        // Tag-token rows so the cheap pre-gate (live-tail upper bound vs
+        // triggerBudget) does NOT short-circuit — the point of this test is
+        // the tail_size METRIC, which only evaluates past the gate. The tool
+        // tags carry the huge output token counts (true-raw axis).
+        for (let i = 1; i <= 6; i++) {
+            insertTag(
+                db,
+                sessionId,
+                `read:${i}`,
+                "tool",
+                40_000,
+                i,
+                0,
+                "read",
+                64,
+                `m-a${i}`,
+                null,
+                {
+                    tokenCount: 10_000,
+                    inputTokenCount: 16,
+                    reasoningTokenCount: 0,
+                },
+            );
+        }
+
+        //#when: LOW pressure (25%) — far below the proactive floor. The only
+        // trigger that could fire is tail_size.
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            5_000,
+        );
+
+        //#then: must NOT fire — the historian has nothing substantial to
+        // narrate. Pressure paths (63%/80%) remain the relief for occupancy.
+        expect(result.shouldFire).toBe(false);
+    });
 });

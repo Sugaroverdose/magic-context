@@ -180,6 +180,14 @@ interface TailInfo {
     hasProtectedEligibleHead: boolean;
     isMeaningful: boolean;
     tokenEstimate: number;
+    /**
+     * True when the TC chunk scan exhausted its token budget before reaching
+     * the end of the eligible head — i.e. the chunked (U:/A:/TC:) content
+     * exceeds the scan budget. `tokenEstimate` saturates at the scan budget
+     * (the reader stops appending blocks at the cap), so THIS is the signal
+     * that the narratable content crossed the tail_size threshold.
+     */
+    chunkHasMore: boolean;
     trueRawEligibleTokens: number;
     commitClusterCount: number;
     boundarySnapshot?: ProtectedTailBoundarySnapshot;
@@ -191,6 +199,7 @@ const TAIL_INFO_DEFAULTS: TailInfo = {
     hasProtectedEligibleHead: false,
     isMeaningful: false,
     tokenEstimate: 0,
+    chunkHasMore: false,
     trueRawEligibleTokens: 0,
     commitClusterCount: 0,
 };
@@ -300,6 +309,7 @@ function getUnsummarizedTailInfo(
                 hasProtectedEligibleHead,
                 isMeaningful,
                 tokenEstimate: chunk.tokenEstimate,
+                chunkHasMore: chunk.hasMore,
                 trueRawEligibleTokens: boundary.trueRawEligibleTokens,
                 commitClusterCount: chunk.commitClusterCount,
                 boundarySnapshot: boundary,
@@ -525,11 +535,30 @@ export function checkCompartmentTrigger(
         };
     }
 
-    // Tail-size trigger: eligible prefix is very large regardless of pressure or commits
-    if (tailInfo.trueRawEligibleTokens >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER) {
+    // Tail-size trigger: enough NARRATABLE material accumulated, regardless of
+    // pressure or commits. Measured on the TC-chunked estimate (U:/A:/TC:
+    // lines — what the historian actually condenses), NOT true-raw. NOTE: this
+    // is a deliberate two-axis split, do not re-unify. True-raw (tool outputs
+    // included) is the axis for the BOUNDARY and the pressure paths, because
+    // it measures wire occupancy. But firing tail_size on true-raw made
+    // tool-heavy sessions fire at 25% usage on a few file reads — each run
+    // narrating ~700 tokens of content into a confetti compartment (observed
+    // live: spans degraded 155 → 27 messages/compartment over one session).
+    // Under no pressure the agent is managing its own context (drops working);
+    // the historian shouldn't spawn until there's enough chunked data to make
+    // a properly-sized compartment. Tool-heavy-but-thin tails are covered by
+    // the pressure paths (proactive floor / force_80), which fire on occupancy.
+    // The chunk scan budget IS the threshold (scanBudget = max(min-estimate,
+    // budget×multiplier)), so tokenEstimate saturates at the cap — "≥ cap OR
+    // the scan ran out of budget with more blocks remaining" is the complete
+    // crossed-the-threshold signal.
+    if (
+        tailInfo.tokenEstimate >= triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER ||
+        (tailInfo.chunkHasMore && tailInfo.tokenEstimate > 0)
+    ) {
         sessionLog(
             sessionId,
-            `compartment trigger: tail-size fire — ~${tailInfo.trueRawEligibleTokens} true-raw tokens (TC-estimate ~${tailInfo.tokenEstimate}) exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
+            `compartment trigger: tail-size fire — ~${tailInfo.tokenEstimate} TC-chunked tokens (hasMore=${tailInfo.chunkHasMore}, true-raw ~${tailInfo.trueRawEligibleTokens}) exceeds ${triggerBudget * TAIL_SIZE_TRIGGER_MULTIPLIER} budget threshold`,
         );
         return {
             shouldFire: true,

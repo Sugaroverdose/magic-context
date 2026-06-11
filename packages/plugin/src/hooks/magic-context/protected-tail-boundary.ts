@@ -647,7 +647,15 @@ export function validateBoundarySnapshot(args: {
             };
         }
     }
-    const expectedOffset = getLastCompartmentEndMessage(args.db, snapshot.sessionId) + 1;
+    // Apply the SAME clamp the resolver applies (`offset = Math.max(1, end+1)`,
+    // line ~328): a zero-compartment session has lastCompartmentEnd = -1, so
+    // the unclamped expectation (0) would mismatch the clamped snapshot offset
+    // (1) and permanently reject every FIRST-compartment snapshot as stale —
+    // a fresh session could never publish its first compartment.
+    const expectedOffset = Math.max(
+        1,
+        getLastCompartmentEndMessage(args.db, snapshot.sessionId) + 1,
+    );
     if (expectedOffset !== snapshot.offset) {
         return {
             ok: false,
@@ -687,6 +695,15 @@ export function createDefaultBoundarySnapshotForTests(
         1,
         Math.min(rawMessageCount + 1, getLegacyProtectedTailStartOrdinal(sessionId)),
     );
+    // Real true-raw sum over the eligible head — the trigger semantics under
+    // test (tail_size vs TC, isMeaningful) depend on this being the genuine
+    // tool-output-inclusive size, not a hardcoded 0 (which made tests of the
+    // true-raw/TC distinction pass vacuously).
+    const index = buildTrueRawTokenIndex(sessionId, messages, {
+        providerShapeVersion: "opencode-v1",
+        cacheNamespace: `test:${sessionId}`,
+    });
+    const trueRawEligibleTokens = index.rangeTokens(1, protectedTailStart);
     const messageIdAt = (ordinal: number): string | null =>
         messages.find((message) => message.ordinal === ordinal)?.id ?? null;
     return {
@@ -713,7 +730,7 @@ export function createDefaultBoundarySnapshotForTests(
         cacheNamespace: `test:${sessionId}`,
         createdAt: Date.now(),
         rawRangeFingerprint: "",
-        trueRawEligibleTokens: 0,
+        trueRawEligibleTokens,
         oversizeAtomicUnit: false,
         boundaryReason: "test-legacy",
     };
