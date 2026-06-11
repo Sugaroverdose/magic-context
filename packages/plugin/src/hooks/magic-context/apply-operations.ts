@@ -16,6 +16,28 @@ import { stripTagPrefix } from "./tag-part-guards";
 const USER_DROP_PREVIEW_CHARS = 250;
 
 /**
+ * Agent-initiated (ctx_reduce) drops of a tool call within the newest N tool
+ * calls keep a structural skeleton — the tool_use/tool_result pair survives
+ * with `[truncated]` content — instead of being removed outright.
+ *
+ * WHY: when every recent tool call vanishes from the wire, models (especially
+ * smaller ones) lose the anchors showing what they actually did and start
+ * hallucinating fake tool-call shapes (the §N§ cargo-culting failure mode).
+ * Keeping skeletons in the recent band structurally prevents that class.
+ * Older drops still remove the full structure — deep history needs no anchors.
+ *
+ * CACHE SAFETY: the mode is decided once, at drop time (always a
+ * cache-busting pass), persisted in `tags.drop_mode`, and replayed
+ * byte-identically by `applyFlushedStatuses` on every later pass. A skeleton
+ * is NEVER demoted to a full drop afterwards — that second mutation would be
+ * a mid-prefix rewrite on some later pass (the volatile-boundary bust class).
+ * Emergency drops and heuristic dedup stay full-drop: emergency wants max
+ * reclaim on an already-busting pass, and dedup keeps the newest duplicate's
+ * full content as the nearby anchor.
+ */
+const RECENT_TOOL_SKELETON_WINDOW = 20;
+
+/**
  * Build the replacement content for a dropped message tag.
  *
  * Assistant messages (and unknown-role messages) get a full `[dropped §N§]`
@@ -89,6 +111,17 @@ export function applyPendingOperations(
 
         const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
 
+        // Newest-K tool calls at THIS moment — the skeleton window. Computed
+        // once per apply pass over all tool tags (any status: the window
+        // reflects conversation recency, not droppability).
+        const skeletonWindow = new Set(
+            tags
+                .filter((tag) => tag.type === "tool")
+                .map((tag) => tag.tagNumber)
+                .sort((left, right) => right - left)
+                .slice(0, RECENT_TOOL_SKELETON_WINDOW),
+        );
+
         for (const pendingOp of pendingOps) {
             const tagStatus = tagStatusById.get(pendingOp.tagId);
             if (tagStatus === "compacted" || tagStatus === "dropped") {
@@ -104,14 +137,25 @@ export function applyPendingOperations(
             const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
             if (isToolTag) {
-                const dropResult = target?.drop?.() ?? "absent";
-                if (dropResult === "incomplete") {
-                    continue;
+                if (skeletonWindow.has(pendingOp.tagId)) {
+                    const truncResult = target?.truncate?.() ?? "absent";
+                    if (truncResult === "incomplete") {
+                        continue;
+                    }
+                    if (truncResult === "truncated") {
+                        didMutateMessage = true;
+                    }
+                    updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
+                } else {
+                    const dropResult = target?.drop?.() ?? "absent";
+                    if (dropResult === "incomplete") {
+                        continue;
+                    }
+                    if (dropResult === "removed") {
+                        didMutateMessage = true;
+                    }
+                    updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
                 }
-                if (dropResult === "removed") {
-                    didMutateMessage = true;
-                }
-                updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
             } else if (target) {
                 const changed = target.setContent(buildReplacementContent(pendingOp.tagId, target));
                 if (changed) didMutateMessage = true;

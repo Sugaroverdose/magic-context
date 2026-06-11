@@ -44,6 +44,19 @@ function useTempDataHome(prefix: string): void {
     process.env.XDG_DATA_HOME = dir;
 }
 
+/**
+ * Insert 20 newer tool tags so `realTagNumber` falls OUTSIDE the newest-20
+ * skeleton window and a queued drop takes the full-removal path.
+ */
+function padSkeletonWindow(
+    db: ReturnType<typeof openDatabase> & object,
+    realTagNumber: number,
+): void {
+    for (let i = 1; i <= 20; i += 1) {
+        insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, realTagNumber + i);
+    }
+}
+
 function hasCall(messages: MessageLike[], callId: string): boolean {
     for (const message of messages) {
         for (const part of message.parts) {
@@ -86,6 +99,9 @@ describe("apply operations for tool drops", () => {
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
         const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
         expect(toolTagId).toBeDefined();
+        // Push the real tag out of the newest-20 skeleton window so this test
+        // exercises the FULL-removal path (deep-history drop).
+        padSkeletonWindow(db, toolTagId!);
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
         const didMutate = applyPendingOperations("ses-1", db, targets);
@@ -96,6 +112,42 @@ describe("apply operations for tool drops", () => {
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
+    });
+
+    it("keeps a [truncated] skeleton for drops within the recent tool window", () => {
+        useTempDataHome("context-tool-drop-skeleton-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const messages: MessageLike[] = [
+            {
+                info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
+                parts: [{ type: "tool-invocation", callID: "call-1" }],
+            },
+            {
+                info: { id: "m-tool", role: "tool", sessionID: "ses-1" },
+                parts: [{ type: "tool", callID: "call-1", state: { output: "result" } }],
+            },
+        ];
+
+        const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
+        expect(toolTagId).toBeDefined();
+
+        // No padding: the tool is within the newest-20 window, so the agent
+        // drop keeps the structural skeleton (anti-hallucination anchor).
+        queuePendingOp(db, "ses-1", toolTagId!, "drop");
+        const didMutate = applyPendingOperations("ses-1", db, targets);
+        batch.finalize();
+
+        expect(didMutate).toBe(true);
+        expect(hasCall(messages, "call-1")).toBe(true);
+        const toolPart = messages
+            .flatMap((m) => m.parts)
+            .find((p: any) => p.callID === "call-1" && p.type === "tool") as any;
+        expect(toolPart.state.output).toBe("[truncated]");
+        expect(getPendingOps(db, "ses-1")).toHaveLength(0);
+        expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("truncated");
     });
 
     it("defers pending drop when only invocation exists", () => {
@@ -329,6 +381,7 @@ describe("apply operations for tool drops", () => {
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
         const toolTagId = tagger.getToolTag("ses-1", "call-3", "m-assistant");
         expect(toolTagId).toBeDefined();
+        padSkeletonWindow(db, toolTagId!);
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
         const didMutate = applyPendingOperations("ses-1", db, targets);
@@ -366,6 +419,7 @@ describe("apply operations for tool drops", () => {
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
         const toolTagId = tagger.getToolTag("ses-1", "call-4", "m-assistant");
         expect(toolTagId).toBeDefined();
+        padSkeletonWindow(db, toolTagId!);
 
         queuePendingOp(db, "ses-1", toolTagId!, "drop");
         const didMutate = applyPendingOperations("ses-1", db, targets);
