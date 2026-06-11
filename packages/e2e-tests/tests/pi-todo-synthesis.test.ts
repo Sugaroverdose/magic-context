@@ -401,18 +401,19 @@ describe("pi synthetic todowrite e2e", () => {
 		expect(meta?.last_todo_state).toBe(stateJson);
 	}, 180_000);
 
-	it("does not re-anchor persisted synthetic pairs on defer when the anchor is gone", async () => {
+	it("replays the persisted synthetic pair byte-identically on defer passes", async () => {
 		const sessionId = await newSessionId();
 		const { callId } = await prepareCacheBustState(sessionId);
 
 		const t0Body = await sendAndCaptureMainRequest("Pi defer replay t0");
-		expect(findSyntheticPair(t0Body, callId)).toBeNull();
+		const t0Bytes = syntheticPairBytes(t0Body, callId);
 		const metaT0 = readTodoMeta(sessionId);
 
 		const t1Body = await sendAndCaptureMainRequest("Pi defer replay t1");
-		expect(findSyntheticPair(t1Body, callId)).toBeNull();
+		const t1Bytes = syntheticPairBytes(t1Body, callId);
 		const metaT1 = readTodoMeta(sessionId);
 
+		expect(t1Bytes).toBe(t0Bytes);
 		expect(metaT1?.todo_synthetic_call_id).toBe(metaT0?.todo_synthetic_call_id);
 		expect(metaT1?.todo_synthetic_anchor_message_id).toBe(
 			metaT0?.todo_synthetic_anchor_message_id,
@@ -453,7 +454,7 @@ describe("pi synthetic todowrite e2e", () => {
 		expect(meta?.last_todo_state).toBe(normalizedJson(STATE_Y_TODOS));
 	}, 180_000);
 
-	it("self-heals legacy anchors with empty stateJson on cache-bust", async () => {
+	it("self-heals legacy anchors with empty stateJson and replays them on defer", async () => {
 		const sessionId = await newSessionId();
 		const { callId } = await prepareCacheBustState(sessionId, STATE_X_TODOS);
 
@@ -467,7 +468,7 @@ describe("pi synthetic todowrite e2e", () => {
 		const cacheBustBody = await sendAndCaptureMainRequest(
 			"Pi legacy self-heal cache bust",
 		);
-		expect(syntheticPairBytes(cacheBustBody, callId)).not.toBe("");
+		const cacheBustBytes = syntheticPairBytes(cacheBustBody, callId);
 
 		const after = readTodoMeta(sessionId);
 		expect(after?.todo_synthetic_state_json).toBe(
@@ -477,7 +478,8 @@ describe("pi synthetic todowrite e2e", () => {
 		const deferBody = await sendAndCaptureMainRequest(
 			"Pi legacy self-heal defer",
 		);
-		expect(findSyntheticPair(deferBody, callId)).toBeNull();
+		const deferBytes = syntheticPairBytes(deferBody, callId);
+		expect(deferBytes).toBe(cacheBustBytes);
 	}, 180_000);
 
 	it("skips todowrite capture and synthetic injection for subagents", async () => {

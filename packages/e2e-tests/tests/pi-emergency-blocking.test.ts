@@ -72,7 +72,7 @@ describe("pi emergency >=95%", () => {
             });
 
             for (let i = 1; i <= 10; i++) {
-                await h.sendPrompt(`turn ${i}: meaningful pi content populating raw history.`);
+                await h.sendPrompt(`turn ${i}: meaningful pi content populating raw history. ${h.ballast(3_000)}`);
             }
 
             h.mock.setDefault({
