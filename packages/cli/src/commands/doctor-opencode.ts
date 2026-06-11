@@ -692,7 +692,9 @@ export async function runDoctor(
                 if (deadKey in mcConfig) {
                     delete mcConfig[deadKey];
                     mcChanged = true;
-                    log.success(`Removed deprecated ${deadKey} (replaced by tiered emergency drop)`);
+                    log.success(
+                        `Removed deprecated ${deadKey} (replaced by tiered emergency drop)`,
+                    );
                     fixed++;
                 }
             }

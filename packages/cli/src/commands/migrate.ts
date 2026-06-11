@@ -644,30 +644,6 @@ interface CopyMagicContextStateResult {
     lastCompartmentEndPiEntryId?: string;
 }
 
-interface PlannedCompartmentRow {
-    sequence: number;
-    start_message: number;
-    end_message: number;
-    start_message_id: string;
-    end_message_id: string;
-    title: string;
-    content: string;
-    p1: string | null;
-    p2: string | null;
-    p3: string | null;
-    p4: string | null;
-    importance: number | null;
-    episode_type: string | null;
-    legacy: number;
-}
-
-interface PlannedFactRow {
-    category: string;
-    content: string;
-    created_at: number;
-    updated_at: number;
-}
-
 /**
  * The remapped state to copy, plus a committer that performs all INSERTs
  * inside a single transaction. The plan is computed without writing so the
