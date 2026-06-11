@@ -99,7 +99,7 @@ describe("emergency >=95%", () => {
             for (let i = 1; i <= 10; i++) {
                 await h.sendPrompt(
                     sessionId,
-                    `turn ${i}: meaningful content populating raw history.`,
+                    `turn ${i}: meaningful content populating raw history. ${h.ballast(3_000)}`,
                 );
             }
 

@@ -134,10 +134,15 @@ describe("historian success path", () => {
 
             const sessionId = await h.createSession();
 
+            // Each build turn carries ~3K tokens of REAL text ballast: the v3
+            // protected-tail boundary measures true-raw content, not the
+            // mock's fabricated usage numbers — without content mass the
+            // boundary finds no eligible head and the historian (correctly)
+            // never starts.
             for (let i = 1; i <= 10; i++) {
                 await h.sendPrompt(
                     sessionId,
-                    `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}.`,
+                    `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}. ${h.ballast(3_000)}`,
                 );
             }
 

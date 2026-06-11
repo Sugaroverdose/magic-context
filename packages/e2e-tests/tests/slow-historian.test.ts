@@ -110,7 +110,7 @@ describe("slow historian vs fast main", () => {
             for (let i = 1; i <= 10; i++) {
                 await h.sendPrompt(
                     sessionId,
-                    `turn ${i}: meaningful prompt carrying durable signal about build process step ${i}.`,
+                    `turn ${i}: meaningful prompt carrying durable signal about build process step ${i}. ${h.ballast(3_000)}`,
                 );
             }
 
@@ -128,23 +128,16 @@ describe("slow historian vs fast main", () => {
             });
             await h.sendPrompt(sessionId, "turn 11: trigger turn with meaningful content.");
 
-            // Wait for the event handler to set compartmentInProgress.
-            await h.waitFor(
-                () => {
-                    const row = h
-                        .contextDb()
-                        .prepare(
-                            "SELECT compartment_in_progress FROM session_meta WHERE session_id = ?",
-                        )
-                        .get(sessionId) as { compartment_in_progress: number } | null;
-                    return row?.compartment_in_progress === 1;
-                },
-                { timeoutMs: 15_000, label: "compartmentInProgress=true" },
-            );
+            // NOTE: the trigger decision runs in the TRANSFORM now (fed by the
+            // in-memory message tail), not in the message.updated event handler.
+            // After turn 11 the flag is still 0 — turn 12's transform evaluates
+            // the trigger, sets compartmentInProgress, AND starts the historian
+            // in that same pass (background, non-blocking). So there is no
+            // flag-wait between turns anymore; the flag assertion moves after
+            // turn 12 is dispatched.
 
-            // Turn 12: transform sees compartmentInProgress=true, kicks off
-            // historian in background (non-blocking). The mock will hang
-            // historian for 8s. We measure turn 12 wall-clock — must be fast.
+            // Turn 12: transform fires the trigger, kicks off historian in
+            // background (non-blocking). The mock will hang historian for 8s.
             // Keep usage here low so we don't accidentally trip the 95% blocking
             // path (BLOCK_UNTIL_DONE_PERCENTAGE).
             h.mock.setDefault({

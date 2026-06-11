@@ -159,7 +159,9 @@ describe("context overflow recovery", () => {
             // Build a few turns of history so historian has something to
             // compartmentalize once triggered.
             for (let i = 1; i <= 6; i++) {
-                await h.sendPrompt(sessionId, `user turn ${i}: some work`, { timeoutMs: 30_000 });
+                await h.sendPrompt(sessionId, `user turn ${i}: some work ${h.ballast(2_000)}`, {
+                    timeoutMs: 30_000,
+                });
             }
 
             const ctx = h.contextDb();

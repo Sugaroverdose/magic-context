@@ -413,9 +413,17 @@ describe("long-running OpenCode Magic Context session", () => {
 
         const sessionId = await h.createSession();
 
-        // Phase 1: Warm-up turns 1-3 stay below threshold; the cached prefix is byte-identical.
+        // Phase 1: Warm-up turns 1-3 stay below threshold; the cached prefix is
+        // byte-identical. Each carries ~2.5K tokens of REAL text ballast: the
+        // v3 protected-tail boundary measures true-raw content (not mock usage
+        // numbers), so phase 5's historian force-fire needs genuine content
+        // mass beyond the scaled protected tail or the head resolves empty.
         for (let i = 1; i <= 3; i += 1) {
-            await send(sessionId, `turn ${i}: OpenCode warm-up cache-stability probe`, `phase 1 assistant ${i}`);
+            await send(
+                sessionId,
+                `turn ${i}: OpenCode warm-up cache-stability probe ${h.ballast(2_500)}`,
+                `phase 1 assistant ${i}`,
+            );
         }
         const warmup = mainRequests();
         expect(warmup.length).toBeGreaterThanOrEqual(3);
@@ -431,13 +439,24 @@ describe("long-running OpenCode Magic Context session", () => {
         expect(beforeExecutePressure).toBeLessThan(20);
         expect(afterExecutePressure).toBeGreaterThanOrEqual(20);
         await send(sessionId, "turn 5: execute pass should run heuristic cleanup", "phase 2 execute cleanup");
-        await h.waitFor(() => h.countTagsByStatus(sessionId, "dropped") > 0, { label: "heuristic cleanup drops tags" });
-        const droppedAfterExecute = h.countTagsByStatus(sessionId, "dropped");
+        // No routine drops anymore: need-blind age-drops were removed with the
+        // tiered emergency-drop redesign. An execute pass with no droppable
+        // tool pile (one tiny ctx_search output here) must drop NOTHING —
+        // reduction is the agent's job (ctx_reduce, phase 4) with the ≥85%
+        // tiered drop as the safety net (covered end-to-end by
+        // short-context-overflow.test.ts). The execute pass still runs; the
+        // invariant kept here is that it doesn't spuriously evict and the
+        // cache recovers on the following defer pass.
         await send(sessionId, "turn 6: defer after first execute should recover cache", "phase 2 cache recovery");
         const phase2Tail = mainRequests().slice(-2);
         expect(phase2Tail.length).toBe(2);
         expect(serialize(phase2Tail[1]!.body.messages?.[0])).toBe(serialize(phase2Tail[0]!.body.messages?.[0]));
-        expect(droppedAfterExecute).toBeGreaterThan(0);
+        // Drops here are legitimate, from two designed ≥85% paths (85K usage on
+        // the 100K test limit): the tiered emergency drop may evict tool
+        // outputs, and the force-fired historian publishes a compartment whose
+        // covered messages are queue-dropped. The invariant that matters is the
+        // byte-identical cache recovery asserted above — NOT a drop count
+        // (routine need-blind age-drops are gone; these are need-driven).
 
         // Phase 3: ctx_note write plus terminal todo trigger. The nudge is delayed to a fresh user turn and then replayed.
         emitToolOnce(/^ctx_note$/, { action: "write", content: "Revisit the long-running OpenCode assertions after verification." });

@@ -173,6 +173,41 @@ export class TestHarness {
      * Send a user prompt. Returns the raw prompt response.
      * Default model routes to our mock-anthropic provider. Callers can override.
      */
+    /**
+     * Generate ~`tokens` tokens of varied, realistic prose ballast.
+     *
+     * The protected-tail boundary (v3) is SIZE-based: it measures the true-raw
+     * token content of the session, not the mock's fabricated usage numbers.
+     * Tests that fake pressure (90K `input_tokens` on a session whose actual
+     * text is a few hundred tokens) leave the boundary with no eligible head —
+     * the historian can never start, which is correct behavior for that
+     * (production-unreachable) state. Pressure-driving turns must therefore
+     * carry real content mass: `sendPrompt(id, prefix + h.ballast(N))`.
+     *
+     * Varied word bank (not single-char repeats): BPE tokenizers degrade
+     * pathologically on degenerate repeats, and varied prose tokenizes at a
+     * stable ~4 chars/token so the size math holds.
+     */
+    ballast(tokens: number): string {
+        const words = [
+            "boundary", "historian", "compartment", "schedule", "pressure",
+            "tokens", "window", "publish", "transform", "session", "marker",
+            "budget", "eligible", "protected", "ordinal", "snapshot", "replay",
+            "decision", "threshold", "baseline", "measure", "archive", "deliver",
+        ];
+        const target = Math.max(0, Math.round(tokens * 4)); // ~4 chars/token
+        const parts: string[] = [];
+        let length = 0;
+        let i = 0;
+        while (length < target) {
+            const w = words[i % words.length];
+            parts.push(`${w}${i % 17 === 0 ? "." : ""}`);
+            length += w.length + 1;
+            i += 1;
+        }
+        return parts.join(" ");
+    }
+
     async sendPrompt(
         sessionId: string,
         text: string,

@@ -414,7 +414,7 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                 // Phase 2 — build an eligible tail, then trigger + run the historian.
                 for (let i = 4; i <= 11; i++) {
                     setDefer(`B9 reply ${i}`);
-                    await h.sendPrompt(sessionId, `B9 turn ${i}: durable content for compartment chunk ${i}.`);
+                    await h.sendPrompt(sessionId, `B9 turn ${i}: durable content for compartment chunk ${i}. ${h.ballast(3_000)}`);
                 }
                 h.mock.setDefault({ text: "B9 trigger", usage: HISTORIAN_TRIGGER_USAGE });
                 await h.sendPrompt(sessionId, "B9 turn 12: high-usage historian trigger.");

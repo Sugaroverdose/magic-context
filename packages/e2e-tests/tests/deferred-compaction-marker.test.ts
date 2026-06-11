@@ -162,7 +162,7 @@ describe("deferred compaction marker (plan v6)", () => {
             for (let i = 1; i <= 10; i++) {
                 await h.sendPrompt(
                     sessionId,
-                    `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}.`,
+                    `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}. ${h.ballast(3_000)}`,
                 );
             }
 
