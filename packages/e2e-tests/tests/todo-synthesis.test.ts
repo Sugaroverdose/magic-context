@@ -148,7 +148,9 @@ function updateTodoMeta(sessionId: string, sql: string): void {
 
 async function waitForLastTodoState(sessionId: string, stateJson: string): Promise<void> {
     await h.waitFor(() => readTodoMeta(sessionId)?.last_todo_state === stateJson, {
-        timeoutMs: 10_000,
+        // Wraps a full opencode-serve prompt round-trip: ~1s locally, 7-12s on
+        // loaded CI runners — budget must absorb runner latency, not gate it.
+        timeoutMs: 60_000,
         label: "last_todo_state captured",
     });
 }
@@ -162,7 +164,8 @@ async function waitForHighPressure(sessionId: string): Promise<void> {
                 .get(sessionId) as { last_context_percentage: number } | null;
             return (row?.last_context_percentage ?? 0) >= 65;
         },
-        { timeoutMs: 10_000, label: "session crosses execute threshold" },
+        // Same prompt-round-trip dependency as above: 60s for CI runner latency.
+        { timeoutMs: 60_000, label: "session crosses execute threshold" },
     );
 }
 
@@ -353,7 +356,8 @@ describe("synthetic todowrite e2e", () => {
         const parentId = await h.createSession();
         const childId = await h.createChildSession(parentId, "todo-synthesis-child");
         await h.waitFor(() => h.isSubagent(childId) === true, {
-            timeoutMs: 10_000,
+            // Same CI-runner-latency class as the waits above.
+            timeoutMs: 60_000,
             label: "child is_subagent=true",
         });
 
