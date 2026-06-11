@@ -20,6 +20,7 @@ const SERVER = "http://127.0.0.1:5599";
 
 afterEach(() => {
     closeDatabase();
+    mock.restore();
 });
 
 describe("maybeDeliverChannel2", () => {
@@ -109,6 +110,21 @@ describe("maybeDeliverChannel2", () => {
         expect(getChannel2NudgeClaimedAt(db, "ses-stale-claim")).toBe(0);
     });
 
+    it("cache-hit openDatabase heals stale claimed leases for long-lived processes", () => {
+        useTempDataHome("ch2-cache-heal-");
+        const db = openDatabase()!;
+        setChannel2NudgeState(db, "ses-cache-heal", "claimed");
+        db.prepare(
+            "UPDATE session_meta SET channel2_nudge_claimed_at = ? WHERE session_id = ?",
+        ).run(Date.now() - 180_000, "ses-cache-heal");
+
+        const cached = openDatabase()!;
+
+        expect(cached).toBe(db);
+        expect(getChannel2NudgeState(db, "ses-cache-heal")).toBe("pending");
+        expect(getChannel2NudgeClaimedAt(db, "ses-cache-heal")).toBe(0);
+    });
+
     it("delivers via the live-server client and consumes the one-shot cap", async () => {
         useTempDataHome("ch2-deliver-");
         const db = openDatabase()!;
@@ -179,6 +195,115 @@ describe("maybeDeliverChannel2", () => {
         expect(promptAsync).toHaveBeenCalledTimes(1);
         expect(delivered).toBe(false);
         expect(getChannel2NudgeState(db, "ses-confirm-lost")).toBe("delivered");
+    });
+
+    it("preserves a sibling's delivered claim and logs the duplicate window distinctly", async () => {
+        useTempDataHome("ch2-duplicate-window-");
+        const db = openDatabase()!;
+        const sessionId = "ses-duplicate-window";
+        setChannel2NudgeState(db, sessionId, "pending");
+        setLiveServerWakeAvailable(SERVER, true);
+
+        const sessionLog = mock(() => {});
+        const promptAsync = mock(async () => {
+            db.prepare(
+                "UPDATE session_meta SET channel2_nudge_state = 'delivered', channel2_nudge_claimed_at = 0 WHERE session_id = ?",
+            ).run(sessionId);
+        });
+        mock.module("../../shared/live-server-client", () => ({
+            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
+            hasFreshProbe: () => true,
+            probeServerReachable: async () => true,
+            useLiveServerWake: () => true,
+            setLiveServerWakeAvailable: () => {},
+        }));
+        mock.module("../../shared/logger", () => ({ sessionLog }));
+
+        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
+        const delivered = await deliver(sessionId, {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
+        });
+
+        expect(promptAsync).toHaveBeenCalledTimes(1);
+        expect(delivered).toBe(false);
+        expect(getChannel2NudgeState(db, sessionId)).toBe("delivered");
+        expect(
+            sessionLog.mock.calls.some(
+                (call) =>
+                    call[0] === sessionId &&
+                    typeof call[1] === "string" &&
+                    call[1].includes("duplicate window"),
+            ),
+        ).toBe(true);
+    });
+
+    it("leaves a stale claim healable when claimed→pending CAS throws on send failure", async () => {
+        useTempDataHome("ch2-revert-throw-");
+        const db = openDatabase()!;
+        const sessionId = "ses-revert-throw";
+        setChannel2NudgeState(db, sessionId, "pending");
+        setLiveServerWakeAvailable(SERVER, true);
+
+        const originalPrepare = db.prepare.bind(db);
+        (db as unknown as { prepare: typeof db.prepare }).prepare = (sql: string) => {
+            const statement = originalPrepare(sql);
+            if (
+                sql ===
+                "UPDATE session_meta SET channel2_nudge_state = ?, channel2_nudge_claimed_at = ? WHERE session_id = ? AND channel2_nudge_state = ?"
+            ) {
+                return {
+                    ...statement,
+                    run: (...args: unknown[]) => {
+                        if (
+                            args[0] === "pending" &&
+                            args[1] === 0 &&
+                            args[2] === sessionId &&
+                            args[3] === "claimed"
+                        ) {
+                            throw new Error("SQLITE_BUSY: database is locked");
+                        }
+                        return statement.run(...(args as [unknown, unknown, unknown, unknown]));
+                    },
+                } as typeof statement;
+            }
+            return statement;
+        };
+        const promptAsync = mock(async () => {
+            throw new Error("transient network failure");
+        });
+        mock.module("../../shared/live-server-client", () => ({
+            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
+            hasFreshProbe: () => true,
+            probeServerReachable: async () => true,
+            useLiveServerWake: () => true,
+            setLiveServerWakeAvailable: () => {},
+        }));
+
+        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
+        const delivered = await deliver(sessionId, {
+            db,
+            serverUrl: SERVER,
+            directory: ".",
+            reclaimableTokens: 30_000,
+            usableTokens: 60_000,
+        });
+
+        expect(delivered).toBe(false);
+        expect(getChannel2NudgeState(db, sessionId)).toBe("claimed");
+        expect(getChannel2NudgeClaimedAt(db, sessionId)).toBeGreaterThan(0);
+
+        db.prepare(
+            "UPDATE session_meta SET channel2_nudge_claimed_at = ? WHERE session_id = ?",
+        ).run(Date.now() - 180_000, sessionId);
+
+        const cached = openDatabase()!;
+        expect(cached).toBe(db);
+        expect(getChannel2NudgeState(db, sessionId)).toBe("pending");
+        expect(getChannel2NudgeClaimedAt(db, sessionId)).toBe(0);
     });
 
     it("reverts claimed→pending on send failure (cap not burned)", async () => {

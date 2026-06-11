@@ -80,6 +80,7 @@ import {
 	peekDeferredExecutePending,
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
+	resetLastNudgeCycleIfTailShrank,
 	setDeferredExecutePendingIfAbsent,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
@@ -2219,6 +2220,14 @@ export function registerPiContextHandler(
 					const usableTokensPi = Math.max(
 						0,
 						executeThresholdTokensPi - usageInputTokens + liveTailTokens,
+					);
+					// Same rationale as OpenCode: a historian publish, emergency drop,
+					// or pending-op replay can shrink the tail without a ctx_reduce
+					// tool call, so a regrowth must not inherit a stale persisted band.
+					resetLastNudgeCycleIfTailShrank(
+						options.db,
+						sessionId,
+						tailToolTokens,
 					);
 					setPiChannel1Baseline(sessionId, {
 						tailToolTokens,

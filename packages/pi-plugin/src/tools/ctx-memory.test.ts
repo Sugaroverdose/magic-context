@@ -260,6 +260,44 @@ describe("createCtxMemoryTool", () => {
 		}
 	});
 
+	it("rejects archived memories for primary archive too", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const archived = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for scripts.",
+			});
+			db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(
+				archived.id,
+			);
+
+			const archivedAgain = await primary.execute(
+				"call-a",
+				{ action: "archive", ids: [archived.id] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(archivedAgain.isError).toBe(true);
+			expect(archivedAgain.content[0]?.text).toContain(
+				"restore it before archiving",
+			);
+			expect(getMemoryById(db, archived.id)?.status).toBe("archived");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("keeps dreamer able to curate archived memories during merge", async () => {
 		const db = createTestDb();
 		try {

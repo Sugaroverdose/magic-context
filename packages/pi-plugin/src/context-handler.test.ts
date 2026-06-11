@@ -11,6 +11,8 @@ import {
 	addNote,
 	appendNoteNudgeAnchor,
 	getHistorianFailureState,
+	getLastNudgeLevel,
+	getLastNudgeUndropped,
 	getNoteNudgeAnchors,
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -19,6 +21,8 @@ import {
 	incrementHistorianFailure,
 	insertTag,
 	queuePendingOp,
+	setLastNudgeLevel,
+	setLastNudgeUndropped,
 	setPendingPiCompactionMarkerState,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
@@ -159,6 +163,35 @@ describe("registerPiContextHandler", () => {
 
 			// The resolver was consulted with the pass's cwd.
 			expect(seenDirs).toContain(switchedDir);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("resets the persisted Channel 1 band when baseline refresh sees a smaller tail", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-band-reset";
+			setLastNudgeUndropped(db, sessionId, 80_000);
+			setLastNudgeLevel(db, sessionId, "urgent");
+
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] } | undefined>;
+
+			await handler(
+				{ messages: [userMessage("hello", 1)] as never[] },
+				fakeContext(sessionId) as never,
+			);
+
+			expect(getLastNudgeUndropped(db, sessionId)).toBe(0);
+			expect(getLastNudgeLevel(db, sessionId)).toBe("");
 		} finally {
 			closeQuietly(db);
 		}
@@ -958,8 +991,21 @@ describe("registerPiContextHandler", () => {
 						piInputs.commitClusterTrigger,
 					);
 
+					const stripCreatedAtDeep = (value: unknown): unknown => {
+						if (Array.isArray(value)) {
+							return value.map(stripCreatedAtDeep);
+						}
+						if (!value || typeof value !== "object") return value;
+						const entries = Object.entries(value as Record<string, unknown>)
+							.filter(([key]) => key !== "createdAt")
+							.map(([key, inner]) => [key, stripCreatedAtDeep(inner)]);
+						return Object.fromEntries(entries);
+					};
+
 					expect(piInputs.triggerBudget).toBe(triggerBudget);
-					expect(piDecision).toEqual(opencodeDecision);
+					expect(stripCreatedAtDeep(piDecision)).toEqual(
+						stripCreatedAtDeep(opencodeDecision),
+					);
 					expect(piDecision).toMatchObject({
 						shouldFire: true,
 						reason: "projected_headroom",

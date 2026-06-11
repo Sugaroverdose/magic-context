@@ -61,7 +61,7 @@
  *     `websearch` remain denied — dreamer must not spawn subagents
  *     or commit changes.
  *
- *   - **sidekick**: `ctx_search`, `ctx_memory`, plus the read-only AFT
+ *   - **sidekick**: `ctx_search`, plus the read-only AFT
  *     navigation tools `aft_outline` and `aft_zoom`. Sidekick's job
  *     is augmenting user prompts via memory retrieval — see
  *     `features/magic-context/sidekick/agent.ts`. AFT navigation lets

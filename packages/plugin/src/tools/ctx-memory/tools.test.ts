@@ -299,6 +299,24 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, third.id)?.status).toBe("active");
         });
 
+        it("rejects archived memories with the same inactive-memory error used by update and merge", async () => {
+            const archived = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Already curated away.",
+            });
+            db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(archived.id);
+
+            const result = await tools.ctx_memory.execute(
+                { action: "archive", ids: [archived.id] },
+                toolContext(),
+            );
+
+            expect(result).toContain("restore it before archiving");
+            expect(getMemoryById(db, archived.id)?.status).toBe("archived");
+            expect(getMutationRows(db, "/repo/project", [archived.id])).toHaveLength(0);
+        });
+
         it("rejects a non-integer archive id without mutating", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",

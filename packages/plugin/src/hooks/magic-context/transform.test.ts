@@ -19,6 +19,8 @@ import {
     clearPendingOps,
     closeDatabase,
     getHistorianFailureState,
+    getLastNudgeLevel,
+    getLastNudgeUndropped,
     getOrCreateSessionMeta,
     getPendingOps,
     getTagById,
@@ -28,6 +30,8 @@ import {
     openDatabase,
     queuePendingOp,
     recordOverflowDetected,
+    setLastNudgeLevel,
+    setLastNudgeUndropped,
     updateSessionMeta,
     updateTagStatus,
 } from "../../features/magic-context/storage";
@@ -1183,6 +1187,51 @@ describe("createTransform", () => {
         );
         // Baseline recorded → Channel 1 is active for this subagent.
         expect(channel1StateBySession.has("ses-sub-ch1")).toBe(true);
+    });
+
+    it("resets the persisted Channel 1 band when baseline refresh sees a smaller tail", async () => {
+        useTempDataHome("context-transform-band-reset-");
+        const sessionId = "ses-band-reset";
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        setLastNudgeUndropped(db, sessionId, 80_000);
+        setLastNudgeLevel(db, sessionId, "urgent");
+        const channel1StateBySession = new Map<
+            string,
+            import("./ctx-reduce-nudge").Channel1State
+        >();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    { usage: { percentage: 50, inputTokens: 100_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            channel1StateBySession,
+        });
+
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: { id: "m-user-reset", role: "user", sessionID: sessionId },
+                        parts: [{ type: "text", text: "hi" }],
+                    },
+                ],
+            },
+        );
+
+        expect(getLastNudgeUndropped(db, sessionId)).toBe(0);
+        expect(getLastNudgeLevel(db, sessionId)).toBe("");
     });
 
     it("Unit B: ctx_reduce_enabled:false primary gets NO Channel 1 baseline (latent-gap fix)", async () => {

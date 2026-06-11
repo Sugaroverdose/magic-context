@@ -65,6 +65,7 @@ export {
     removeStrippedPlaceholderId,
     reserveProtectedTailDrainTokens,
     resetLastNudgeCycle,
+    resetLastNudgeCycleIfTailShrank,
     resetProtectedTailNoEligibleHead,
     rollbackProtectedTailDrainReservation,
     setChannel2NudgeState,

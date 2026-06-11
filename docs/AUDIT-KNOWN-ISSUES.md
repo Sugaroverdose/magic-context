@@ -581,12 +581,22 @@ with the default, so they read `''` (verified `IS NULL → 0`), and the
 trigger/delivery CAS matches.
 
 A wedged `'claimed'` lease (crash mid-delivery) is still healed by
-`healWedgedChannel2Claims` (`storage-db.ts`), but the heal is now TTL-scoped via
-`channel2_nudge_claimed_at`: fresh claims are left alone so a sibling process
-boot cannot steal a live in-flight delivery; stale/legacy claims rewind to
-`'pending'`. After a send succeeds, confirm failures are not reverted to
-`'pending'` because the synthetic user message may already exist. Accepted as
-correct.
+`healWedgedChannel2Claims` (`storage-db.ts`), and `openDatabase()` now reruns that
+TTL-scoped heal on cached-handle reuse too so long-lived processes eventually
+unwind stale claims without a restart. The lease uses
+`channel2_nudge_claimed_at` as its liveness boundary: fresh claims are left alone
+so a sibling process boot cannot steal a live in-flight delivery; stale/legacy
+claims rewind to `'pending'`. If a send fails and the `claimed→pending` restore is
+locked, the row stays `claimed` with its timestamp intact and later TTL-heals back
+to `'pending'`.
+
+One rare duplicate window remains accepted by design: if a process is suspended or
+otherwise hangs for longer than the TTL after sending but before confirming, a
+sibling can heal that stale claim, redeliver the same reminder, and mark
+`'delivered'` first. The original sender now preserves an already-`'delivered'`
+row and logs that stolen-lease path distinctly for diagnosis, but it cannot
+unsend its already-queued reminder. The cost is one duplicate synthetic message,
+not extra cap consumption.
 
 ### A37. `NORMAL_HYSTERESIS_TOKENS` (256) eligible-head snap is deliberate (boundary-straddle wobble accepted)
 

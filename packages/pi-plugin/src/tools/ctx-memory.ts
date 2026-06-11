@@ -174,7 +174,7 @@ function isPrimaryMutableMemory(memory: Memory): boolean {
 
 function inactiveMemoryError(
 	id: number,
-	action: "updating" | "merging",
+	action: "updating" | "merging" | "archiving",
 ): string {
 	return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
@@ -598,6 +598,12 @@ export function createCtxMemoryTool(
 						!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
 					) {
 						return err(`Error: Memory with ID ${memoryId} was not found.`);
+					}
+					if (!dreamerAllowed && !isPrimaryMutableMemory(memory)) {
+						// Match update/merge: once a primary caller archived or
+						// superseded a memory, re-archiving it should stop with the same
+						// friendly inactive-memory error instead of rewriting it.
+						return err(inactiveMemoryError(memoryId, "archiving"));
 					}
 				}
 				deps.db.transaction(() => {

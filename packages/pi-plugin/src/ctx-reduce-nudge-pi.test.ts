@@ -1,10 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	getChannel2NudgeClaimedAt,
 	getChannel2NudgeState,
 	setChannel2NudgeState,
 } from "@magic-context/core/features/magic-context/storage";
+import * as loggerModule from "@magic-context/core/shared/logger";
 import {
 	clearPiChannel1State,
 	computeTailTokenEstimatePi,
@@ -18,6 +20,10 @@ import { createTestDb } from "./test-utils.test";
 function toolResultMsg(text: string) {
 	return { role: "toolResult", content: [{ type: "text", text }] };
 }
+
+afterEach(() => {
+	mock.restore();
+});
 
 describe("computeTailToolTokensPi", () => {
 	it("sums non-dropped toolResult text, excludes sentinels", () => {
@@ -260,6 +266,90 @@ describe("maybeDeliverChannel2Pi", () => {
 		);
 		expect(delivered).toBe(false);
 		expect(getChannel2NudgeState(db, SESSION)).toBe("pending");
+	});
+
+	it("returns false and leaves the claim healable when claimed→pending CAS throws", async () => {
+		const db = createTestDb();
+		const session = "ses-ch2-pi-revert-throw";
+		setChannel2NudgeState(db, session, "pending");
+		armStrongBaseline(session);
+
+		const originalPrepare = db.prepare.bind(db);
+		(db as unknown as { prepare: typeof db.prepare }).prepare = (
+			sql: string,
+		) => {
+			const statement = originalPrepare(sql);
+			if (
+				sql ===
+				"UPDATE session_meta SET channel2_nudge_state = ?, channel2_nudge_claimed_at = ? WHERE session_id = ? AND channel2_nudge_state = ?"
+			) {
+				return {
+					...statement,
+					run: (...args: unknown[]) => {
+						if (
+							args[0] === "pending" &&
+							args[1] === 0 &&
+							args[2] === session &&
+							args[3] === "claimed"
+						) {
+							throw new Error("SQLITE_BUSY: database is locked");
+						}
+						return statement.run(
+							...(args as [unknown, unknown, unknown, unknown]),
+						);
+					},
+				} as typeof statement;
+			}
+			return statement;
+		};
+
+		const delivered = maybeDeliverChannel2Pi(
+			{
+				sendUserMessage: () => {
+					throw new Error("transient");
+				},
+			},
+			db,
+			session,
+		);
+
+		expect(delivered).toBe(false);
+		expect(getChannel2NudgeState(db, session)).toBe("claimed");
+		expect(getChannel2NudgeClaimedAt(db, session)).toBeGreaterThan(0);
+	});
+
+	it("preserves a sibling's delivered claim and logs the duplicate window distinctly", async () => {
+		const db = createTestDb();
+		const session = "ses-ch2-pi-duplicate";
+		setChannel2NudgeState(db, session, "pending");
+		armStrongBaseline(session);
+
+		const sessionLog = spyOn(loggerModule, "sessionLog").mockImplementation(
+			() => {},
+		);
+
+		const delivered = maybeDeliverChannel2Pi(
+			{
+				sendUserMessage: () => {
+					db.prepare(
+						"UPDATE session_meta SET channel2_nudge_state = 'delivered', channel2_nudge_claimed_at = 0 WHERE session_id = ?",
+					).run(session);
+				},
+			},
+			db,
+			session,
+		);
+
+		expect(delivered).toBe(false);
+		expect(getChannel2NudgeState(db, session)).toBe("delivered");
+		expect(
+			sessionLog.mock.calls.some(
+				(call) =>
+					call[0] === session &&
+					typeof call[1] === "string" &&
+					call[1].includes("duplicate window"),
+			),
+		).toBe(true);
 	});
 
 	it("does not re-deliver after success (one nudge per lifetime)", () => {

@@ -211,7 +211,7 @@ function isPrimaryMutableMemory(memory: Memory): boolean {
     );
 }
 
-function inactiveMemoryError(id: number, action: "updating" | "merging"): string {
+function inactiveMemoryError(id: number, action: "updating" | "merging" | "archiving"): string {
     return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
 
@@ -600,6 +600,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         !memoryBelongsToProject(memory, projectPath)
                     ) {
                         return `Error: Memory with ID ${memoryId} was not found.`;
+                    }
+                    if (toolContext.agent !== DREAMER_AGENT && !isPrimaryMutableMemory(memory)) {
+                        // Mirror update/merge: once the primary agent archived or
+                        // superseded this memory, re-archiving it should return the
+                        // same friendly inactive-memory error instead of mutating it.
+                        return inactiveMemoryError(memoryId, "archiving");
                     }
                     targets.push({
                         memoryId,

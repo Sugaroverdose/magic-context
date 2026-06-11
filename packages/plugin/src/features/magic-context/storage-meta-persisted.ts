@@ -626,6 +626,33 @@ export function resetLastNudgeCycle(db: Database, sessionId: string): void {
     })();
 }
 
+/**
+ * Clear the persisted Channel-1 cadence/band state when a fresh baseline sees
+ * that the reclaimable tail already shrank below the old watermark.
+ *
+ * Why this exists: historian publication, emergency eviction, or pending-op
+ * replay can shrink the tail WITHOUT a `ctx_reduce` tool call. The old nudge then
+ * referred to a pile that no longer exists, so a regrowth must start a new
+ * gentle→firm→urgent cycle instead of inheriting a stale persisted band.
+ */
+export function resetLastNudgeCycleIfTailShrank(
+    db: Database,
+    sessionId: string,
+    measuredUndropped: number,
+): boolean {
+    let changed = false;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET last_nudge_undropped = 0, last_nudge_level = '' WHERE session_id = ? AND last_nudge_undropped > ?",
+            )
+            .run(sessionId, Math.max(0, Math.round(measuredUndropped)));
+        changed = (result.changes ?? 0) > 0;
+    })();
+    return changed;
+}
+
 // ---- Channel 2 (synthetic-user-message ceiling) one-shot lease/outbox ----
 // State machine stored as a single string in `channel2_nudge_state`:
 //   ''         — no intent (initial)

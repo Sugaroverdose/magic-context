@@ -25,6 +25,7 @@ import {
     clearPersistedReasoningWatermark,
     getOverflowState,
     loadProtectedTailMeta,
+    resetLastNudgeCycleIfTailShrank,
     resetProtectedTailNoEligibleHead,
     setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -1811,6 +1812,11 @@ export function createTransform(deps: TransformDeps) {
                     0,
                     executeThresholdTokens - contextUsage.inputTokens + liveTailTokens,
                 );
+                // If the measured tail already shrank below the last persisted
+                // watermark before this tool turn (historian publish, emergency
+                // drop, pending-op replay), the old band referred to a pile that
+                // no longer exists. Clear it now so regrowth starts a fresh cycle.
+                resetLastNudgeCycleIfTailShrank(db, sessionId, tailToolTokens);
                 deps.channel1StateBySession.set(sessionId, {
                     tailToolTokens,
                     historyBudgetTokens: historyBudgetTokens ?? 0,

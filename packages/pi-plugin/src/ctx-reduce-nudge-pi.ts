@@ -40,9 +40,31 @@ import {
 	tailToolTokensFromStrings,
 	toolOutputTokens,
 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
 export type { Channel1State };
+
+function sealDeliveredAfterUnconfirmedSend(
+	db: Database,
+	sessionId: string,
+): "already-delivered" | "sealed" | "stuck-claimed" {
+	try {
+		if (getChannel2NudgeState(db, sessionId) === "delivered") {
+			return "already-delivered";
+		}
+	} catch {
+		// Best-effort probe only — if the read fails, still try to seal the cap.
+	}
+
+	try {
+		setChannel2NudgeState(db, sessionId, "delivered");
+		return "sealed";
+	} catch {
+		// Preserve the stale claim so the shared TTL heal can recover it later.
+		return "stuck-claimed";
+	}
+}
 
 // Per-session Channel 1 metric baseline. Written at the end of each pipeline
 // pass (post-drop), read in the `tool_result` handler. Primary-only: subagents
@@ -322,8 +344,22 @@ export function maybeDeliverChannel2Pi(
 		pi.sendUserMessage(buildChannel2Reminder(undropped), {
 			deliverAs,
 		});
-	} catch {
-		casChannel2NudgeState(db, sessionId, "claimed", "pending");
+	} catch (error) {
+		try {
+			casChannel2NudgeState(db, sessionId, "claimed", "pending");
+		} catch (revertError) {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge delivery failed; pending restore was busy so the stale claim will heal later:",
+				{ deliveryError: error, revertError },
+			);
+			return false;
+		}
+		sessionLog(
+			sessionId,
+			"channel2 ceiling nudge delivery failed (will retry):",
+			error,
+		);
 		return false;
 	}
 
@@ -334,22 +370,50 @@ export function maybeDeliverChannel2Pi(
 			"claimed",
 			"delivered",
 		);
-		if (confirmed) return true;
-		try {
-			// The nudge has already been handed to Pi; seal the cap if another
-			// process rewound the claim before our authoritative confirm.
-			setChannel2NudgeState(db, sessionId, "delivered");
-		} catch {
-			// Best-effort; never re-arm after send.
+		if (confirmed) {
+			sessionLog(sessionId, "channel2 ceiling nudge delivered");
+			return true;
+		}
+
+		const outcome = sealDeliveredAfterUnconfirmedSend(db, sessionId);
+		if (outcome === "already-delivered") {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge duplicate window: our send returned after a sibling reclaimed the stale lease and already delivered",
+			);
+		} else if (outcome === "sealed") {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge sent but claim confirmation was lost; sealed delivered without an authoritative confirm",
+			);
+		} else {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge sent but claim confirmation was lost; lease stayed claimed and will heal later",
+			);
 		}
 		return false;
-	} catch {
+	} catch (error) {
 		// The nudge has already been handed to Pi; never re-arm on a post-send
 		// confirm failure, or a transient DB error can duplicate the one-shot cap.
-		try {
-			setChannel2NudgeState(db, sessionId, "delivered");
-		} catch {
-			// Best-effort; never re-arm after send.
+		const outcome = sealDeliveredAfterUnconfirmedSend(db, sessionId);
+		if (outcome === "already-delivered") {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge duplicate window: our send returned after a sibling reclaimed the stale lease and already delivered",
+			);
+		} else if (outcome === "sealed") {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge sent but confirm failed:",
+				error,
+			);
+		} else {
+			sessionLog(
+				sessionId,
+				"channel2 ceiling nudge sent but confirm failed; lease stayed claimed and will heal later:",
+				error,
+			);
 		}
 		return false;
 	}

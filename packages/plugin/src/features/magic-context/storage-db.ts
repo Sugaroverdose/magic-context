@@ -241,12 +241,16 @@ export function runSqliteOptimize(db: Database): void {
 }
 
 export function initializeDatabase(db: Database): void {
+    // Install the busy timeout BEFORE any file-level PRAGMAs like WAL. Two
+    // processes can cold-open the same DB at once (real OpenCode/Pi startup, or
+    // the subprocess lease tests); without the timeout this connection can throw
+    // SQLITE_BUSY immediately while the sibling is switching journal mode.
+    db.exec("PRAGMA busy_timeout=5000");
     // SQLite per-connection PRAGMAs. foreign_keys MUST run before any reads
     // or writes: it defaults to OFF, which silently breaks every ON DELETE
     // CASCADE / SET NULL declared in the schema below and in migrations.
     db.exec("PRAGMA foreign_keys=ON");
     db.exec("PRAGMA journal_mode=WAL");
-    db.exec("PRAGMA busy_timeout=5000");
     applySqliteTuningPragmas(db);
     db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
@@ -1250,6 +1254,11 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         if (!persistenceByDatabase.has(existing)) {
             persistenceByDatabase.set(existing, true);
         }
+        // Re-run the TTL-scoped lease heal on cache hits too. Long-lived
+        // processes keep this handle for hours, and a revert/confirm DB lock can
+        // leave a stale `claimed` lease behind until some later openDatabase()
+        // call. The heal is one idempotent UPDATE gated by claimed_at age.
+        healWedgedChannel2Claims(existing);
         return existing;
     }
 
@@ -1277,9 +1286,10 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
                 log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
             }
         }
-        // Recover any Channel-2 ceiling-nudge lease left at 'claimed' by a crash
-        // mid-delivery (see healWedgedChannel2Claims). Once per boot from the
-        // fresh-open path; the cached-handle early-return above skips it.
+        // Recover any Channel-2 ceiling-nudge lease left at `claimed` by a crash
+        // mid-delivery (see healWedgedChannel2Claims). Fresh opens and later
+        // cached-handle reuses both run this TTL-scoped heal so long-lived
+        // processes eventually unwind stuck stale claims without a restart.
         healWedgedChannel2Claims(db);
         // Tool-owner backfill (plan v3.3.1, Layer B). Runs once per
         // boot to populate tool_owner_message_id on legacy tool tags.
