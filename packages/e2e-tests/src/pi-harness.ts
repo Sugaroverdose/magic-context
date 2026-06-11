@@ -73,6 +73,33 @@ export class PiTestHarness {
     return new PiTestHarness(mock, rpc);
   }
 
+  /**
+   * Generate ~`tokens` tokens of varied prose ballast. Mirror of
+   * TestHarness.ballast (see harness.ts): the v3 protected-tail boundary
+   * measures TRUE-RAW content, not mock usage numbers, so pressure-driving
+   * turns must carry real content mass or the boundary resolves no eligible
+   * head and the historian (correctly) never starts.
+   */
+  ballast(tokens: number): string {
+    const words = [
+      "boundary", "historian", "compartment", "schedule", "pressure",
+      "tokens", "window", "publish", "transform", "session", "marker",
+      "budget", "eligible", "protected", "ordinal", "snapshot", "replay",
+      "decision", "threshold", "baseline", "measure", "archive", "deliver",
+    ];
+    const target = Math.max(0, Math.round(tokens * 4)); // ~4 chars/token
+    const parts: string[] = [];
+    let length = 0;
+    let i = 0;
+    while (length < target) {
+      const w = words[i % words.length];
+      parts.push(`${w}${i % 17 === 0 ? "." : ""}`);
+      length += w.length + 1;
+      i += 1;
+    }
+    return parts.join(" ");
+  }
+
   async sendPrompt(
     text: string,
     options: { timeoutMs?: number; continueSession?: boolean; images?: unknown[] } = {},

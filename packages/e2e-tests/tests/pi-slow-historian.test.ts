@@ -63,7 +63,7 @@ describe("pi slow historian vs fast main", () => {
 
             for (let i = 1; i <= 10; i++) {
                 await h.sendPrompt(
-                    `turn ${i}: meaningful pi prompt carrying durable signal about build step ${i}.`,
+                    `turn ${i}: meaningful pi prompt carrying durable signal about build step ${i}. ${h.ballast(3_000)}`,
                 );
             }
 

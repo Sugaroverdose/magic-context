@@ -166,7 +166,7 @@ describe("pi cache invariants — m[0]/m[1] taxonomy", () => {
                     // Phase 2 — build an eligible tail, then trigger + run historian.
                     for (let i = 4; i <= 11; i++) {
                         h.mock.setDefault({ text: `pi B9 r${i}`, usage: LO });
-                        await h.sendPrompt(`pi B9 turn ${i}: durable content for compartment chunk ${i}.`, {
+                        await h.sendPrompt(`pi B9 turn ${i}: durable content for compartment chunk ${i}. ${h.ballast(3_000)}`, {
                             timeoutMs: 90_000,
                             continueSession: true,
                         });

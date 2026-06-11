@@ -103,7 +103,7 @@ describe("pi historian success path", () => {
             });
 
             for (let i = 1; i <= 10; i++) {
-                await h.sendPrompt(`turn ${i}: meaningful pi prompt carrying durable signal ${i}.`);
+                await h.sendPrompt(`turn ${i}: meaningful pi prompt carrying durable signal ${i}. ${h.ballast(3_000)}`);
             }
 
             h.mock.setDefault({

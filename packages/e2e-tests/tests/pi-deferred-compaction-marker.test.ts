@@ -207,7 +207,7 @@ describe("pi compaction marker", () => {
 
             let sessionId: string | null = null;
             for (let i = 1; i <= 10; i++) {
-                const turn = await h.sendPrompt(`pi marker warmup turn ${i}: durable context for historian`, {
+                const turn = await h.sendPrompt(`pi marker warmup turn ${i}: durable context for historian ${h.ballast(3_000)}`, {
                     timeoutMs: 60_000,
                 });
                 sessionId = turn.sessionId;

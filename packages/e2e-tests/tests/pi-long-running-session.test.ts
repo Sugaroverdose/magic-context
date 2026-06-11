@@ -290,7 +290,7 @@ describe("long-running Pi Magic Context session", () => {
 
             // Phase 1: Warm-up turns 1-3 stay below threshold; the cached prefix is byte-identical.
             for (let i = 1; i <= 3; i += 1) {
-                await send(`turn ${i}: Pi warm-up cache-stability probe`, `pi phase 1 assistant ${i}`);
+                await send(`turn ${i}: Pi warm-up cache-stability probe ${h.ballast(2_500)}`, `pi phase 1 assistant ${i}`);
             }
             expect(sessionId).not.toBe("");
             const warmup = mainRequests();
@@ -307,7 +307,11 @@ describe("long-running Pi Magic Context session", () => {
             expect(beforeExecutePressure).toBeLessThan(20);
             expect(afterExecutePressure).toBeGreaterThanOrEqual(20);
             await send("turn 5: Pi execute pass should run heuristic cleanup", "pi phase 2 execute cleanup");
-            await h.waitFor(() => h.countDroppedTags(sessionId) > 0, { label: "Pi heuristic cleanup drops tags" });
+            // No routine drops anymore: need-blind age-drops were removed with
+            // the tiered emergency-drop redesign (mirrors the OpenCode
+            // long-running test). The invariant kept is byte-identical cache
+            // recovery on the following defer pass; need-driven drops (≥85%
+            // tiered, historian queue-drops) are covered elsewhere.
             await send("turn 6: Pi defer after first execute should recover cache", "pi phase 2 cache recovery");
             const phase2Tail = mainRequests().slice(-2);
             expect(serialize(phase2Tail[1]!.body.messages?.[0])).toBe(serialize(phase2Tail[0]!.body.messages?.[0]));
