@@ -39,7 +39,8 @@
  *   - The NULL guard makes UPDATE idempotent: re-running against an
  *     already-backfilled row matches zero rows and moves on.
  *   - The state table makes session bookkeeping idempotent: a
- *     completed session is never re-processed.
+ *     completed session is never re-processed; a session with unresolved
+ *     NULL-owner rows stays pending for later lazy adoption/retry.
  */
 
 import { existsSync } from "node:fs";
@@ -272,6 +273,14 @@ function markSessionCompleted(db: Database, sessionId: string, now: number): voi
     ).run(now, sessionId);
 }
 
+function markSessionPendingRetry(db: Database, sessionId: string): void {
+    db.prepare(
+        `UPDATE tool_owner_backfill_state
+         SET status = 'pending', completed_at = NULL, lease_expires_at = NULL, last_error = NULL
+         WHERE session_id = ?`,
+    ).run(sessionId);
+}
+
 function markSessionSkipped(db: Database, sessionId: string, now: number, reason: string): void {
     db.prepare(
         `INSERT INTO tool_owner_backfill_state(session_id, status, completed_at, last_error)
@@ -429,12 +438,23 @@ function applyOwnersForSession(
          SET tool_owner_message_id = ?
          WHERE id = ? AND tool_owner_message_id IS NULL`,
     );
+    const existingOwnerStmt = db.prepare(
+        `SELECT 1 AS hit FROM tags
+         WHERE session_id = ? AND message_id = ? AND type = 'tool'
+           AND tool_owner_message_id = ?
+         LIMIT 1`,
+    );
 
     let rowsUpdated = 0;
     db.transaction(() => {
         for (const [callId, ownerId] of ownersByCallId) {
             const orphan = findOrphanStmt.get(sessionId, callId) as { id: number } | undefined;
             if (!orphan) continue;
+            // Legacy call-id collisions can leave several NULL rows for the same
+            // callId. Once one row has claimed this owner, updating another would
+            // violate the partial UNIQUE index; leave the ghost NULL so runtime
+            // lazy adoption can attach it to the real observed owner later.
+            if (existingOwnerStmt.get(sessionId, callId, ownerId)) continue;
             const result = updateRowStmt.run(ownerId, orphan.id);
             rowsUpdated += result.changes ?? 0;
         }
@@ -478,6 +498,13 @@ function backfillToolOwnersInChunks(db: Database, result: BackfillResult): void 
                 // forever; lazy adoption handles them at runtime.
                 markSessionSkipped(db, sessionId, Date.now(), "no_oc_matches");
                 result.sessionsSkippedNoMatches += 1;
+            } else if (rowsLeftNull > 0) {
+                // Completion is a promise that the stored-token fast path has no
+                // legacy NULL-owner tool rows left to strand. If collision ghosts
+                // remain, keep the session retryable; later runtime lazy adoption
+                // or a future boot can finish it without treating partial totals
+                // as permanently settled.
+                markSessionPendingRetry(db, sessionId);
             } else {
                 markSessionCompleted(db, sessionId, Date.now());
                 result.sessionsCompleted += 1;

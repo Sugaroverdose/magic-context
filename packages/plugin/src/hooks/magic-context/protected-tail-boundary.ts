@@ -643,11 +643,18 @@ export function validateBoundarySnapshot(args: {
         };
     }
     const messages = readRawSessionMessages(snapshot.sessionId);
-    if (snapshot.rawMessageCountAtTrigger > messages.length) {
+    // Readers preserve ordinal slots for malformed rows by skipping the element
+    // but keeping later message ordinals absolute. Compare against the same
+    // gap-preserving measure the resolver used, not the compacted array length.
+    const currentRawMessageCount = messages.reduce(
+        (max, message) => Math.max(max, message.ordinal),
+        messages.length,
+    );
+    if (snapshot.rawMessageCountAtTrigger > currentRawMessageCount) {
         return { ok: false, reason: "stale_snapshot", detail: "raw message count shrank" };
     }
-    const idAt = (ordinal: number): string | null =>
-        messages.find((message) => message.ordinal === ordinal)?.id ?? null;
+    const idsByOrdinal = new Map(messages.map((message) => [message.ordinal, message.id]));
+    const idAt = (ordinal: number): string | null => idsByOrdinal.get(ordinal) ?? null;
     const checks: Array<[number, string | null, string]> = [
         [snapshot.offset, snapshot.offsetMessageId, "offset"],
         [snapshot.rawMessageCountAtTrigger, snapshot.rawLastMessageIdAtTrigger, "last"],

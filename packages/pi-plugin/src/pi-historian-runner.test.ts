@@ -12,9 +12,12 @@ import {
 	getOverflowState,
 	getPendingPiCompactionMarkerState,
 	getPersistedNoteNudge,
+	loadProtectedTailMeta,
 	recordOverflowDetected,
+	reserveProtectedTailDrainTokens,
 } from "@magic-context/core/features/magic-context/storage";
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
+import type { ProtectedTailBoundarySnapshot } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import {
@@ -82,6 +85,40 @@ function successXmlWithUserObservation(observation: string) {
 	return `${successXml()}\n<user_observations>\n* ${observation}\n</user_observations>`;
 }
 
+function makeBoundarySnapshot(
+	overrides: Partial<ProtectedTailBoundarySnapshot> = {},
+): ProtectedTailBoundarySnapshot {
+	return {
+		sessionId: "ses-historian",
+		mode: "pi-trigger",
+		offset: 1,
+		offsetMessageId: "m1",
+		protectedTailStart: 6,
+		protectedTailStartMessageId: "m6",
+		eligibleEndOrdinal: 6,
+		eligibleEndMessageId: "m5",
+		rawMessageCountAtTrigger: 12,
+		rawLastMessageIdAtTrigger: "m12",
+		N: 1000,
+		usagePercentage: 80,
+		usageInputTokens: 8000,
+		usageSource: "live",
+		contextLimit: 10_000,
+		executeThresholdPercentage: 65,
+		triggerBudget: 1000,
+		priorBoundaryOrdinal: 6,
+		migrationFloorActive: false,
+		providerShapeVersion: "pi-folded-v1",
+		cacheNamespace: "test:pi-historian",
+		createdAt: 1,
+		rawRangeFingerprint: "",
+		trueRawEligibleTokens: 1000,
+		oversizeAtomicUnit: false,
+		boundaryReason: "test",
+		...overrides,
+	};
+}
+
 function runnerReturning(outputs: string[]): SubagentRunner {
 	const run = mock(async () => {
 		const text = outputs.shift() ?? "";
@@ -99,16 +136,20 @@ async function runHistorianWith(args: {
 	onPublished?: () => void;
 	appendCompaction?: Parameters<typeof runPiHistorian>[0]["appendCompaction"];
 	readBranchEntries?: () => unknown[];
+	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	providerMessages?: ReturnType<typeof rawMessages>;
+	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
 }) {
 	const db = createTestDb();
 	const runner = runnerReturning([...args.outputs]);
 	const holderId = "test-holder";
 	expect(acquireCompartmentLease(db, "ses-historian", holderId)).not.toBeNull();
+	args.beforeRun?.(db);
 	await runPiHistorian({
 		db,
 		sessionId: "ses-historian",
 		directory: process.cwd(),
-		provider: { readMessages: () => rawMessages() },
+		provider: { readMessages: () => args.providerMessages ?? rawMessages() },
 		runner,
 		historianModel: "test/model",
 		historianChunkTokens: 20_000,
@@ -119,6 +160,7 @@ async function runHistorianWith(args: {
 		onPublished: args.onPublished,
 		appendCompaction: args.appendCompaction,
 		readBranchEntries: args.readBranchEntries,
+		boundarySnapshot: args.boundarySnapshot,
 		compartmentLeaseHolderId: holderId,
 	});
 	return { db, runner };
@@ -189,6 +231,66 @@ describe("runPiHistorian", () => {
 			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
 				1,
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("skips when the protected-tail drain quota is exhausted", async () => {
+		const boundary = makeBoundarySnapshot();
+		const usable = Math.round(
+			(boundary.contextLimit * boundary.executeThresholdPercentage) / 100,
+		);
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: boundary,
+			beforeRun: (db) => {
+				for (let i = 0; i < 3; i++) {
+					const reservation = reserveProtectedTailDrainTokens({
+						db,
+						sessionId: "ses-historian",
+						runId: `pre-${i}`,
+						trueRawTokens: 3000,
+						usagePercentage: boundary.usagePercentage,
+						usable,
+						perRunCap: 3000,
+					});
+					expect(reservation.ok).toBe(true);
+				}
+			},
+		});
+		try {
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(
+				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
+			).toBe(9000);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("rolls back reserved drain tokens when the Pi chunk is empty", async () => {
+		const emptyMessages = rawMessages(4).map((message) => ({
+			...message,
+			parts: [],
+		}));
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			providerMessages: emptyMessages,
+			boundarySnapshot: makeBoundarySnapshot({
+				protectedTailStart: 5,
+				protectedTailStartMessageId: null,
+				eligibleEndOrdinal: 5,
+				eligibleEndMessageId: "m4",
+				rawMessageCountAtTrigger: 4,
+				rawLastMessageIdAtTrigger: "m4",
+			}),
+		});
+		try {
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(
+				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
+			).toBe(0);
 		} finally {
 			closeQuietly(db);
 		}

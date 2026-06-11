@@ -34,6 +34,7 @@ import {
     getActiveCompartmentRun,
     registerActiveCompartmentRun,
     runCompartmentAgent,
+    startCompartmentAgent,
 } from "./compartment-runner";
 import { tagMessages } from "./tag-messages";
 
@@ -918,6 +919,31 @@ function _getHistorianDumpContents(sessionId: string): string[] {
 }
 
 describe("runCompartmentAgent", () => {
+    it("clears compartment-in-progress when another process holds the lease", () => {
+        useTempDataHome("compartment-runner-lease-denied-");
+        const db = openDatabase();
+        const holderId = "external-holder";
+        expect(acquireCompartmentLease(db, "ses-lease-denied", holderId)).not.toBeNull();
+        updateSessionMeta(db, "ses-lease-denied", { compartmentInProgress: true });
+
+        try {
+            startCompartmentAgent({
+                client: {} as PluginContext["client"],
+                db,
+                sessionId: "ses-lease-denied",
+                historianChunkTokens: 10_000,
+                directory: "/tmp",
+            });
+
+            expect(getActiveCompartmentRun("ses-lease-denied")).toBeUndefined();
+            expect(getOrCreateSessionMeta(db, "ses-lease-denied").compartmentInProgress).toBe(
+                false,
+            );
+        } finally {
+            releaseCompartmentLease(db, "ses-lease-denied", holderId);
+        }
+    });
+
     it("clears compartment-in-progress after successful compartment generation", async () => {
         useTempDataHome("compartment-runner-reset-");
         createOpenCodeDb("ses-1", [

@@ -113,6 +113,10 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
             deps.sessionId,
             "compartment agent skipped: compartment lease held by another process",
         );
+        // The DB lease is the cross-process authority. If this process set the
+        // start-intent flag but did not win the lease, no local run will clear it;
+        // release the intent so later passes can retry instead of starving.
+        updateSessionMeta(deps.db, deps.sessionId, { compartmentInProgress: false });
         return;
     }
     const renewal = startLeaseRenewal(deps, holderId);

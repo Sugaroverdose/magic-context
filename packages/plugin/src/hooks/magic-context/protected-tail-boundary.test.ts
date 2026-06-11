@@ -76,7 +76,7 @@ function useBoundaryTempDataHome(prefix: string): void {
 
 function createBoundaryOpenCodeDb(
     sessionId: string,
-    messages: Array<{ id: string; role: string; parts: unknown[] }>,
+    messages: Array<{ id: string; role: string; parts: unknown[]; rawData?: string }>,
 ): Database {
     const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -98,7 +98,8 @@ function createBoundaryOpenCodeDb(
             sessionId,
             timestamp,
             timestamp,
-            JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
+            message.rawData ??
+                JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
         );
         message.parts.forEach((part) => {
             insertPart.run(message.id, sessionId, timestamp, timestamp, JSON.stringify(part));
@@ -177,6 +178,34 @@ describe("protected-tail boundary integration", () => {
                 usageSource: "live",
             });
             expect(snapshot.offset).toBe(1);
+            expect(validateBoundarySnapshot({ db, snapshot })).toEqual({ ok: true });
+        } finally {
+            closeQuietly(db);
+            closeQuietly(opencodeDb);
+        }
+    });
+    it("validates fresh snapshots when malformed rows create ordinal gaps", () => {
+        useBoundaryTempDataHome("protected-tail-ordinal-gap-");
+        const sessionId = "ses-ordinal-gap";
+        const opencodeDb = createBoundaryOpenCodeDb(sessionId, [
+            { id: "m1", role: "user", parts: [{ type: "text", text: "eligible".repeat(800) }] },
+            { id: "bad-json", role: "assistant", rawData: "{not json", parts: [] },
+            { id: "m3", role: "assistant", parts: [{ type: "text", text: "reply".repeat(800) }] },
+            { id: "m4", role: "user", parts: [{ type: "text", text: "protected".repeat(2000) }] },
+        ]);
+        const db = createContextDb();
+        try {
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 12_000,
+                executeThresholdPercentage: 65,
+                usage: { percentage: 95, inputTokens: 7_400 },
+                usageSource: "live",
+            });
+
+            expect(snapshot.rawMessageCountAtTrigger).toBe(4);
             expect(validateBoundarySnapshot({ db, snapshot })).toEqual({ ok: true });
         } finally {
             closeQuietly(db);

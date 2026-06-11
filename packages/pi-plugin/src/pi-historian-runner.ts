@@ -37,6 +37,7 @@
  * see Pi runs in the same `[magic-context][ses_xxx]` format.
  */
 
+import * as crypto from "node:crypto";
 import { embedAndStoreCompartments } from "@magic-context/core/features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
@@ -53,6 +54,8 @@ import {
 	getOverflowState,
 	incrementHistorianFailure,
 	recordProtectedTailPublicationFloor,
+	reserveProtectedTailDrainTokens,
+	rollbackProtectedTailDrainReservation,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -84,6 +87,7 @@ import {
 	createDefaultBoundarySnapshotForTests,
 	type ProtectedTailBoundarySnapshot,
 	recordHighPressureNoEligibleHead,
+	selectPerRunCap,
 	validateBoundarySnapshot,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import {
@@ -249,6 +253,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		runKind: "incremental",
 		status: "failed",
 	};
+	let completedSuccessfully = false;
+	let retainDrainReservationForRetryThrottle = false;
+	let drainReservation: ReturnType<
+		typeof reserveProtectedTailDrainTokens
+	>["reservation"] = null;
+	const rollbackDrainReservation = (): void => {
+		if (!drainReservation) return;
+		rollbackProtectedTailDrainReservation(db, drainReservation);
+		drainReservation = null;
+	};
 
 	try {
 		// All session-data reads in the historian path go through the shared
@@ -330,6 +344,35 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				return;
 			}
 
+			const perRunCap = selectPerRunCap(boundarySnapshot);
+			const usable = Math.max(
+				1,
+				Math.round(
+					(boundarySnapshot.contextLimit *
+						boundarySnapshot.executeThresholdPercentage) /
+						100,
+				),
+			);
+			const reserve = reserveProtectedTailDrainTokens({
+				db,
+				sessionId,
+				runId: crypto.randomUUID(),
+				trueRawTokens: boundarySnapshot.trueRawEligibleTokens,
+				usagePercentage: boundarySnapshot.usagePercentage,
+				usable,
+				perRunCap,
+			});
+			if (!reserve.ok) {
+				sessionLog(
+					sessionId,
+					`historian rate-limit skip: ${reserve.skippedReason ?? "quota exhausted"}`,
+				);
+				telemetry.status = "noop";
+				telemetry.failureReason = "protected-tail drain quota exhausted";
+				return;
+			}
+			drainReservation = reserve.reservation;
+
 			const chunk = readSessionChunk(
 				sessionId,
 				historianChunkTokens,
@@ -346,6 +389,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				} else {
 					recordHighPressureNoEligibleHead(db, boundarySnapshot);
 				}
+				telemetry.status = "noop";
+				telemetry.failureReason = "chunk empty after filtering";
+				rollbackDrainReservation();
 				return;
 			}
 
@@ -365,6 +411,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						buildHistorianFailureNotice(failCount, chunkCoverageError),
 					);
 				}
+				rollbackDrainReservation();
 				return;
 			}
 
@@ -489,6 +536,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					}
 				};
 			};
+
+			retainDrainReservationForRetryThrottle = true;
 
 			// First pass.
 			const firstResult = await runner.run({
@@ -630,6 +679,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 				return;
 			}
+			retainDrainReservationForRetryThrottle = false;
 
 			// Optional two-pass editor refinement. Mirrors OpenCode's
 			// `runEditorPassOrFallback` in `compartment-runner-historian.ts`.
@@ -729,6 +779,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					const failCount = incrementHistorianFailure(db, sessionId, errorMsg);
 					await notify(buildHistorianFailureNotice(failCount, errorMsg));
 				}
+				rollbackDrainReservation();
 				return;
 			}
 
@@ -766,6 +817,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					sessionId,
 					"historian publish skipped: missing compartment lease holder",
 				);
+				rollbackDrainReservation();
 				return;
 			}
 			let published = false;
@@ -777,6 +829,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						sessionId,
 						"historian publish skipped: compartment lease no longer held",
 					);
+					rollbackDrainReservation();
 					return;
 				}
 				appendCompartments(db, sessionId, newCompartments);
@@ -948,6 +1001,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// Mirrors OpenCode's signal-last ordering in
 			// compartment-runner-incremental.ts.
 			onPublished?.();
+			completedSuccessfully = true;
 
 			sessionLog(
 				sessionId,
@@ -994,6 +1048,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			await notify(buildHistorianFailureNotice(failCount, desc.brief));
 		}
 	} finally {
+		if (!completedSuccessfully && !retainDrainReservationForRetryThrottle) {
+			rollbackDrainReservation();
+		}
 		updateSessionMeta(db, sessionId, { compartmentInProgress: false });
 		// Record one historian_runs row for this attempt (every exit path).
 		try {

@@ -122,7 +122,9 @@ describe("Pi protected-tail true-raw parity", () => {
 	});
 });
 
+import type { ProtectedTailBoundarySnapshot } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import { computeRawRangeFingerprint } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
+import { selectPiHistorianRunBoundarySnapshot } from "./context-handler";
 import { convertEntriesToRawMessages } from "./read-session-pi";
 
 test("protected-tail fingerprints are content-stable: metadata-only drift matches, content drift does not", () => {
@@ -178,4 +180,54 @@ test("protected-tail fingerprints are content-stable: metadata-only drift matche
 			2,
 		),
 	);
+});
+
+test("Pi historian runner uses the trigger boundary snapshot when the trigger re-resolves", () => {
+	const resolved = {
+		sessionId: "ses-pi-pre-trigger",
+		mode: "pi-trigger",
+		offset: 1,
+		offsetMessageId: "m1",
+		protectedTailStart: 40,
+		protectedTailStartMessageId: "m40",
+		eligibleEndOrdinal: 40,
+		eligibleEndMessageId: "m39",
+		rawMessageCountAtTrigger: 50,
+		rawLastMessageIdAtTrigger: "m50",
+		N: 4000,
+		usagePercentage: 80,
+		usageInputTokens: 160_000,
+		usageSource: "live",
+		contextLimit: 200_000,
+		executeThresholdPercentage: 65,
+		triggerBudget: 10_000,
+		priorBoundaryOrdinal: 40,
+		migrationFloorActive: false,
+		providerShapeVersion: "pi-folded-v1",
+		cacheNamespace: "pi:ses-pi-pre-trigger",
+		createdAt: 1,
+		rawRangeFingerprint: "",
+		trueRawEligibleTokens: 20_000,
+		oversizeAtomicUnit: false,
+		boundaryReason: "primary",
+	} satisfies ProtectedTailBoundarySnapshot;
+	const triggerResolved = {
+		...resolved,
+		mode: "trigger",
+		protectedTailStart: 20,
+		emergencyTailScale: 0.5,
+		boundaryReason: "force_80_scaled",
+	} satisfies ProtectedTailBoundarySnapshot;
+
+	expect(
+		selectPiHistorianRunBoundarySnapshot({
+			resolvedBoundarySnapshot: resolved,
+			triggerBoundarySnapshot: triggerResolved,
+		}),
+	).toBe(triggerResolved);
+	expect(
+		selectPiHistorianRunBoundarySnapshot({
+			resolvedBoundarySnapshot: resolved,
+		}),
+	).toBe(resolved);
 });

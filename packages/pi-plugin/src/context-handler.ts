@@ -2399,6 +2399,16 @@ export function resolvePiHistorianTriggerInputs(args: {
 	};
 }
 
+export function selectPiHistorianRunBoundarySnapshot(args: {
+	resolvedBoundarySnapshot: ProtectedTailBoundarySnapshot;
+	triggerBoundarySnapshot?: ProtectedTailBoundarySnapshot;
+}): ProtectedTailBoundarySnapshot {
+	// The trigger may re-resolve under emergency pressure; the runner must
+	// consume the exact boundary the fire decision evaluated, falling back only
+	// for recovery paths that did not go through the trigger.
+	return args.triggerBoundarySnapshot ?? args.resolvedBoundarySnapshot;
+}
+
 export function resolveHistoryBudgetTokensForPi(args: {
 	historyBudgetPercentage: number | undefined;
 	usagePercentage: number;
@@ -2803,7 +2813,7 @@ function maybeFireHistorian(args: {
 		modelKey,
 		usageContextLimit,
 	});
-	const boundaryContextLimit = usageContextLimit ?? 128_000;
+	const boundaryContextLimit = triggerInputs.contextLimit;
 	const resolvePiBoundarySnapshot = (
 		emergencyTailScale?: 0.5 | 0.25,
 	): ProtectedTailBoundarySnapshot =>
@@ -2887,7 +2897,7 @@ function maybeFireHistorian(args: {
 			triggerInputs.clearReasoningAge,
 			triggerInputs.commitClusterTrigger,
 			args.activeTags,
-			usageContextLimit,
+			boundaryContextLimit,
 		);
 
 		if (!trigger.shouldFire) {
@@ -2916,7 +2926,10 @@ function maybeFireHistorian(args: {
 			historian,
 			provider,
 			unregister,
-			boundarySnapshot,
+			boundarySnapshot: selectPiHistorianRunBoundarySnapshot({
+				resolvedBoundarySnapshot: boundarySnapshot,
+				triggerBoundarySnapshot: trigger.boundarySnapshot,
+			}),
 			currentContextLimit: boundaryContextLimit,
 		});
 	} catch (err) {

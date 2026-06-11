@@ -249,10 +249,11 @@ describe("runToolOwnerBackfill", () => {
         closeQuietly(mc);
     });
 
-    test("collision: callID reused across two messages — both NULL rows get owner of oldest", () => {
+    test("collision: callID ghosts keep the session pending until NULL owners are gone", () => {
         // Real-world bug case: read:32 reused on three turns. We have
-        // three NULL-owner tag rows for the same callID; each should
-        // get the oldest assistant message id.
+        // three NULL-owner tag rows for the same callID; only one can
+        // claim the oldest assistant message without violating the partial
+        // UNIQUE index.
         const oc = buildOpencodeDb(
             [
                 { id: "msg-1", sessionId: "ses-1", role: "assistant", timeCreated: 1000 },
@@ -295,34 +296,20 @@ describe("runToolOwnerBackfill", () => {
         insertTag(mc, "ses-1", "read:32", "tool", 100, 3);
 
         const result = runToolOwnerBackfill(mc);
-        // All three rows get adopted to msg-1 (oldest). The partial
-        // UNIQUE only fires for non-NULL owners — but it would
-        // reject a second row trying to claim (ses-1, read:32, msg-1)
-        // if the rows already had owners. Here the SET is the same
-        // value, so SQLite considers each UPDATE separately and they
-        // all land on different rows (different `id` PK).
-        //
-        // WAIT — the partial UNIQUE on (session_id, message_id,
-        // tool_owner_message_id) rejects duplicates ONCE non-NULL
-        // owner is set. So the first UPDATE succeeds; the second
-        // and third UPDATE attempts (same composite triple) FAIL
-        // with UNIQUE constraint.
-        //
-        // What actually happens: applyOwnersForSession runs ONE
-        // UPDATE per callID (`tool_owner_message_id = ? WHERE
-        // session_id = ? AND message_id = ? AND ... IS NULL`), so
-        // SQLite tries to set ALL three rows to msg-1 in one
-        // statement — and the UNIQUE constraint stops the second
-        // and third row from accepting that owner.
-        //
-        // The expected behavior is: only the lowest-tag_number row
-        // adopts msg-1; the others stay NULL and lazy-adopt at
-        // runtime to the actually-current owner.
-        expect(result.rowsUpdated).toBeGreaterThanOrEqual(1);
-        // At least one row should now have msg-1 as owner.
+        expect(result.rowsUpdated).toBe(1);
+        expect(result.rowsLeftNull).toBe(2);
+        expect(result.sessionsCompleted).toBe(0);
+        expect(_getBackfillState(mc, "ses-1")?.status).toBe("pending");
+
         const tags = getTagsBySession(mc, "ses-1");
-        const withOwner = tags.filter((t) => t.toolOwnerMessageId === "msg-1");
-        expect(withOwner.length).toBeGreaterThanOrEqual(1);
+        expect(tags.filter((t) => t.toolOwnerMessageId === "msg-1")).toHaveLength(1);
+        expect(tags.filter((t) => t.toolOwnerMessageId === null)).toHaveLength(2);
+
+        const retry = runToolOwnerBackfill(mc);
+        expect(retry.sessionsProcessed).toBe(1);
+        expect(retry.sessionsCompleted).toBe(0);
+        expect(retry.sessionsErrored).toBe(0);
+        expect(_getBackfillState(mc, "ses-1")?.status).toBe("pending");
 
         closeQuietly(mc);
     });

@@ -347,7 +347,10 @@ own authoritative runtime source, then bounds it to a sane `[20k, 3M]` range
 
 Same effective behavior (authoritative per-harness limit, sane-bounded, overflow
 override); different source because each harness exposes the resolved window
-through a different API.
+through a different API. Pi resolves that window once per trigger evaluation and
+uses the same value for the trigger budget, boundary snapshot, and historian
+runner stale-snapshot check; when the trigger re-resolves a scaled boundary, the
+runner receives that trigger snapshot rather than the earlier probe snapshot.
 
 ---
 
