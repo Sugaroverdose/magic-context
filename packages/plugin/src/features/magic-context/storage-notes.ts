@@ -280,7 +280,12 @@ export function updateNote(
         sets.push("session_id = ?");
         params.push(updates.sessionId);
     }
-    if (updates.status !== undefined) {
+    const smartConditionChanged =
+        existing.type === "smart" &&
+        updates.surfaceCondition !== undefined &&
+        updates.surfaceCondition !== existing.surfaceCondition;
+
+    if (updates.status !== undefined && !smartConditionChanged) {
         sets.push("status = ?");
         params.push(updates.status);
     }
@@ -294,17 +299,28 @@ export function updateNote(
             sets.push("surface_condition = ?");
             params.push(updates.surfaceCondition);
         }
-        if (updates.lastCheckedAt !== undefined) {
-            sets.push("last_checked_at = ?");
-            params.push(updates.lastCheckedAt);
-        }
-        if (updates.readyAt !== undefined) {
-            sets.push("ready_at = ?");
-            params.push(updates.readyAt);
-        }
-        if (updates.readyReason !== undefined) {
-            sets.push("ready_reason = ?");
-            params.push(updates.readyReason);
+        if (smartConditionChanged) {
+            // A new trigger has not been evaluated yet; clear stale readiness so
+            // the note cannot keep surfacing under the previous condition.
+            sets.push(
+                "status = 'pending'",
+                "last_checked_at = NULL",
+                "ready_at = NULL",
+                "ready_reason = NULL",
+            );
+        } else {
+            if (updates.lastCheckedAt !== undefined) {
+                sets.push("last_checked_at = ?");
+                params.push(updates.lastCheckedAt);
+            }
+            if (updates.readyAt !== undefined) {
+                sets.push("ready_at = ?");
+                params.push(updates.readyAt);
+            }
+            if (updates.readyReason !== undefined) {
+                sets.push("ready_reason = ?");
+                params.push(updates.readyReason);
+            }
         }
     }
 

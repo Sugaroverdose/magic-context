@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { DREAMER_AGENT } from "../../agents/dreamer";
+import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
     getMemoriesByProject,
     getMemoryById,
@@ -298,11 +299,43 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, third.id)?.status).toBe("active");
         });
 
+        it("rejects a non-integer archive id without mutating", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Still active.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "archive", ids: [memory.id, memory.id + 0.5] },
+                toolContext(),
+            );
+
+            expect(result).toContain("integer memory ID");
+            expect(getMemoryById(db, memory.id)?.status).toBe("active");
+        });
+
+        it("rejects malformed archive ids without mutating", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "KNOWN_ISSUES",
+                content: "Malformed id should not archive this.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "archive", ids: [memory.id, memory.id + 0.5] },
+                toolContext(),
+            );
+
+            expect(result).toContain("integer memory ID");
+            expect(getMemoryById(db, memory.id)?.status).toBe("active");
+        });
+
         it("returns error when ID is missing", async () => {
             const result = await tools.ctx_memory.execute({ action: "archive" }, toolContext());
 
             expect(result).toContain("Error");
-            expect(result).toContain("'ids' must contain at least one memory ID");
+            expect(result).toContain("'ids' must contain at least one integer memory ID");
         });
 
         it("returns error when memory not found", async () => {
@@ -401,6 +434,50 @@ describe("createCtxMemoryTools", () => {
             expect(getMutationRows(db, projectIdentity, [memory.id])).toMatchObject([
                 { mutationType: "update", targetMemoryId: memory.id, newContent: "timeout=10s" },
             ]);
+        });
+
+        it("rejects malformed update ids without mutating", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "cache_ttl=5m",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id + 0.5],
+                    content: "cache_ttl=10m",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toContain("integer memory ID");
+            expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=5m");
+        });
+
+        it("rejects archived or superseded memories for primary-agent update", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "cache_ttl=5m",
+            });
+            db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(memory.id);
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [memory.id],
+                    content: "cache_ttl=10m",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(
+                `Error: Memory with ID ${memory.id} is archived or superseded; restore it before updating.`,
+            );
+            expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=5m");
+            expect(getMemoryById(db, memory.id)?.status).toBe("archived");
         });
 
         it("rolls back content updates when queueing the mutation fails", async () => {
@@ -542,6 +619,97 @@ describe("createCtxMemoryTools", () => {
             expect(getMutationRows(db, "/repo/other-project", [foreign.id])).toHaveLength(0);
         });
 
+        it("rejects archived or superseded memories for primary-agent merge", async () => {
+            const archived = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const active = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for test scripts",
+            });
+            db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(archived.id);
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [archived.id, active.id],
+                    content: "Use bun for scripts",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(result).toBe(
+                `Error: Memory with ID ${archived.id} is archived or superseded; restore it before merging.`,
+            );
+            expect(getMemoryById(db, archived.id)?.status).toBe("archived");
+            expect(getMemoryById(db, active.id)?.status).toBe("active");
+        });
+
+        it("keeps dreamer able to curate archived memories during merge", async () => {
+            const archived = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const active = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for test scripts",
+            });
+            db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(archived.id);
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [archived.id, active.id],
+                    content: "Use bun for scripts",
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain(`canonical memory [ID: ${archived.id}]`);
+            expect(getMemoryById(db, archived.id)?.status).toBe("active");
+            expect(getMemoryById(db, active.id)?.status).toBe("archived");
+        });
+
+        it("rejects malformed or duplicate merge ids", async () => {
+            const first = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for scripts",
+            });
+            const second = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Use bun for tests",
+            });
+
+            const malformed = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [first.id, second.id + 0.5],
+                    content: "Use bun for all scripts.",
+                },
+                toolContext("ses-primary", "general"),
+            );
+            const duplicate = await tools.ctx_memory.execute(
+                {
+                    action: "merge",
+                    ids: [first.id, first.id],
+                    content: "Use bun for scripts.",
+                },
+                toolContext("ses-primary", "general"),
+            );
+
+            expect(malformed).toContain("integer memory IDs");
+            expect(duplicate).toContain("distinct memory IDs");
+            expect(getMemoryById(db, first.id)?.status).toBe("active");
+            expect(getMemoryById(db, second.id)?.status).toBe("active");
+        });
+
         it("queues superseded rows under each affected project identity when merging across identities", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project-a",
@@ -636,6 +804,20 @@ describe("createCtxMemoryTools", () => {
     describe("#given restricted actions", () => {
         // Primary set = write/archive/update/merge. Only `list` is dreamer-only.
         const PRIMARY_ACTIONS = ["write", "archive", "update", "merge"] as const;
+
+        it("rejects sidekick ctx_memory calls even if the tool is exposed", async () => {
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "USER_DIRECTIVES",
+                    content: "Sidekick should not be able to write this.",
+                },
+                toolContext("ses-sidekick", SIDEKICK_AGENT),
+            );
+
+            expect(result).toBe("Error: ctx_memory is not available to the sidekick agent.");
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+        });
 
         it("keeps the dreamer-only `list` action in the schema so OpenCode can deliver it to execute", () => {
             const primaryTools = createCtxMemoryTools({

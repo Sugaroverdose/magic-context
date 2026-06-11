@@ -388,6 +388,40 @@ describe("magic-context storage", () => {
         closeQuietly(db);
     });
 
+    it("resets smart-note readiness when the surface condition changes", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        const smartNote = addNote(db, "smart", {
+            content: "Surface release checklist when CI stabilizes.",
+            projectPath: "git:test-project",
+            sessionId: "ses-smart-reset",
+            surfaceCondition: "When CI is green on main",
+        });
+        markNoteReady(db, smartNote.id, "CI is green on main");
+        expect(getSmartNotes(db, "git:test-project", "ready").map((note) => note.id)).toEqual([
+            smartNote.id,
+        ]);
+
+        //#when
+        const updated = updateNote(
+            db,
+            smartNote.id,
+            { surfaceCondition: "When the release tag is published" },
+            { sessionId: "ses-smart-reset", projectPath: "git:test-project" },
+        );
+
+        //#then
+        expect(updated?.status).toBe("pending");
+        expect(updated?.readyAt).toBeNull();
+        expect(updated?.readyReason).toBeNull();
+        expect(updated?.lastCheckedAt).toBeNull();
+        expect(getSmartNotes(db, "git:test-project", "ready")).toEqual([]);
+        expect(getPendingSmartNotes(db, "git:test-project").map((note) => note.id)).toEqual([
+            smartNote.id,
+        ]);
+        closeQuietly(db);
+    });
+
     it("escapes XML-sensitive compartment body content", () => {
         const block = buildCompartmentBlock(
             [

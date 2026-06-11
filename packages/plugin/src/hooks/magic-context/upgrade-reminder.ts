@@ -5,6 +5,7 @@ import {
 } from "../../features/magic-context/storage-meta-session";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import type { NotificationDeliveryDisposition } from "./send-session-notification";
 
 /**
  * E5 — Session upgrade reminder (v2).
@@ -125,7 +126,7 @@ export interface UpgradeReminderDeps {
         sessionId: string,
         text: string,
         params: Record<string, unknown>,
-    ) => Promise<void>;
+    ) => Promise<NotificationDeliveryDisposition>;
     /** Live notification params (model/variant/agent) for the active session. */
     getNotificationParams: (sessionId: string) => Record<string, unknown>;
     /** True when a TUI client is actively polling FOR THIS SESSION (decides
@@ -253,25 +254,36 @@ export async function maybeSendUpgradeReminder(
             sessionLog(sessionId, `upgrade-reminder: TUI dialog action enqueued (${kind})`);
         } else {
             // Non-TUI (Desktop/headless): no interactive buttons, so the persisted
-            // ignored message IS the one-shot delivery. Stamp on send so we don't
-            // re-post a duplicate every restart. (Resume re-fires via staging
-            // regardless of the stamp.) Skip the stamp for TRANSIENT delivery
-            // (Pi toast) — see deliveryPersists: stamping a toast that leaves no
-            // scrollback would permanently suppress after one missed toast.
-            if (durableStampActive && meta.upgradeRemindedAt === null) {
-                try {
-                    updateSessionMeta(deps.db, sessionId, { upgradeRemindedAt: Date.now() });
-                } catch {
-                    // best-effort — still avoid a same-process re-fire (guard set above)
-                }
-            }
-            await deps.sendIgnoredMessage(
+            // ignored message IS the one-shot delivery. Only stamp after the send
+            // reports an actual post; the title-safety guard can deliberately skip
+            // never-titled sessions, and leaving the stamp unset lets a later
+            // startup retry. Skip the stamp for TRANSIENT delivery (Pi toast) — see
+            // deliveryPersists: stamping a toast that leaves no scrollback would
+            // permanently suppress after one missed toast.
+            const delivery = await deps.sendIgnoredMessage(
                 deps.client,
                 sessionId,
                 resume ? buildResumeReminderText(resume) : UPGRADE_REMINDER_TEXT,
                 deps.getNotificationParams(sessionId),
             );
-            sessionLog(sessionId, `upgrade-reminder: ignored message delivered (${kind}, non-TUI)`);
+            if (delivery === "sent") {
+                if (durableStampActive && meta.upgradeRemindedAt === null) {
+                    try {
+                        updateSessionMeta(deps.db, sessionId, { upgradeRemindedAt: Date.now() });
+                    } catch {
+                        // best-effort — still avoid a same-process re-fire (guard set above)
+                    }
+                }
+                sessionLog(
+                    sessionId,
+                    `upgrade-reminder: ignored message delivered (${kind}, non-TUI)`,
+                );
+            } else {
+                sessionLog(
+                    sessionId,
+                    `upgrade-reminder: ignored message not delivered (${kind}, non-TUI, ${delivery})`,
+                );
+            }
         }
     } catch (error) {
         sessionLog(sessionId, `upgrade-reminder: delivery failed: ${String(error)}`);

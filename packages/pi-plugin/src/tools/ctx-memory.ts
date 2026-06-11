@@ -165,6 +165,20 @@ function formatMemoryList(memories: Memory[]): string {
 	].join("\n");
 }
 
+function isPrimaryMutableMemory(memory: Memory): boolean {
+	return (
+		(memory.status === "active" || memory.status === "permanent") &&
+		memory.supersededByMemoryId === null
+	);
+}
+
+function inactiveMemoryError(
+	id: number,
+	action: "updating" | "merging",
+): string {
+	return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
+}
+
 function queueEmbedding(args: {
 	deps: CtxMemoryToolDeps;
 	projectIdentity: string;
@@ -304,12 +318,14 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "update") {
-				const updateIds = params.ids?.filter((id): id is number =>
-					Number.isInteger(id),
-				);
-				if (!updateIds || updateIds.length !== 1) {
+				const updateIds = params.ids;
+				if (
+					!updateIds ||
+					updateIds.length !== 1 ||
+					!updateIds.every(Number.isInteger)
+				) {
 					return err(
-						"Error: 'ids' must contain exactly one memory ID when action is 'update'.",
+						"Error: 'ids' must contain exactly one integer memory ID when action is 'update'.",
 					);
 				}
 				const updateId = updateIds[0];
@@ -324,6 +340,9 @@ export function createCtxMemoryTool(
 					!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
 				) {
 					return err(`Error: Memory with ID ${updateId} was not found.`);
+				}
+				if (!dreamerAllowed && !isPrimaryMutableMemory(memory)) {
+					return err(inactiveMemoryError(updateId, "updating"));
 				}
 
 				const normalizedHash = computeNormalizedHash(content);
@@ -354,12 +373,15 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "merge") {
-				const ids = params.ids?.filter((id): id is number =>
-					Number.isInteger(id),
-				);
-				if (!ids || ids.length < 2) {
+				const ids = params.ids;
+				if (!ids || ids.length < 2 || !ids.every(Number.isInteger)) {
 					return err(
-						"Error: 'ids' must include at least two memory IDs when action is 'merge'.",
+						"Error: 'ids' must include at least two integer memory IDs when action is 'merge'.",
+					);
+				}
+				if (new Set(ids).size !== ids.length) {
+					return err(
+						"Error: 'ids' must include at least two distinct memory IDs when action is 'merge'.",
 					);
 				}
 
@@ -389,6 +411,12 @@ export function createCtxMemoryTool(
 					);
 					if (foreign) {
 						return err(`Error: Memory with ID ${foreign.id} was not found.`);
+					}
+					const inactive = sourceMemories.find(
+						(memory) => !isPrimaryMutableMemory(memory),
+					);
+					if (inactive) {
+						return err(inactiveMemoryError(inactive.id, "merging"));
 					}
 				}
 
@@ -551,12 +579,14 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "archive") {
-				const archiveIds = params.ids?.filter((id): id is number =>
-					Number.isInteger(id),
-				);
-				if (!archiveIds || archiveIds.length === 0) {
+				const archiveIds = params.ids;
+				if (
+					!archiveIds ||
+					archiveIds.length === 0 ||
+					!archiveIds.every(Number.isInteger)
+				) {
 					return err(
-						"Error: 'ids' must contain at least one memory ID when action is 'archive'.",
+						"Error: 'ids' must contain at least one integer memory ID when action is 'archive'.",
 					);
 				}
 				// Validate the whole batch BEFORE mutating so a typo'd id can't

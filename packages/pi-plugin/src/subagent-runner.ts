@@ -99,11 +99,9 @@ const SUBAGENT_ENTRY_PATH = resolveSubagentEntryPath();
 const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
 /**
- * Set of subagent agent ids that get the dreamer-only ctx_memory
- * `list` action. Mirrors OpenCode's `tool-registry.ts` allowedActions
- * split: only the dreamer agent gets `list`; everyone else (historian,
- * sidekick, compressor, ad-hoc commands) gets the primary set
- * (write/archive/update/merge).
+ * Set of subagent agent ids that get ctx_memory in the lean child extension.
+ * Sidekick is retrieval-only and uses ctx_search; only dreamer-equivalent
+ * agents need memory mutation/list capabilities.
  *
  * Membership uses the SAME agent strings the Pi callers actually pass
  * (see e.g. `dreamer/index.ts` passing `"magic-context-dreamer"`). If
@@ -884,8 +882,8 @@ export function buildArgs(
 	// `--no-extensions`. Verified at pi-coding-agent
 	// resource-loader.js:272-274: `--no-extensions` skips Pi's
 	// discovered-extensions scan but still loads explicit `--extension`
-	// paths, so we get tools (ctx_search, ctx_memory, ctx_note,
-	// ctx_expand) without recursion risk (the lean entry never registers
+	// paths, so sidekick gets ctx_search and dreamer gets ctx_search + ctx_memory
+	// without recursion risk (the lean entry never registers
 	// historian, dreamer, transform, or any other event handler that
 	// could spawn further subagents). When the bundle isn't present
 	// (e.g. running source from src/ without a build), skip the flag —
@@ -908,10 +906,9 @@ export function buildArgs(
 	if (shouldLoadSubagentExtension) {
 		args.push("--extension", SUBAGENT_ENTRY_PATH);
 
-		// Only the dreamer subagent gets the elevated ctx_memory action
-		// surface (update/merge/archive). Mirrors OpenCode's
-		// tool-registry.ts:114 allowedActions split. The flag is read
-		// inside the subagent extension via `pi.getFlag(...)`.
+		// Only dreamer subagents get ctx_memory in the child extension. Sidekick
+		// loads the same entry for ctx_search but must stay read-only. The flag is
+		// read inside the subagent extension via `pi.getFlag(...)`.
 		if (DREAMER_ACTION_AGENTS.has(options.agent)) {
 			args.push("--magic-context-dreamer-actions");
 		}

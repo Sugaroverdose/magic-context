@@ -80,6 +80,7 @@ function makeDeps(
         db,
         sendIgnoredMessage: async (_client, _sid, text) => {
             sent.push(text);
+            return "sent";
         },
         getNotificationParams: () => ({}),
         // Default to non-TUI so existing assertions exercise the ignored-message path.
@@ -144,6 +145,30 @@ describe("E5 upgrade reminder", () => {
 
         // No durable stamp was set, so the dialog re-fires on the second process.
         expect(dialogActions).toEqual(["ses-tui-interrupted", "ses-tui-interrupted"]);
+    });
+
+    it("does not stamp when the ignored-message delivery is skipped", async () => {
+        const db = openDatabase();
+        insertLegacyCompartment(db, "ses-skip");
+        const attempts: string[] = [];
+        const deps: UpgradeReminderDeps = {
+            ...makeDeps(db, attempts),
+            sendIgnoredMessage: async (_client, _sid, text) => {
+                attempts.push(text);
+                return "skipped";
+            },
+        };
+
+        await maybeSendUpgradeReminder(deps, "ses-skip");
+
+        expect(attempts).toHaveLength(1);
+        expect(getOrCreateSessionMeta(db, "ses-skip").upgradeRemindedAt).toBeNull();
+
+        __resetUpgradeReminderProcessGuard();
+        await maybeSendUpgradeReminder(deps, "ses-skip");
+
+        expect(attempts).toHaveLength(2);
+        expect(getOrCreateSessionMeta(db, "ses-skip").upgradeRemindedAt).toBeNull();
     });
 
     it("does not re-fire after the durable stamp (simulating a new process)", async () => {

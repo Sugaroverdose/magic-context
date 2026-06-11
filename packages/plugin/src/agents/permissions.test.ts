@@ -133,11 +133,11 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
 });
 
 describe("SIDEKICK_ALLOWED_TOOLS", () => {
-    it("includes ctx_search + ctx_memory for memory retrieval", () => {
-        // Sidekick is the /ctx-aug memory retriever. It augments the user
-        // prompt with relevant memories.
+    it("includes ctx_search but not ctx_memory for retrieval", () => {
+        // Sidekick is the /ctx-aug memory retriever. It searches memories without
+        // receiving the mutation-capable ctx_memory tool.
         expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_search");
-        expect(SIDEKICK_ALLOWED_TOOLS).toContain("ctx_memory");
+        expect(SIDEKICK_ALLOWED_TOOLS).not.toContain("ctx_memory");
     });
 
     it("includes `aft_outline` and `aft_zoom` for lightweight structural context", () => {
@@ -193,12 +193,11 @@ describe("integration: full hidden-agent permission shape", () => {
         });
     });
 
-    it("sidekick permission object: `*` denied + ctx_* + aft_* allowed", () => {
+    it("sidekick permission object: `*` denied + read-only retrieval/navigation allowed", () => {
         const perm = buildAllowOnlyPermission(SIDEKICK_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             ctx_search: "allow",
-            ctx_memory: "allow",
             aft_outline: "allow",
             aft_zoom: "allow",
         });

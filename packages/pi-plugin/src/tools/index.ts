@@ -48,13 +48,14 @@ export interface RegisterToolsOptions {
 	 *  the dreamer is configured to evaluate them. When false, smart-note
 	 *  writes are rejected to avoid stuck-pending state. */
 	dreamerEnabled?: boolean;
+	/** When false, omit ctx_memory from the registered surface. Sidekick only
+	 *  needs read-only ctx_search; dreamer and the main agent keep ctx_memory. */
+	memoryToolEnabled?: boolean;
 	/** When true, omit session-scoped tools (ctx_note, ctx_expand) from the
 	 *  registered surface. Set by `--no-session` children (sidekick, dreamer):
 	 *  those tools resolve `ctx.sessionManager.getSessionId()` to the EPHEMERAL
 	 *  child session, so ctx_note would write notes orphaned under the hidden
-	 *  child id and ctx_expand would expand the child's empty transcript. The
-	 *  project-scoped tools (ctx_search project memories/commits, ctx_memory)
-	 *  stay registered because they carry real value for sidekick/dreamer. */
+	 *  child id and ctx_expand would expand the child's empty transcript. */
 	sessionScopedToolsDisabled?: boolean;
 }
 
@@ -72,21 +73,23 @@ export function registerMagicContextTools(
 		}),
 	);
 
-	pi.registerTool(
-		createCtxMemoryTool({
-			db: opts.db,
-			ensureProjectRegistered: opts.ensureProjectRegistered,
-			memoryEnabled: opts.memoryEnabled,
-			embeddingEnabled: opts.embeddingEnabled,
-			allowDreamerActions: opts.allowDreamerActions ?? false,
-		}),
-	);
+	if (opts.memoryToolEnabled !== false) {
+		pi.registerTool(
+			createCtxMemoryTool({
+				db: opts.db,
+				ensureProjectRegistered: opts.ensureProjectRegistered,
+				memoryEnabled: opts.memoryEnabled,
+				embeddingEnabled: opts.embeddingEnabled,
+				allowDreamerActions: opts.allowDreamerActions ?? false,
+			}),
+		);
+	}
 
 	// ctx_note and ctx_expand are session-scoped: they resolve the CURRENT
 	// session id at call time. For `--no-session` children that id is the hidden
 	// ephemeral child session, so a note would be orphaned and an expand would
-	// target the child's empty transcript. Omit them for those children; keep
-	// the project-scoped tools (ctx_search / ctx_memory) which carry real value.
+	// target the child's empty transcript. Omit them for those children; ctx_search
+	// stays available and ctx_memory is controlled above.
 	if (!opts.sessionScopedToolsDisabled) {
 		pi.registerTool(
 			createCtxNoteTool({

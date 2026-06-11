@@ -47,6 +47,18 @@ async function callNote(args: {
 }
 
 describe("Pi ctx_note smart notes", () => {
+	it("matches OpenCode's default empty-read string", async () => {
+		const db = createTestDb();
+		const { isError, text } = await callNote({
+			db,
+			dreamerEnabled: true,
+			params: { action: "read" },
+		});
+
+		expect(isError).toBe(false);
+		expect(text).toBe("## Notes\n\nNo session notes or smart notes.");
+	});
+
 	it("rejects smart-note write when dreamer is disabled", async () => {
 		const db = createTestDb();
 		const { isError, text } = await callNote({

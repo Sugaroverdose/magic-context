@@ -1,5 +1,6 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
+import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
     archiveMemory,
     CATEGORY_PRIORITY,
@@ -50,7 +51,7 @@ function normalizeLimit(limit?: number): number {
     return Math.max(1, Math.floor(limit));
 }
 
-// Audit Finding #7 hardening: when a caller omits `allowedActions`, fall back
+// When a caller omits `allowedActions`, fall back
 // to the least-privileged set instead of the dreamer's full action list. The
 // only production caller (`tool-registry.ts`) passes the primary set
 // (`CTX_MEMORY_ACTIONS`) explicitly, and dreamer child sessions are gated by the
@@ -203,6 +204,17 @@ function memoryBelongsToProject(memory: Memory, projectPath: string): boolean {
     return storedPathBelongsToIdentity(memory.projectPath, projectPath);
 }
 
+function isPrimaryMutableMemory(memory: Memory): boolean {
+    return (
+        (memory.status === "active" || memory.status === "permanent") &&
+        memory.supersededByMemoryId === null
+    );
+}
+
+function inactiveMemoryError(id: number, action: "updating" | "merging"): string {
+    return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
+}
+
 function updateMemoryContentInCurrentTransaction(
     db: CtxMemoryToolDeps["db"],
     memory: Memory,
@@ -254,6 +266,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 .describe("Why the memory is being archived (optional, recommended)"),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
+            // Sidekick consumes untrusted `/ctx-aug` prompt text and is retrieval-only;
+            // fail closed even if a future permission list accidentally exposes this tool.
+            if (toolContext.agent === SIDEKICK_AGENT) {
+                return "Error: ctx_memory is not available to the sidekick agent.";
+            }
             if (toolContext.agent !== DREAMER_AGENT && !allowedActions.includes(args.action)) {
                 return `Error: Action '${args.action}' is not allowed in this context.`;
             }
@@ -332,9 +349,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "update") {
-                const updateIds = args.ids?.filter((id): id is number => Number.isInteger(id));
-                if (!updateIds || updateIds.length !== 1) {
-                    return "Error: 'ids' must contain exactly one memory ID when action is 'update'.";
+                const updateIds = args.ids;
+                if (!updateIds || updateIds.length !== 1 || !updateIds.every(Number.isInteger)) {
+                    return "Error: 'ids' must contain exactly one integer memory ID when action is 'update'.";
                 }
                 const updateId = updateIds[0];
 
@@ -347,6 +364,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const memory = getMemoryById(deps.db, updateId);
                 if (!memory || !rawProjectPath || !memoryBelongsToProject(memory, projectPath)) {
                     return `Error: Memory with ID ${updateId} was not found.`;
+                }
+                if (toolContext.agent !== DREAMER_AGENT && !isPrimaryMutableMemory(memory)) {
+                    return inactiveMemoryError(updateId, "updating");
                 }
 
                 const normalizedHash = computeNormalizedHash(content);
@@ -388,9 +408,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "merge") {
-                const ids = args.ids?.filter((id): id is number => Number.isInteger(id));
-                if (!ids || ids.length < 2) {
-                    return "Error: 'ids' must include at least two memory IDs when action is 'merge'.";
+                const ids = args.ids;
+                if (!ids || ids.length < 2 || !ids.every(Number.isInteger)) {
+                    return "Error: 'ids' must include at least two integer memory IDs when action is 'merge'.";
+                }
+                if (new Set(ids).size !== ids.length) {
+                    return "Error: 'ids' must include at least two distinct memory IDs when action is 'merge'.";
                 }
 
                 const content = args.content?.trim();
@@ -419,6 +442,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     );
                     if (foreign) {
                         return `Error: Memory with ID ${foreign.id} was not found.`;
+                    }
+                    const inactive = sourceMemories.find(
+                        (memory) => !isPrimaryMutableMemory(memory),
+                    );
+                    if (inactive) {
+                        return inactiveMemoryError(inactive.id, "merging");
                     }
                 }
 
@@ -553,9 +582,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "archive") {
-                const archiveIds = args.ids?.filter((id): id is number => Number.isInteger(id));
-                if (!archiveIds || archiveIds.length === 0) {
-                    return "Error: 'ids' must contain at least one memory ID when action is 'archive'.";
+                const archiveIds = args.ids;
+                if (!archiveIds || archiveIds.length === 0 || !archiveIds.every(Number.isInteger)) {
+                    return "Error: 'ids' must contain at least one integer memory ID when action is 'archive'.";
                 }
 
                 // Validate the whole batch BEFORE mutating anything so a typo'd

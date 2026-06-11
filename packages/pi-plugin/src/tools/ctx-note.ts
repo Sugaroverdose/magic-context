@@ -324,7 +324,7 @@ export function createCtxNoteTool(
 			}
 
 			if (sections.length === 0) {
-				return ok("## Notes\n\nNo notes for the current filter.");
+				return ok("## Notes\n\nNo session notes or smart notes.");
 			}
 
 			const body = sections.join("\n\n");

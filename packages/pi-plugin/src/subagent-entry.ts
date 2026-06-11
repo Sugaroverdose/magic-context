@@ -17,12 +17,12 @@
  *   3. Inject prompt content the subagent prompt doesn't expect (key
  *      files, project docs, user profile, session history, etc.).
  *
- * What this entry registers:
+ * What this entry registers for `--no-session` children:
  *   - `ctx_search` — read-only search over shared memories/messages/git
- *   - `ctx_memory` — primary action surface (write/archive/update/merge)
- *      plus the dreamer-only `list` action when the allowlist flag is set
- *   - `ctx_note` — write/read/dismiss/update simple AND smart notes
- *   - `ctx_expand` — decompress compartment ranges
+ *   - `ctx_memory` — dreamer only; sidekick is retrieval-only and uses ctx_search
+ *
+ * Session-scoped `ctx_note`/`ctx_expand` stay omitted because hidden child
+ * sessions have no useful transcript or parent note id to target.
  *
  * Recursion guard: this entry never wires `pi.on("context", ...)`,
  * `pi.on("before_agent_start", ...)`, or any other event that could
@@ -31,19 +31,17 @@
  *
  * How parent passes this entry to the child:
  *   pi --print --no-extensions \
- *     -x /absolute/path/to/dist/subagent-entry.js \
+ *     --extension /absolute/path/to/dist/subagent-entry.js \
  *     [other flags...]
  *
  * `--no-extensions` skips Pi's discovered-extensions scan but still
- * loads the explicit `-x` paths (verified in pi-coding-agent
- * resource-loader.js:272-274). The result: subagent gets tools without
- * any of the full-extension overhead or recursion risk.
+ * loads explicit `--extension` paths. The result: subagent gets the scoped
+ * Magic Context tools without full-extension overhead or recursion risk.
  *
  * Tool/action allowlists via Pi flags:
- *   --magic-context-dreamer-actions  Enable dreamer-only ctx_memory
- *                                     actions (update, merge, archive).
- *                                     Off by default. Set by parent for
- *                                     dreamer subagents only.
+ *   --magic-context-dreamer-actions  Register ctx_memory with the dreamer
+ *                                     action surface. Off by default; sidekick
+ *                                     receives ctx_search only.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -69,7 +67,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.registerFlag(SUBAGENT_DREAMER_ACTIONS_FLAG, {
 		description:
-			"Enable dreamer-only ctx_memory actions (update, merge, archive).",
+			"Register ctx_memory with dreamer actions for Magic Context subagents.",
 		type: "boolean",
 		default: false,
 	});
@@ -97,20 +95,18 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 			registerMagicContextTools(pi, {
 				db,
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
-				// Subagents inherit the same dreamer-action allowlist
-				// the parent passed via the --magic-context-dreamer-actions
-				// flag. Default false → primary set (write/archive/update/merge);
-				// only the dreamer-only `list` action is gated behind the flag.
+				// Sidekick is retrieval-only and consumes untrusted /ctx-aug prompt text,
+				// so only dreamer subagents register ctx_memory in child processes.
+				memoryToolEnabled: dreamerActionsEnabled,
 				allowDreamerActions: dreamerActionsEnabled,
 				// `--no-session` children resolve getSessionId() to the ephemeral
 				// child session, so session-scoped ctx_note/ctx_expand would write
-				// orphaned notes / expand an empty transcript. Drop them; keep the
-				// project-scoped ctx_search / ctx_memory.
+				// orphaned notes / expand an empty transcript. Drop them; keep ctx_search.
 				sessionScopedToolsDisabled: true,
 			});
 
 			log(
-				`[pi-subagent] registered tools: ctx_search, ctx_memory` +
+				`[pi-subagent] registered tools: ctx_search${dreamerActionsEnabled ? ", ctx_memory" : ""}` +
 					` (ctx_note/ctx_expand omitted: --no-session child;` +
 					` memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
 					` git_commits=${cfg.memory.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,

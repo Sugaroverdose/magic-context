@@ -235,9 +235,9 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("does not set --magic-context-dreamer-actions for non-dreamer agents", () => {
-		// Even if the bundle were present, only agent="dreamer" should
-		// see the elevated ctx_memory action surface. Historian, sidekick,
-		// compressor etc. get the primary set (write/archive/update/merge) only.
+		// Even if the bundle were present, only dreamer-equivalent agents should
+		// receive ctx_memory in the child extension. Historian, sidekick,
+		// compressor etc. stay without the dreamer flag.
 		for (const agent of ["historian", "sidekick", "compressor", "recomp"]) {
 			const args = __test.buildArgs({
 				...baseOptions,

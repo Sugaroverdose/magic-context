@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getMemoryById,
 	insertMemory,
@@ -146,6 +147,162 @@ describe("createCtxMemoryTool", () => {
 			);
 			expect(getMemoryById(db, ownId)?.status).toBe("active");
 			expect(getMemoryById(db, foreign.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("rejects malformed ids and duplicate merge ids for primary agents", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const first = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for scripts.",
+			});
+			const second = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for tests.",
+			});
+
+			const malformedArchive = await primary.execute(
+				"call-a",
+				{ action: "archive", ids: [first.id, second.id + 0.5] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			const malformedUpdate = await primary.execute(
+				"call-u",
+				{ action: "update", ids: [first.id + 0.5], content: "Use pnpm." },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			const duplicateMerge = await primary.execute(
+				"call-m",
+				{ action: "merge", ids: [first.id, first.id], content: "Use bun." },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(malformedArchive.isError).toBe(true);
+			expect(malformedArchive.content[0]?.text).toContain("integer memory ID");
+			expect(malformedUpdate.isError).toBe(true);
+			expect(malformedUpdate.content[0]?.text).toContain("integer memory ID");
+			expect(duplicateMerge.isError).toBe(true);
+			expect(duplicateMerge.content[0]?.text).toContain("distinct memory IDs");
+			expect(getMemoryById(db, first.id)?.status).toBe("active");
+			expect(getMemoryById(db, second.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("rejects archived memories for primary update and merge", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const archived = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for scripts.",
+			});
+			const active = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for tests.",
+			});
+			db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(
+				archived.id,
+			);
+
+			const update = await primary.execute(
+				"call-u",
+				{ action: "update", ids: [archived.id], content: "Use pnpm." },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			const merge = await primary.execute(
+				"call-m",
+				{ action: "merge", ids: [archived.id, active.id], content: "Use bun." },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(update.isError).toBe(true);
+			expect(update.content[0]?.text).toContain("restore it before updating");
+			expect(merge.isError).toBe(true);
+			expect(merge.content[0]?.text).toContain("restore it before merging");
+			expect(getMemoryById(db, archived.id)?.status).toBe("archived");
+			expect(getMemoryById(db, active.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps dreamer able to curate archived memories during merge", async () => {
+		const db = createTestDb();
+		try {
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-dreamer") as never;
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const archived = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for scripts.",
+			});
+			const active = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONSTRAINTS",
+				content: "Use bun for tests.",
+			});
+			db.prepare("UPDATE memories SET status = 'archived' WHERE id = ?").run(
+				archived.id,
+			);
+
+			const result = await dreamer.execute(
+				"call-m",
+				{
+					action: "merge",
+					ids: [archived.id, active.id],
+					content: "Use bun for scripts.",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(result.content[0]?.text).toContain(
+				`canonical memory [ID: ${archived.id}]`,
+			);
+			expect(getMemoryById(db, archived.id)?.status).toBe("active");
+			expect(getMemoryById(db, active.id)?.status).toBe("archived");
 		} finally {
 			closeQuietly(db);
 		}

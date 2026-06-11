@@ -364,6 +364,55 @@ describe("createEventHandler", () => {
         expect(call.body?.parts?.[0]?.text).toContain("successfully sent 90,000 tokens");
     });
 
+    it("does not mark the cache alert sent when notification delivery fails", async () => {
+        useTempDataHome("context-event-cache-regression-alert-failed-");
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        await refreshModelLimitsFromApi(providersClient(100_000));
+        const prompt = mock(async () => {
+            throw new Error("notification transport down");
+        });
+        const deps = createDeps(contextUsageMap);
+        deps.client = providersClient(30_000, prompt);
+        const handler = createEventHandler(deps);
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-regression-alert-failed",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 80_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await refreshModelLimitsFromApi(providersClient(30_000));
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-regression-alert-failed",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 90_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+
+        const meta = getOrCreateSessionMeta(openDatabase(), "ses-regression-alert-failed");
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(meta.cacheAlertSent).toBe(false);
+    });
+
     it("refreshes ttl for tokenless assistant updates when prior usage exists", async () => {
         useTempDataHome("context-event-partial-update-");
         const preservedUpdatedAt = Date.now();

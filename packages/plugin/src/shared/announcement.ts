@@ -52,21 +52,31 @@ function getStateFilePath(): string {
     return path.join(getMagicContextStorageDir(), STATE_FILENAME);
 }
 
-/**
- * Read the most recently dismissed announcement version, or `""` if none.
- *
- * Best-effort: any read failure returns `""` (which forces the announcement to
- * re-show). The cost of a spurious second dialog is much smaller than the cost
- * of suppressing a real announcement due to a transient FS error.
- */
-export function readLastAnnouncedVersion(): string {
+type AnnouncementStateRead =
+    | { status: "missing" }
+    | { status: "valid"; version: string }
+    | { status: "error" };
+
+function readAnnouncementState(): AnnouncementStateRead {
     try {
         const file = getStateFilePath();
-        if (!fs.existsSync(file)) return "";
-        return fs.readFileSync(file, "utf-8").trim();
+        if (!fs.existsSync(file)) return { status: "missing" };
+        const version = fs.readFileSync(file, "utf-8").trim();
+        if (!version) return { status: "error" };
+        return { status: "valid", version };
     } catch {
-        return "";
+        return { status: "error" };
     }
+}
+
+/**
+ * Read the most recently dismissed announcement version, or `""` if none can be
+ * returned. Callers that need to distinguish first-run from read/corruption
+ * failures should use the internal tri-state path in `shouldShowAnnouncement`.
+ */
+export function readLastAnnouncedVersion(): string {
+    const state = readAnnouncementState();
+    return state.status === "valid" ? state.version : "";
 }
 
 /**
@@ -108,12 +118,17 @@ export function markAnnouncementSeen(version: string): void {
  */
 export function shouldShowAnnouncement(): boolean {
     if (!ANNOUNCEMENT_VERSION || ANNOUNCEMENT_FEATURES.length === 0) return false;
-    const lastVersion = readLastAnnouncedVersion();
-    if (!lastVersion) {
+    const state = readAnnouncementState();
+    if (state.status === "missing") {
         // No prior state: fresh install or wiped sandbox. Seed to current and
         // skip the announcement so we never pester first-run / ephemeral envs.
         markAnnouncementSeen(ANNOUNCEMENT_VERSION);
         return false;
     }
-    return lastVersion !== ANNOUNCEMENT_VERSION;
+    if (state.status === "error") {
+        // A corrupt or temporarily unreadable existing state file is not first-run.
+        // Do not advance the version; a later successful boot can still show it.
+        return false;
+    }
+    return state.version !== ANNOUNCEMENT_VERSION;
 }

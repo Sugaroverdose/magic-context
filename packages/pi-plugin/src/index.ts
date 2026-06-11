@@ -955,6 +955,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 							db,
 							sendIgnoredMessage: async (_client, _sid, text) => {
 								ctx.ui.notify(text, "info");
+								return "sent";
 							},
 							getNotificationParams: () => ({}),
 							// Pi's ctx.ui.notify is a TRANSIENT toast (no scrollback),

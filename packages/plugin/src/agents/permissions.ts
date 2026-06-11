@@ -168,8 +168,8 @@ export const DREAMER_ALLOWED_TOOLS = [
 /**
  * Tools the sidekick agent needs. Sidekick is a read-only memory
  * retriever for `/ctx-aug` — it queries the project's memory store
- * via `ctx_search` and (rarely) reads specific memories with
- * `ctx_memory(action="list")`.
+ * through `ctx_search` only. Keep `ctx_memory` out of this list because
+ * its OpenCode tool definition is mutation-capable for primary agents.
  *
  * Also allow `aft_outline` and `aft_zoom` so sidekick can pull
  * lightweight structural context about a file or symbol when the
@@ -178,9 +178,4 @@ export const DREAMER_ALLOWED_TOOLS = [
  *
  * Still denied: spawning subagents, edits, bash, web fetches.
  */
-export const SIDEKICK_ALLOWED_TOOLS = [
-    "ctx_search",
-    "ctx_memory",
-    "aft_outline",
-    "aft_zoom",
-] as const;
+export const SIDEKICK_ALLOWED_TOOLS = ["ctx_search", "aft_outline", "aft_zoom"] as const;

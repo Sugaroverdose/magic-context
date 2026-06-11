@@ -8,6 +8,8 @@ export interface NotificationParams {
     modelId?: string;
 }
 
+export type NotificationDeliveryDisposition = "sent" | "skipped" | "failed";
+
 interface NotificationClient {
     session?: {
         prompt?: (opts: unknown) => unknown | Promise<unknown>;
@@ -68,7 +70,7 @@ export async function sendIgnoredMessage(
     // background work (e.g. session-upgrade result) where a transient 5s toast
     // is too easy to miss — dogfood 2026-05-30.
     forcePersist = false,
-): Promise<void> {
+): Promise<NotificationDeliveryDisposition> {
     // In TUI mode, show as toast via RPC instead of ignored message — UNLESS the
     // caller asked to force-persist (long-running outcome must stay in scrollback).
     // Cannot use process.env.OPENCODE_CLIENT — it's undefined in the server plugin process.
@@ -89,7 +91,7 @@ export async function sendIgnoredMessage(
                         duration: 5000,
                     },
                 });
-                return;
+                return "sent";
             }
         } catch {
             // showToast failed or tui client is unavailable — fall through to ignored message.
@@ -106,7 +108,7 @@ export async function sendIgnoredMessage(
     const { waitForSafeNotificationTarget } = await import("../../shared/safe-notification-target");
     if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") {
         sessionLog(sessionId, "notification skipped (session not titled yet)");
-        return;
+        return "skipped";
     }
 
     const agent = params.agent || undefined;
@@ -121,7 +123,7 @@ export async function sendIgnoredMessage(
 
     if (!hasNotificationSessionClient(client)) {
         sessionLog(sessionId, "session prompt API unavailable for notification");
-        return;
+        return "failed";
     }
     const c = client;
 
@@ -145,14 +147,18 @@ export async function sendIgnoredMessage(
     try {
         if (typeof c.session?.prompt === "function") {
             await Promise.resolve(c.session.prompt(input));
-        } else if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(input);
-        } else {
-            sessionLog(sessionId, "session prompt API unavailable for notification");
+            return "sent";
         }
+        if (typeof c.session?.promptAsync === "function") {
+            await c.session.promptAsync(input);
+            return "sent";
+        }
+        sessionLog(sessionId, "session prompt API unavailable for notification");
+        return "failed";
     } catch (error: unknown) {
         const msg = getErrorMessage(error);
         sessionLog(sessionId, "failed to send notification:", msg);
+        return "failed";
     }
 }
 

@@ -140,6 +140,24 @@ describe("shouldShowAnnouncement gating", () => {
         expect(shouldShowAnnouncement()).toBe(false);
     });
 
+    test("does not seed or advance state when an existing state file is unreadable/corrupt", async () => {
+        const mod = await import(`./announcement?t=${Date.now()}-corrupt`);
+        const { ANNOUNCEMENT_VERSION, ANNOUNCEMENT_FEATURES, shouldShowAnnouncement } = mod;
+
+        if (!ANNOUNCEMENT_VERSION || ANNOUNCEMENT_FEATURES.length === 0) {
+            expect(shouldShowAnnouncement()).toBe(false);
+            return;
+        }
+
+        const dir = path.join(tmpRoot, "cortexkit", "magic-context");
+        const file = path.join(dir, "last_announced_version");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, "");
+
+        expect(shouldShowAnnouncement()).toBe(false);
+        expect(fs.readFileSync(file, "utf-8")).toBe("");
+    });
+
     test("returns true when a different (older) version is marked", async () => {
         const mod = await import(`./announcement?t=${Date.now()}-older`);
         const {

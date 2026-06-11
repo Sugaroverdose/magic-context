@@ -492,14 +492,19 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         }
 
                         if (contextLimit < totalInputTokens && !sessionMeta.cacheAlertSent) {
-                            updates.cacheAlertSent = true;
                             const safeTokens = Math.max(observedSafeInputTokens, totalInputTokens);
-                            await sendIgnoredMessage(
+                            const delivery = await sendIgnoredMessage(
                                 deps.client,
                                 info.sessionID,
                                 `⚠️ Magic Context: OpenCode reports a context limit of ${formatTokens(contextLimit)} tokens for ${info.providerID}/${info.modelID} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the cached limit looks wrong. Restart OpenCode if you suspect this is incorrect.`,
                                 deps.getNotificationParams?.(info.sessionID) ?? {},
                             );
+                            // The title guard can skip ignored-message posts until a
+                            // session is safely titled; keep the flag unset unless
+                            // the notification actually reached a user-visible surface.
+                            if (delivery === "sent") {
+                                updates.cacheAlertSent = true;
+                            }
                         }
                     }
 
