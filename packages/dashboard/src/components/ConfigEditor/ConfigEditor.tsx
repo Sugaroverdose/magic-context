@@ -1209,7 +1209,7 @@ function ConfigForm(props: {
                     <input
                       type="checkbox"
                       checked={
-                        (getNestedValue(formData(), "dreamer.inject_docs") as boolean) ?? false
+                        (getNestedValue(formData(), "dreamer.inject_docs") as boolean) ?? true
                       }
                       onChange={(e) =>
                         handleFieldChange("dreamer.inject_docs", e.currentTarget.checked)
@@ -1217,7 +1217,7 @@ function ConfigForm(props: {
                     />
                     <span class="toggle-slider" />
                     <span class="toggle-label">
-                      {((getNestedValue(formData(), "dreamer.inject_docs") as boolean) ?? false)
+                      {((getNestedValue(formData(), "dreamer.inject_docs") as boolean) ?? true)
                         ? "Enabled"
                         : "Disabled"}
                     </span>
