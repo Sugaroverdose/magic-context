@@ -1,0 +1,18 @@
+{
+    "$schema": "./node_modules/wrangler/config-schema.json",
+    "name": "magic-context-docs",
+    "compatibility_date": "2026-05-01",
+    // Static Starlight site served via Workers static assets — no Worker script.
+    "assets": {
+        "directory": "./dist",
+        // Pretty URLs: /getting-started/installation/ -> .../index.html
+        "html_handling": "auto-trailing-slash",
+        "not_found_handling": "404-page"
+    },
+    "routes": [
+        {
+            "pattern": "docs.cortexkit.io",
+            "custom_domain": true
+        }
+    ]
+}
