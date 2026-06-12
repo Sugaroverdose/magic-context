@@ -1,0 +1,191 @@
+---
+title: Configuration
+description: Every magic-context.jsonc key, with types, defaults, and where to put the file.
+---
+
+<!-- GENERATED FILE — do not edit. Source of truth is the Zod schema in
+    packages/plugin/src/config/schema/magic-context.ts; regenerate with
+    `bun packages/plugin/scripts/build-config-docs.ts`. -->
+
+Magic Context reads `magic-context.jsonc` (or `.json`). Project config overrides user config, key by key.
+
+**OpenCode** — project: `<project>/magic-context.jsonc` or `<project>/.opencode/magic-context.jsonc`; user: `~/.config/opencode/magic-context.jsonc`.
+
+**Pi** — project: `<project>/.pi/magic-context.jsonc`; user: `~/.pi/agent/magic-context.jsonc`.
+
+Add the schema line for editor validation and autocomplete:
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json"
+}
+```
+
+:::note
+Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion and cannot set `sqlite.*` or override hidden-agent prompts/permissions — these are security boundaries against untrusted repositories. User-level config has no such restriction.
+:::
+
+## Top-level switches
+
+Global on/off switches for the plugin and its agent-facing surface.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enable magic context (default: true) |
+| `ctx_reduce_enabled` | boolean | `true` | When false, ctx_reduce tool is hidden, all nudges disabled, and prompt guidance about ctx_reduce stripped. Heuristic cleanup, compartments, memory, and other features still work. (default: true) |
+| `auto_update` | boolean | — | Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates. |
+| `keep_subagents` | boolean | `false` | Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect. |
+
+## Context management
+
+When and how aggressively Magic Context manages the session's context window. Per-model keys accept `provider/model` map form where noted.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `cache_ttl` | string \\| map<string, string> | `"5m"` | Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" }) |
+| `execute_threshold_percentage` | number (20–80) \\| map<string, number (20–80)> | `65` | Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Values above 80 are rejected because the runtime caps at 80% for cache safety (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE |
+| `execute_threshold_tokens` | object | — | Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 80% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000. |
+| `execute_threshold_tokens.default` | number (5000–2000000) | — |  |
+| `protected_tags` | number (1–100) | — | Number of recent tags to protect from dropping (min: 1, max: 100, default: 20) |
+| `clear_reasoning_age` | number (10–) | `50` | Clear reasoning/thinking blocks older than N tags (default: 50) |
+| `history_budget_percentage` | number (0.05–0.5) | `0.15` | Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15) |
+
+## Historian
+
+The background agent that condenses old conversation into compact history.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `historian` | object | — | Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, two_pass, etc.) |
+| `historian.model` | string | — | Primary model ID (e.g. 'claude-sonnet-4-6') |
+| `historian.temperature` | number (0–2) | — | Sampling temperature (0-2) |
+| `historian.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
+| `historian.prompt` | string | — | Additional system prompt text |
+| `historian.tools` | map<string, boolean> | — | Tool enable/disable overrides |
+| `historian.disable` | boolean | — | Disable this agent |
+| `historian.description` | string | — | Agent description |
+| `historian.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
+| `historian.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
+| `historian.maxSteps` | number | — | Maximum tool-call steps per invocation |
+| `historian.permission` | object | — | Per-tool permission overrides |
+| `historian.permission.edit` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `historian.permission.bash` | `"ask"` \\| `"allow"` \\| `"deny"` \\| map<string, `"ask"` \\| `"allow"` \\| `"deny"`> | — |  |
+| `historian.permission.webfetch` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `historian.permission.doom_loop` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `historian.permission.external_directory` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `historian.maxTokens` | number | — | Maximum output tokens |
+| `historian.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
+| `historian.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
+| `historian.two_pass` | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
+| `historian.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: explicit thinking level passed as --thinking <level> to Pi historian subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off \| minimal \| low \| medium \| high \| xhigh |
+| `historian_timeout_ms` | number (60000–) | `300000` | Timeout for each historian prompt call in milliseconds (default: 300000) |
+| `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
+| `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
+| `commit_cluster_trigger.min_clusters` | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
+
+## Memory & recall
+
+Durable project memory, semantic search, and recall features.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `memory` | object | — | Cross-session memory configuration |
+| `memory.enabled` | boolean | `true` | Enable cross-session memory (default: true) |
+| `memory.injection_budget_tokens` | number (500–20000) | `4000` | Token budget for memory injection on session start (min: 500, max: 20000, default: 4000) |
+| `memory.auto_promote` | boolean | `true` | Automatically promote eligible session facts into memory (default: true) |
+| `memory.retrieval_count_promotion_threshold` | number (1–) | `3` | retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3) |
+| `memory.auto_search` | object | — | Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled. |
+| `memory.auto_search.enabled` | boolean | `true` | Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories, conversation, or commits are found. Graduated from experimental.auto_search; on by default (set false to opt out). Independent of memory.enabled. |
+| `memory.auto_search.score_threshold` | number (0.3–0.95) | `0.6` | Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.60) |
+| `memory.auto_search.min_prompt_chars` | number (5–500) | `20` | Skip hint when user message is shorter than this (min: 5, max: 500, default: 20) |
+| `memory.git_commit_indexing` | object | — | Index git commit messages from HEAD into ctx_search. Commits become a 4th searchable source alongside memories and session history. Graduated from experimental.git_commit_indexing; opt-in, default off (per-project embedding cost). Independent of memory.enabled. |
+| `memory.git_commit_indexing.enabled` | boolean | `false` | Index HEAD git commits for ctx_search (git_commit source). Graduated from experimental.git_commit_indexing; opt-in, default off. Independent of memory.enabled. |
+| `memory.git_commit_indexing.since_days` | number (7–3650) | `365` | Days of HEAD history to index (min: 7, max: 3650, default: 365) |
+| `memory.git_commit_indexing.max_commits` | number (100–20000) | `2000` | Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) |
+| `embedding` | object | — | Embedding provider configuration |
+| `embedding.provider` | `"local"` \\| `"openai-compatible"` \\| `"off"` | `"local"` | Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'off' disables embeddings. |
+| `embedding.model` | string | — | Embedding model name. Required for openai-compatible, ignored for local. |
+| `embedding.endpoint` | string | — | API endpoint URL. Required when provider is openai-compatible. |
+| `embedding.api_key` | string | — | API key for remote embedding provider (optional) |
+| `embedding.input_type` | string | — | Optional input_type sent in the embedding request body. Required by some openai-compatible providers (e.g. NVIDIA NIM expects 'query' or 'passage'). Omitted from the request when unset. |
+| `embedding.truncate` | string | — | Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' \| 'START' \| 'END'). Omitted from the request when unset. |
+
+## Background agents
+
+Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `dreamer` | object | — | Dreamer agent + scheduling configuration (model, fallback_models, disable, schedule, tasks, etc.) |
+| `dreamer.model` | string | — | Primary model ID (e.g. 'claude-sonnet-4-6') |
+| `dreamer.temperature` | number (0–2) | — | Sampling temperature (0-2) |
+| `dreamer.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
+| `dreamer.prompt` | string | — | Additional system prompt text |
+| `dreamer.tools` | map<string, boolean> | — | Tool enable/disable overrides |
+| `dreamer.disable` | boolean | — | Disable this agent |
+| `dreamer.description` | string | — | Agent description |
+| `dreamer.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
+| `dreamer.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
+| `dreamer.maxSteps` | number | — | Maximum tool-call steps per invocation |
+| `dreamer.permission` | object | — | Per-tool permission overrides |
+| `dreamer.permission.edit` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `dreamer.permission.bash` | `"ask"` \\| `"allow"` \\| `"deny"` \\| map<string, `"ask"` \\| `"allow"` \\| `"deny"`> | — |  |
+| `dreamer.permission.webfetch` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `dreamer.permission.doom_loop` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `dreamer.permission.external_directory` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `dreamer.maxTokens` | number | — | Maximum output tokens |
+| `dreamer.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
+| `dreamer.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
+| `dreamer.schedule` | string | `"02:00-06:00"` | Scheduled window for overnight dreaming (e.g. '02:00-06:00') |
+| `dreamer.max_runtime_minutes` | number (10–) | `120` | Maximum runtime per dream session in minutes |
+| `dreamer.tasks` | `"consolidate"` \\| `"verify"` \\| `"archive-stale"` \\| `"improve"` \\| `"maintain-docs"`[] | `["consolidate","verify","archive-stale","improve"]` | Tasks to run during dreaming, in order |
+| `dreamer.task_timeout_minutes` | number (5–) | `20` | Minutes allocated per task before moving to next |
+| `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into system prompt |
+| `dreamer.user_memories` | object | — | User memory pipeline: historian extracts behavior observations from each compartment run; dreamer reviews recurring patterns and promotes them to stable user memories injected into all sessions as <user-profile>. Requires dreamer to not be disabled for promotion to actually happen. Graduated from experimental in v0.14. Default: enabled. |
+| `dreamer.user_memories.enabled` | boolean | `true` | Enable user memory extraction and promotion (default: true) |
+| `dreamer.user_memories.promotion_threshold` | number (2–20) | `3` | Minimum candidate observations before dreamer considers promotion (default: 3) |
+| `dreamer.pin_key_files` | object | — | Pin frequently-read key files into the system prompt so the agent doesn't need to re-read them after context drops. Dreamer identifies key files per session based on read patterns. Requires dreamer to not be disabled for selection to happen. Graduated from experimental in v0.14. Default: disabled. |
+| `dreamer.pin_key_files.enabled` | boolean | `false` | Enable key file pinning (default: false) |
+| `dreamer.pin_key_files.token_budget` | number (2000–30000) | `10000` | Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000) |
+| `dreamer.pin_key_files.min_reads` | number (2–20) | `4` | Minimum full-read count before a file is considered for pinning (min: 2, default: 4) |
+| `dreamer.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level. |
+| `sidekick` | object | — | Optional sidekick agent configuration for session-start memory retrieval |
+| `sidekick.model` | string | — | Primary model ID (e.g. 'claude-sonnet-4-6') |
+| `sidekick.temperature` | number (0–2) | — | Sampling temperature (0-2) |
+| `sidekick.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
+| `sidekick.prompt` | string | — | Additional system prompt text |
+| `sidekick.tools` | map<string, boolean> | — | Tool enable/disable overrides |
+| `sidekick.disable` | boolean | — | Disable this agent |
+| `sidekick.description` | string | — | Agent description |
+| `sidekick.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
+| `sidekick.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
+| `sidekick.maxSteps` | number | — | Maximum tool-call steps per invocation |
+| `sidekick.permission` | object | — | Per-tool permission overrides |
+| `sidekick.permission.edit` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `sidekick.permission.bash` | `"ask"` \\| `"allow"` \\| `"deny"` \\| map<string, `"ask"` \\| `"allow"` \\| `"deny"`> | — |  |
+| `sidekick.permission.webfetch` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `sidekick.permission.doom_loop` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `sidekick.permission.external_directory` | `"ask"` \\| `"allow"` \\| `"deny"` | — |  |
+| `sidekick.maxTokens` | number | — | Maximum output tokens |
+| `sidekick.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
+| `sidekick.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
+| `sidekick.timeout_ms` | number | `30000` | Timeout for sidekick calls in milliseconds |
+| `sidekick.system_prompt` | string | — | Custom system prompt for sidekick |
+| `sidekick.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: explicit thinking level for sidekick subagent invocations. See historian.thinking_level. |
+
+## Advanced
+
+Behavior tuning most installs never need to touch.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `temporal_awareness` | boolean | `true` | Inject wall-clock gap markers (<!-- +Xm -->) between user messages where > 5 min elapsed since the previous message, and add start/end date attributes on compartments. Gives the agent a sense of session pacing and "how long ago" across multi-day sessions. Graduated from experimental.temporal_awareness; default: true (set false to opt out). |
+| `caveman_text_compression` | object | — | Age-tier caveman compression for long user/assistant text parts. Only active when ctx_reduce_enabled is false. Oldest 20% of eligible tags (outside protected tail) go to ultra, next 20% to full, next 20% to lite, newest 40% untouched. Graduated from experimental.caveman_text_compression; opt-in, default off (lossy). |
+| `caveman_text_compression.enabled` | boolean | `false` | Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%). |
+| `caveman_text_compression.min_chars` | number (100–10000) | `500` | Text parts shorter than this (characters) stay untouched. Min 100, max 10000. Default: 500. |
+| `system_prompt_injection` | object | — | Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile / key-files blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically. |
+| `system_prompt_injection.enabled` | boolean | `true` | When false, NO injection happens for ANY agent — global escape hatch. (default: true) |
+| `system_prompt_injection.skip_signatures` | string[] | `["<!-- magic-context: skip -->"]` | Substring opt-out list. If the agent's system prompt contains any of these strings, skip ALL Magic Context injection for that call. Default "<!-- magic-context: skip -->" is meant to be added inside a user's custom agent prompt to opt that agent out. |
+| `sqlite` | object | — | SQLite connection tuning for Magic Context's own context.db. These are per-connection PRAGMAs applied at open; they do not change the schema or what is stored. |
+| `sqlite.cache_size_mb` | number (2–2048) | `64` | Page-cache size in MiB per connection (PRAGMA cache_size). Larger keeps more hot pages resident, cutting re-reads on repeated full-table scans. (min 2, max 2048, default 64) |
+| `sqlite.mmap_size_mb` | number (0–8192) | `0` | Memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap (SQLite default). Raising it can cut read overhead on large DBs at the cost of address space. (min 0, max 8192, default 0) |
