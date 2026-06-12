@@ -154,6 +154,9 @@ pub struct Memory {
     pub merged_from: Option<String>,
     pub metadata_json: Option<String>,
     pub has_embedding: bool,
+    /// Member `display_name` when listing memories under a workspace filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1450,6 +1453,9 @@ pub struct ProjectInfo {
 }
 
 pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Error> {
+    let workspace_identities =
+        crate::workspaces::extra_workspace_member_identities(conn).unwrap_or_default();
+
     let mut stmt = conn.prepare(
         "SELECT project_path FROM memories
          UNION
@@ -1461,13 +1467,13 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
     let stored_values: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut identities: Vec<String> = stored_values
+    let mut identity_set: HashSet<String> = stored_values
         .into_iter()
         .map(|value| normalize_stored_project_path(&value))
         .filter(|identity| !identity.is_empty())
-        .collect::<HashSet<_>>()
-        .into_iter()
         .collect();
+    identity_set.extend(workspace_identities);
+    let mut identities: Vec<String> = identity_set.into_iter().collect();
     identities.sort();
 
     // Resolve friendly names/paths via the same enumeration the project picker
@@ -1537,13 +1543,25 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
         .map(|value| normalize_stored_project_path(value))
         .collect();
 
-    // Build the full project list from OpenCode + Pi DBs (which gives us the
-    // real `display_name` and `primary_path` for each project), then filter
-    // down to projects whose identity has at least one memory in the pool.
-    let all = enumerate_projects_filtered(None);
+    let mut picker_identities = memory_identities;
+    if let Ok(extra) = crate::workspaces::extra_workspace_member_identities(conn) {
+        picker_identities.extend(extra);
+    }
+
+    let mut all = enumerate_projects_filtered(None);
+    let mut known: HashSet<String> = all.iter().map(|r| r.identity.clone()).collect();
+    if let Ok(rows) = crate::workspaces::workspace_member_picker_rows(conn) {
+        for row in rows {
+            if picker_identities.contains(&row.identity) && !known.contains(&row.identity) {
+                known.insert(row.identity.clone());
+                all.push(row);
+            }
+        }
+    }
+    all.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     Ok(all
         .into_iter()
-        .filter(|row| memory_identities.contains(&row.identity))
+        .filter(|row| picker_identities.contains(&row.identity))
         .collect())
 }
 
@@ -1672,11 +1690,35 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
 /// (older dashboard build, or external caller), no rows resolve to it as an
 /// identity and we fall back to filtering by that single value — same
 /// behavior as the pre-fix code.
-fn resolve_paths_for_memory_filter(
+pub(crate) fn resolve_paths_for_memory_filter(
     conn: &Connection,
     project_filter: &str,
 ) -> Result<Vec<String>, rusqlite::Error> {
     resolve_paths_for_table_filter(conn, "memories", project_filter)
+}
+
+/// Count memories whose stored `project_path` normalizes to `member_identity`.
+pub fn count_memories_matching_identity(
+    conn: &Connection,
+    member_identity: &str,
+) -> Result<i64, rusqlite::Error> {
+    let paths = resolve_paths_for_memory_filter(conn, member_identity)?;
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = build_in_placeholders(paths.len(), 1);
+    let sql = format!(
+        "SELECT COUNT(*) FROM memories WHERE project_path IN ({})",
+        placeholders
+    );
+    conn.query_row(&sql, rusqlite::params_from_iter(paths.iter()), |r| r.get(0))
+}
+
+pub(crate) fn bump_project_memory_epoch_for_identity_pub(
+    tx: &Transaction<'_>,
+    identity: &str,
+) -> Result<(), rusqlite::Error> {
+    bump_project_memory_epoch_for_identity(tx, identity)
 }
 
 /// Resolve a project-identity filter (`git:<sha>` / `dir:<hash>`) to the set of
@@ -1732,9 +1774,31 @@ fn build_in_placeholders(count: usize, start_idx: usize) -> String {
         .join(", ")
 }
 
+fn enrich_memories_workspace_source(
+    conn: &Connection,
+    workspace_id: Option<i64>,
+    memories: &mut [Memory],
+) -> Result<(), rusqlite::Error> {
+    let Some(ws_id) = workspace_id else {
+        return Ok(());
+    };
+    if !crate::workspaces::workspace_schema_ready(conn)? {
+        return Ok(());
+    }
+    for mem in memories.iter_mut() {
+        mem.source_display_name = crate::workspaces::display_name_for_memory_in_workspace(
+            conn,
+            ws_id,
+            &mem.project_path,
+        )?;
+    }
+    Ok(())
+}
+
 pub fn get_memories(
     conn: &Connection,
     project_filter: Option<&str>,
+    workspace_filter: Option<i64>,
     status_filter: Option<&str>,
     category_filter: Option<&str>,
     search_query: Option<&str>,
@@ -1779,10 +1843,10 @@ pub fn get_memories(
         // LIKE uses the first param
     }
 
-    // Resolve project filter (identity-or-path) into the set of concrete
-    // memory project_path values. Empty Vec is impossible because the helper
-    // falls back to `[filter]` when no rows resolve.
-    let resolved_paths: Vec<String> = if let Some(p) = project_filter {
+    // Workspace filter takes precedence over single-project filter (union of members).
+    let resolved_paths: Vec<String> = if let Some(ws_id) = workspace_filter {
+        crate::workspaces::resolve_workspace_filter_paths(conn, ws_id)?
+    } else if let Some(p) = project_filter {
         resolve_paths_for_memory_filter(conn, p)?
     } else {
         Vec::new()
@@ -1879,7 +1943,10 @@ pub fn get_memories(
     };
 
     match result {
-        Ok(memories) if !memories.is_empty() || !use_fts => Ok(memories),
+        Ok(mut memories) if !memories.is_empty() || !use_fts => {
+            enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
+            Ok(memories)
+        }
         Ok(_empty) if use_fts && !use_like_fallback => {
             // FTS returned nothing — retry with LIKE for better partial matching
             let like_sql = format!(
@@ -1920,7 +1987,9 @@ pub fn get_memories(
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 like_params.iter().map(|p| p.as_ref()).collect();
             let rows = stmt.query_map(param_refs.as_slice(), map_memory_row)?;
-            rows.collect()
+            let mut memories: Vec<Memory> = rows.collect::<Result<Vec<_>, _>>()?;
+            enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
+            Ok(memories)
         }
         Err(e) if use_fts => {
             // FTS query failed — fall back to LIKE
@@ -1958,7 +2027,9 @@ pub fn get_memories(
             let param_refs: Vec<&dyn rusqlite::types::ToSql> =
                 like_params.iter().map(|p| p.as_ref()).collect();
             let rows = stmt.query_map(param_refs.as_slice(), map_memory_row)?;
-            rows.collect()
+            let mut memories: Vec<Memory> = rows.collect::<Result<Vec<_>, _>>()?;
+            enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
+            Ok(memories)
         }
         other => other,
     }
@@ -1988,19 +2059,21 @@ fn map_memory_row(row: &rusqlite::Row<'_>) -> Result<Memory, rusqlite::Error> {
         merged_from: row.get(19)?,
         metadata_json: row.get(20)?,
         has_embedding: row.get::<_, i64>(21)? != 0,
+        source_display_name: None,
     })
 }
 
 pub fn get_memory_stats(
     conn: &Connection,
     project_filter: Option<&str>,
+    workspace_filter: Option<i64>,
 ) -> Result<MemoryStats, rusqlite::Error> {
-    // Resolve project filter identity → concrete `project_path` set (see
-    // `resolve_paths_for_memory_filter` doc comment for why this is needed).
-    // Empty when no filter is provided; non-empty when filtering.
-    let resolved_paths: Vec<String> = match project_filter {
-        Some(p) => resolve_paths_for_memory_filter(conn, p)?,
-        None => Vec::new(),
+    let resolved_paths: Vec<String> = if let Some(ws_id) = workspace_filter {
+        crate::workspaces::resolve_workspace_filter_paths(conn, ws_id)?
+    } else if let Some(p) = project_filter {
+        resolve_paths_for_memory_filter(conn, p)?
+    } else {
+        Vec::new()
     };
 
     // Build a `project_path IN (?, ?, ...)` fragment and the param refs that
@@ -2382,6 +2455,11 @@ pub fn update_memory_status(
         None
     };
     let is_archive = new_status == "archived" && prior_status != Some("archived");
+    let epoch_bump_identities = if let Some(ref id) = project_identity {
+        Some(crate::workspaces::workspace_member_identities_for_project(conn, id)?)
+    } else {
+        None
+    };
 
     // Phase B: re-check the target row, mutate, and queue/bump in one tx.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2390,8 +2468,8 @@ pub fn update_memory_status(
         "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
         params![new_status, now_millis(), memory_id],
     )?;
-    if let Some(project_identity) = project_identity.as_deref() {
-        bump_project_memory_epoch_for_identity(&tx, project_identity)?;
+    if let Some(identities) = epoch_bump_identities.as_ref() {
+        crate::workspaces::bump_epochs_for_identities(&tx, identities)?;
     } else if is_archive {
         queue_memory_mutation(
             &tx,
@@ -2533,6 +2611,14 @@ pub fn bulk_update_memory_status(
     } else {
         HashSet::new()
     };
+    let mut epoch_bump_identities = HashSet::new();
+    if is_restore {
+        for identity in &phase_a_identities {
+            epoch_bump_identities.extend(
+                crate::workspaces::workspace_member_identities_for_project(conn, identity)?,
+            );
+        }
+    }
 
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql =
@@ -2553,9 +2639,7 @@ pub fn bulk_update_memory_status(
         tx.execute(&sql, params_from_iter(params_vec))?
     };
     if is_restore {
-        for identity in &phase_a_identities {
-            bump_project_memory_epoch_for_identity(&tx, identity)?;
-        }
+        crate::workspaces::bump_epochs_for_identities(&tx, &epoch_bump_identities)?;
     } else if is_archive {
         for id in memory_ids {
             if let Some(target) = phase_a_targets.get(id) {
@@ -5146,8 +5230,8 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/issue87-b", "ARCHITECTURE_DECISIONS", "active");
 
         let identity = stable_dir_identity("/tmp/issue87-a");
-        let rows =
-            get_memories(&conn, Some(&identity), None, None, None, 100, 0).expect("get_memories");
+        let rows = get_memories(&conn, Some(&identity), None, None, None, None, 100, 0)
+            .expect("get_memories");
 
         assert_eq!(rows.len(), 2, "expected both memories under /tmp/issue87-a");
         for row in &rows {
@@ -5177,7 +5261,7 @@ mod memory_project_filter_tests {
         );
 
         let identity = stable_dir_identity("/tmp/issue87-stats");
-        let stats = get_memory_stats(&conn, Some(&identity)).expect("get_memory_stats");
+        let stats = get_memory_stats(&conn, Some(&identity), None).expect("get_memory_stats");
 
         assert_eq!(stats.total, 3);
         assert_eq!(stats.active, 2);
@@ -5201,7 +5285,7 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/a", "X", "active");
         insert_memory(&conn, "/tmp/b", "Y", "active");
 
-        let rows = get_memories(&conn, None, None, None, None, 100, 0).expect("get_memories");
+        let rows = get_memories(&conn, None, None, None, None, None, 100, 0).expect("get_memories");
         assert_eq!(rows.len(), 2);
     }
 
@@ -5212,7 +5296,7 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/b", "Y", "permanent");
         insert_memory(&conn, "/tmp/c", "Z", "archived");
 
-        let stats = get_memory_stats(&conn, None).expect("get_memory_stats");
+        let stats = get_memory_stats(&conn, None, None).expect("get_memory_stats");
         assert_eq!(stats.total, 3);
         assert_eq!(stats.active, 1);
         assert_eq!(stats.permanent, 1);

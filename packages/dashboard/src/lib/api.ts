@@ -29,6 +29,8 @@ import type {
   SubagentTotals,
   UserMemory,
   UserMemoryCandidate,
+  WorkspaceListItem,
+  WorkspaceSummary,
 } from "./types";
 
 // ── Memory API ──────────────────────────────────────────────
@@ -39,6 +41,7 @@ export async function getProjects(): Promise<import("./types").ProjectInfo[]> {
 
 export async function getMemories(params?: {
   project?: string;
+  workspaceId?: number;
   status?: string;
   category?: string;
   search?: string;
@@ -47,6 +50,7 @@ export async function getMemories(params?: {
 }): Promise<Memory[]> {
   return invoke("get_memories", {
     project: params?.project ?? null,
+    workspaceId: params?.workspaceId ?? null,
     status: params?.status ?? null,
     category: params?.category ?? null,
     search: params?.search ?? null,
@@ -55,8 +59,67 @@ export async function getMemories(params?: {
   });
 }
 
-export async function getMemoryStats(project?: string): Promise<MemoryStats> {
-  return invoke("get_memory_stats", { project: project ?? null });
+export async function getMemoryStats(params?: {
+  project?: string;
+  workspaceId?: number;
+}): Promise<MemoryStats> {
+  return invoke("get_memory_stats", {
+    project: params?.project ?? null,
+    workspaceId: params?.workspaceId ?? null,
+  });
+}
+
+export async function workspaceSchemaReady(): Promise<boolean> {
+  return invoke("workspace_schema_ready");
+}
+
+export async function listWorkspaces(): Promise<WorkspaceListItem[]> {
+  return invoke("list_workspaces");
+}
+
+export async function listWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
+  return invoke("list_workspace_summaries");
+}
+
+export async function createWorkspace(name: string): Promise<number> {
+  return invoke("create_workspace", { name });
+}
+
+export async function renameWorkspace(workspaceId: number, name: string): Promise<void> {
+  return invoke("rename_workspace", { workspaceId, name });
+}
+
+export async function deleteWorkspace(workspaceId: number): Promise<void> {
+  return invoke("delete_workspace", { workspaceId });
+}
+
+export async function addWorkspaceMember(
+  workspaceId: number,
+  projectPath: string,
+  displayName: string,
+  displayPath: string,
+): Promise<void> {
+  return invoke("add_workspace_member", {
+    workspaceId,
+    projectPath,
+    displayName,
+    displayPath,
+  });
+}
+
+export async function removeWorkspaceMember(
+  workspaceId: number,
+  projectPath: string,
+): Promise<void> {
+  return invoke("remove_workspace_member", { workspaceId, projectPath });
+}
+
+export async function setMemberDisplayName(
+  workspaceId: number,
+  projectPath: string,
+  displayName: string,
+): Promise<void> {
+  return invoke("set_member_display_name", { workspaceId, projectPath, displayName });
 }
 
 export async function updateMemoryStatus(memoryId: number, status: string): Promise<void> {

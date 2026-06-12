@@ -23,6 +23,7 @@ export interface Memory {
   merged_from: string | null;
   metadata_json: string | null;
   has_embedding: boolean;
+  source_display_name?: string | null;
 }
 
 export type MemoryCategory =
@@ -438,9 +439,31 @@ export interface UserMemoryCandidate {
   created_at: number;
 }
 
+export interface WorkspaceMemberView {
+  project_path: string;
+  display_name: string;
+  display_path: string;
+  memory_count: number;
+  added_at: number;
+}
+
+export interface WorkspaceListItem {
+  id: number;
+  name: string;
+  created_at: number;
+  updated_at: number;
+  members: WorkspaceMemberView[];
+}
+
+export interface WorkspaceSummary {
+  id: number;
+  name: string;
+}
+
 export type NavSection =
   | "memories"
   | "sessions"
+  | "workspaces"
   | "cache"
   | "dreamer"
   | "user-memories"

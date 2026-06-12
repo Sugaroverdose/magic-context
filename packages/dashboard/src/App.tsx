@@ -9,6 +9,7 @@ import LogViewer from "./components/LogViewer/LogViewer";
 import MemoryBrowser from "./components/MemoryBrowser/MemoryBrowser";
 import SessionViewer from "./components/SessionViewer/SessionViewer";
 import UserMemories from "./components/UserMemories/UserMemories";
+import WorkspacesPanel from "./components/WorkspacesPanel/WorkspacesPanel";
 import { getAvailableModels, getAvailablePiModels, getDbHealth } from "./lib/api";
 import type { NavSection } from "./lib/types";
 import { checkForUpdate, installAndRelaunch, runUpdater } from "./lib/updater";
@@ -156,6 +157,9 @@ export default function App() {
           </Show>
           <Show when={activeSection() === "cache"}>
             <CacheDiagnostics />
+          </Show>
+          <Show when={activeSection() === "workspaces"}>
+            <WorkspacesPanel />
           </Show>
           <Show when={activeSection() === "dreamer"}>
             <DreamerPanel />

@@ -96,6 +96,16 @@ fn main() {
             // Health
             commands::get_db_health,
             commands::get_dashboard_schema_warning,
+            // Workspaces
+            commands::workspace_schema_ready,
+            commands::list_workspaces,
+            commands::list_workspace_summaries,
+            commands::create_workspace,
+            commands::rename_workspace,
+            commands::delete_workspace,
+            commands::add_workspace_member,
+            commands::remove_workspace_member,
+            commands::set_member_display_name,
         ])
         .setup(|app| {
             // ── macOS app menu bar ──

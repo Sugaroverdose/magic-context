@@ -4,6 +4,7 @@ const NAV_ITEMS: { id: NavSection; icon: string; label: string }[] = [
   { id: "memories", icon: "🧠", label: "Mem" },
   { id: "sessions", icon: "📜", label: "Hist" },
   { id: "cache", icon: "📊", label: "Cache" },
+  { id: "workspaces", icon: "🗂️", label: "Space" },
   { id: "dreamer", icon: "🌙", label: "Dream" },
   { id: "user-memories", icon: "👤", label: "User" },
   { id: "config", icon: "⚙️", label: "Config" },

@@ -8,6 +8,7 @@ import {
   formatRelativeTime,
   getMemories,
   getMemoryStats,
+  listWorkspaceSummaries,
   truncate,
   updateMemoryContent,
   updateMemoryStatus,
@@ -43,6 +44,7 @@ function saveCollapsedCategories(set: Set<string>): void {
 
 export default function MemoryBrowser() {
   const [projectFilter, setProjectFilter] = createSignal<string>("");
+  const [workspaceFilter, setWorkspaceFilter] = createSignal<number | "">("");
   const [statusFilter, setStatusFilter] = createSignal<string>("");
   const [categoryFilter, setCategoryFilter] = createSignal<string>("");
   const [searchQuery, setSearchQuery] = createSignal<string>("");
@@ -59,20 +61,27 @@ export default function MemoryBrowser() {
   createEffect(() => saveCollapsedCategories(collapsedCategories()));
 
   const [projects] = createResource(enumerateMemoryProjects);
+  const [workspaceSummaries] = createResource(listWorkspaceSummaries);
 
-  const fetchParams = () => ({
-    project: projectFilter() || undefined,
-    status: statusFilter() || undefined,
-    category: categoryFilter() || undefined,
-    search: searchQuery() || undefined,
-    limit: 200,
-    offset: 0,
-  });
+  const fetchParams = () => {
+    const ws = workspaceFilter();
+    return {
+      project: ws === "" ? projectFilter() || undefined : undefined,
+      workspaceId: ws === "" ? undefined : ws,
+      status: statusFilter() || undefined,
+      category: categoryFilter() || undefined,
+      search: searchQuery() || undefined,
+      limit: 200,
+      offset: 0,
+    };
+  };
 
   const [memories, { refetch: refetchMemories }] = createResource(fetchParams, getMemories);
-  const [stats, { refetch: refetchStats }] = createResource(
-    () => ({ project: projectFilter() || undefined }),
-    (params) => getMemoryStats(params.project),
+  const [stats, { refetch: refetchStats }] = createResource(fetchParams, (params) =>
+    getMemoryStats({
+      project: params.project,
+      workspaceId: params.workspaceId,
+    }),
   );
 
   // Group memories by category (stable alphabetical order).
@@ -90,8 +99,8 @@ export default function MemoryBrowser() {
   // the selection set would produce a confusing "12 selected" count when only
   // 3 are visible, and bulk actions would still target the hidden ones.
   createEffect(() => {
-    // Track filter signals so this runs when they change.
     projectFilter();
+    workspaceFilter();
     statusFilter();
     categoryFilter();
     searchQuery();
@@ -342,8 +351,31 @@ export default function MemoryBrowser() {
 
       <div class="filter-bar">
         <FilterSelect
+          value={workspaceFilter() === "" ? "" : String(workspaceFilter())}
+          onChange={(v) => {
+            if (v === "") {
+              setWorkspaceFilter("");
+            } else {
+              setWorkspaceFilter(Number(v));
+              setProjectFilter("");
+            }
+          }}
+          placeholder="All workspaces"
+          align="left"
+          options={[
+            { value: "", label: "All workspaces" },
+            ...(workspaceSummaries() ?? []).map((w) => ({
+              value: String(w.id),
+              label: w.name,
+            })),
+          ]}
+        />
+        <FilterSelect
           value={projectFilter()}
-          onChange={setProjectFilter}
+          onChange={(v) => {
+            setProjectFilter(v);
+            if (v) setWorkspaceFilter("");
+          }}
           placeholder="All projects"
           align="left"
           options={[
@@ -524,6 +556,13 @@ export default function MemoryBrowser() {
                                     <span class={`pill ${sourcePillClass(mem.source_type)}`}>
                                       {mem.source_type}
                                     </span>
+                                    <Show
+                                      when={workspaceFilter() !== "" && mem.source_display_name}
+                                    >
+                                      <span class="pill gray">
+                                        source: {mem.source_display_name}
+                                      </span>
+                                    </Show>
                                     <span>seen {mem.seen_count}×</span>
                                     <span>retrieved {mem.retrieval_count}×</span>
                                     <span>{formatRelativeTime(mem.updated_at)}</span>
