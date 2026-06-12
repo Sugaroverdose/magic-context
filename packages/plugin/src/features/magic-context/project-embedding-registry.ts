@@ -5,6 +5,17 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import {
+    buildCanonicalChunkTextFromFts,
+    chunkCanonicalText,
+    chunkEmbeddingWindowsAreCurrent,
+    clearChunkEmbeddingsForProject,
+    getDistinctChunkEmbeddingModelIds,
+    loadUnembeddedCompartmentChunkCandidates,
+    normalizeCompartmentChunkMaxInputTokens,
+    replaceCompartmentChunkEmbeddings,
+    type SaveCompartmentChunkEmbeddingInput,
+} from "./compartment-chunk-embedding";
+import {
     clearProjectCommitEmbeddings,
     getDistinctCommitEmbeddingModelIds,
     loadUnembeddedCommits,
@@ -32,6 +43,8 @@ const SWEEP_MAX_CONSECUTIVE_EMPTY = 3;
 // the others or pin the provider indefinitely.
 const COMMIT_DRAIN_BATCH_SIZE = 16;
 const COMMIT_DRAIN_MAX_PER_SWEEP = 500;
+const CHUNK_DRAIN_BATCH_SIZE = 8;
+const CHUNK_DRAIN_MAX_PER_SWEEP = 200;
 
 export interface EmbeddingFeatures {
     memoryEnabled: boolean;
@@ -79,6 +92,13 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
         return {
             provider: "local",
             model: config?.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+            ...(config?.max_input_tokens
+                ? {
+                      max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
+                          config.max_input_tokens,
+                      ),
+                  }
+                : {}),
         };
     }
 
@@ -98,6 +118,13 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             // vectors. Dropping them here silently disabled NIM support.
             ...(inputType ? { input_type: inputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(config.max_input_tokens
+                ? {
+                      max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
+                          config.max_input_tokens,
+                      ),
+                  }
+                : {}),
         };
     }
 
@@ -120,10 +147,11 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             apiKey: config.api_key,
             inputType: config.input_type,
             truncate: config.truncate,
+            maxInputTokens: config.max_input_tokens,
         });
     }
 
-    return new LocalEmbeddingProvider(config.model);
+    return new LocalEmbeddingProvider(config.model, config.max_input_tokens);
 }
 
 function stableStringify(value: unknown): string {
@@ -217,6 +245,14 @@ function maybeWipeStaleEmbeddings(
             const commitIds = getDistinctCommitEmbeddingModelIds(db, projectIdentity);
             if (anyStoredModelIdIsStale(commitIds, currentProviderIdentity)) {
                 clearProjectCommitEmbeddings(db, projectIdentity);
+                wiped = true;
+            }
+        }
+
+        if (features.memoryEnabled) {
+            const chunkIds = getDistinctChunkEmbeddingModelIds(db, projectIdentity);
+            if (anyStoredModelIdIsStale(chunkIds, currentProviderIdentity)) {
+                clearChunkEmbeddingsForProject(db, projectIdentity);
                 wiped = true;
             }
         }
@@ -317,6 +353,17 @@ export function getProjectEmbeddingSnapshot(
 ): ProjectEmbeddingRegistrationSnapshot | null {
     const registration = projectRegistrations.get(projectIdentity);
     return registration ? snapshotFor(registration) : null;
+}
+
+export function getProjectEmbeddingMaxInputTokens(projectIdentity: string): number {
+    const registration = projectRegistrations.get(projectIdentity);
+    const configMax =
+        registration?.config && "max_input_tokens" in registration.config
+            ? registration.config.max_input_tokens
+            : undefined;
+    return normalizeCompartmentChunkMaxInputTokens(
+        registration?.provider?.maxInputTokens ?? configMax,
+    );
 }
 
 function getOrCreateProjectProvider(
@@ -515,30 +562,162 @@ async function drainCommitBacklogForProject(
     return total;
 }
 
+async function embedCompartmentChunkBatch(
+    db: Database,
+    projectIdentity: string,
+    batchSize: number,
+): Promise<number> {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled || snapshot.modelId === "off") return 0;
+
+    const candidates = loadUnembeddedCompartmentChunkCandidates(
+        db,
+        projectIdentity,
+        snapshot.modelId,
+        batchSize,
+    );
+    if (candidates.length === 0) return 0;
+
+    const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectIdentity);
+    const prepared: Array<{
+        candidate: (typeof candidates)[number];
+        windows: ReturnType<typeof chunkCanonicalText>;
+        textOffset: number;
+    }> = [];
+    const texts: string[] = [];
+
+    for (const candidate of candidates) {
+        const canonicalText = buildCanonicalChunkTextFromFts(
+            db,
+            candidate.sessionId,
+            candidate.startMessage,
+            candidate.endMessage,
+        );
+        if (canonicalText.length === 0) continue;
+        const windows = chunkCanonicalText(
+            canonicalText,
+            candidate.startMessage,
+            candidate.endMessage,
+            maxInputTokens,
+        );
+        if (windows.length === 0) continue;
+        if (chunkEmbeddingWindowsAreCurrent(db, candidate.id, snapshot.modelId, windows)) {
+            continue;
+        }
+        prepared.push({ candidate, windows, textOffset: texts.length });
+        texts.push(...windows.map((window) => window.text));
+    }
+
+    if (texts.length === 0) return 0;
+
+    try {
+        const result = await embedBatchForProject(projectIdentity, texts);
+        if (!result) return 0;
+
+        let embeddedCount = 0;
+        for (const item of prepared) {
+            const vectors = result.vectors.slice(
+                item.textOffset,
+                item.textOffset + item.windows.length,
+            );
+            if (vectors.length !== item.windows.length || vectors.some((vector) => !vector)) {
+                continue;
+            }
+            const rows: SaveCompartmentChunkEmbeddingInput[] = item.windows.map(
+                (window, index) => ({
+                    compartmentId: item.candidate.id,
+                    sessionId: item.candidate.sessionId,
+                    projectPath: projectIdentity,
+                    window,
+                    modelId: result.modelId,
+                    vector: vectors[index] as Float32Array,
+                }),
+            );
+            replaceCompartmentChunkEmbeddings(db, rows);
+            embeddedCount += 1;
+        }
+        return embeddedCount;
+    } catch (error) {
+        log("[magic-context] failed to proactively embed compartment chunks:", error);
+        return 0;
+    }
+}
+
+async function drainCompartmentChunkBacklogForProject(
+    db: Database,
+    projectIdentity: string,
+    deadline: number,
+): Promise<number> {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled) return 0;
+
+    const holderId = `chunk-embed-sweep-${randomUUID()}`;
+    const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
+    if (!lease.acquired) {
+        return 0;
+    }
+
+    let total = 0;
+    try {
+        while (Date.now() < deadline && total < CHUNK_DRAIN_MAX_PER_SWEEP) {
+            const embedded = await embedCompartmentChunkBatch(
+                db,
+                projectIdentity,
+                CHUNK_DRAIN_BATCH_SIZE,
+            );
+            if (embedded === 0) break;
+            total += embedded;
+            if (embedded < CHUNK_DRAIN_BATCH_SIZE) break;
+        }
+    } finally {
+        releaseGitSweepLease(db, projectIdentity, holderId);
+    }
+    return total;
+}
+
+export async function embedUnembeddedCompartmentChunksForProject(
+    db: Database,
+    projectIdentity: string,
+): Promise<number> {
+    return drainCompartmentChunkBacklogForProject(
+        db,
+        projectIdentity,
+        Date.now() + SWEEP_MAX_WALL_CLOCK_MS,
+    );
+}
+
 export async function sweepAllRegisteredProjects(
     db: Database,
     batchSize = 10,
 ): Promise<{
     memoriesEmbedded: number;
     commitsEmbedded: number;
-    perProject: Map<string, { memories: number; commits: number }>;
+    chunksEmbedded: number;
+    perProject: Map<string, { memories: number; commits: number; chunks: number }>;
 }> {
     if (projectSweepInProgress) {
         log("[magic-context] project embedding sweep already in progress, skipping this tick");
-        return { memoriesEmbedded: 0, commitsEmbedded: 0, perProject: new Map() };
+        return {
+            memoriesEmbedded: 0,
+            commitsEmbedded: 0,
+            chunksEmbedded: 0,
+            perProject: new Map(),
+        };
     }
 
     projectSweepInProgress = true;
     const startedAt = Date.now();
     const deadline = startedAt + SWEEP_MAX_WALL_CLOCK_MS;
-    const perProject = new Map<string, { memories: number; commits: number }>();
+    const perProject = new Map<string, { memories: number; commits: number; chunks: number }>();
     let memoriesEmbedded = 0;
     let commitsEmbedded = 0;
+    let chunksEmbedded = 0;
 
     try {
         for (const projectIdentity of projectRegistrations.keys()) {
             let memories = 0;
             let commits = 0;
+            let chunks = 0;
             let consecutiveEmpty = 0;
 
             while (Date.now() < deadline) {
@@ -563,14 +742,23 @@ export async function sweepAllRegisteredProjects(
                 commitsEmbedded += commits;
             }
 
-            perProject.set(projectIdentity, { memories, commits });
+            if (Date.now() < deadline) {
+                chunks = await drainCompartmentChunkBacklogForProject(
+                    db,
+                    projectIdentity,
+                    deadline,
+                );
+                chunksEmbedded += chunks;
+            }
+
+            perProject.set(projectIdentity, { memories, commits, chunks });
             if (Date.now() >= deadline) break;
         }
     } finally {
         projectSweepInProgress = false;
     }
 
-    return { memoriesEmbedded, commitsEmbedded, perProject };
+    return { memoriesEmbedded, commitsEmbedded, chunksEmbedded, perProject };
 }
 
 export function _setTestProviderFactoryForProject(

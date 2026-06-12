@@ -1,4 +1,7 @@
-import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
+import {
+    embedAndStoreCompartmentChunks,
+    embedAndStoreCompartments,
+} from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
     clearRecompStaging,
@@ -269,7 +272,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // (see final-success path below for rationale). Structural rebuild only.
             void promoted.facts;
 
-            // v2 (E2): recompute P1 embeddings for the rebuilt compartments.
+            // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments.
             // Recomp deletes + reinserts every compartment with fresh P1 text, so
             // their embeddings must be regenerated — otherwise the rebuilt rows
             // have NULL p1_embedding and vanish from ctx_search semantic results +
@@ -287,6 +290,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
                     .filter((c) => typeof c.id === "number" && c.p1.length > 0);
                 void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
+
+                const chunksToEmbed = liveCompartments.map((c) => ({
+                    id: c.id,
+                    startMessage: c.startMessage,
+                    endMessage: c.endMessage,
+                }));
+                void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
             }
 
             const lastCompartmentEnd =
@@ -584,7 +594,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // history/materialize signals must find the drop rows durable.
         deps.onCompartmentStatePublished?.(sessionId);
 
-        // v2 (E2): recompute P1 embeddings for the rebuilt compartments. This is
+        // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which
         // handles early-exit/partial cases and already embeds). Without this, a
         // fully-completed recomp leaves NULL p1_embedding → rebuilds vanish from
@@ -600,6 +610,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
                 .filter((c) => typeof c.id === "number" && c.p1.length > 0);
             void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
+
+            const chunksToEmbed = liveCompartments.map((c) => ({
+                id: c.id,
+                startMessage: c.startMessage,
+                endMessage: c.endMessage,
+            }));
+            void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
         }
 
         // v2: advance the compaction marker on the full-completion path too (the

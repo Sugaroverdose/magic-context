@@ -331,6 +331,7 @@ function extractBatchEmbeddings(
 
 export class LocalEmbeddingProvider implements EmbeddingProvider {
     readonly modelId: string;
+    readonly maxInputTokens: number;
 
     private readonly model: string;
     private pipeline: EmbeddingPipeline | null = null;
@@ -340,8 +341,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     private disposePromise: Promise<void> | null = null;
     private readonly inFlightWaiters: Array<() => void> = [];
 
-    constructor(model = DEFAULT_LOCAL_EMBEDDING_MODEL) {
+    constructor(model = DEFAULT_LOCAL_EMBEDDING_MODEL, maxInputTokens = 512) {
         this.model = model;
+        this.maxInputTokens = maxInputTokens;
         this.modelId = getEmbeddingProviderIdentity({ provider: "local", model });
     }
 

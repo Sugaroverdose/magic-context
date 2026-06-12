@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
+import {
+    chunkCanonicalText,
+    loadCompartmentChunkEmbeddingsForSearch,
+    replaceCompartmentChunkEmbeddings,
+} from "./compartment-chunk-embedding";
+import { appendCompartments, getCompartments } from "./compartment-storage";
 import type { EmbeddingProvider } from "./memory/embedding-provider";
 import {
     _resetProjectEmbeddingRegistryForTests,
@@ -12,6 +18,7 @@ import {
     getProjectEmbeddingSnapshot,
     registerProjectEmbeddingAndMaybeWipe,
     registerProjectInObservationMode,
+    sweepAllRegisteredProjects,
 } from "./project-embedding-registry";
 import { closeDatabase, openDatabase } from "./storage";
 
@@ -46,6 +53,31 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
 
 function localConfig(model: string): EmbeddingConfig {
     return { provider: "local", model };
+}
+
+function seedCompartmentWithFts(
+    db: NonNullable<ReturnType<typeof openDatabase>>,
+    sessionId: string,
+): number {
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 2,
+            startMessageId: "u1",
+            endMessageId: "a2",
+            title: "Hydraulic backpressure",
+            content: "P1 content",
+            p1: "P1 content",
+        },
+    ]);
+    db.prepare(
+        "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+    ).run(sessionId, 1, `${sessionId}-u1`, "user", "How do we avoid saturating the queue?");
+    db.prepare(
+        "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+    ).run(sessionId, 2, `${sessionId}-a2`, "assistant", "Use backpressure and bounded drains.");
+    return getCompartments(db, sessionId)[0].id;
 }
 
 describe("project embedding registry", () => {
@@ -162,5 +194,86 @@ describe("project embedding registry", () => {
         release?.();
 
         expect(await inFlight).toBeNull();
+    });
+
+    it("wipes stale compartment chunk embeddings on provider change", () => {
+        const db = useTempDb();
+        const compartmentId = seedCompartmentWithFts(db, "ses-wipe");
+        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        replaceCompartmentChunkEmbeddings(
+            db,
+            windows.map((window) => ({
+                compartmentId,
+                sessionId: "ses-wipe",
+                projectPath: "git:wipe",
+                window,
+                modelId: "stale:model",
+                vector: new Float32Array([1, 0]),
+            })),
+        );
+
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:wipe",
+            localConfig("model-b"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/wipe",
+        );
+
+        expect(loadCompartmentChunkEmbeddingsForSearch(db, "ses-wipe", "git:wipe")).toHaveLength(0);
+    });
+
+    it("backfill drains missing compartment chunks and is idempotent", async () => {
+        let batchCalls = 0;
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        batchCalls += 1;
+                        return super.embedBatch(texts);
+                    }
+                })(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-backfill");
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:backfill",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/backfill",
+        );
+
+        const first = await sweepAllRegisteredProjects(db, 5);
+        expect(first.chunksEmbedded).toBe(1);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-backfill", "git:backfill"),
+        ).toHaveLength(1);
+
+        const second = await sweepAllRegisteredProjects(db, 5);
+        expect(second.chunksEmbedded).toBe(0);
+        expect(batchCalls).toBe(1);
+    });
+
+    it("does not backfill compartment chunks when memory is disabled", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-memory-off");
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:off",
+            localConfig("model-a"),
+            { memoryEnabled: false, gitCommitEnabled: false },
+            "/tmp/off",
+        );
+
+        const result = await sweepAllRegisteredProjects(db, 5);
+        expect(result.chunksEmbedded).toBe(0);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-memory-off", "git:off"),
+        ).toHaveLength(0);
     });
 });

@@ -1,4 +1,7 @@
-import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
+import {
+    embedAndStoreCompartmentChunks,
+    embedAndStoreCompartments,
+} from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
 import {
     appendCompartments,
@@ -634,6 +637,16 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 .map((c, i) => ({ id: persistedIds[i], p1: c.p1 ?? c.content }))
                 .filter((c) => typeof c.id === "number" && c.p1.length > 0);
             void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
+
+            const chunksToEmbed = persistedCompartments
+                .map((c, i) => ({
+                    id: persistedIds[i],
+                    startMessage: c.startMessage,
+                    endMessage: c.endMessage,
+                    sourceChunkText: chunk.text,
+                }))
+                .filter((c) => typeof c.id === "number");
+            void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
         }
 
         queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);

@@ -11,6 +11,7 @@ import {
     renewGitSweepLease,
 } from "../features/magic-context/git-commits";
 import {
+    embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
@@ -174,6 +175,16 @@ function runTick(origin: "startup" | "interval"): void {
                     if (embeddedCount > 0) {
                         log(
                             `[magic-context] proactively embedded ${embeddedCount} ${embeddedCount === 1 ? "memory" : "memories"} for project ${reg.projectIdentity}`,
+                        );
+                    }
+
+                    const chunkCount = await embedUnembeddedCompartmentChunksForProject(
+                        db,
+                        reg.projectIdentity,
+                    );
+                    if (chunkCount > 0) {
+                        log(
+                            `[magic-context] proactively embedded ${chunkCount} compartment ${chunkCount === 1 ? "chunk" : "chunks"} for project ${reg.projectIdentity}`,
                         );
                     }
                 }

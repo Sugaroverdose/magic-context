@@ -1,5 +1,9 @@
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import {
+    loadCompartmentChunkEmbeddingsForSearch,
+    type StoredCompartmentChunkEmbedding,
+} from "./compartment-chunk-embedding";
 import { type GitCommitSearchHit, searchGitCommitsSync } from "./git-commits";
 import { containsProbeVerbatim, extractLiteralProbes } from "./literal-probes";
 import {
@@ -12,7 +16,7 @@ import {
     updateMemoryRetrievalCount,
 } from "./memory";
 import { cosineSimilarity } from "./memory/cosine-similarity";
-import { embedText, isEmbeddingEnabled } from "./memory/embedding";
+import { embedText, getProjectEmbeddingSnapshot, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
@@ -108,6 +112,19 @@ export interface MessageSearchResult {
     role: string;
 }
 
+export interface CompartmentSearchResult {
+    source: "compartment";
+    content: string;
+    score: number;
+    compartmentId: number;
+    sessionId: string;
+    title: string;
+    startOrdinal: number;
+    endOrdinal: number;
+    matchType: "semantic" | "hybrid";
+    snippet?: string;
+}
+
 export interface GitCommitSearchResult {
     source: "git_commit";
     content: string;
@@ -119,7 +136,11 @@ export interface GitCommitSearchResult {
     matchType: "semantic" | "fts" | "hybrid";
 }
 
-export type UnifiedSearchResult = MemorySearchResult | MessageSearchResult | GitCommitSearchResult;
+export type UnifiedSearchResult =
+    | MemorySearchResult
+    | MessageSearchResult
+    | CompartmentSearchResult
+    | GitCommitSearchResult;
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
@@ -162,9 +183,7 @@ const ftsMatchCountStatements = new WeakMap<Database, PreparedStatement>();
 function getSessionFtsRowCount(db: Database, sessionId: string): number {
     let stmt = ftsRowCountStatements.get(db);
     if (!stmt) {
-        stmt = db.prepare(
-            "SELECT COUNT(*) AS n FROM message_history_fts WHERE session_id = ?",
-        );
+        stmt = db.prepare("SELECT COUNT(*) AS n FROM message_history_fts WHERE session_id = ?");
         ftsRowCountStatements.set(db, stmt);
     }
     const row = stmt.get(sessionId) as { n?: number } | undefined;
@@ -598,11 +617,152 @@ function searchMessages(args: {
     }));
 }
 
+function searchCompartmentChunks(args: {
+    db: Database;
+    sessionId: string;
+    projectPath: string;
+    queryEmbedding: Float32Array | null;
+    limit: number;
+    maxOrdinal?: number;
+    modelId?: string | null;
+}): CompartmentSearchResult[] {
+    if (!args.queryEmbedding || args.limit <= 0) return [];
+    const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
+    const rows = loadCompartmentChunkEmbeddingsForSearch(
+        args.db,
+        args.sessionId,
+        args.projectPath,
+        args.modelId,
+    );
+    if (rows.length === 0) return [];
+
+    const byCompartment = new Map<
+        number,
+        { row: StoredCompartmentChunkEmbedding; score: number }
+    >();
+    for (const row of rows) {
+        if (cutoff !== null && row.endOrdinal > cutoff) {
+            continue;
+        }
+        const score = normalizeCosineScore(cosineSimilarity(args.queryEmbedding, row.vector));
+        if (score <= 0) continue;
+        const existing = byCompartment.get(row.compartmentId);
+        if (!existing || score > existing.score) {
+            byCompartment.set(row.compartmentId, { row, score });
+        }
+    }
+
+    return [...byCompartment.values()]
+        .sort((left, right) =>
+            right.score !== left.score
+                ? right.score - left.score
+                : left.row.startOrdinal - right.row.startOrdinal,
+        )
+        .slice(0, args.limit)
+        .map(({ row, score }) => ({
+            source: "compartment" as const,
+            content: previewText(row.title),
+            score: score * SINGLE_SOURCE_PENALTY,
+            compartmentId: row.compartmentId,
+            sessionId: row.sessionId,
+            title: row.title,
+            startOrdinal: row.startOrdinal,
+            endOrdinal: row.endOrdinal,
+            matchType: "semantic" as const,
+        }));
+}
+
+function mergeMessageAndCompartmentResults(args: {
+    messages: MessageSearchResult[];
+    compartments: CompartmentSearchResult[];
+    limit: number;
+}): Array<MessageSearchResult | CompartmentSearchResult> {
+    if (args.compartments.length === 0) return args.messages;
+    if (args.messages.length === 0) return args.compartments;
+
+    const fused = new Map<
+        string,
+        {
+            result: MessageSearchResult | CompartmentSearchResult;
+            score: number;
+            tieOrdinal: number;
+            snippetScore: number;
+        }
+    >();
+
+    const add = (
+        key: string,
+        result: MessageSearchResult | CompartmentSearchResult,
+        score: number,
+        tieOrdinal: number,
+    ) => {
+        const existing = fused.get(key);
+        if (existing) {
+            existing.score += score;
+            return existing;
+        }
+        const entry = { result, score, tieOrdinal, snippetScore: -1 };
+        fused.set(key, entry);
+        return entry;
+    };
+
+    args.compartments.forEach((compartment, rank) => {
+        add(
+            `compartment:${compartment.compartmentId}`,
+            compartment,
+            1 / (RRF_K + rank),
+            compartment.startOrdinal,
+        );
+    });
+
+    for (const [rank, message] of args.messages.entries()) {
+        const containing = args.compartments.find(
+            (compartment) =>
+                message.messageOrdinal >= compartment.startOrdinal &&
+                message.messageOrdinal <= compartment.endOrdinal,
+        );
+        const contribution = 1 / (RRF_K + rank);
+        if (!containing) {
+            add(`message:${message.messageId}`, message, contribution, message.messageOrdinal);
+            continue;
+        }
+
+        const entry = add(
+            `compartment:${containing.compartmentId}`,
+            containing,
+            contribution,
+            containing.startOrdinal,
+        );
+        if (message.score > entry.snippetScore && entry.result.source === "compartment") {
+            entry.snippetScore = message.score;
+            entry.result = {
+                ...entry.result,
+                matchType: "hybrid",
+                snippet: message.content,
+            };
+        }
+    }
+
+    const ranked = [...fused.values()]
+        .sort((left, right) =>
+            right.score !== left.score
+                ? right.score - left.score
+                : left.tieOrdinal - right.tieOrdinal,
+        )
+        .slice(0, args.limit);
+
+    return ranked.map((entry, rank) => ({
+        ...entry.result,
+        score: linearDecayScore(rank, ranked.length),
+    }));
+}
+
 function getSourceBoost(result: UnifiedSearchResult): number {
     switch (result.source) {
         case "memory":
             return MEMORY_SOURCE_BOOST;
         case "message":
+        case "compartment":
             return MESSAGE_SOURCE_BOOST;
         case "git_commit":
             return GIT_COMMIT_SOURCE_BOOST;
@@ -623,6 +783,10 @@ function compareUnifiedResults(left: UnifiedSearchResult, right: UnifiedSearchRe
 
     if (left.source === "message" && right.source === "message") {
         return left.messageOrdinal - right.messageOrdinal;
+    }
+
+    if (left.source === "compartment" && right.source === "compartment") {
+        return left.startOrdinal - right.startOrdinal;
     }
 
     if (left.source === "git_commit" && right.source === "git_commit") {
@@ -702,9 +866,11 @@ export async function unifiedSearch(
     const gitCommitsEnabled = options.gitCommitsEnabled ?? false;
     const activeSources = resolveSources(options.sources);
 
-    const runMemory = activeSources.has("memory") && (options.memoryEnabled ?? true);
+    const memoryFeatureEnabled = options.memoryEnabled ?? true;
+    const runMemory = activeSources.has("memory") && memoryFeatureEnabled;
     const runMessages = activeSources.has("message");
     const runGitCommits = activeSources.has("git_commit") && gitCommitsEnabled;
+    const runCompartmentChunks = runMessages && memoryFeatureEnabled && embeddingEnabled;
 
     // Embed the query ONCE at the top — both memory and git-commit searches
     // need the same vector. Previously each search called `embedQuery`
@@ -723,7 +889,9 @@ export async function unifiedSearch(
     // that BEFORE the embed call meant the embed fetch couldn't start
     // until indexing finished.
     const needsEmbedding =
-        (runMemory || runGitCommits) && embeddingEnabled && isEmbeddingRuntimeEnabled();
+        (runMemory || runGitCommits || runCompartmentChunks) &&
+        embeddingEnabled &&
+        isEmbeddingRuntimeEnabled();
 
     const queryEmbeddingPromise: Promise<Float32Array | null> = needsEmbedding
         ? embedQuery(trimmedQuery, options.signal).catch((error) => {
@@ -763,6 +931,23 @@ export async function unifiedSearch(
     // Wait for the single embed call (if any) and then run the two
     // embedding-dependent searches in parallel using the same vector.
     const queryEmbedding = await queryEmbeddingPromise;
+    const embeddingModelId = getProjectEmbeddingSnapshot(projectPath)?.modelId;
+    const compartmentResults = runCompartmentChunks
+        ? searchCompartmentChunks({
+              db,
+              sessionId,
+              projectPath,
+              queryEmbedding,
+              limit: tierLimit,
+              maxOrdinal: options.maxMessageOrdinal,
+              modelId: embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+          })
+        : [];
+    const messageLikeResults = mergeMessageAndCompartmentResults({
+        messages: messageResults,
+        compartments: compartmentResults,
+        limit: tierLimit,
+    });
 
     const [memoryResults, gitCommitResults] = await Promise.all([
         runMemory
@@ -789,7 +974,7 @@ export async function unifiedSearch(
             : Promise.resolve([] as GitCommitSearchResult[]),
     ]);
 
-    const results = [...memoryResults, ...messageResults, ...gitCommitResults]
+    const results = [...memoryResults, ...messageLikeResults, ...gitCommitResults]
         .sort(compareUnifiedResults)
         .slice(0, limit);
 

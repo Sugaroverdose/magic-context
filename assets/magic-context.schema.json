@@ -636,6 +636,12 @@
         "truncate": {
           "description": "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
           "type": "string"
+        },
+        "max_input_tokens": {
+          "description": "Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
         }
       }
     },

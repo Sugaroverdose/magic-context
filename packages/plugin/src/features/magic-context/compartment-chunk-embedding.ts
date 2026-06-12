@@ -1,0 +1,624 @@
+import { createHash } from "node:crypto";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
+import { getHarness } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+
+export const DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS = 512;
+
+interface FtsChunkRow {
+    messageOrdinal: number | string;
+    role: string;
+    content: string;
+}
+
+interface ExistingChunkHashRow {
+    windowIndex: number;
+    chunkHash: string;
+}
+
+interface StoredModelIdRow {
+    modelId: string | null;
+}
+
+interface SearchChunkRow {
+    compartmentId: number;
+    sessionId: string;
+    title: string;
+    compartmentStart: number;
+    compartmentEnd: number;
+    windowIndex: number;
+    windowStart: number;
+    windowEnd: number;
+    chunkHash: string;
+    modelId: string;
+    dims: number;
+    vector: Uint8Array | ArrayBuffer;
+}
+
+interface BackfillCandidateRow {
+    id: number;
+    sessionId: string;
+    startMessage: number;
+    endMessage: number;
+    title: string;
+}
+
+export interface CompartmentChunkBackfillCandidate {
+    id: number;
+    sessionId: string;
+    startMessage: number;
+    endMessage: number;
+    title: string;
+}
+
+export interface CompartmentChunkWindow {
+    windowIndex: number;
+    startOrdinal: number;
+    endOrdinal: number;
+    text: string;
+    chunkHash: string;
+}
+
+export interface StoredCompartmentChunkEmbedding {
+    compartmentId: number;
+    sessionId: string;
+    title: string;
+    startOrdinal: number;
+    endOrdinal: number;
+    windowIndex: number;
+    windowStartOrdinal: number;
+    windowEndOrdinal: number;
+    chunkHash: string;
+    modelId: string;
+    dims: number;
+    vector: Float32Array;
+}
+
+export interface SaveCompartmentChunkEmbeddingInput {
+    compartmentId: number;
+    sessionId: string;
+    projectPath: string;
+    window: CompartmentChunkWindow;
+    modelId: string;
+    vector: Float32Array;
+    createdAt?: number;
+}
+
+const loadFtsRowsStatements = new WeakMap<Database, PreparedStatement>();
+const existingHashStatements = new WeakMap<Database, PreparedStatement>();
+const deleteByCompartmentStatements = new WeakMap<Database, PreparedStatement>();
+const insertEmbeddingStatements = new WeakMap<Database, PreparedStatement>();
+const distinctModelStatements = new WeakMap<Database, PreparedStatement>();
+const clearProjectStatements = new WeakMap<Database, PreparedStatement>();
+const clearProjectModelStatements = new WeakMap<Database, PreparedStatement>();
+const searchRowsStatements = new WeakMap<Database, PreparedStatement>();
+const searchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
+const backfillCandidateStatements = new WeakMap<Database, PreparedStatement>();
+
+function getLoadFtsRowsStatement(db: Database): PreparedStatement {
+    let stmt = loadFtsRowsStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT message_ordinal AS messageOrdinal, role, content
+             FROM message_history_fts
+             WHERE session_id = ?
+               AND message_ordinal >= ?
+               AND message_ordinal <= ?
+               AND role IN ('user', 'assistant')
+             ORDER BY message_ordinal ASC`,
+        );
+        loadFtsRowsStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getExistingHashStatement(db: Database): PreparedStatement {
+    let stmt = existingHashStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT window_index AS windowIndex, chunk_hash AS chunkHash
+             FROM compartment_chunk_embeddings
+             WHERE compartment_id = ? AND model_id = ?
+             ORDER BY window_index ASC`,
+        );
+        existingHashStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getDeleteByCompartmentStatement(db: Database): PreparedStatement {
+    let stmt = deleteByCompartmentStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("DELETE FROM compartment_chunk_embeddings WHERE compartment_id = ?");
+        deleteByCompartmentStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getInsertEmbeddingStatement(db: Database): PreparedStatement {
+    let stmt = insertEmbeddingStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `INSERT INTO compartment_chunk_embeddings (
+                compartment_id, session_id, project_path, harness, window_index,
+                start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        insertEmbeddingStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getDistinctModelStatement(db: Database): PreparedStatement {
+    let stmt = distinctModelStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT DISTINCT model_id AS modelId
+             FROM compartment_chunk_embeddings
+             WHERE project_path = ?`,
+        );
+        distinctModelStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getClearProjectStatement(db: Database): PreparedStatement {
+    let stmt = clearProjectStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("DELETE FROM compartment_chunk_embeddings WHERE project_path = ?");
+        clearProjectStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getClearProjectModelStatement(db: Database): PreparedStatement {
+    let stmt = clearProjectModelStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "DELETE FROM compartment_chunk_embeddings WHERE project_path = ? AND model_id = ?",
+        );
+        clearProjectModelStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getSearchRowsStatement(db: Database, withModel: boolean): PreparedStatement {
+    const map = withModel ? searchRowsByModelStatements : searchRowsStatements;
+    let stmt = map.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT e.compartment_id AS compartmentId,
+                    e.session_id AS sessionId,
+                    c.title AS title,
+                    c.start_message AS compartmentStart,
+                    c.end_message AS compartmentEnd,
+                    e.window_index AS windowIndex,
+                    e.start_ordinal AS windowStart,
+                    e.end_ordinal AS windowEnd,
+                    e.chunk_hash AS chunkHash,
+                    e.model_id AS modelId,
+                    e.dims AS dims,
+                    e.vector AS vector
+             FROM compartment_chunk_embeddings e
+             JOIN compartments c ON c.id = e.compartment_id
+             WHERE e.session_id = ?
+               AND e.project_path = ?
+               ${withModel ? "AND e.model_id = ?" : ""}
+             ORDER BY e.compartment_id ASC, e.window_index ASC`,
+        );
+        map.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getBackfillCandidateStatement(db: Database): PreparedStatement {
+    let stmt = backfillCandidateStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT c.id AS id,
+                    c.session_id AS sessionId,
+                    c.start_message AS startMessage,
+                    c.end_message AS endMessage,
+                    c.title AS title
+             FROM compartments c
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM compartment_chunk_embeddings current
+                 WHERE current.compartment_id = c.id
+                   AND current.model_id = ?
+             )
+               AND (
+                 EXISTS (
+                     SELECT 1
+                     FROM compartment_chunk_embeddings scoped
+                     WHERE scoped.session_id = c.session_id
+                       AND scoped.project_path = ?
+                 )
+                 OR NOT EXISTS (
+                     SELECT 1
+                     FROM compartment_chunk_embeddings any_scope
+                     WHERE any_scope.session_id = c.session_id
+                 )
+               )
+             ORDER BY c.created_at DESC, c.id DESC
+             LIMIT ?`,
+        );
+        backfillCandidateStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function isFinitePositiveInteger(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+export function normalizeCompartmentChunkMaxInputTokens(value: unknown): number {
+    if (!isFinitePositiveInteger(value)) {
+        return DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS;
+    }
+    return Math.max(1, Math.floor(value));
+}
+
+function normalizeContent(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+}
+
+function formatOrdinalRange(start: number, end: number): string {
+    return start === end ? `[${start}]` : `[${start}-${end}]`;
+}
+
+function rolePrefix(role: string): "U" | "A" | null {
+    if (role === "user") return "U";
+    if (role === "assistant") return "A";
+    return null;
+}
+
+function parseOrdinal(value: number | string | undefined): number | null {
+    const parsed = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseCanonicalLineRange(line: string): { start: number; end: number } | null {
+    const match = /^\[(\d+)(?:-(\d+))?\]\s+[UA]:/.exec(line.trim());
+    if (!match) return null;
+    const start = Number.parseInt(match[1], 10);
+    const end = match[2] ? Number.parseInt(match[2], 10) : start;
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    return { start, end };
+}
+
+function hashChunkText(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+}
+
+function vectorBlob(vector: Float32Array): Uint8Array {
+    return new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength);
+}
+
+function toFloat32Array(blob: Uint8Array | ArrayBuffer): Float32Array {
+    if (blob instanceof Uint8Array) {
+        const buffer = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+        return new Float32Array(buffer);
+    }
+    return new Float32Array(blob.slice(0));
+}
+
+export function buildCanonicalChunkTextFromFts(
+    db: Database,
+    sessionId: string,
+    startOrdinal: number,
+    endOrdinal: number,
+): string {
+    if (endOrdinal < startOrdinal) return "";
+    const rows = getLoadFtsRowsStatement(db)
+        .all(sessionId, startOrdinal, endOrdinal)
+        .map((row) => row as FtsChunkRow);
+    const lines: string[] = [];
+    let current: {
+        role: "U" | "A";
+        start: number;
+        end: number;
+        parts: string[];
+    } | null = null;
+
+    const flush = (): void => {
+        if (!current || current.parts.length === 0) return;
+        lines.push(
+            `${formatOrdinalRange(current.start, current.end)} ${current.role}: ${current.parts.join(
+                " / ",
+            )}`,
+        );
+        current = null;
+    };
+
+    for (const row of rows) {
+        const ordinal = parseOrdinal(row.messageOrdinal);
+        const prefix = rolePrefix(row.role);
+        const content = typeof row.content === "string" ? normalizeContent(row.content) : "";
+        if (ordinal === null || prefix === null || content.length === 0) continue;
+
+        if (current && current.role === prefix) {
+            current.end = ordinal;
+            current.parts.push(content);
+            continue;
+        }
+
+        flush();
+        current = { role: prefix, start: ordinal, end: ordinal, parts: [content] };
+    }
+    flush();
+    return lines.join("\n");
+}
+
+/**
+ * Convert historian input text into the same embeddable subset used by the FTS
+ * backfill producer: only U:/A: conversational lines remain, and TC: tool-call
+ * summaries are removed because they are better served by exact FTS probes.
+ */
+export function canonicalizeInMemoryChunkTextForEmbedding(
+    chunkText: string,
+    startOrdinal?: number,
+    endOrdinal?: number,
+): string {
+    const lines: string[] = [];
+    for (const rawLine of chunkText.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        const match = /^(\[(\d+)(?:-(\d+))?\]\s+[UA]:)\s*(.*)$/.exec(line);
+        if (!match) continue;
+        const lineStart = Number.parseInt(match[2], 10);
+        const lineEnd = match[3] ? Number.parseInt(match[3], 10) : lineStart;
+        if (startOrdinal != null && lineEnd < startOrdinal) continue;
+        if (endOrdinal != null && lineStart > endOrdinal) continue;
+
+        const rawParts = match[4]
+            .split(" / ")
+            .map((part) => normalizeContent(part))
+            .filter((part) => part.length > 0);
+        const ordinalSpan = lineEnd - lineStart + 1;
+        const roleLabel = match[1].slice(match[1].indexOf("]") + 2);
+
+        if (ordinalSpan === rawParts.length) {
+            const retained = rawParts
+                .map((part, index) => ({ ordinal: lineStart + index, part }))
+                .filter(({ ordinal, part }) => {
+                    if (part.startsWith("TC:")) return false;
+                    if (startOrdinal != null && ordinal < startOrdinal) return false;
+                    if (endOrdinal != null && ordinal > endOrdinal) return false;
+                    return true;
+                });
+            if (retained.length === 0) continue;
+            const retainedStart = retained[0].ordinal;
+            const retainedEnd = retained[retained.length - 1].ordinal;
+            lines.push(
+                `${formatOrdinalRange(retainedStart, retainedEnd)} ${roleLabel} ${retained
+                    .map(({ part }) => part)
+                    .join(" / ")}`,
+            );
+            continue;
+        }
+
+        const parts = rawParts.filter((part) => !part.startsWith("TC:"));
+        if (parts.length === 0) continue;
+        lines.push(`${match[1]} ${parts.join(" / ")}`);
+    }
+    return lines.join("\n");
+}
+
+export function chunkCanonicalText(
+    canonicalText: string,
+    startOrdinal: number,
+    endOrdinal: number,
+    maxInputTokens: number,
+): CompartmentChunkWindow[] {
+    const lines = canonicalText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    if (lines.length === 0 || endOrdinal < startOrdinal) return [];
+
+    const normalizedMax = normalizeCompartmentChunkMaxInputTokens(maxInputTokens);
+    const fullText = lines.join("\n");
+    if (estimateTokens(fullText) <= normalizedMax) {
+        return [
+            {
+                windowIndex: 0,
+                startOrdinal,
+                endOrdinal,
+                text: fullText,
+                chunkHash: hashChunkText(fullText),
+            },
+        ];
+    }
+
+    const windows: CompartmentChunkWindow[] = [];
+    let currentLines: string[] = [];
+    let currentStart: number | null = null;
+    let currentEnd: number | null = null;
+    let currentTokens = 0;
+
+    const flush = (): void => {
+        if (currentLines.length === 0 || currentStart === null || currentEnd === null) return;
+        const text = currentLines.join("\n");
+        windows.push({
+            windowIndex: windows.length + 1,
+            startOrdinal: currentStart,
+            endOrdinal: currentEnd,
+            text,
+            chunkHash: hashChunkText(text),
+        });
+        currentLines = [];
+        currentStart = null;
+        currentEnd = null;
+        currentTokens = 0;
+    };
+
+    for (const line of lines) {
+        const range = parseCanonicalLineRange(line);
+        const lineStart = range?.start ?? startOrdinal;
+        const lineEnd = range?.end ?? lineStart;
+        const lineTokens = estimateTokens(line);
+        if (currentLines.length > 0 && currentTokens + lineTokens > normalizedMax) {
+            flush();
+        }
+        if (currentLines.length === 0) {
+            currentStart = lineStart;
+        }
+        currentLines.push(line);
+        currentEnd = lineEnd;
+        currentTokens += lineTokens;
+    }
+    flush();
+
+    return windows;
+}
+
+export function getExistingChunkHashes(
+    db: Database,
+    compartmentId: number,
+    modelId: string,
+): Map<number, string> {
+    const rows = getExistingHashStatement(db).all(compartmentId, modelId) as ExistingChunkHashRow[];
+    return new Map(
+        rows
+            .filter(
+                (row) => typeof row.windowIndex === "number" && typeof row.chunkHash === "string",
+            )
+            .map((row) => [row.windowIndex, row.chunkHash]),
+    );
+}
+
+export function chunkEmbeddingWindowsAreCurrent(
+    db: Database,
+    compartmentId: number,
+    modelId: string,
+    windows: readonly CompartmentChunkWindow[],
+): boolean {
+    const existing = getExistingChunkHashes(db, compartmentId, modelId);
+    if (existing.size !== windows.length) return false;
+    return windows.every((window) => existing.get(window.windowIndex) === window.chunkHash);
+}
+
+export function replaceCompartmentChunkEmbeddings(
+    db: Database,
+    rows: readonly SaveCompartmentChunkEmbeddingInput[],
+): void {
+    if (rows.length === 0) return;
+    const compartmentId = rows[0].compartmentId;
+    const now = Date.now();
+    db.transaction(() => {
+        getDeleteByCompartmentStatement(db).run(compartmentId);
+        const insert = getInsertEmbeddingStatement(db);
+        for (const row of rows) {
+            insert.run(
+                row.compartmentId,
+                row.sessionId,
+                row.projectPath,
+                getHarness(),
+                row.window.windowIndex,
+                row.window.startOrdinal,
+                row.window.endOrdinal,
+                row.window.chunkHash,
+                row.modelId,
+                row.vector.length,
+                vectorBlob(row.vector),
+                row.createdAt ?? now,
+            );
+        }
+    })();
+}
+
+export function getDistinctChunkEmbeddingModelIds(
+    db: Database,
+    projectPath: string,
+): Set<string | null> {
+    const rows = getDistinctModelStatement(db).all(projectPath) as StoredModelIdRow[];
+    return new Set(rows.map((row) => (typeof row.modelId === "string" ? row.modelId : null)));
+}
+
+export function clearChunkEmbeddingsForProject(
+    db: Database,
+    projectPath: string,
+    modelId?: string,
+): number {
+    if (modelId) {
+        return getClearProjectModelStatement(db).run(projectPath, modelId).changes;
+    }
+    return getClearProjectStatement(db).run(projectPath).changes;
+}
+
+export function loadCompartmentChunkEmbeddingsForSearch(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    modelId?: string | null,
+): StoredCompartmentChunkEmbedding[] {
+    const rows = modelId
+        ? (getSearchRowsStatement(db, true).all(
+              sessionId,
+              projectPath,
+              modelId,
+          ) as SearchChunkRow[])
+        : (getSearchRowsStatement(db, false).all(sessionId, projectPath) as SearchChunkRow[]);
+    return rows
+        .filter(
+            (row) =>
+                typeof row.compartmentId === "number" &&
+                typeof row.sessionId === "string" &&
+                typeof row.title === "string" &&
+                typeof row.compartmentStart === "number" &&
+                typeof row.compartmentEnd === "number" &&
+                typeof row.windowIndex === "number" &&
+                typeof row.windowStart === "number" &&
+                typeof row.windowEnd === "number" &&
+                typeof row.chunkHash === "string" &&
+                typeof row.modelId === "string" &&
+                typeof row.dims === "number" &&
+                (row.vector instanceof Uint8Array || row.vector instanceof ArrayBuffer),
+        )
+        .map((row) => ({
+            compartmentId: row.compartmentId,
+            sessionId: row.sessionId,
+            title: row.title,
+            startOrdinal: row.compartmentStart,
+            endOrdinal: row.compartmentEnd,
+            windowIndex: row.windowIndex,
+            windowStartOrdinal: row.windowStart,
+            windowEndOrdinal: row.windowEnd,
+            chunkHash: row.chunkHash,
+            modelId: row.modelId,
+            dims: row.dims,
+            vector: toFloat32Array(row.vector),
+        }));
+}
+
+export function loadUnembeddedCompartmentChunkCandidates(
+    db: Database,
+    projectPath: string,
+    modelId: string,
+    limit: number,
+): CompartmentChunkBackfillCandidate[] {
+    const rows = getBackfillCandidateStatement(db).all(
+        modelId,
+        projectPath,
+        Math.max(1, limit),
+    ) as unknown[];
+    return rows
+        .filter((row): row is BackfillCandidateRow => {
+            if (row === null || typeof row !== "object") return false;
+            const candidate = row as Record<string, unknown>;
+            return (
+                typeof candidate.id === "number" &&
+                typeof candidate.sessionId === "string" &&
+                typeof candidate.startMessage === "number" &&
+                typeof candidate.endMessage === "number" &&
+                typeof candidate.title === "string"
+            );
+        })
+        .map((row) => ({
+            id: row.id,
+            sessionId: row.sessionId,
+            startMessage: row.startMessage,
+            endMessage: row.endMessage,
+            title: row.title,
+        }));
+}

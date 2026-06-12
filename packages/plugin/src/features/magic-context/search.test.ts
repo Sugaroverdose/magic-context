@@ -11,7 +11,11 @@ const rawMessagesBySession = new Map<
 >();
 
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { replaceSessionFacts } from "./compartment-storage";
+import {
+    chunkCanonicalText,
+    replaceCompartmentChunkEmbeddings,
+} from "./compartment-chunk-embedding";
+import { appendCompartments, getCompartments, replaceSessionFacts } from "./compartment-storage";
 import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
 import { ensureMessagesIndexed } from "./message-index";
 import { runMigrations } from "./migrations";
@@ -24,6 +28,45 @@ const embedQuery = async (text: string) => {
     return queryEmbedding ? new Float32Array(queryEmbedding) : null;
 };
 const isEmbeddingRuntimeEnabled = () => true;
+
+function seedCompartmentChunkEmbedding(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    vector: Float32Array,
+): number {
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 2,
+            startMessageId: "u1",
+            endMessageId: "a2",
+            title: "Queue saturation design",
+            content: "P1 content",
+            p1: "P1 content",
+        },
+    ]);
+    const compartment = getCompartments(db, sessionId)[0];
+    const windows = chunkCanonicalText(
+        "[1] U: queue saturation problem\n[2] A: bounded drains with backpressure",
+        1,
+        2,
+        10_000,
+    );
+    replaceCompartmentChunkEmbeddings(
+        db,
+        windows.map((window) => ({
+            compartmentId: compartment.id,
+            sessionId,
+            projectPath,
+            window,
+            modelId: "mock:model",
+            vector,
+        })),
+    );
+    return compartment.id;
+}
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
@@ -599,5 +642,124 @@ describe("unifiedSearch", () => {
         // Even with two embed-needing branches active, the query is embedded
         // exactly once. Pre-fix this would have been 2.
         expect(embeddingQueries).toEqual(["shared embed query"]);
+    });
+
+    it("returns a semantic compartment hit for message-only conceptual search", async () => {
+        rawMessagesBySession.set("ses-chunk", [
+            {
+                ordinal: 1,
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "queue saturation problem" }],
+            },
+            {
+                ordinal: 2,
+                id: "a2",
+                role: "assistant",
+                parts: [{ type: "text", text: "bounded drains with backpressure" }],
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-chunk", readMessages);
+        const compartmentId = seedCompartmentChunkEmbedding(
+            db,
+            "ses-chunk",
+            "/repo/chunk",
+            new Float32Array([0, 1]),
+        );
+        queryEmbedding = new Float32Array([0, 1]);
+
+        const results = await unifiedSearch(db, "ses-chunk", "/repo/chunk", "hydraulic flow", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            maxMessageOrdinal: 2,
+        });
+
+        expect(embeddingQueries).toEqual(["hydraulic flow"]);
+        expect(results[0]).toMatchObject({
+            source: "compartment",
+            compartmentId,
+            startOrdinal: 1,
+            endOrdinal: 2,
+            matchType: "semantic",
+        });
+    });
+
+    it("deduplicates FTS hits inside semantic compartment ranges and keeps a snippet", async () => {
+        rawMessagesBySession.set("ses-dedup", [
+            {
+                ordinal: 1,
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "queue saturation problem" }],
+            },
+            {
+                ordinal: 2,
+                id: "a2",
+                role: "assistant",
+                parts: [{ type: "text", text: "bounded drains with backpressure" }],
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-dedup", readMessages);
+        seedCompartmentChunkEmbedding(db, "ses-dedup", "/repo/chunk", new Float32Array([0, 1]));
+        queryEmbedding = new Float32Array([0, 1]);
+
+        const results = await unifiedSearch(db, "ses-dedup", "/repo/chunk", "bounded drains", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            maxMessageOrdinal: 2,
+        });
+
+        expect(results.some((result) => result.source === "message")).toBe(false);
+        const compartment = results.find((result) => result.source === "compartment");
+        expect(compartment).toMatchObject({ source: "compartment", matchType: "hybrid" });
+        expect(compartment && "snippet" in compartment ? compartment.snippet : "").toContain(
+            "bounded drains",
+        );
+    });
+
+    it("respects message watermark cutoff and memory.enabled for compartment chunks", async () => {
+        rawMessagesBySession.set("ses-cutoff", [
+            { ordinal: 1, id: "u1", role: "user", parts: [{ type: "text", text: "first" }] },
+            { ordinal: 2, id: "a2", role: "assistant", parts: [{ type: "text", text: "second" }] },
+        ]);
+        ensureMessagesIndexed(db, "ses-cutoff", readMessages);
+        seedCompartmentChunkEmbedding(db, "ses-cutoff", "/repo/cutoff", new Float32Array([0, 1]));
+        queryEmbedding = new Float32Array([0, 1]);
+
+        const cutoffResults = await unifiedSearch(db, "ses-cutoff", "/repo/cutoff", "concept", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            maxMessageOrdinal: 1,
+        });
+        expect(cutoffResults.some((result) => result.source === "compartment")).toBe(false);
+
+        embeddingQueries.length = 0;
+        const memoryOffResults = await unifiedSearch(db, "ses-cutoff", "/repo/cutoff", "concept", {
+            limit: 5,
+            memoryEnabled: false,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            maxMessageOrdinal: 2,
+        });
+        expect(memoryOffResults.some((result) => result.source === "compartment")).toBe(false);
+        expect(embeddingQueries).toEqual([]);
     });
 });

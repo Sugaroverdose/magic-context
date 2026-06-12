@@ -2,6 +2,7 @@ import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
+import { normalizeCompartmentChunkMaxInputTokens } from "../compartment-chunk-embedding";
 import { cosineSimilarity } from "./cosine-similarity";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { LocalEmbeddingProvider } from "./embedding-local";
@@ -18,6 +19,7 @@ export {
     _setTestProviderFactoryForProject,
     embedBatchForProject,
     embedTextForProject,
+    embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
     registerProjectEmbeddingAndMaybeWipe,
@@ -67,16 +69,34 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
         return {
             provider: "local",
             model: config?.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+            ...(config?.max_input_tokens
+                ? {
+                      max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
+                          config.max_input_tokens,
+                      ),
+                  }
+                : {}),
         };
     }
 
     if (config.provider === "openai-compatible") {
         const apiKey = config.api_key?.trim();
+        const inputType = config.input_type?.trim();
+        const truncate = config.truncate?.trim();
         return {
             provider: "openai-compatible",
             model: config.model.trim(),
             endpoint: config.endpoint.trim(),
             ...(apiKey ? { api_key: apiKey } : {}),
+            ...(inputType ? { input_type: inputType } : {}),
+            ...(truncate ? { truncate } : {}),
+            ...(config.max_input_tokens
+                ? {
+                      max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
+                          config.max_input_tokens,
+                      ),
+                  }
+                : {}),
         };
     }
 
@@ -99,10 +119,11 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             apiKey: config.api_key,
             inputType: config.input_type,
             truncate: config.truncate,
+            maxInputTokens: config.max_input_tokens,
         });
     }
 
-    return new LocalEmbeddingProvider(config.model);
+    return new LocalEmbeddingProvider(config.model, config.max_input_tokens);
 }
 
 function getOrCreateProvider(): EmbeddingProvider | null {

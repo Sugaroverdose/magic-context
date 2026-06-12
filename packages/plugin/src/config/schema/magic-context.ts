@@ -176,6 +176,14 @@ const BaseEmbeddingConfigSchema = z
             .describe(
                 "Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' | 'START' | 'END'). Omitted from the request when unset.",
             ),
+        max_input_tokens: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe(
+                "Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted.",
+            ),
     })
     .superRefine((data, ctx) => {
         if (data.provider === "openai-compatible" && !data.endpoint?.trim()) {
@@ -200,6 +208,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
         return {
             provider: "local" as const,
             model: data.model?.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL,
+            ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };
     }
 
@@ -214,6 +223,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };
     }
 

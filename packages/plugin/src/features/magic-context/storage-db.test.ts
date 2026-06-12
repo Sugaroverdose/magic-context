@@ -104,6 +104,7 @@ describe("storage-db", () => {
                 "source_contents",
                 "tags",
                 "session_meta",
+                "compartment_chunk_embeddings",
                 "compartments",
                 "session_facts",
                 "compartment_state_lease",

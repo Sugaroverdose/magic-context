@@ -1,6 +1,19 @@
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { embedTextForProject } from "./project-embedding-registry";
+import {
+    buildCanonicalChunkTextFromFts,
+    canonicalizeInMemoryChunkTextForEmbedding,
+    chunkCanonicalText,
+    chunkEmbeddingWindowsAreCurrent,
+    replaceCompartmentChunkEmbeddings,
+    type SaveCompartmentChunkEmbeddingInput,
+} from "./compartment-chunk-embedding";
+import {
+    embedBatchForProject,
+    embedTextForProject,
+    getProjectEmbeddingMaxInputTokens,
+    getProjectEmbeddingSnapshot,
+} from "./project-embedding-registry";
 
 /**
  * Compartment P1 embedding (v2 / E2).
@@ -58,6 +71,94 @@ export async function embedAndStoreCompartments(
             }
         } catch (error) {
             sessionLog(sessionId, `compartment embedding failed for compartment ${c.id}:`, error);
+        }
+    }
+}
+
+export interface CompartmentChunkToEmbed {
+    id: number;
+    startMessage: number;
+    endMessage: number;
+    /** Optional publish-time chunk text. When present, TC: tool summaries are stripped. */
+    sourceChunkText?: string;
+}
+
+export async function embedAndStoreCompartmentChunks(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    compartments: readonly CompartmentChunkToEmbed[],
+): Promise<void> {
+    if (compartments.length === 0) return;
+    const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectPath);
+
+    for (const compartment of compartments) {
+        try {
+            const fromMemory = compartment.sourceChunkText
+                ? canonicalizeInMemoryChunkTextForEmbedding(
+                      compartment.sourceChunkText,
+                      compartment.startMessage,
+                      compartment.endMessage,
+                  )
+                : "";
+            const canonicalText =
+                fromMemory ||
+                buildCanonicalChunkTextFromFts(
+                    db,
+                    sessionId,
+                    compartment.startMessage,
+                    compartment.endMessage,
+                );
+            if (canonicalText.length === 0) continue;
+
+            const windows = chunkCanonicalText(
+                canonicalText,
+                compartment.startMessage,
+                compartment.endMessage,
+                maxInputTokens,
+            );
+            if (windows.length === 0) continue;
+
+            const currentModelId = getProjectEmbeddingSnapshot(projectPath)?.modelId;
+            if (
+                currentModelId &&
+                currentModelId !== "off" &&
+                chunkEmbeddingWindowsAreCurrent(db, compartment.id, currentModelId, windows)
+            ) {
+                continue;
+            }
+
+            const result = await embedBatchForProject(
+                projectPath,
+                windows.map((window) => window.text),
+            );
+            if (!result) continue;
+            if (chunkEmbeddingWindowsAreCurrent(db, compartment.id, result.modelId, windows)) {
+                continue;
+            }
+
+            const rows: SaveCompartmentChunkEmbeddingInput[] = [];
+            for (const [index, window] of windows.entries()) {
+                const vector = result.vectors[index];
+                if (!vector) continue;
+                rows.push({
+                    compartmentId: compartment.id,
+                    sessionId,
+                    projectPath,
+                    window,
+                    modelId: result.modelId,
+                    vector,
+                });
+            }
+            if (rows.length === windows.length) {
+                replaceCompartmentChunkEmbeddings(db, rows);
+            }
+        } catch (error) {
+            sessionLog(
+                sessionId,
+                `compartment chunk embedding failed for compartment ${compartment.id}:`,
+                error,
+            );
         }
     }
 }

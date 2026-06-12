@@ -11,6 +11,8 @@ interface OpenAICompatibleEmbeddingProviderOptions {
     inputType?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
     truncate?: string;
+    /** Maximum safe input tokens for chunk embeddings. */
+    maxInputTokens?: number;
 }
 
 interface EmbeddingResponseBody {
@@ -56,6 +58,7 @@ type CircuitState = "closed" | "open" | "half_open";
 
 export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     readonly modelId: string;
+    readonly maxInputTokens: number;
 
     private readonly endpoint: string;
     private readonly model: string;
@@ -80,11 +83,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.apiKey = options.apiKey?.trim() ?? "";
         this.inputType = options.inputType?.trim() ?? "";
         this.truncate = options.truncate?.trim() ?? "";
+        this.maxInputTokens =
+            typeof options.maxInputTokens === "number" && Number.isFinite(options.maxInputTokens)
+                ? Math.max(1, Math.floor(options.maxInputTokens))
+                : 512;
         this.modelId = getEmbeddingProviderIdentity({
             provider: "openai-compatible",
             endpoint: this.endpoint,
             model: this.model,
             ...(this.apiKey ? { api_key: this.apiKey } : {}),
+            ...(this.inputType ? { input_type: this.inputType } : {}),
         });
     }
 

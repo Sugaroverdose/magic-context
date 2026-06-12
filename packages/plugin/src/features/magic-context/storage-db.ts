@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 32;
+export const LATEST_SUPPORTED_VERSION = 33;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -311,6 +311,25 @@ export function initializeDatabase(db: Database): void {
       UNIQUE(session_id, sequence)
     );
     CREATE INDEX IF NOT EXISTS idx_compartments_session ON compartments(session_id);
+
+    CREATE TABLE IF NOT EXISTS compartment_chunk_embeddings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      compartment_id INTEGER NOT NULL REFERENCES compartments(id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      project_path TEXT NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      window_index INTEGER NOT NULL DEFAULT 0,
+      start_ordinal INTEGER NOT NULL,
+      end_ordinal INTEGER NOT NULL,
+      chunk_hash TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      dims INTEGER NOT NULL,
+      vector BLOB NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(compartment_id, window_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
+    CREATE INDEX IF NOT EXISTS idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
 
     CREATE TABLE IF NOT EXISTS compartment_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

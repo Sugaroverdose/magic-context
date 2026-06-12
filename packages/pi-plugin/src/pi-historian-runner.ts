@@ -38,7 +38,10 @@
  */
 
 import * as crypto from "node:crypto";
-import { embedAndStoreCompartments } from "@magic-context/core/features/magic-context/compartment-embedding";
+import {
+	embedAndStoreCompartmentChunks,
+	embedAndStoreCompartments,
+} from "@magic-context/core/features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "@magic-context/core/features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
@@ -990,6 +993,21 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					.map((c, i) => ({ id: persistedIds[i], p1: c.p1 ?? c.content }))
 					.filter((c) => typeof c.id === "number" && c.p1.length > 0);
 				void embedAndStoreCompartments(db, sessionId, projectPath, toEmbed);
+
+				const chunksToEmbed = newCompartments
+					.map((c, i) => ({
+						id: persistedIds[i],
+						startMessage: c.startMessage,
+						endMessage: c.endMessage,
+						sourceChunkText: chunk.text,
+					}))
+					.filter((c) => typeof c.id === "number");
+				void embedAndStoreCompartmentChunks(
+					db,
+					sessionId,
+					projectPath,
+					chunksToEmbed,
+				);
 			}
 
 			// Signal deferred materialization/history-refresh LAST — after fact

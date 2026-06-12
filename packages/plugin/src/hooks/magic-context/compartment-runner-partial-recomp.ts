@@ -1,4 +1,7 @@
-import { embedAndStoreCompartments } from "../../features/magic-context/compartment-embedding";
+import {
+    embedAndStoreCompartmentChunks,
+    embedAndStoreCompartments,
+} from "../../features/magic-context/compartment-embedding";
 import type {
     Compartment,
     CompartmentInput,
@@ -332,7 +335,7 @@ export async function executePartialRecompInternal(
             }
             deps.onCompartmentStatePublished?.(sessionId);
 
-            // v2 (E2): recompute P1 embeddings for the rebuilt compartments.
+            // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments.
             // Partial recomp deletes + reinserts compartments with fresh P1 text
             // (the rebuilt range), so their embeddings must be regenerated or the
             // rebuilt rows have NULL p1_embedding and vanish from ctx_search +
@@ -345,12 +348,25 @@ export async function executePartialRecompInternal(
                 const toEmbed = liveCompartments
                     .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
                     .filter((c) => typeof c.id === "number" && c.p1.length > 0);
+                const chunksToEmbed = liveCompartments.map((c) => ({
+                    id: c.id,
+                    startMessage: c.startMessage,
+                    endMessage: c.endMessage,
+                }));
                 // Register the embedding provider FIRST; embedTextForProject
                 // silently no-ops for unregistered projects, leaving NULL
-                // p1_embedding on the rebuilt rows. This block is sync, so chain
-                // register→embed as fire-and-forget (matches the prior void call).
+                // p1_embedding/chunk rows on the rebuilt rows. This block is sync,
+                // so chain register→embed as fire-and-forget (matches the prior void call).
                 void Promise.resolve(deps.ensureProjectRegistered?.(sessionDirectory, db)).then(
-                    () => embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed),
+                    () => {
+                        void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
+                        return embedAndStoreCompartmentChunks(
+                            db,
+                            sessionId,
+                            projectIdentity,
+                            chunksToEmbed,
+                        );
+                    },
                 );
             }
 

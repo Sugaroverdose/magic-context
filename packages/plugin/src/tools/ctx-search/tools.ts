@@ -73,6 +73,13 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
         ].join("\n");
     }
 
+    if (result.source === "compartment") {
+        return [
+            `[${index}] [message] score=${result.score.toFixed(2)} compartment_id=${result.compartmentId} range=${result.startOrdinal}-${result.endOrdinal} match=${result.matchType} title=${result.title}`,
+            result.snippet ? `Snippet: ${result.snippet}` : result.content,
+        ].join("\n");
+    }
+
     const expandStart = Math.max(1, result.messageOrdinal - 3);
     const expandEnd = result.messageOrdinal + 3;
     return [
@@ -87,7 +94,7 @@ function formatSearchResults(query: string, results: UnifiedSearchResult[]): str
     }
 
     const bodyParts = results.map((result, index) => formatResult(result, index + 1));
-    if (results.some((result) => result.source === "message")) {
+    if (results.some((result) => result.source === "message" || result.source === "compartment")) {
         bodyParts.push(
             "Use ctx_expand(start, end) with the range from any message result above to read the full conversation context.",
         );
