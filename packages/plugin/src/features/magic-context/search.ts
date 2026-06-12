@@ -155,6 +155,40 @@ function getMessageSearchStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+const ftsRowCountStatements = new WeakMap<Database, PreparedStatement>();
+const ftsMatchCountStatements = new WeakMap<Database, PreparedStatement>();
+
+/** Total indexed FTS rows for one session (probe-weight denominator). */
+function getSessionFtsRowCount(db: Database, sessionId: string): number {
+    let stmt = ftsRowCountStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT COUNT(*) AS n FROM message_history_fts WHERE session_id = ?",
+        );
+        ftsRowCountStatements.set(db, stmt);
+    }
+    const row = stmt.get(sessionId) as { n?: number } | undefined;
+    return typeof row?.n === "number" ? row.n : 0;
+}
+
+/** Document frequency of one (sanitized) FTS query within a session. */
+function countSessionFtsMatches(db: Database, sessionId: string, ftsQuery: string): number {
+    let stmt = ftsMatchCountStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT COUNT(*) AS n FROM message_history_fts WHERE session_id = ? AND message_history_fts MATCH ?",
+        );
+        ftsMatchCountStatements.set(db, stmt);
+    }
+    try {
+        const row = stmt.get(sessionId, ftsQuery) as { n?: number } | undefined;
+        return typeof row?.n === "number" ? row.n : 0;
+    } catch {
+        // Malformed FTS syntax that survived sanitization — treat as rare.
+        return 0;
+    }
+}
+
 function getMessageOrdinal(value: number | string | undefined): number | null {
     if (typeof value === "number" && Number.isFinite(value)) {
         return value;
@@ -426,10 +460,26 @@ function runMessageFtsQuery(
 // reward gap between rank-0 and rank-1 so a candidate that appears in several
 // probe lists outranks one that tops a single list.
 const RRF_K = 60;
-// Additive bonus when a candidate's text contains a literal probe verbatim.
-// Tuned to sit above one extra mid-rank list appearance so an exact-symbol hit
-// reliably surfaces, without swamping a candidate that ranks high everywhere.
-const VERBATIM_PROBE_BONUS = 0.5;
+// Verbatim containment is worth one extra rank-0 list appearance — the same
+// 1/RRF_K currency as the fused lists. The previous flat +0.5 bonus lived 30×
+// above the RRF scale (max list contribution is 1/60 ≈ 0.017), so every
+// verbatim hit saturated; after divide-by-max normalization all scores
+// flattened into a ~0.95–1.0 band, and at the unified layer those ~1.0 scores
+// × MESSAGE_SOURCE_BOOST crowded every memory hit out of the result set.
+const VERBATIM_RANK_BONUS = 1 / RRF_K;
+// Probe discrimination weighting: a probe matching a large share of the
+// session's corpus (common acronyms, generic identifiers) carries near-zero
+// signal — bm25 over a single common term is nearly flat, so its ranked list
+// is noise. Weight each probe list (and its verbatim bonus) by a smooth
+// document-frequency falloff: w = 1 / (1 + IDF_FALLOFF · df/N).
+// df/N = 0.1% → 0.91, 1% → 0.50, 2% → 0.33, 10% → 0.09.
+const IDF_FALLOFF = 100;
+
+/** Smooth document-frequency weight for one probe within a session corpus. */
+function probeDiscriminationWeight(df: number, corpusSize: number): number {
+    if (corpusSize <= 0 || df <= 0) return 1;
+    return 1 / (1 + (IDF_FALLOFF * df) / corpusSize);
+}
 
 function searchMessages(args: {
     db: Database;
@@ -472,22 +522,34 @@ function searchMessages(args: {
     // Multi-probe: run the full query plus each literal probe as its OWN FTS
     // query, then RRF-fuse the ranked lists. This recovers messages that
     // contain a literal symbol but not the query's other (AND-joined) tokens.
-    const queryLists: NormalizedMessageRow[][] = [];
+    // Each probe list is weighted by its discrimination (document frequency):
+    // a probe matching 2% of the corpus contributes a third of a rare probe.
+    const corpusSize = getSessionFtsRowCount(args.db, args.sessionId);
+    const queryLists: Array<{ rows: NormalizedMessageRow[]; weight: number }> = [];
     if (baseQuery.length > 0) {
-        queryLists.push(runMessageFtsQuery(args.db, args.sessionId, baseQuery, fetchLimit, cutoff));
+        queryLists.push({
+            rows: runMessageFtsQuery(args.db, args.sessionId, baseQuery, fetchLimit, cutoff),
+            // The full query is AND-joined and inherently discriminative.
+            weight: 1,
+        });
     }
+    const probeWeights = new Map<string, number>();
     for (const probe of probes) {
         const probeQuery = sanitizeFtsQuery(probe);
         if (probeQuery.length === 0) continue;
-        queryLists.push(
-            runMessageFtsQuery(args.db, args.sessionId, probeQuery, fetchLimit, cutoff),
-        );
+        const df = countSessionFtsMatches(args.db, args.sessionId, probeQuery);
+        const weight = probeDiscriminationWeight(df, corpusSize);
+        probeWeights.set(probe, weight);
+        queryLists.push({
+            rows: runMessageFtsQuery(args.db, args.sessionId, probeQuery, fetchLimit, cutoff),
+            weight,
+        });
     }
 
     const fused = new Map<string, { row: NormalizedMessageRow; score: number }>();
     for (const list of queryLists) {
-        list.forEach((row, rank) => {
-            const rrf = 1 / (RRF_K + rank);
+        list.rows.forEach((row, rank) => {
+            const rrf = list.weight / (RRF_K + rank);
             const existing = fused.get(row.messageId);
             if (existing) {
                 existing.score += rrf;
@@ -498,10 +560,19 @@ function searchMessages(args: {
     }
 
     // Verbatim boost: a message that literally contains a probe is exactly what
-    // a symbol/command lookup wants surfaced first.
+    // a symbol/command lookup wants surfaced first. Worth one rank-0 appearance
+    // of the BEST (most discriminative) matching probe — rank-domain currency,
+    // so it reorders within the band instead of saturating the scale.
     for (const entry of fused.values()) {
-        if (containsProbeVerbatim(entry.row.content, probes)) {
-            entry.score += VERBATIM_PROBE_BONUS;
+        let best = 0;
+        for (const probe of probes) {
+            const weight = probeWeights.get(probe) ?? 0;
+            if (weight > best && containsProbeVerbatim(entry.row.content, [probe])) {
+                best = weight;
+            }
+        }
+        if (best > 0) {
+            entry.score += best * VERBATIM_RANK_BONUS;
         }
     }
 
@@ -511,13 +582,16 @@ function searchMessages(args: {
         )
         .slice(0, args.limit);
 
-    // Normalize fused scores into the 0..1 band the unified ranker expects from
-    // the message source (linearDecayScore's range), preserving relative order.
-    const maxScore = ranked.length > 0 ? ranked[0].score : 1;
-    return ranked.map((entry) => ({
+    // Map fused RRF scores into the same linear 0..1 band the single-query path
+    // emits (linearDecayScore), so the unified ranker sees comparable scales
+    // from both message paths and source boosts behave consistently. Rank is
+    // what RRF actually determines; the band keeps cross-source comparability
+    // (a rank-0 message no longer pins to exactly 1.0 unless it leads a full
+    // result set, and mid-ranked messages no longer all read as ~1.0).
+    return ranked.map((entry, rank) => ({
         source: "message" as const,
         content: previewText(entry.row.content),
-        score: maxScore > 0 ? entry.score / maxScore : 0,
+        score: linearDecayScore(rank, ranked.length),
         messageOrdinal: entry.row.messageOrdinal,
         messageId: entry.row.messageId,
         role: entry.row.role,

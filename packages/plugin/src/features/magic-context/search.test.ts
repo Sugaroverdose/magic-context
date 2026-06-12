@@ -349,6 +349,89 @@ describe("unifiedSearch", () => {
         expect(probedMessages[0]?.messageId).toBe("m1");
     });
 
+    it("multi-probe scores decay linearly instead of flattening into a ~1.0 band", async () => {
+        // Regression: the flat +0.5 verbatim bonus sat 30× above the RRF scale,
+        // so after divide-by-max normalization every probe-matching message
+        // scored ~1.0 and (×MESSAGE_SOURCE_BOOST) crowded memories out of the
+        // unified results. Scores must now follow the linear rank band.
+        const msgs = Array.from({ length: 8 }, (_, i) => ({
+            ordinal: i + 1,
+            id: `mm${i}`,
+            role: "assistant",
+            parts: [
+                {
+                    type: "text",
+                    text: `note ${i}: the /ctx-status dialog rendering pass number ${i}`,
+                },
+            ],
+        }));
+        rawMessagesBySession.set("ses-band", msgs);
+        ensureMessagesIndexed(db, "ses-band", readMessages);
+
+        const results = await unifiedSearch(db, "ses-band", "/repo/band", "ctx-status dialog", {
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+            explicitSearch: true,
+        });
+        const messages = results.filter((r) => r.source === "message");
+        expect(messages.length).toBeGreaterThanOrEqual(4);
+        // Top hit caps the band; the rest must spread DOWN the linear band, not
+        // cluster at ~1.0. With the old flat bonus all of these were ≥0.95.
+        expect(messages[0].score).toBeGreaterThan(0.9);
+        const second = messages[1].score;
+        const last = messages[messages.length - 1].score;
+        expect(second).toBeLessThan(0.95);
+        expect(last).toBeLessThan(0.5);
+    });
+
+    it("a discriminative probe outranks a corpus-flooding probe", async () => {
+        // "AFT"-class regression: a probe matching a large share of the corpus
+        // carries near-zero signal and must not drown the rare probe's hit.
+        const flood = Array.from({ length: 30 }, (_, i) => ({
+            ordinal: i + 1,
+            id: `f${i}`,
+            role: "assistant",
+            parts: [{ type: "text", text: `CommonTerm appears here in filler message ${i}` }],
+        }));
+        const rare = {
+            ordinal: 31,
+            id: "rare-hit",
+            role: "assistant",
+            parts: [
+                {
+                    type: "text",
+                    text: "RareSymbolXyz was fixed alongside CommonTerm in the resolver",
+                },
+            ],
+        };
+        rawMessagesBySession.set("ses-idf", [...flood, rare]);
+        ensureMessagesIndexed(db, "ses-idf", readMessages);
+
+        const results = await unifiedSearch(
+            db,
+            "ses-idf",
+            "/repo/idf",
+            "where did we fix RareSymbolXyz near CommonTerm",
+            {
+                memoryEnabled: false,
+                embeddingEnabled: false,
+                readMessages,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                sources: ["message"],
+                explicitSearch: true,
+            },
+        );
+        const messages = results.filter((r) => r.source === "message");
+        // The rare-probe message must win over the 30 flood messages that only
+        // match the common probe.
+        expect(messages[0]?.messageId).toBe("rare-hit");
+    });
+
     it("returns empty message results until async indexing populates FTS", async () => {
         rawMessagesBySession.set("ses-2", [
             {
