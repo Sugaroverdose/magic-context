@@ -31,10 +31,22 @@ jobs:
             target: x86_64-unknown-linux-gnu
             label: Linux x64
             arch: x64
+          - host: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            label: Linux ARM64
+            arch: arm64
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows x64
             arch: x64
+          - host: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            label: Windows ARM64
+            arch: arm64
+            # WiX has no ARM64 support — NSIS is the only Windows ARM installer
+            # Tauri can produce. Without this override the default bundle set
+            # ("all") fails the leg at the .msi step.
+            bundles: nsis
 
     runs-on: ${{ matrix.settings.host }}
     steps:
@@ -103,7 +115,7 @@ jobs:
         with:
           projectPath: packages/dashboard
           tauriScript: bunx tauri
-          args: --target ${{ matrix.settings.target }}
+          args: --target ${{ matrix.settings.target }}${{ matrix.settings.bundles && format(' --bundles {0}', matrix.settings.bundles) || '' }}
           updaterJsonPreferNsis: true
           tagName: ${{ github.ref_name }}
           releaseName: "Dashboard ${{ github.ref_name }}"
