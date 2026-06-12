@@ -2,6 +2,7 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import starlightThemeObsidian from "starlight-theme-obsidian";
+import { remarkBaseLinks } from "./remark-base-links.mjs";
 
 // https://astro.build/config
 export default defineConfig({
@@ -10,6 +11,9 @@ export default defineConfig({
     // Nest output under /magic-context so the deployed asset tree matches the
     // URL space — sibling CortexKit plugin docs will share this subdomain.
     outDir: "./dist-root/magic-context",
+    markdown: {
+        remarkPlugins: [remarkBaseLinks({ base: "/magic-context" })],
+    },
     integrations: [
         starlight({
             plugins: [starlightThemeObsidian({ graph: false, backlinks: false })],
@@ -22,7 +26,7 @@ export default defineConfig({
                     label: "GitHub",
                     href: "https://github.com/cortexkit/magic-context",
                 },
-                { icon: "discord", label: "Discord", href: "https://discord.gg/mvegWMTr" },
+                { icon: "discord", label: "Discord", href: "https://discord.gg/DSa65w8wuf" },
             ],
             editLink: {
                 baseUrl: "https://github.com/cortexkit/magic-context/edit/master/packages/docs/",
