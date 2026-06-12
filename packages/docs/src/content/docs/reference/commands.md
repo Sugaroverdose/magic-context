@@ -35,7 +35,7 @@ Use **`/ctx-session-upgrade`** for legacy session format upgrades, not `/ctx-rec
 
 ## /ctx-recomp
 
-**What it does.** Rebuilds compartments from raw history; a **full** run also re-extracts facts. Partial runs snap your range to compartment boundaries.
+**What it does.** Rebuilds compartments from raw history — structure only. Recomp never writes memories or facts, so your curated project memory is untouched. Partial runs snap your range to compartment boundaries.
 
 **When to use it.** Wrong or missing summaries/facts, or deliberate rebuild after historian config changes.
 

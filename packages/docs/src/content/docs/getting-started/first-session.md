@@ -36,7 +36,7 @@ Every message in your session is assigned a tag — a short identifier like `§1
 Tags serve two purposes:
 
 - **Reference points** for the agent when calling `ctx_reduce` to mark stale content for removal
-- **Boundaries** for the historian when it creates compartments
+- **Bookkeeping** for Magic Context's automatic cleanup, which tracks every piece of content by tag
 
 You will see tag references in the `/ctx-status` output and in `ctx_reduce` nudges. They are internal tracking identifiers; you do not need to interact with them directly.
 

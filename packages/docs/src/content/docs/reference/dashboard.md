@@ -81,7 +81,7 @@ Experimental **user-level** memories (separate from project memory): promoted en
 - **Edit** content, **dismiss**, or **delete** promoted memories.
 - **Delete** candidates you do not want promoted.
 
-Requires the experimental user-memories feature in config.
+Controlled by `dreamer.user_memories.enabled` (on by default; set `false` to disable collection).
 
 <!-- screenshot: user-memories -->
 

@@ -23,7 +23,7 @@ The automatic-only mode. The agent-facing reduction machinery is removed:
 
 Everything else keeps running: the historian still compresses, heuristic drops still fire at the execute threshold, compartments still inject, memory still works, and synthetic-todowrite and auto-search hints still appear.
 
-This mode is for users who want a fully automatic pipeline. You can optionally enable caveman text compression (`experimental.caveman_text_compression.enabled`) to recover some of the benefit that manual `ctx_reduce` provides for long user and assistant text parts. See the [configuration reference](/reference/configuration/) for the setting.
+This mode is for users who want a fully automatic pipeline. You can optionally enable caveman text compression (`caveman_text_compression.enabled`) to recover some of the benefit that manual `ctx_reduce` provides for long user and assistant text parts. See the [configuration reference](/reference/configuration/) for the setting.
 
 ### Subagent
 
