@@ -416,8 +416,13 @@ describe("pi cache stability", () => {
 
                 const body = JSON.stringify(h.mock.lastRequest()!.body);
                 expect(body).toContain(callId);
-                expect(body).toContain("__magic_context_dropped__");
-                expect(body).toContain(`[dropped §${toolTag}§]`);
+                // The tool call is within the newest-20 skeleton window, so the
+                // drop materializes as a truncated skeleton: tool_use survives
+                // with its input replaced and the paired result truncated —
+                // pairing stays intact instead of the pair being fully removed.
+                expect(body).toContain("__magic_context_replacement__");
+                expect(body).toContain("[truncated]");
+                expect(body).not.toContain("__magic_context_dropped__");
 
                 const occurrences = body.split(callId).length - 1;
                 expect(occurrences).toBeGreaterThanOrEqual(2);
