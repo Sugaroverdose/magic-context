@@ -54,6 +54,7 @@ packages/plugin/docs/animation[0-9]*/
 # so committing them would couple CI to experiment state. Production generators
 # (scripts/build-*.ts) stay tracked — they are wired into release.sh.
 packages/plugin/scripts/experiments/
+scripts/experiments/
 # Same experiment harnesses when dropped at scripts/ root (not under experiments/).
 packages/plugin/scripts/lib/
 packages/plugin/scripts/claude-oauth.ts
