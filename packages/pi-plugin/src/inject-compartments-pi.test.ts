@@ -1167,7 +1167,6 @@ describe("renderM0Pi sibling-block layout (OpenCode parity)", () => {
 describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () => {
 	const baseHard = {
 		systemHash: "sys-v1",
-		toolSetHash: "",
 		modelKey: "anthropic/opus",
 		cacheExpired: false,
 		lastResponseTime: 0,
@@ -1271,7 +1270,6 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...state,
 				hardSignals: {
 					systemHash: "",
-					toolSetHash: "",
 					modelKey: "",
 					cacheExpired: false,
 					lastResponseTime: 0,

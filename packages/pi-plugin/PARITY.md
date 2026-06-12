@@ -358,28 +358,17 @@ runner receives that trigger snapshot rather than the earlier probe snapshot.
 
 ---
 
-## 15. HARD-bust tool-set hash: Pi stubs it (no `tool.definition` hook)
+## 15. HARD-bust tool-set hash: Removed on both harnesses
 
 The m[0]/m[1] materialization decision (`mustMaterialize` / `mustMaterializePi`)
 folds m[1] into m[0] on a HARD bust — a provider-side cache-eviction event where
 the prompt cache was already dead, so folding is "free". The HARD trigger set is
 identical across harnesses: model/provider change, system-prompt-hash change,
-tool-set hash change, and idle>TTL.
+and idle>TTL.
 
-The one divergence is the **tool-set hash**. The provider sends the `tools` block
-BEFORE `system`, so a tool add/schema-change busts the entire provider cache but
-is invisible to the system-prompt hash. OpenCode detects it via
-`getCurrentToolSetHash()` — a sha256 over the per-tool fingerprints recorded by
-its `tool.definition` plugin hook. **Pi has no `tool.definition` hook**, so it
-cannot observe tool definitions and always passes `toolSetHash: ""`. The
-`tool_set_hash` branch in `mustMaterializePi` is kept (structural parity) but is
-inert on Pi — an empty current signal is never treated as a change.
-
-Consequence: a Pi tool-set change is not detected as a HARD fold and is instead
-picked up later by the pressure backstop (the m[1]/m[0] ratio or absolute-cap
-refold) or the next genuine HARD bust. That is a missed free-fold, never a
-spurious bust — the safe direction. The model/system/TTL HARD triggers work
-identically on both harnesses.
+The tool-set hash trigger was previously used to detect tool changes, but was
+removed on both harnesses because the signal is process-global and produced
+false-positive folds. Pi and OpenCode now both operate without this trigger.
 
 ---
 

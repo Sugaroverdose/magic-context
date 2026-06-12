@@ -66,7 +66,6 @@ function compartment(seq: number, title: string, body: string): CompartmentInput
 // signal fires, isolating the compartment/SOFT behavior under test.
 const BASE_HARD: M0HardSignals = {
     systemHash: "sys-v1",
-    toolSetHash: "tools-v1",
     modelKey: "anthropic/opus",
     cacheExpired: false,
     lastResponseTime: 0,
@@ -189,21 +188,6 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(hard.rematerialized).toBe(true);
     });
 
-    it("HARD (tool-set hash change): re-materializes m[0]", () => {
-        db = makeDb();
-        const projectDirectory = makeProjectDir();
-        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
-        pass({ projectDirectory, isCacheBustingPass: true });
-
-        const hard = pass({
-            projectDirectory,
-            isCacheBustingPass: true,
-            hard: { ...BASE_HARD, toolSetHash: "tools-v2" },
-        });
-        expect(hard.reason).toBe("tool_set_hash");
-        expect(hard.rematerialized).toBe(true);
-    });
-
     it("an EMPTY current HARD signal is never treated as a change (no spurious fold)", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
@@ -217,7 +201,6 @@ describe("m[0]/m[1] materialization taxonomy", () => {
             isCacheBustingPass: true,
             hard: {
                 systemHash: "",
-                toolSetHash: "",
                 modelKey: "",
                 cacheExpired: false,
                 lastResponseTime: 0,
@@ -314,7 +297,6 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         const restartState = getOrCreateSessionMeta(db, SESSION_ID);
         expect(restartState.cachedM0ModelKey).toBe("anthropic/opus");
         expect(restartState.cachedM0SystemHash).toBe("sys-v1");
-        expect(restartState.cachedM0ToolSetHash).toBe("tools-v1");
 
         const noFold = pass({ projectDirectory, isCacheBustingPass: true, hard: BASE_HARD });
         expect(noFold.rematerialized).toBe(false);

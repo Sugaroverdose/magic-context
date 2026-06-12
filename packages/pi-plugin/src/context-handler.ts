@@ -3740,8 +3740,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// re-materialize inside mustMaterializePi when genuinely needed.
 			// HARD-bust signals (parity with OpenCode). systemHash + TTL idle derive
 			// from the freshly-read session_meta; modelKey from the volatile live
-			// map. Pi has no tool.definition hook, so toolSetHash is always "" — its
-			// mustMaterializePi branch is inert (see PARITY.md).
+			// map.
 			const hardMeta = getOrCreateSessionMeta(args.db, args.sessionId);
 			let piTtlMs = 5 * 60 * 1000;
 			try {
@@ -3754,7 +3753,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					typeof hardMeta.systemPromptHash === "string"
 						? hardMeta.systemPromptHash
 						: "",
-				toolSetHash: "",
 				modelKey: liveModelBySession.get(args.sessionId) ?? "",
 				cacheExpired:
 					hardMeta.lastResponseTime > 0 &&

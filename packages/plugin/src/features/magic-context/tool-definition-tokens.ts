@@ -83,40 +83,6 @@ function fingerprintFor(description: string, parameters: unknown): string {
 }
 
 /**
- * Combined fingerprint of the current tool set for a (provider, model, agent),
- * used as a HARD-bust marker for m[0]/m[1] materialization. The provider sends
- * `tools` as a separate block BEFORE `system`, so any add or schema-change to a
- * tool busts the entire provider prompt cache but is invisible to the
- * system-prompt hash. This hash makes that detectable: when it differs from the
- * persisted `cachedM0ToolSetHash`, the cache was already dead and folding m[1]
- * into m[0] is "free".
- *
- * Built from the per-tool content fingerprints (`fingerprintFor`), sorted by
- * toolID so order is irrelevant. Returns "" when no tools have been recorded yet
- * for the key (e.g. before the first `tool.definition` fire) — the caller treats
- * an empty hash as "unknown" and does not fold on it.
- *
- * Known limitation (accepted): `recordToolDefinition` only adds/overwrites and
- * never deletes, so a *removed* tool lingers in the map and this hash does NOT
- * change on pure removal. That is a missed free-fold (the drift backstop folds
- * it later), never a spurious bust — the safe direction. Add and schema-change
- * ARE detected.
- */
-export function getCurrentToolSetHash(
-    providerID: string,
-    modelID: string,
-    agentName: string | undefined,
-): string {
-    const key = keyFor(providerID, modelID, agentName);
-    const inner = fingerprints.get(key);
-    if (!inner || inner.size === 0) return "";
-    const parts: string[] = [];
-    for (const [toolID, fp] of inner) parts.push(`${toolID}\u0000${fp}`);
-    parts.sort();
-    return createHash("sha256").update(parts.join("\n")).digest("hex");
-}
-
-/**
  * Register the database used to persist measurements. Called by
  * openDatabase() after runMigrations() has ensured the
  * `tool_definition_measurements` table exists. Subsequent

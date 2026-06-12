@@ -234,14 +234,6 @@ export interface TransformDeps {
     ) => import("./send-session-notification").NotificationParams;
     getModelKey?: (sessionId: string) => string | undefined;
     getFallbackModelId?: (sessionId: string) => string | undefined;
-    /**
-     * Combined fingerprint of the current tool set for this session's
-     * provider/model/agent, used as a HARD-bust marker (the provider `tools`
-     * block sits before `system` and a tool change is invisible to the system
-     * hash). Returns "" when unknown (no tool.definition fire yet) → treated as
-     * "no signal", never a spurious fold.
-     */
-    getToolSetHash?: (sessionId: string) => string;
     projectPath?: string;
     experimentalUserMemories?: boolean;
     experimentalPinKeyFiles?: boolean;
@@ -1432,7 +1424,6 @@ export function createTransform(deps: TransformDeps) {
         // next pass — the accepted one-pass lag.
         const hardModel = deps.liveModelBySession?.get(sessionId);
         const hardModelKey = hardModel ? `${hardModel.providerID}/${hardModel.modelID}` : "";
-        const hardToolSetHash = deps.getToolSetHash?.(sessionId) ?? "";
         const hardSystemHash =
             typeof sessionMeta.systemPromptHash === "string" ? sessionMeta.systemPromptHash : "";
         let hardTtlMs = 5 * 60 * 1000;
@@ -1446,7 +1437,6 @@ export function createTransform(deps: TransformDeps) {
             Date.now() - sessionMeta.lastResponseTime >= hardTtlMs;
         const m0HardSignals = {
             systemHash: hardSystemHash,
-            toolSetHash: hardToolSetHash,
             modelKey: hardModelKey,
             cacheExpired: hardCacheExpired,
             lastResponseTime: sessionMeta.lastResponseTime,

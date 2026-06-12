@@ -1,4 +1,3 @@
-
 /**
  * OpenAI-compatible chat adjacency invariant used by GitHub Copilot's wire format.
  *
@@ -13,7 +12,11 @@
 export type OpenAiCompatWireMessage = {
     role: string;
     content?: string | null | unknown;
-    tool_calls?: Array<{ id: string; type?: string; function?: { name: string; arguments: string } }>;
+    tool_calls?: Array<{
+        id: string;
+        type?: string;
+        function?: { name: string; arguments: string };
+    }>;
     tool_call_id?: string;
 };
 
@@ -68,7 +71,9 @@ export function assertOpenAiCompatAdjacency(messages: OpenAiCompatWireMessage[])
             j++;
         }
 
-        const followingRoles = messages.slice(i + 1, Math.min(messages.length, i + 4)).map((m) => m.role);
+        const followingRoles = messages
+            .slice(i + 1, Math.min(messages.length, i + 4))
+            .map((m) => m.role);
         const missing = expectedIds.filter((id) => !collected.has(id));
         if (missing.length > 0) {
             violations.push({

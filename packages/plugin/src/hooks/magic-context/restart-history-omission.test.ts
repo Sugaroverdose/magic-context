@@ -85,7 +85,6 @@ function makeMessages(count: number): MessageLike[] {
 
 const BASE_HARD: M0HardSignals = {
     systemHash: "sys-v1",
-    toolSetHash: "tools-v1",
     modelKey: "anthropic/opus",
     cacheExpired: false,
     lastResponseTime: 0,

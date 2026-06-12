@@ -524,7 +524,6 @@ export interface PiM0SnapshotMarkers {
 	// tool.definition hook so toolSetHash is always "" (a documented divergence —
 	// see PARITY.md). Captured from PiM0HardSignals at the injection call site.
 	systemHash: string;
-	toolSetHash: string;
 	modelKey: string;
 }
 
@@ -536,7 +535,6 @@ export interface PiM0SnapshotMarkers {
  */
 export interface PiM0HardSignals {
 	systemHash: string;
-	toolSetHash: string;
 	modelKey: string;
 	cacheExpired: boolean;
 	lastResponseTime: number;
@@ -544,7 +542,6 @@ export interface PiM0HardSignals {
 
 const EMPTY_PI_HARD_SIGNALS: PiM0HardSignals = {
 	systemHash: "",
-	toolSetHash: "",
 	modelKey: "",
 	cacheExpired: false,
 	lastResponseTime: 0,
@@ -686,7 +683,6 @@ function getCachedMarkers(
 		// null for a legitimately-boundaryless baseline — see the guard above).
 		lastBaselineEndMessageId: cachedBoundary,
 		systemHash: meta.cachedM0SystemHash ?? "",
-		toolSetHash: meta.cachedM0ToolSetHash ?? "",
 		modelKey: meta.cachedM0ModelKey ?? "",
 	};
 }
@@ -766,7 +762,6 @@ function readCurrentMarkersFromCompartments(
 		}`,
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
-		toolSetHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).toolSetHash,
 		modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 	};
 }
@@ -815,12 +810,6 @@ export function mustMaterializePi(
 		hard.systemHash !== (meta.cachedM0SystemHash ?? "")
 	) {
 		return { value: true, reason: "system_hash" };
-	}
-	if (
-		hard.toolSetHash !== "" &&
-		hard.toolSetHash !== (meta.cachedM0ToolSetHash ?? "")
-	) {
-		return { value: true, reason: "tool_set_hash" };
 	}
 	// Idle > TTL: self-consuming guard via cachedM0MaterializedAt (parity with
 	// OpenCode). cacheExpired stays true every pass until lastResponseTime
@@ -1047,7 +1036,6 @@ function readFrozenM0InputsPi(
 			}`,
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
-			toolSetHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).toolSetHash,
 			modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 		};
 		return { docs, markers, compartments, memories, userProfile };
@@ -1230,7 +1218,6 @@ export function materializeM0Pi(
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
 			upgradeState: snapshotMarkers.upgradeState,
 			systemHash: snapshotMarkers.systemHash,
-			toolSetHash: snapshotMarkers.toolSetHash,
 			modelKey: snapshotMarkers.modelKey,
 		});
 		// Persist the rendered-memory identity in the SAME transaction as the m[0]
@@ -1513,7 +1500,6 @@ interface CachedPiM0M1Row {
 	cached_m0_session_facts_version: number | null;
 	cached_m0_upgrade_state: string | null;
 	cached_m0_system_hash: string | null;
-	cached_m0_tool_set_hash: string | null;
 	cached_m0_model_key: string | null;
 	cached_m0_last_baseline_end_message_id: string | null;
 	memory_block_ids: string | null;
@@ -1562,7 +1548,6 @@ function readCachedPiM0M1Row(
 					cached_m0_session_facts_version,
 					cached_m0_upgrade_state,
 					cached_m0_system_hash,
-					cached_m0_tool_set_hash,
 					cached_m0_model_key,
 					cached_m0_last_baseline_end_message_id,
 					memory_block_ids
@@ -1606,7 +1591,6 @@ function markersFromCachedPiRow(
 				? row.cached_m0_last_baseline_end_message_id
 				: null,
 		systemHash: row.cached_m0_system_hash ?? "",
-		toolSetHash: row.cached_m0_tool_set_hash ?? "",
 		modelKey: row.cached_m0_model_key ?? "",
 	};
 }
@@ -1640,7 +1624,6 @@ function cachedPiRowMatchesSnapshot(args: {
 		// that re-materialized under a new system/tool/model identity must invalidate
 		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].
 		(rowMarkers.systemHash ?? "") === (args.markers.systemHash ?? "") &&
-		(rowMarkers.toolSetHash ?? "") === (args.markers.toolSetHash ?? "") &&
 		(rowMarkers.modelKey ?? "") === (args.markers.modelKey ?? "")
 	);
 }

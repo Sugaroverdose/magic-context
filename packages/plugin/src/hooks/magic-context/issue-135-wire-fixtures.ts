@@ -14,7 +14,7 @@ export const ISSUE_135_ORPHAN_WIRE: OpenAiCompatWireMessage[] = [
             {
                 id: "call_orphan",
                 type: "function",
-                function: { name: "read", arguments: "{\"filePath\":\"x\"}" },
+                function: { name: "read", arguments: '{"filePath":"x"}' },
             },
         ],
     },

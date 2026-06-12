@@ -583,7 +583,6 @@ export interface M0SnapshotMarkers {
     // Captured from runtime signals at the injectM0M1 call site (NOT a pure DB
     // read), so readCurrentM0SnapshotMarkers takes them as inputs.
     systemHash: string;
-    toolSetHash: string;
     modelKey: string;
 }
 
@@ -595,7 +594,6 @@ export interface M0SnapshotMarkers {
  */
 export interface M0HardSignals {
     systemHash: string;
-    toolSetHash: string;
     modelKey: string;
     /** True when the provider cache TTL has elapsed since lastResponseTime. */
     cacheExpired: boolean;
@@ -605,7 +603,6 @@ export interface M0HardSignals {
 
 const EMPTY_HARD_SIGNALS: M0HardSignals = {
     systemHash: "",
-    toolSetHash: "",
     modelKey: "",
     cacheExpired: false,
     lastResponseTime: 0,
@@ -822,7 +819,6 @@ export function readCurrentM0SnapshotMarkers(args: {
         sessionFactsVersion: getSessionFactsVersion(args.db, args.sessionId),
         upgradeState: getUpgradeState(args.db, args.sessionId),
         systemHash: hard.systemHash,
-        toolSetHash: hard.toolSetHash,
         modelKey: hard.modelKey,
     };
 }
@@ -848,7 +844,6 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         sessionFactsVersion: state.cachedM0SessionFactsVersion,
         upgradeState: state.cachedM0UpgradeState,
         systemHash: state.cachedM0SystemHash ?? "",
-        toolSetHash: state.cachedM0ToolSetHash ?? "",
         modelKey: state.cachedM0ModelKey ?? "",
     };
 }
@@ -893,9 +888,6 @@ export function mustMaterialize(args: {
     }
     if (hard.systemHash !== "" && hard.systemHash !== (args.state.cachedM0SystemHash ?? "")) {
         return { value: true, reason: "system_hash" };
-    }
-    if (hard.toolSetHash !== "" && hard.toolSetHash !== (args.state.cachedM0ToolSetHash ?? "")) {
-        return { value: true, reason: "tool_set_hash" };
     }
     // Idle > TTL: the provider evicted the cache while the user was away. Guard
     // for idempotence across a multi-pass "came back" turn: cacheExpired stays
@@ -1226,7 +1218,6 @@ function applyMarkersToState(
     // their pre-materialize values until a DB reload re-syncs them, which would
     // re-fire the same HARD trigger on the very next pass (double-fold).
     state.cachedM0SystemHash = markers.systemHash;
-    state.cachedM0ToolSetHash = markers.toolSetHash;
     state.cachedM0ModelKey = markers.modelKey;
     state.snapshotMarkers = markers;
 }
@@ -1355,7 +1346,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // THIS request) — they cannot change mid-materialization-transaction,
             // so carry the captured values and exclude them from the stale check.
             systemHash: snapshotMarkers.systemHash,
-            toolSetHash: snapshotMarkers.toolSetHash,
             modelKey: snapshotMarkers.modelKey,
         };
         // NOTE: maxMemoryId is deliberately EXCLUDED from this stale-check.
@@ -1399,7 +1389,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
             upgradeState: snapshotMarkers.upgradeState,
             systemHash: snapshotMarkers.systemHash,
-            toolSetHash: snapshotMarkers.toolSetHash,
             modelKey: snapshotMarkers.modelKey,
         });
 
@@ -1643,7 +1632,6 @@ interface CachedM0M1Row {
     cached_m0_session_facts_version: number | null;
     cached_m0_upgrade_state: string | null;
     cached_m0_system_hash: string | null;
-    cached_m0_tool_set_hash: string | null;
     cached_m0_model_key: string | null;
     memory_block_ids: string | null;
 }
@@ -1688,7 +1676,6 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
                     cached_m0_session_facts_version,
                     cached_m0_upgrade_state,
                     cached_m0_system_hash,
-                    cached_m0_tool_set_hash,
                     cached_m0_model_key,
                     memory_block_ids
                FROM session_meta
@@ -1718,7 +1705,6 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         sessionFactsVersion: row.cached_m0_session_facts_version,
         upgradeState: row.cached_m0_upgrade_state,
         systemHash: row.cached_m0_system_hash ?? "",
-        toolSetHash: row.cached_m0_tool_set_hash ?? "",
         modelKey: row.cached_m0_model_key ?? "",
     };
 }
@@ -1737,7 +1723,6 @@ function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
         row.cached_m0_session_facts_version === state.cachedM0SessionFactsVersion &&
         (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&
         (row.cached_m0_system_hash ?? "") === (state.cachedM0SystemHash ?? "") &&
-        (row.cached_m0_tool_set_hash ?? "") === (state.cachedM0ToolSetHash ?? "") &&
         (row.cached_m0_model_key ?? "") === (state.cachedM0ModelKey ?? "")
     );
 }
@@ -1760,7 +1745,6 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
     state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
     state.cachedM0UpgradeState = markers.upgradeState;
     state.cachedM0SystemHash = markers.systemHash;
-    state.cachedM0ToolSetHash = markers.toolSetHash;
     state.cachedM0ModelKey = markers.modelKey;
     state.snapshotMarkers = markers;
 }

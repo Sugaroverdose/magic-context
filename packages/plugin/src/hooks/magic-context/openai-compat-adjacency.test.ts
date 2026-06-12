@@ -12,7 +12,9 @@ describe("assertOpenAiCompatAdjacency", () => {
             {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: "{}" } }],
+                tool_calls: [
+                    { id: "call-1", type: "function", function: { name: "read", arguments: "{}" } },
+                ],
             },
             { role: "tool", tool_call_id: "call-1", content: "ok" },
         ];
@@ -25,7 +27,9 @@ describe("assertOpenAiCompatAdjacency", () => {
             {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: "{}" } }],
+                tool_calls: [
+                    { id: "call-1", type: "function", function: { name: "read", arguments: "{}" } },
+                ],
             },
             { role: "assistant", content: "[dropped]" },
             { role: "tool", tool_call_id: "call-1", content: "ok" },
@@ -40,7 +44,9 @@ describe("assertOpenAiCompatAdjacency", () => {
             {
                 role: "assistant",
                 content: null,
-                tool_calls: [{ id: "c1", type: "function", function: { name: "x", arguments: "{}" } }],
+                tool_calls: [
+                    { id: "c1", type: "function", function: { name: "x", arguments: "{}" } },
+                ],
             },
             { role: "user", content: "[dropped]" },
             { role: "tool", tool_call_id: "c1", content: "y" },
