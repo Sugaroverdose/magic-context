@@ -25,14 +25,20 @@ fn workspace_ready_cache() -> &'static Mutex<Option<bool>> {
 }
 
 pub fn workspace_schema_ready(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    // Only a `true` verdict is cached: schemas never un-migrate, but a `false`
+    // verdict can flip the moment a v34 plugin process migrates the shared DB
+    // while the dashboard stays open — so not-ready must re-probe every call
+    // (two sqlite_master lookups + one MAX(version), negligible).
     if let Ok(guard) = workspace_ready_cache().lock() {
-        if let Some(cached) = *guard {
-            return Ok(cached);
+        if *guard == Some(true) {
+            return Ok(true);
         }
     }
     let ready = compute_workspace_schema_ready(conn)?;
-    if let Ok(mut guard) = workspace_ready_cache().lock() {
-        *guard = Some(ready);
+    if ready {
+        if let Ok(mut guard) = workspace_ready_cache().lock() {
+            *guard = Some(true);
+        }
     }
     Ok(ready)
 }
