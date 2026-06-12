@@ -521,8 +521,7 @@ export interface PiM0SnapshotMarkers {
 	lastBaselineEndMessageId: string | null;
 	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers): provider-side
 	// cache-eviction signals. systemHash/modelKey come from runtime; Pi has no
-	// tool.definition hook so toolSetHash is always "" (a documented divergence —
-	// see PARITY.md). Captured from PiM0HardSignals at the injection call site.
+	// Captured from PiM0HardSignals at the injection call site.
 	systemHash: string;
 	modelKey: string;
 }
