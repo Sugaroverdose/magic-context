@@ -227,6 +227,7 @@ describe("createCtxMemoryTool", () => {
 				ctx,
 			);
 
+			expect(String(result)).not.toContain("Archived memory");
 			expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
 		} finally {
 			closeQuietly(db);
