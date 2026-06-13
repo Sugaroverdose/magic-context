@@ -556,6 +556,26 @@ pub fn save_project_config(project_path: String, content: String) -> Result<(), 
 
 // ── Model commands ──────────────────────────────────────────
 
+/// Upper bound for model-discovery subprocesses so a hung CLI shim cannot block
+/// the dashboard worker thread indefinitely.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Run a binary with args, bounded by [`PROBE_TIMEOUT`]. `kill_on_drop` reaps
+/// the child when the future is dropped on timeout so orphans do not accumulate.
+async fn run_bounded_binary(program: &str, args: &[&str]) -> Option<String> {
+    let fut = tokio::process::Command::new(program)
+        .args(args)
+        .no_window()
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
+        Ok(Ok(output)) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Run `command` through the user's login shell and return its stdout on
 /// success. GUI apps don't inherit the shell PATH, and version managers
 /// (mise/nvm/fnm/volta/asdf) install binaries under per-version directories
@@ -577,8 +597,9 @@ async fn run_via_login_shell(command: String) -> Option<String> {
         .arg("-c")
         .arg(&command)
         .no_window()
+        .kill_on_drop(true)
         .output();
-    match tokio::time::timeout(std::time::Duration::from_secs(8), fut).await {
+    match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
         Ok(Ok(output)) if output.status.success() => {
             Some(String::from_utf8_lossy(&output.stdout).to_string())
         }
@@ -635,17 +656,10 @@ pub async fn get_available_models() -> Vec<String> {
     };
 
     for bin in &candidates {
-        if let Ok(output) = tokio::process::Command::new(bin)
-            .arg("models")
-            .no_window()
-            .output()
-            .await
-        {
-            if output.status.success() {
-                let models = parse(&String::from_utf8_lossy(&output.stdout));
-                if !models.is_empty() {
-                    return models;
-                }
+        if let Some(text) = run_bounded_binary(bin, &["models"]).await {
+            let models = parse(&text);
+            if !models.is_empty() {
+                return models;
             }
         }
     }
@@ -659,23 +673,63 @@ pub async fn get_available_models() -> Vec<String> {
     Vec::new()
 }
 
-/// Parse the tabular output of `pi --list-models` into `provider/model` strings.
+fn strip_ansi_pi_output(text: &str) -> String {
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*m").expect("ansi strip regex");
+    re.replace_all(text, "").into_owned()
+}
+
+fn pi_provider_token_ok(s: &str) -> bool {
+    let s = s.trim_matches(',');
+    if s.is_empty() || !s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn pi_model_token_ok(s: &str) -> bool {
+    let s = s.trim_matches(',');
+    if s.is_empty() || !s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+}
+
+/// Parse `pi --list-models` output into `provider/model` ids.
 ///
-/// Skips the header line, empty lines, and any row with fewer than 2 tokens.
-/// Whitespace is normalized via `split_whitespace`.
+/// Mirrors `packages/cli/src/lib/pi-helpers.ts` `parseModelListOutput`: skip
+/// `Usage:`/help lines, detect the header by column content (not blind skip(1)),
+/// validate provider/model token shapes, strip ANSI, and accept slash-joined ids.
 pub fn parse_pi_models_output(text: &str) -> Vec<String> {
-    text.lines()
-        .skip(1) // skip header
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| {
-            let tokens: Vec<&str> = line.split_whitespace().take(2).collect();
-            if tokens.len() >= 2 {
-                Some(format!("{}/{}", tokens[0], tokens[1]))
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut models = std::collections::BTreeSet::new();
+    for raw_line in strip_ansi_pi_output(text).lines() {
+        let mut line = raw_line.trim().to_string();
+        if line.starts_with('•') || line.starts_with('*') || line.starts_with('-') {
+            line = line.trim_start_matches(['•', '*', '-']).trim_start().to_string();
+        }
+        if line.is_empty() || line.to_ascii_lowercase().contains("usage:") {
+            continue;
+        }
+
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let first = cols.first().copied().unwrap_or("").trim_end_matches(',');
+
+        if first.contains('/') && !first.starts_with("http://") && !first.starts_with("https://") {
+            models.insert(first.to_string());
+            continue;
+        }
+
+        let provider = first;
+        let model = cols.get(1).copied().unwrap_or("").trim_end_matches(',');
+        if provider.eq_ignore_ascii_case("provider") && model.eq_ignore_ascii_case("model") {
+            continue;
+        }
+        if pi_provider_token_ok(provider) && pi_model_token_ok(model) {
+            models.insert(format!("{provider}/{model}"));
+        }
+    }
+    models.into_iter().collect()
 }
 
 #[tauri::command]
@@ -707,18 +761,10 @@ pub async fn get_available_pi_models() -> Vec<String> {
     };
 
     for bin in &candidates {
-        if let Ok(output) = tokio::process::Command::new(bin)
-            .arg("--list-models")
-            .no_window()
-            .output()
-            .await
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let models = parse_pi_models_output(&text);
-                if !models.is_empty() {
-                    return models;
-                }
+        if let Some(text) = run_bounded_binary(bin, &["--list-models"]).await {
+            let models = parse_pi_models_output(&text);
+            if !models.is_empty() {
+                return models;
             }
         }
     }
@@ -904,7 +950,24 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pi_models_output;
+    use super::{parse_pi_models_output, run_bounded_binary};
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn run_bounded_binary_times_out_on_sleep() {
+        let start = Instant::now();
+        let result = if cfg!(windows) {
+            run_bounded_binary("cmd", &["/C", "timeout", "/t", "30", "/nobreak"]).await
+        } else {
+            run_bounded_binary("sleep", &["30"]).await
+        };
+        assert!(result.is_none());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(12),
+            "probe should return within timeout, took {:?}",
+            start.elapsed()
+        );
+    }
 
     #[test]
     fn test_parse_pi_models_output_normal() {
@@ -942,5 +1005,19 @@ mod tests {
         let input = "provider   model\nanthropic\n  \ncerebras  gpt-oss\n";
         let result = parse_pi_models_output(input);
         assert_eq!(result, vec!["cerebras/gpt-oss"]);
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_skips_usage_and_accepts_slash_ids() {
+        let input = "Usage: pi --list-models\nanthropic/claude-opus-4-8  extra cols\n";
+        let result = parse_pi_models_output(input);
+        assert_eq!(result, vec!["anthropic/claude-opus-4-8"]);
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_strips_ansi() {
+        let input = "\x1b[32manthropic\x1b[0m  claude-sonnet-4-5";
+        let result = parse_pi_models_output(input);
+        assert_eq!(result, vec!["anthropic/claude-sonnet-4-5"]);
     }
 }

@@ -311,36 +311,25 @@ export async function runSetup(dryRun = false): Promise<number> {
     }
 
     // ─── Step 5: Historian model ────────────────────────
-    // No recommendation tree: pickModel shows the user's FULL model list in a
-    // type-ahead picker with role guidance. When no models were detected we keep
-    // the runtime built-in fallback chain (model stays null) rather than forcing
-    // a manual entry.
-    let historianModel: string | null = null;
-    if (allModels.length > 0) {
-        historianModel = await pickModel(promptIO, allModels, "historian");
-        log.success(`Historian: ${historianModel}`);
-    } else {
-        log.info("Skipping model selection — using built-in fallback chain");
-    }
+    // pickModel shows the full discovered list when non-empty; when discovery
+    // returns [] it still runs and offers free-text provider/model entry (same as Pi setup).
+    const historianModel = await pickModel(promptIO, allModels, "historian");
+    log.success(`Historian: ${historianModel}`);
 
     // ─── Step 6: Dreamer ────────────────────────────────
     const dreamerEnabled = await confirm("Enable dreamer?", true);
     let dreamerModel: string | null = null;
-    if (dreamerEnabled && allModels.length > 0) {
+    if (dreamerEnabled) {
         dreamerModel = await pickModel(promptIO, allModels, "dreamer");
         log.success(`Dreamer: ${dreamerModel}`);
-    } else if (dreamerEnabled) {
-        log.info("Using built-in fallback chain for dreamer");
     }
 
     // ─── Step 7: Sidekick ───────────────────────────────
     const sidekickEnabled = await confirm("Enable sidekick?", false);
     let sidekickModel: string | null = null;
-    if (sidekickEnabled && allModels.length > 0) {
+    if (sidekickEnabled) {
         sidekickModel = await pickModel(promptIO, allModels, "sidekick");
         log.success(`Sidekick: ${sidekickModel}`);
-    } else if (sidekickEnabled) {
-        log.info("Using built-in fallback chain for sidekick");
     }
 
     // ─── Claude Max subscription ────────────────────────

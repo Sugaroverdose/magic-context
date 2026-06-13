@@ -8,7 +8,7 @@
     "build": "astro build && cp root-redirect.html dist-root/index.html",
     "preview": "astro preview",
     "astro": "astro",
-    "deploy": "astro build && wrangler deploy"
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.34.0",

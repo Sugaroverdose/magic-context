@@ -143,7 +143,10 @@ export function getAvailableModels(piPath: string): string[] {
         const models = parseModelListOutput(output);
         if (models.length > 0) return models;
     }
-    return getStaticModels();
+    // Empty/failed discovery must not fall back to a static catalog — that reintroduces
+    // issue #144 (users pick models they do not have). Callers pass [] to pickModel(),
+    // which offers free-text provider/model entry instead.
+    return [];
 }
 
 export function buildModelSelection(

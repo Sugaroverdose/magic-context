@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseModelListOutput } from "./pi-helpers";
+import { getAvailableModels, parseModelListOutput } from "./pi-helpers";
 
 describe("parseModelListOutput", () => {
     it("parses the `pi --list-models` table (provider + model columns) — issue #144", () => {
@@ -54,5 +54,18 @@ describe("parseModelListOutput", () => {
     it("dedupes repeated ids", () => {
         const output = "anthropic  claude-opus-4-8\nanthropic  claude-opus-4-8";
         expect(parseModelListOutput(output)).toEqual(["anthropic/claude-opus-4-8"]);
+    });
+
+    it("strips ANSI color codes before parsing", () => {
+        const esc = String.fromCharCode(27);
+        const output = `${esc}[32manthropic${esc}[0m  claude-opus-4-8`;
+        expect(parseModelListOutput(output)).toEqual(["anthropic/claude-opus-4-8"]);
+    });
+});
+
+describe("getAvailableModels", () => {
+    it("returns [] when pi output parses to no models (no static fallback)", () => {
+        const piPath = process.platform === "win32" ? "where" : "true";
+        expect(getAvailableModels(piPath)).toEqual([]);
     });
 });
