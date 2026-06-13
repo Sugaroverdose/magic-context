@@ -11,7 +11,6 @@ import {
     renewGitSweepLease,
 } from "../features/magic-context/git-commits";
 import {
-    embedUnembeddedCompartmentChunksForProject,
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
@@ -177,16 +176,10 @@ function runTick(origin: "startup" | "interval"): void {
                             `[magic-context] proactively embedded ${embeddedCount} ${embeddedCount === 1 ? "memory" : "memories"} for project ${reg.projectIdentity}`,
                         );
                     }
-
-                    const chunkCount = await embedUnembeddedCompartmentChunksForProject(
-                        db,
-                        reg.projectIdentity,
-                    );
-                    if (chunkCount > 0) {
-                        log(
-                            `[magic-context] proactively embedded ${chunkCount} compartment ${chunkCount === 1 ? "chunk" : "chunks"} for project ${reg.projectIdentity}`,
-                        );
-                    }
+                    // Compartment-chunk backfill is NOT driven from the timer: a
+                    // bounded batch per tick is a slow, bursty trickle that hammers
+                    // local embedding endpoints. New compartments embed on publish;
+                    // historical backfill runs on demand via /ctx-embed-history.
                 }
 
                 await reg.ensureRegistered(reg.directory, db);
