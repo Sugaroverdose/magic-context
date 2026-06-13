@@ -623,6 +623,9 @@ describe("createTransform", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 10,
+            liveModelBySession: new Map([
+                ["ses-structural", { providerID: "anthropic", modelID: "claude-sonnet" }],
+            ]),
         });
         const messages: TestMessage[] = [
             {
@@ -644,8 +647,8 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then — sentinel replacement preserves array length;
-        // empty-text sentinels are dropped at the wire by OpenCode's provider/transform.
+        //#then — Anthropic sentinel replacement preserves array length;
+        // empty-text sentinels are dropped at the wire by OpenCode's Anthropic adapter.
         expect(messages[1].parts).toHaveLength(5);
         // The live text part survives unchanged
         expect(text(messages[1], 0)).toContain("visible answer");
@@ -654,6 +657,226 @@ describe("createTransform", () => {
             messages[1].parts as Array<{ type: string; text?: string }>
         ).filter((p) => p.type === "text" && p.text === "");
         expect(sentineledParts).toHaveLength(4);
+    });
+
+    it("keeps github-copilot tool-adjacent step-finish native instead of adding an empty sentinel", async () => {
+        //#given
+        useTempDataHome("context-transform-copilot-step-finish-");
+        const sessionId = "ses-copilot-step-finish";
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db: openDatabase(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 10,
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "github-copilot", modelID: "claude-sonnet" }],
+            ]),
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [
+                    { type: "tool", callID: "call-1", state: { output: "result" } },
+                    { type: "step-finish", text: "done" },
+                ],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then — copilot's OpenCode path does not filter empty text parts, so no
+        // empty sentinel may be inserted between a tool_use and its following result.
+        expect(messages[1].parts[1]).toEqual({ type: "step-finish", text: "done" });
+        expect(
+            (messages[1].parts as Array<{ type?: string; text?: string }>).some(
+                (part) => part.type === "text" && part.text === "",
+            ),
+        ).toBe(false);
+    });
+
+    it("keeps step-start native for github-copilot but sentinelizes it for anthropic", async () => {
+        //#given
+        useTempDataHome("context-transform-provider-step-start-");
+        const runForProvider = async (providerID: string, sessionId: string) => {
+            const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler,
+                contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                    [
+                        sessionId,
+                        { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
+                    ],
+                ]),
+                db: openDatabase(),
+                historyRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map<string, string>(),
+                clearReasoningAge: 50,
+                protectedTags: 10,
+                liveModelBySession: new Map([
+                    [sessionId, { providerID, modelID: "claude-sonnet" }],
+                ]),
+            });
+            const messages: TestMessage[] = [
+                {
+                    info: { id: `${sessionId}-user`, role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "continue" }],
+                },
+                {
+                    info: { id: `${sessionId}-assistant`, role: "assistant" },
+                    parts: [
+                        { type: "tool", callID: "call-1", state: { output: "result" } },
+                        { type: "step-start", text: "start" },
+                        { type: "text", text: "visible" },
+                    ],
+                },
+            ];
+            await transform({}, { messages });
+            return messages;
+        };
+
+        //#when
+        const copilotMessages = await runForProvider("github-copilot", "ses-copilot-step-start");
+        const anthropicMessages = await runForProvider("anthropic", "ses-anthropic-step-start");
+
+        //#then
+        expect(copilotMessages[1].parts[1]).toEqual({ type: "step-start", text: "start" });
+        expect(anthropicMessages[1].parts[1]).toEqual({ type: "text", text: "" });
+    });
+
+    it("produces byte-identical structural output on cold DB-recovered and hot anthropic passes", async () => {
+        //#given
+        useTempDataHome("context-transform-cold-hot-provider-");
+        const sessionId = "ses-anthropic-cold-hot";
+        createOpenCodeDbForTransform(sessionId, [
+            { id: "oc-user", role: "user", text: "hello" },
+            {
+                id: "oc-assistant",
+                role: "assistant",
+                text: "hi",
+                providerID: "anthropic",
+                modelID: "claude-sonnet",
+            },
+        ]);
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db: openDatabase(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 10,
+            liveModelBySession,
+        });
+        const buildMessages = (): TestMessage[] => [
+            {
+                info: { id: "m-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [
+                    { type: "text", text: "visible answer" },
+                    { type: "step-start", text: "start" },
+                    { type: "step-finish", text: "finish" },
+                ],
+            },
+        ];
+
+        //#when — first pass recovers provider from OpenCode DB; second reuses the warmed map.
+        const coldMessages = buildMessages();
+        await transform({}, { messages: coldMessages });
+        expect(liveModelBySession.get(sessionId)?.providerID).toBe("anthropic");
+        const hotMessages = buildMessages();
+        await transform({}, { messages: hotMessages });
+
+        //#then
+        expect(JSON.stringify(hotMessages[1].parts)).toBe(JSON.stringify(coldMessages[1].parts));
+    });
+
+    it("uses the DB-recovered provider for both main transform and postprocess in one anthropic pass", async () => {
+        //#given
+        useTempDataHome("context-transform-single-provider-resolution-");
+        const sessionId = "ses-single-provider-resolution";
+        createOpenCodeDbForTransform(sessionId, [
+            { id: "oc-user", role: "user", text: "hello" },
+            {
+                id: "oc-assistant",
+                role: "assistant",
+                text: "hi",
+                providerID: "anthropic",
+                modelID: "claude-sonnet",
+            },
+        ]);
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    { usage: { percentage: 60, inputTokens: 120_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db: openDatabase(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            liveModelBySession: new Map(),
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "m-structural", role: "assistant" },
+                parts: [
+                    { type: "text", text: "visible" },
+                    { type: "step-start", text: "start" },
+                ],
+            },
+            {
+                info: { id: "m-system-injected", role: "assistant" },
+                parts: [{ type: "text", text: "<system-reminder>internal</system-reminder>" }],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then — main transform stripped step-start with the recovered provider,
+        // and postprocess used that same provider for the whole-message sentinel.
+        expect(messages[1].parts[1]).toEqual({ type: "text", text: "" });
+        expect(messages[2].parts).toEqual([{ type: "text", text: "" }]);
     });
 
     it("applies pending drop operations when scheduler executes", async () => {
@@ -1509,6 +1732,9 @@ describe("createTransform", () => {
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
             protectedTags: 0,
+            liveModelBySession: new Map([
+                ["ses-think", { providerID: "anthropic", modelID: "claude-sonnet" }],
+            ]),
         });
 
         const firstPass: TestMessage[] = [
@@ -1548,12 +1774,12 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages: secondPass });
 
-        //#then — thinking part becomes sentinel; text becomes [dropped §2§];
-        // assistant message neutralized to a lone sentinel (array length preserved).
-        // Default providerID → `[dropped]` sentinel.
+        //#then — under Anthropic the cleared thinking becomes an empty sentinel;
+        // then the dropped-placeholder-only assistant is neutralized to one empty
+        // whole-message sentinel (filtered before the wire by OpenCode).
         expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toContain("user prompt");
-        expect(secondPass[1].parts).toEqual([{ type: "text", text: "[dropped]" }]);
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
     });
 
     it("fails open when session meta lookup throws", async () => {
@@ -1783,7 +2009,14 @@ describe("createTransform", () => {
 
 function createOpenCodeDbForTransform(
     sessionId: string,
-    messages: Array<{ id: string; role: string; text: string }>,
+    messages: Array<{
+        id: string;
+        role: string;
+        text: string;
+        providerID?: string;
+        modelID?: string;
+        agent?: string;
+    }>,
 ): void {
     const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -1814,13 +2047,15 @@ function createOpenCodeDbForTransform(
         );
         messages.forEach((message, index) => {
             const timestamp = index + 1;
-            insertMessage.run(
-                message.id,
-                sessionId,
-                timestamp,
-                timestamp,
-                JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
-            );
+            const data: Record<string, unknown> = {
+                id: message.id,
+                role: message.role,
+                sessionID: sessionId,
+            };
+            if (message.providerID) data.providerID = message.providerID;
+            if (message.modelID) data.modelID = message.modelID;
+            if (message.agent) data.agent = message.agent;
+            insertMessage.run(message.id, sessionId, timestamp, timestamp, JSON.stringify(data));
             insertPart.run(
                 message.id,
                 sessionId,

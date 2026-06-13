@@ -22,14 +22,12 @@ function isStructuralNoisePart(part: unknown): boolean {
 
 /**
  * Replace structural/cleared parts with empty-text sentinels instead of removing
- * them. Preserves message.parts length between passes so providers that hash
- * the serialized message array (proxy providers like Antigravity, some
- * OpenRouter configs) see a stable cache prefix across turns.
+ * them. Preserves message.parts length between passes so Anthropic prompt-cache
+ * prefixes stay byte-stable while OpenCode filters the empty text parts before
+ * the wire.
  *
- * For Anthropic/Bedrock/Google, OpenCode's provider/transform.ts drops empty
- * text/reasoning parts before the wire, so the sentinel disappears anyway —
- * producing the same wire shape as the previous behavior but avoiding
- * mid-pipeline array mutation.
+ * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is true.
+ * Non-Anthropic adapters can forward empty text parts as real wire content.
  *
  * Idempotent: sentinels are themselves recognized on subsequent passes and
  * skipped (not re-mutated, not re-counted).

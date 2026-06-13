@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+    addStaleReduceStrippedIds,
     getActiveTagsBySession,
     getOrCreateSessionMeta,
     getTagsBySession,
@@ -100,6 +101,53 @@ function makeDropTarget(message: MessageLike): TagTarget {
     };
 }
 
+type PostTransformArgs = Parameters<typeof runPostTransformPhase>[0];
+
+function basePostTransformArgs(
+    db: Database,
+    sessionId: string,
+    messages: MessageLike[],
+    overrides: Partial<PostTransformArgs> = {},
+): PostTransformArgs {
+    return {
+        sessionId,
+        db,
+        messages,
+        tags: [],
+        targets: new Map(),
+        reasoningByMessage: new Map(),
+        messageTagNumbers: new Map(),
+        batch: null,
+        contextUsage: { percentage: 20, inputTokens: 1000 },
+        schedulerDecision: "defer",
+        fullFeatureMode: true,
+        canRunCompartments: false,
+        awaitedCompartmentRun: false,
+        phaseJustAwaitedPublication: false,
+        compartmentInProgress: false,
+        historyRefreshExplicitBeforePrepare: false,
+        deferredHistoryWasPendingAtPassStart: false,
+        compartmentInjectionRebuiltFromDb: false,
+        rebuiltHistoryFromInitialPrepare: false,
+        historyRebuiltThisPass: false,
+        canConsumeDeferredLate: false,
+        sessionMeta: getOrCreateSessionMeta(db, sessionId),
+        currentTurnId: null,
+        pendingMaterializationSessions: new Set(),
+        deferredHistoryRefreshSessions: new Set(),
+        deferredMaterializationSessions: new Set(),
+        lastHeuristicsTurnId: new Map(),
+        clearReasoningAge: 999,
+        protectedTags: 0,
+        pendingCompartmentInjection: null,
+        didMutateFromFlushedStatuses: false,
+        watermark: 0,
+        forceMaterializationPercentage: 85,
+        hasRecentReduceCall: false,
+        ...overrides,
+    };
+}
+
 describe("postprocess emergency drop accounting", () => {
     it("plans emergency floor from tags that remain active after pending ops", async () => {
         db = new Database(":memory:");
@@ -164,5 +212,126 @@ describe("postprocess emergency drop accounting", () => {
             [3, "active"],
             [4, "active"],
         ]);
+    });
+});
+
+describe("postprocess empty-sentinel provider gate", () => {
+    it("does not sentinelize cleared reasoning on github-copilot execute passes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-copilot-cleared-reasoning";
+        const messages: MessageLike[] = [
+            {
+                info: { id: "m-cleared", role: "assistant" },
+                parts: [{ type: "thinking", thinking: "[cleared]" }],
+            } as unknown as MessageLike,
+        ];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                contextUsage: { percentage: 60, inputTokens: 6000 },
+                currentTurnId: "turn-cleared",
+                resolvedProviderID: "github-copilot",
+            }),
+        );
+
+        expect(messages[0].parts).toEqual([{ type: "thinking", thinking: "[cleared]" }]);
+    });
+
+    it("leaves processed image file parts native for github-copilot", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-copilot-processed-image";
+        const userMessage = {
+            info: { id: "m-image", role: "user" },
+            parts: [
+                {
+                    type: "file",
+                    mime: "image/png",
+                    url: `data:image/png;base64,${"a".repeat(220)}`,
+                },
+            ],
+        } as unknown as MessageLike;
+        const messages: MessageLike[] = [
+            userMessage,
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "seen" }],
+            },
+        ] as unknown as MessageLike[];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                watermark: 1,
+                messageTagNumbers: new Map([[userMessage, 1]]),
+                resolvedProviderID: "github-copilot",
+            }),
+        );
+
+        expect(userMessage.parts[0]).toMatchObject({ type: "file", mime: "image/png" });
+        expect(userMessage.parts).not.toContainEqual({ type: "text", text: "" });
+    });
+
+    it("still sentinelizes processed image file parts for anthropic", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-anthropic-processed-image";
+        const userMessage = {
+            info: { id: "m-image", role: "user" },
+            parts: [
+                {
+                    type: "file",
+                    mime: "image/png",
+                    url: `data:image/png;base64,${"a".repeat(220)}`,
+                },
+            ],
+        } as unknown as MessageLike;
+        const messages: MessageLike[] = [
+            userMessage,
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "seen" }],
+            },
+        ] as unknown as MessageLike[];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                watermark: 1,
+                messageTagNumbers: new Map([[userMessage, 1]]),
+                resolvedProviderID: "anthropic",
+            }),
+        );
+
+        expect(userMessage.parts).toEqual([{ type: "text", text: "" }]);
+    });
+
+    it("does not replay stale ctx_reduce frozen ids as empty sentinels for github-copilot", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-copilot-stale-reduce";
+        addStaleReduceStrippedIds(db, sessionId, ["reduce-1"]);
+        const messages: MessageLike[] = [
+            {
+                info: { id: "reduce-1", role: "tool" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "ctx_reduce",
+                        callID: "call-reduce",
+                        state: { output: "Queued: drop §1§", status: "completed" },
+                    },
+                ],
+            } as unknown as MessageLike,
+        ];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "github-copilot",
+            }),
+        );
+
+        expect(messages[0].parts[0]).toMatchObject({ type: "tool", tool: "ctx_reduce" });
     });
 });

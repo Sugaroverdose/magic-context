@@ -1,46 +1,38 @@
 import { isRecord } from "../../shared/record-type-guard";
 
 /**
- * Whole-message sentinel placeholder for providers that DO NOT filter
- * empty assistant content out of their wire payload.
+ * Whole-message sentinel placeholder for providers that must not receive empty
+ * assistant content on the wire.
  *
  * Background: when `stripDroppedPlaceholderMessages` /
- * `stripSystemInjectedMessages` / `replaySentinelByMessageIds` reduce a
- * whole assistant message to one sentinel part, the resulting AI-SDK
- * `ModelMessage` becomes `{ role: "assistant", content: "" }`. Anthropic
- * and Bedrock filter such empty messages out via their `normalizeMessages`
- * step (see OpenCode's `provider/transform.ts:55-73`), so the wire never
- * sees them. Most other providers (openai-compatible, openrouter, google,
- * ...) do not, and the empty-content message reaches the wire — and is
- * rejected by stricter backends (e.g. Moonshot/Kimi: "must not be empty").
+ * `stripSystemInjectedMessages` / `replaySentinelByMessageIds` reduce a whole
+ * assistant message to one sentinel part, the resulting AI-SDK `ModelMessage`
+ * can become `{ role: "assistant", content: "" }`. OpenCode's canonical
+ * Anthropic adapter filters that empty message before the wire; most other
+ * providers can forward it and stricter backends reject it (e.g. Moonshot/Kimi:
+ * "must not be empty").
  *
- * Using a non-empty placeholder text whose value won't be filtered keeps
- * the wire valid while still telling the model honestly that something
- * was dropped. For Anthropic/Bedrock we still emit `""` so their existing
- * filter continues removing the message — no wire-shape change for them.
+ * Using a non-empty placeholder text whose value won't be filtered keeps the
+ * wire valid while still telling the model honestly that something was dropped.
  */
 export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 
 /**
- * Decide whether a model accepts empty assistant `content` on the wire.
+ * Decide whether empty-text sentinels are safe for the provider's wire path.
  *
- * "Accepts" here means: OpenCode's own `normalizeMessages` (or the AI SDK)
- * filters out empty text/reasoning/messages BEFORE they reach the
- * provider, so an empty sentinel is safe AND lets the message disappear
- * from the wire entirely (a small token-count optimization).
+ * The gate is deliberately canonical-Anthropic only. OpenCode filters empty
+ * text/reasoning parts only in the `@ai-sdk/anthropic` branch before sending
+ * to the provider; github-copilot and other non-Anthropic adapters forward
+ * `{type:"text", text:""}` parts as real content blocks. Bedrock also filters
+ * empty text later, but native `step-start` boundaries and empty sentinels are
+ * not byte-equivalent before that filter runs. Google Vertex Anthropic maps to
+ * an Anthropic SDK key but does not enter OpenCode's `@ai-sdk/anthropic`
+ * empty-part filter.
  *
- * Rule: only the canonical `anthropic` provider. Everything else gets the
- * non-empty `[dropped]` placeholder.
- *
- * Trade-off: providers that ALSO filter empties but aren't the canonical
- * Anthropic provider (e.g. Bedrock, Google-Vertex Anthropic) will see
- * `[dropped]` here instead of `""`. Their filter doesn't remove non-empty
- * content, so the message stays on the wire — one cache bust on rollout,
- * then stable. Acceptable given the alternative is broader matching that
- * risks misclassifying non-filter providers as filter-friendly (which
- * would re-introduce the empty-message rejection bug we're fixing).
+ * Unknown or non-canonical providers therefore must keep native parts (or use
+ * non-empty whole-message placeholders) rather than producing empty sentinels.
  */
-function modelAcceptsEmptyContent(providerID?: string): boolean {
+export function modelAcceptsEmptyContent(providerID?: string): boolean {
     return providerID === "anthropic";
 }
 
@@ -49,21 +41,14 @@ function modelAcceptsEmptyContent(providerID?: string): boolean {
  * whole message) while preserving the array's length and index positions
  * across passes.
  *
- * For per-part sentinelization, empty text is always safe — the message
- * still has other content (text/tool/reasoning) so it never reaches the
- * wire as an empty assistant message.
+ * Why sentinels exist: Anthropic prompt caching is sensitive to serialized
+ * message-array shape. Replacing removed parts with inert `{type:"text",
+ * text:""}` placeholders keeps indices stable across passes, and OpenCode's
+ * canonical Anthropic adapter filters those empty text parts before the wire.
  *
- * Why sentinels exist: some providers (Antigravity/Gemini-routed-Claude,
- * some OpenRouter configs) hash the full serialized messages[] array as
- * their prompt-cache key. Any array-length change between turns busts the
- * cache. Replacing removed parts with inert `{type:"text", text:""}`
- * placeholders keeps the array shape stable so subsequent turns can hit
- * cache on the unchanged prefix.
- *
- * For Anthropic/Bedrock/Google-SDK providers, `provider/transform.ts:55-73`
- * (or the SDK itself) filters out parts where `text === ""`, so the
- * sentinel never reaches the wire. Wire behavior stays identical to the
- * previous `.filter()`/`.splice()` behavior.
+ * Call sites must gate this helper with `modelAcceptsEmptyContent()`. For
+ * non-Anthropic providers the empty text part can survive onto the wire and
+ * break provider-specific adjacency or non-empty-content invariants.
  *
  * `cache_control` inheritance: if the original part carried provider-side
  * cache-breakpoint metadata (`cache_control` / `cacheControl`), the

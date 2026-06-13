@@ -67,6 +67,9 @@ boundaries. In Pi's raw array tool results carry role `"toolResult"`; the
 synthetic-user folds live only in the transcript *view* (never written back), so
 only genuine prompts are user-role in the stripped array.
 
+Pi has no `makeSentinel` empty-text-part wire path; the empty-part-sentinel
+provider gate is OpenCode-only by construction.
+
 ---
 
 ## 3. No `session.deleted` event → `session_before_switch` is reversible

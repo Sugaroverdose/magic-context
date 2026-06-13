@@ -68,6 +68,7 @@ import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-
 import { estimateTokens } from "./read-session-formatting";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { sendIgnoredMessage } from "./send-session-notification";
+import { modelAcceptsEmptyContent } from "./sentinel";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -618,6 +619,12 @@ export function createTransform(deps: TransformDeps) {
                 deps.liveModelBySession?.set(sessionId, recovered);
             }
         }
+        // Single pass-local provider resolution for every empty-sentinel producer.
+        // A cold pass may recover the model from OpenCode's DB above; hot passes hit
+        // the live map. Reusing this value keeps cold/hot output identical and keeps
+        // postprocess from making a divergent provider decision later in the pass.
+        const resolvedProviderID = modelForBudget?.providerID;
+        const canUseEmptySentinels = modelAcceptsEmptyContent(resolvedProviderID);
         const resolvedContextLimit = modelForBudget
             ? resolveTrustedContextLimit(modelForBudget.providerID, modelForBudget.modelID, {
                   db,
@@ -1221,7 +1228,10 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const t3 = performance.now();
-        const strippedStructuralNoise = stripStructuralNoise(messages);
+        // Empty text part sentinels are safe only for canonical Anthropic, where
+        // OpenCode filters them before the wire. Other providers keep native
+        // structural parts so an empty text block cannot break tool adjacency.
+        const strippedStructuralNoise = canUseEmptySentinels ? stripStructuralNoise(messages) : 0;
         logTransformTiming(
             sessionId,
             "stripStructuralNoise",
@@ -1283,13 +1293,10 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const t4 = performance.now();
-        // OpenCode's provider/transform.ts (PR #24146, 2026-04-24) always emits
-        // the interleaved `reasoning_content`/`reasoning_details` field for
-        // providers that declare `capabilities.interleaved.field` — even when
-        // empty. So neutralizing aged reasoning parts to sentinels is safe
-        // for Moonshot/Kimi and the rest; OpenCode emits an empty interleaved
-        // field rather than leaking stale `[cleared]` text into the wire.
-        const strippedClearedReasoning = stripClearedReasoning(messages);
+        // `clearOldReasoning` replays `[cleared]` as native reasoning text for all
+        // providers. Only Anthropic may replace those shells with empty text
+        // sentinels; other providers can forward the empty part to the wire.
+        const strippedClearedReasoning = canUseEmptySentinels ? stripClearedReasoning(messages) : 0;
         logTransformTiming(
             sessionId,
             "stripClearedReasoning",
@@ -1311,26 +1318,12 @@ export function createTransform(deps: TransformDeps) {
         // Google-Vertex-Anthropic may need the workaround if they hit
         // merged-assistant scenarios; broaden the gate then.
         const tMergeStrip = performance.now();
-        // Provider resolution for the anthropic-only strip. The live map is the
-        // primary source, but on a cold post-restart pass the seeding assistant
-        // (which carries providerID) may not be in the visible window yet, so
-        // the map can be empty here even though the session IS anthropic — and
-        // the strip would be skipped, letting interleaved thinking reach
-        // Anthropic and 400. Fall back to the same OpenCode-DB last-assistant
-        // recovery the budget path uses (and re-seed the map). We must NOT
-        // treat unknown-provider as anthropic: that would trigger the OPPOSITE
-        // 400 ("reasoning_content is missing") on a Kimi/Moonshot cold start.
-        let liveProviderID = deps.liveModelBySession?.get(sessionId)?.providerID;
-        if (liveProviderID === undefined) {
-            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
-            if (recovered) {
-                liveProviderID = recovered.providerID;
-                deps.liveModelBySession?.set(sessionId, recovered);
-            }
-        }
+        // Uses the same resolved provider as the empty-sentinel gates above so a
+        // cold DB-recovered pass and a hot map pass make the same Anthropic-only
+        // merged-reasoning decision.
         const strippedMergedReasoning = stripReasoningFromMergedAssistants(
             messages,
-            liveProviderID,
+            resolvedProviderID,
         );
         if (strippedMergedReasoning > 0) {
             sessionLog(
@@ -1528,12 +1521,10 @@ export function createTransform(deps: TransformDeps) {
                 deps.ctxReduceEnabled === false && !reducedMode
                     ? deps.cavemanTextCompression
                     : undefined,
-            // Live provider for whole-message sentinel selection. Anthropic
-            // gets `""` (their normalizeMessages filters it out of the wire);
-            // every other provider gets `[dropped]` so empty assistant
-            // messages don't reach providers that reject them (Kimi/Moonshot
-            // returns 400 "must not be empty"). See sentinel.ts for details.
-            liveProviderID,
+            // Pass the single resolved provider through to postprocess so every
+            // empty-sentinel gate and whole-message placeholder choice agrees for
+            // this transform pass, including cold DB-recovered passes.
+            resolvedProviderID,
             historyRefreshSessions: deps.historyRefreshSessions,
             m0M1: {
                 // Memory identity ONLY (drives <project-memory> selection in

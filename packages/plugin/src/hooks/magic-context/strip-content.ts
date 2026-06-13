@@ -354,18 +354,10 @@ const CLEARED_REASONING_TYPES = new Set(["thinking", "reasoning"]);
  * "[cleared]" by clearOldReasoning). Replaces them in place with empty-text
  * sentinels so message.parts length stays constant between passes.
  *
- * See strip-structural-noise.ts for the cache-safety rationale. For
- * Anthropic/Bedrock, OpenCode's provider/transform.ts:65 drops empty text
- * parts before the wire, so the sentinel never reaches the provider — same
- * effective wire shape as the previous filter-based behavior but no
- * mid-pipeline array mutation.
- *
- * Providers with `capabilities.interleaved.field` (e.g. Moonshot/Kimi
- * `reasoning_content`) used to need a special gate to keep typed reasoning
- * intact. OpenCode PR #24146 (preserve empty reasoning_content for DeepSeek
- * V4 thinking mode) made the provider/transform layer always emit the
- * interleaved field — empty when no reasoning parts remain — so the gate
- * is no longer needed here.
+ * See strip-structural-noise.ts for the cache-safety rationale. Caller contract:
+ * run only when `modelAcceptsEmptyContent(providerID)` is true. OpenCode's
+ * canonical Anthropic adapter filters empty text sentinels before the wire;
+ * other adapters can forward them as real content blocks.
  */
 export function stripClearedReasoning(messages: MessageLike[]): number {
     let stripped = 0;
@@ -607,9 +599,9 @@ export function stripReasoningFromMergedAssistants(
 /**
  * Neutralize large image-data-URL file parts on already-processed user
  * messages. Replaces them in place with empty-text sentinels so message
- * parts length stays constant between passes — cache-prefix stability on
- * proxy providers, unchanged wire shape on Anthropic/Bedrock where
- * OpenCode's upstream filter drops empty text parts.
+ * parts length stays constant between passes. Caller contract: run only when
+ * `modelAcceptsEmptyContent(providerID)` is true, because non-Anthropic
+ * adapters can forward the empty text replacement to the wire.
  */
 export function stripProcessedImages(
     messages: MessageLike[],

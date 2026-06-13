@@ -40,7 +40,7 @@ import {
 } from "./inject-compartments";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
-import { replaySentinelByMessageIds } from "./sentinel";
+import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
     clearOldReasoning,
     stripClearedReasoning,
@@ -142,12 +142,11 @@ interface RunPostTransformPhaseArgs {
         minChars: number;
     };
     /**
-     * Live provider/model for this session. Used by the whole-message
-     * sentinel path to pick `""` (Anthropic-only optimization) vs
-     * `[dropped]` (everything else, ensures non-empty wire content for
-     * providers that don't filter empties — Kimi/Moonshot, etc.).
+     * Provider resolved once by the main transform for this pass. Used for every
+     * empty-sentinel gate and whole-message placeholder choice so postprocess
+     * cannot diverge from the main transform on cold DB-recovered passes.
      */
-    liveProviderID?: string;
+    resolvedProviderID?: string;
     historyRefreshSessions?: Set<string>;
     m0M1?: {
         projectPath?: string;
@@ -292,6 +291,7 @@ export async function runPostTransformPhase(
     // remain narrow (each reads its own dedicated set) so adjunct refresh
     // and history rebuild are decoupled from materialization timing.
     const isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics;
+    const canUseEmptySentinels = modelAcceptsEmptyContent(args.resolvedProviderID);
     if (shouldRunHeuristics) {
         const subagentRerun =
             !args.fullFeatureMode &&
@@ -432,7 +432,9 @@ export async function runPostTransformPhase(
                 args.messageTagNumbers,
                 args.clearReasoningAge,
             );
-            stripClearedReasoning(args.messages);
+            if (canUseEmptySentinels) {
+                stripClearedReasoning(args.messages);
+            }
             const strippedInline = stripInlineThinking(
                 args.messages,
                 args.messageTagNumbers,
@@ -497,7 +499,9 @@ export async function runPostTransformPhase(
         if (args.watermark > 0) {
             const tWatermarkCleanup = performance.now();
             truncateErroredTools(args.messages, args.watermark, args.messageTagNumbers);
-            stripProcessedImages(args.messages, args.watermark, args.messageTagNumbers);
+            if (canUseEmptySentinels) {
+                stripProcessedImages(args.messages, args.watermark, args.messageTagNumbers);
+            }
             logTransformTiming(args.sessionId, "watermarkCleanup", tWatermarkCleanup);
         }
         if (shouldApplyPendingOps) {
@@ -523,20 +527,28 @@ export async function runPostTransformPhase(
     // mid-prefix (empty sentinel filtered for Anthropic + dropped tool_result →
     // adjacent assistants merge → the message vanishes and the array shifts).
     // Freezing the id set on bust passes and replaying it everywhere removes the
-    // moving boundary entirely. No-op for sessions without ctx_reduce parts.
-    try {
-        const t8 = performance.now();
-        const frozenStaleReduceIds = getStaleReduceStrippedIds(args.db, args.sessionId);
-        const staleReduceResult = dropStaleReduceCalls(args.messages, frozenStaleReduceIds, {
-            detect: isCacheBustingPass,
-            protectedCount: args.protectedTags,
-        });
-        if (isCacheBustingPass && staleReduceResult.newlyStrippedIds.length > 0) {
-            addStaleReduceStrippedIds(args.db, args.sessionId, staleReduceResult.newlyStrippedIds);
+    // moving boundary entirely. Empty reduce sentinels are Anthropic-only: on
+    // other providers even a previously frozen id must stay native so no empty
+    // text block can reach the wire.
+    if (canUseEmptySentinels) {
+        try {
+            const t8 = performance.now();
+            const frozenStaleReduceIds = getStaleReduceStrippedIds(args.db, args.sessionId);
+            const staleReduceResult = dropStaleReduceCalls(args.messages, frozenStaleReduceIds, {
+                detect: isCacheBustingPass,
+                protectedCount: args.protectedTags,
+            });
+            if (isCacheBustingPass && staleReduceResult.newlyStrippedIds.length > 0) {
+                addStaleReduceStrippedIds(
+                    args.db,
+                    args.sessionId,
+                    staleReduceResult.newlyStrippedIds,
+                );
+            }
+            logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
+        } catch (error) {
+            sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
         }
-        logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
-    } catch (error) {
-        sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
     }
 
     const m0M1Enabled =
@@ -665,7 +677,7 @@ export async function runPostTransformPhase(
             const { replayed, missingIds } = replaySentinelByMessageIds(
                 args.messages,
                 persistedIds,
-                args.liveProviderID,
+                args.resolvedProviderID,
             );
             if (replayed > 0) {
                 sessionLog(
@@ -689,13 +701,13 @@ export async function runPostTransformPhase(
         if (isCacheBustingPass) {
             const droppedResult = stripDroppedPlaceholderMessages(
                 args.messages,
-                args.liveProviderID,
+                args.resolvedProviderID,
             );
             const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
             const systemInjectedResult = stripSystemInjectedMessages(
                 args.messages,
                 protectedTailStart,
-                args.liveProviderID,
+                args.resolvedProviderID,
             );
 
             const newlyNeutralized =
