@@ -45,6 +45,7 @@ import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
+    resolveWorkspaceShareCategories,
     sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "../../features/magic-context/workspaces";
@@ -737,6 +738,8 @@ const M1_EMPTY_PLACEHOLDER =
 export interface WorkspaceRenderContext {
     identities: string[];
     expandedIdentities: string[];
+    ownIdentities: string[];
+    shareCategories: string[] | null;
     namesByIdentity: Map<string, string>;
     canonicalIdentityByStoredPath: Map<string, string>;
     isWorkspaced: boolean;
@@ -755,6 +758,8 @@ function resolveWorkspaceRenderContext(args: {
         return {
             identities: [],
             expandedIdentities: [],
+            ownIdentities: [],
+            shareCategories: null,
             namesByIdentity: new Map(),
             canonicalIdentityByStoredPath: new Map(),
             isWorkspaced: false,
@@ -762,19 +767,28 @@ function resolveWorkspaceRenderContext(args: {
     }
     const identitySet =
         args.workspaceIdentitySet ?? resolveWorkspaceIdentitySet(args.db, args.projectPath);
+    const isWorkspaced = identitySet.identities.length > 1;
     const expanded = expandWorkspaceIdentitySetWithAliases(args.db, identitySet.identities);
+    const expandedIdentities = isWorkspaced ? expanded.expandedIdentities : identitySet.identities;
+    const canonicalIdentityByStoredPath = isWorkspaced
+        ? expanded.canonicalIdentityByStoredPath
+        : new Map(identitySet.identities.map((identity) => [identity, identity]));
+    let ownIdentities = expandedIdentities.filter(
+        (identity) => canonicalIdentityByStoredPath.get(identity) === args.projectPath,
+    );
+    if (ownIdentities.length === 0 && expandedIdentities.includes(args.projectPath)) {
+        ownIdentities = [args.projectPath];
+    }
     return {
         identities: identitySet.identities,
-        expandedIdentities:
-            identitySet.identities.length > 1
-                ? expanded.expandedIdentities
-                : identitySet.identities,
+        expandedIdentities,
+        ownIdentities,
+        shareCategories: isWorkspaced
+            ? resolveWorkspaceShareCategories(args.db, args.projectPath)
+            : null,
         namesByIdentity: identitySet.namesByIdentity,
-        canonicalIdentityByStoredPath:
-            identitySet.identities.length > 1
-                ? expanded.canonicalIdentityByStoredPath
-                : new Map(identitySet.identities.map((identity) => [identity, identity])),
-        isWorkspaced: identitySet.identities.length > 1,
+        canonicalIdentityByStoredPath,
+        isWorkspaced,
     };
 }
 
@@ -929,7 +943,12 @@ export function readCurrentM0SnapshotMarkers(args: {
         projectUserProfileVersion: getGlobalUserProfileVersion(args.db),
         maxCompartmentSeq: getMaxCompartmentSeq(args.db, args.sessionId),
         maxMemoryId: workspace.isWorkspaced
-            ? getMaxMemoryIdForProjects(args.db, workspace.expandedIdentities)
+            ? getMaxMemoryIdForProjects(
+                  args.db,
+                  workspace.expandedIdentities,
+                  workspace.ownIdentities,
+                  workspace.shareCategories,
+              )
             : getMaxMemoryId(args.db, args.projectPath),
         maxMutationId: getMaxM0MutationId(args.db, args.sessionId) ?? 0,
         maxMemoryMutationId: workspace.isWorkspaced
@@ -1506,10 +1525,14 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         facts = [];
         memories = projectPath
             ? workspace.isWorkspaced
-                ? getMemoriesByProjects(options.db, workspace.expandedIdentities, [
-                      "active",
-                      "permanent",
-                  ])
+                ? getMemoriesByProjects(
+                      options.db,
+                      workspace.expandedIdentities,
+                      ["active", "permanent"],
+                      Date.now(),
+                      workspace.ownIdentities,
+                      workspace.shareCategories,
+                  )
                 : getMemoriesByProject(options.db, projectPath, ["active", "permanent"])
             : [];
         userMemories = safeGetActiveUserMemories(options.db);
@@ -1597,7 +1620,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             projectUserProfileVersion: getGlobalUserProfileVersion(options.db),
             maxCompartmentSeq: getMaxCompartmentSeq(options.db, options.sessionId),
             maxMemoryId: currentWorkspace.isWorkspaced
-                ? getMaxMemoryIdForProjects(options.db, currentWorkspace.expandedIdentities)
+                ? getMaxMemoryIdForProjects(
+                      options.db,
+                      currentWorkspace.expandedIdentities,
+                      currentWorkspace.ownIdentities,
+                      currentWorkspace.shareCategories,
+                  )
                 : getMaxMemoryId(options.db, projectPath),
             maxMutationId: getMaxM0MutationId(options.db, options.sessionId) ?? 0,
             maxMemoryMutationId: currentWorkspace.isWorkspaced
@@ -1856,6 +1884,8 @@ function renderM1WithMetadata(
               markers.maxMemoryId,
               // Freeze expiry to the materialization timestamp for defer-pass byte stability.
               markers.materializedAt,
+              workspace.ownIdentities,
+              workspace.shareCategories,
           )
         : readNewMemoriesForM1(
               options.db,
@@ -2206,6 +2236,8 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
                   workspace.expandedIdentities,
                   ["active", "permanent"],
                   snapshotMarkers.materializedAt,
+                  workspace.ownIdentities,
+                  workspace.shareCategories,
               )
             : getMemoriesByProject(
                   options.db,

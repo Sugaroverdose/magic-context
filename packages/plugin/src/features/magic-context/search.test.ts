@@ -158,6 +158,44 @@ describe("unifiedSearch", () => {
         expect(getMemoryById(db, memory.id)?.retrievalCount).toBe(1);
     });
 
+    it("filters ctx_search workspace memory candidates and FTS hits by shared categories", async () => {
+        db.exec(`
+            INSERT INTO workspaces (id, name, share_categories, created_at, updated_at)
+            VALUES (1, 'ws', '["CONSTRAINTS"]', 1, 1);
+            INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+            VALUES (1, 'git:own', 'Own', '/own', 1), (1, 'git:foreign', 'Foreign', '/foreign', 1);
+        `);
+        const own = insertMemory(db, {
+            projectPath: "git:own",
+            category: "NAMING",
+            content: "own naming needle",
+        });
+        const foreignShared = insertMemory(db, {
+            projectPath: "git:foreign",
+            category: "CONSTRAINTS",
+            content: "foreign constraint needle",
+        });
+        const foreignHidden = insertMemory(db, {
+            projectPath: "git:foreign",
+            category: "NAMING",
+            content: "foreign naming needle",
+        });
+
+        const results = await unifiedSearch(db, "ses-1", "git:own", "needle", {
+            limit: 10,
+            memoryEnabled: true,
+            embeddingEnabled: false,
+            sources: ["memory"],
+        });
+
+        const memoryIds = results
+            .filter((result) => result.source === "memory")
+            .map((result) => result.memoryId)
+            .sort((left, right) => left - right);
+        expect(memoryIds).toEqual([own.id, foreignShared.id]);
+        expect(memoryIds).not.toContain(foreignHidden.id);
+    });
+
     it("maxMessageOrdinal=0 excludes every message (no compartment yet → whole tail is live)", async () => {
         // Issue #131: before the historian first runs there are no compartments,
         // so the ctx_search tool passes a cutoff of 0. Ordinals are 1-based, so a

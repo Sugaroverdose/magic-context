@@ -8,6 +8,7 @@ import {
     computeWorkspaceEpochFingerprint,
     expandWorkspaceIdentitySet,
     resolveWorkspaceIdentitySet,
+    resolveWorkspaceShareCategories,
 } from "./workspaces";
 
 function openDb(): Database {
@@ -56,6 +57,32 @@ describe("workspace identity helpers", () => {
             expect(computeWorkspaceEpochFingerprint(db, ["git:b", "git:a"])).toBe(
                 computeWorkspaceEpochFingerprint(db, ["git:a", "git:b"]),
             );
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("share categories resolve as sorted canonical values and fingerprint tracks the normalized set", () => {
+        const db = openDb();
+        try {
+            db.exec(`
+                INSERT INTO workspaces (id, name, share_categories, created_at, updated_at)
+                VALUES (1, 'ws', '["NAMING","CONSTRAINTS","NAMING"]', 1, 1);
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, 'git:a', 'A', '/a', 1), (1, 'git:b', 'B', '/b', 1);
+            `);
+
+            const initial = computeWorkspaceEpochFingerprint(db, ["git:b", "git:a"]);
+
+            expect(resolveWorkspaceShareCategories(db, "git:a")).toEqual(["CONSTRAINTS", "NAMING"]);
+            db.prepare("UPDATE workspaces SET share_categories = ? WHERE id = 1").run(
+                '["CONSTRAINTS","NAMING"]',
+            );
+            expect(computeWorkspaceEpochFingerprint(db, ["git:a", "git:b"])).toBe(initial);
+
+            db.prepare("UPDATE workspaces SET share_categories = ? WHERE id = 1").run("[]");
+            expect(computeWorkspaceEpochFingerprint(db, ["git:a", "git:b"])).not.toBe(initial);
+            expect(resolveWorkspaceShareCategories(db, "git:a")).toEqual([]);
         } finally {
             closeQuietly(db);
         }

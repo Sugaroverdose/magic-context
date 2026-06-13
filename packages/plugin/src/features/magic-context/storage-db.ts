@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 34;
+export const LATEST_SUPPORTED_VERSION = 35;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -520,7 +520,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
     );
 
     CREATE TABLE IF NOT EXISTS workspace_members (
@@ -1014,7 +1015,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
       );
       CREATE TABLE IF NOT EXISTS workspace_members (
         workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -1068,6 +1070,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "recomp_compartments", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
     ensureColumn(db, "recomp_facts", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
     ensureColumn(db, "message_history_index", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "workspaces", "share_categories", `TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`);
     // notes table is created by migration v1 (not initializeDatabase). It
     // exists by the time runMigrations() returns, but ensureColumn's PRAGMA
     // table_info check needs the table to exist. Order: initializeDatabase()
@@ -1243,7 +1246,7 @@ export function ensureColumn(
     if (
         !/^[a-z][a-z0-9_]*$/.test(table) ||
         !/^[a-z][a-z0-9_]*$/.test(column) ||
-        !/^[A-Z0-9_'(),[\]\s]+$/i.test(definition)
+        !/^[A-Z0-9_"'(),[\]\s]+$/i.test(definition)
     ) {
         throw new Error(`Unsafe schema identifier: ${table}.${column} ${definition}`);
     }

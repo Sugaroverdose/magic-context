@@ -15,6 +15,7 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearInjectionCache,
     injectM0M1,
@@ -414,6 +415,34 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(decision).toEqual({ value: false, reason: null });
+    });
+
+    it("keeps single-project m[0]/m[1] bytes identical with the no-workspace context", () => {
+        const render = (explicitSingleProjectContext: boolean): string => {
+            const localDb = makeDb();
+            try {
+                insertMemory(localDb, {
+                    projectPath: PROJECT_PATH,
+                    category: "CONSTRAINTS",
+                    content: "Never commit without tests",
+                });
+                const rendered = materializeM0({
+                    db: localDb,
+                    sessionId: SESSION_ID,
+                    state: getOrCreateSessionMeta(localDb, SESSION_ID),
+                    projectPath: PROJECT_PATH,
+                    projectDirectory: "",
+                    workspaceIdentitySet: explicitSingleProjectContext
+                        ? { identities: [PROJECT_PATH], namesByIdentity: new Map() }
+                        : undefined,
+                });
+                return `${rendered.m0Bytes.toString("utf8")}\n---m1---\n${rendered.m1Text}`;
+            } finally {
+                closeQuietly(localDb);
+            }
+        };
+
+        expect(render(true)).toBe(render(false));
     });
 
     it("mustMaterialize detects project_memory_epoch decreases after DB restore", () => {

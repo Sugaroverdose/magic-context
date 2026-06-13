@@ -522,15 +522,79 @@ function uniqueValues(values: readonly string[]): string[] {
     return [...new Set(values.filter((value) => value.length > 0))];
 }
 
+export interface WorkspaceMemorySharingFilter {
+    ownIdentities?: readonly string[];
+    shareCategories?: readonly string[] | null;
+}
+
+export interface WorkspaceMemorySqlFilter {
+    clause: string;
+    params: string[];
+    active: boolean;
+}
+
+// The same own-vs-foreign predicate is appended to baseline, delta, watermark,
+// and FTS union reads. Keeping the SQL builder shared prevents a hidden foreign
+// category from rendering in one path while advancing another path's cursor.
+export function buildWorkspaceMemorySqlFilter(args: {
+    identities: readonly string[];
+    ownIdentities?: readonly string[];
+    shareCategories?: readonly string[] | null;
+    tableName?: string;
+}): WorkspaceMemorySqlFilter {
+    if (args.shareCategories === null || args.shareCategories === undefined) {
+        return { clause: "", params: [], active: false };
+    }
+
+    const identities = uniqueValues(args.identities);
+    const identitySet = new Set(identities);
+    const ownSet = new Set(
+        uniqueValues(args.ownIdentities ?? []).filter((identity) => identitySet.has(identity)),
+    );
+    const foreignIdentities = identities.filter((identity) => !ownSet.has(identity));
+    if (foreignIdentities.length === 0) {
+        return { clause: "", params: [], active: false };
+    }
+
+    const ownIdentities = identities.filter((identity) => ownSet.has(identity));
+    const shareCategories = uniqueValues([...args.shareCategories]);
+    const qualifier = args.tableName ? `${args.tableName}.` : "";
+    const predicates: string[] = [];
+    const params: string[] = [];
+
+    if (ownIdentities.length > 0) {
+        predicates.push(`${qualifier}project_path IN (${sqlPlaceholders(ownIdentities)})`);
+        params.push(...ownIdentities);
+    }
+    if (foreignIdentities.length > 0 && shareCategories.length > 0) {
+        predicates.push(
+            `(${qualifier}project_path IN (${sqlPlaceholders(foreignIdentities)}) AND ${qualifier}category IN (${sqlPlaceholders(shareCategories)}))`,
+        );
+        params.push(...foreignIdentities, ...shareCategories);
+    }
+
+    if (predicates.length === 0) {
+        return { clause: " AND 0 = 1", params: [], active: true };
+    }
+    return { clause: ` AND (${predicates.join(" OR ")})`, params, active: true };
+}
+
 export function getMemoriesByProjects(
     db: Database,
     projectPaths: readonly string[],
     statuses: MemoryStatus[] = ["active", "permanent"],
     expiryCutoff: number = Date.now(),
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
 ): Memory[] {
     const identities = uniqueValues(projectPaths);
     if (identities.length === 0 || statuses.length === 0) return [];
-    if (identities.length === 1) {
+    const sharingFilter = buildWorkspaceMemorySqlFilter({
+        identities,
+        ownIdentities,
+        shareCategories,
+    });
+    if (identities.length === 1 && !sharingFilter.active) {
         return getMemoriesByProject(db, identities[0], statuses, expiryCutoff);
     }
 
@@ -540,19 +604,29 @@ export function getMemoriesByProjects(
                FROM memories
               WHERE project_path IN (${sqlPlaceholders(identities)})
                 AND status IN (${sqlPlaceholders(statuses)})
-                AND (expires_at IS NULL OR expires_at > ?)
+                AND (expires_at IS NULL OR expires_at > ?)${sharingFilter.clause}
               ORDER BY category ASC, updated_at DESC, id ASC`,
         )
-        .all(...identities, ...statuses, expiryCutoff)
+        .all(...identities, ...statuses, expiryCutoff, ...sharingFilter.params)
         .filter(isMemoryRow);
 
     return rows.map(toMemory);
 }
 
-export function getMaxMemoryIdForProjects(db: Database, projectPaths: readonly string[]): number {
+export function getMaxMemoryIdForProjects(
+    db: Database,
+    projectPaths: readonly string[],
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
+): number {
     const identities = uniqueValues(projectPaths);
     if (identities.length === 0) return 0;
-    if (identities.length === 1) {
+    const sharingFilter = buildWorkspaceMemorySqlFilter({
+        identities,
+        ownIdentities,
+        shareCategories,
+    });
+    if (identities.length === 1 && !sharingFilter.active) {
         const row = db
             .prepare("SELECT COALESCE(MAX(id), 0) AS max_id FROM memories WHERE project_path = ?")
             .get(identities[0]) as { max_id?: number } | undefined;
@@ -562,9 +636,9 @@ export function getMaxMemoryIdForProjects(db: Database, projectPaths: readonly s
         .prepare(
             `SELECT COALESCE(MAX(id), 0) AS max_id
                FROM memories
-              WHERE project_path IN (${sqlPlaceholders(identities)})`,
+              WHERE project_path IN (${sqlPlaceholders(identities)})${sharingFilter.clause}`,
         )
-        .get(...identities) as { max_id?: number } | undefined;
+        .get(...identities, ...sharingFilter.params) as { max_id?: number } | undefined;
     return typeof row?.max_id === "number" ? row.max_id : 0;
 }
 
@@ -573,9 +647,16 @@ export function readNewMemoriesForM1Union(
     projectPaths: readonly string[],
     afterId: number,
     expiryCutoff: number,
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
 ): Memory[] {
     const identities = uniqueValues(projectPaths);
     if (identities.length === 0) return [];
+    const sharingFilter = buildWorkspaceMemorySqlFilter({
+        identities,
+        ownIdentities,
+        shareCategories,
+    });
     const rows = db
         .prepare(
             `SELECT ${getMemorySelectColumns(db)}
@@ -583,10 +664,10 @@ export function readNewMemoriesForM1Union(
               WHERE project_path IN (${sqlPlaceholders(identities)})
                 AND id > ?
                 AND status IN ('active', 'permanent')
-                AND (expires_at IS NULL OR expires_at > ?)
+                AND (expires_at IS NULL OR expires_at > ?)${sharingFilter.clause}
               ORDER BY ${MEMORY_CATEGORY_ORDER_SQL}, id ASC`,
         )
-        .all(...identities, afterId, expiryCutoff)
+        .all(...identities, afterId, expiryCutoff, ...sharingFilter.params)
         .filter(isMemoryRow);
     return rows.map(toMemory);
 }

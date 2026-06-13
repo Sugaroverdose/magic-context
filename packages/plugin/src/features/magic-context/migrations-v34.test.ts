@@ -40,7 +40,7 @@ const CLEARED_NULL_COLUMNS = [
 
 const CLEARED_EMPTY_COLUMNS = ["memory_block_cache", "memory_block_ids"] as const;
 
-describe("migration v34 — workspaces", () => {
+describe("migration v34/v35 — workspaces", () => {
     test("fresh DB schema includes workspace tables and schema fence version", () => {
         const db = new Database(":memory:");
         try {
@@ -48,7 +48,13 @@ describe("migration v34 — workspaces", () => {
             runMigrations(db);
 
             expect(tableColumns(db, "workspaces")).toEqual(
-                expect.arrayContaining(["id", "name", "created_at", "updated_at"]),
+                expect.arrayContaining([
+                    "id",
+                    "name",
+                    "created_at",
+                    "updated_at",
+                    "share_categories",
+                ]),
             );
             expect(tableColumns(db, "workspace_members")).toEqual(
                 expect.arrayContaining([
@@ -66,13 +72,19 @@ describe("migration v34 — workspaces", () => {
                     "idx_workspace_member_name",
                 ]),
             );
-            expect(LATEST_SUPPORTED_VERSION).toBe(34);
-            expect(LATEST_MIGRATION_VERSION).toBe(34);
+            db.prepare(
+                "INSERT INTO workspaces (name, created_at, updated_at) VALUES ('fresh', 1, 1)",
+            ).run();
+            expect(
+                db.prepare("SELECT share_categories FROM workspaces WHERE name = 'fresh'").get(),
+            ).toEqual({ share_categories: '["CONSTRAINTS"]' });
+            expect(LATEST_SUPPORTED_VERSION).toBe(35);
+            expect(LATEST_MIGRATION_VERSION).toBe(35);
             expect(
                 db
                     .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
                     .get(),
-            ).toEqual({ version: 34 });
+            ).toEqual({ version: 35 });
         } finally {
             closeQuietly(db);
         }
@@ -145,6 +157,65 @@ describe("migration v34 — workspaces", () => {
             }
             expect(row.memory_block_count).toBe(0);
             expect(tableColumns(db, "session_meta")).toContain("cached_m0_workspace_fingerprint");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("v35 adds guarded share_categories default and bumps existing workspace member epochs", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL);
+                INSERT INTO schema_migrations (version, description, applied_at) VALUES (34, 'pre-v35 fixture', 1);
+                CREATE TABLE workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE workspace_members (
+                    workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    project_path TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    display_path TEXT NOT NULL,
+                    added_at INTEGER NOT NULL,
+                    PRIMARY KEY (workspace_id, project_path)
+                );
+                CREATE TABLE project_state (
+                    project_path TEXT PRIMARY KEY,
+                    project_memory_epoch INTEGER NOT NULL DEFAULT 0,
+                    project_user_profile_version INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, 'git:a', 'A', '/a', 1), (1, 'git:b', 'B', '/b', 1);
+                INSERT INTO project_state (project_path, project_memory_epoch, project_user_profile_version, updated_at)
+                VALUES ('git:a', 7, 0, 1);
+            `);
+
+            runMigrations(db);
+
+            expect(tableColumns(db, "workspaces")).toContain("share_categories");
+            expect(
+                db.prepare("SELECT share_categories FROM workspaces WHERE id = 1").get(),
+            ).toEqual({ share_categories: '["CONSTRAINTS"]' });
+            expect(
+                db
+                    .prepare(
+                        "SELECT project_path, project_memory_epoch FROM project_state ORDER BY project_path",
+                    )
+                    .all(),
+            ).toEqual([
+                { project_path: "git:a", project_memory_epoch: 8 },
+                { project_path: "git:b", project_memory_epoch: 1 },
+            ]);
+            expect(
+                db
+                    .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
+                    .get(),
+            ).toEqual({ version: 35 });
         } finally {
             closeQuietly(db);
         }

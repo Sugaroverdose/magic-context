@@ -8,7 +8,9 @@ import {
     clearEmbeddingsForProject,
     deleteEmbedding,
     deleteMemory,
+    getMaxMemoryIdForProjects,
     getMemoriesByProject,
+    getMemoriesByProjects,
     getMemoryByHash,
     getMemoryById,
     getMemoryCount,
@@ -16,9 +18,11 @@ import {
     getStoredModelId,
     insertMemory,
     loadAllEmbeddings,
+    readNewMemoriesForM1Union,
     resetEmbeddingCacheForTests,
     saveEmbedding,
     searchMemoriesFTS,
+    searchMemoriesFTSUnion,
     updateMemoryContent,
     updateMemoryRetrievalCount,
     updateMemorySeenCount,
@@ -326,6 +330,84 @@ describe("storage-memory", () => {
 
             expect(searchMemoriesFTS(db, "/repo/project", "10m")).toEqual([]);
         });
+    });
+
+    it("#when workspace sharing is narrowed #then baseline delta watermark and FTS agree", () => {
+        db = makeMemoryDatabase();
+        const ownRule = insertMemory(db, {
+            projectPath: "/repo/own",
+            category: "PROJECT_RULES",
+            content: "own rule needle",
+        });
+        const ownAlias = insertMemory(db, {
+            projectPath: "/repo/own-legacy",
+            category: "NAMING",
+            content: "own legacy alias needle",
+        });
+        const foreignShared = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "CONSTRAINTS",
+            content: "foreign shared needle",
+        });
+        const foreignHidden = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "NAMING",
+            content: "foreign hidden needle",
+        });
+        const identities = ["/repo/own", "/repo/own-legacy", "/repo/foreign"];
+        const ownIdentities = ["/repo/own", "/repo/own-legacy"];
+
+        const sharedArgs = [ownIdentities, ["CONSTRAINTS"]] as const;
+        const visibleIds = getMemoriesByProjects(
+            db,
+            identities,
+            ["active", "permanent"],
+            Date.now(),
+            ...sharedArgs,
+        )
+            .map((memory) => memory.id)
+            .sort((left, right) => left - right);
+        expect(visibleIds).toEqual([ownRule.id, ownAlias.id, foreignShared.id]);
+        expect(
+            readNewMemoriesForM1Union(db, identities, ownRule.id, Date.now(), ...sharedArgs)
+                .map((memory) => memory.id)
+                .sort((left, right) => left - right),
+        ).toEqual([ownAlias.id, foreignShared.id]);
+        expect(getMaxMemoryIdForProjects(db, identities, ...sharedArgs)).toBe(foreignShared.id);
+        expect(
+            searchMemoriesFTSUnion(db, identities, "needle", 10, ...sharedArgs)
+                .map((memory) => memory.id)
+                .sort((left, right) => left - right),
+        ).toEqual([ownRule.id, ownAlias.id, foreignShared.id]);
+
+        const ownOnlyArgs = [ownIdentities, []] as const;
+        expect(
+            getMemoriesByProjects(
+                db,
+                identities,
+                ["active", "permanent"],
+                Date.now(),
+                ...ownOnlyArgs,
+            )
+                .map((memory) => memory.id)
+                .sort((left, right) => left - right),
+        ).toEqual([ownRule.id, ownAlias.id]);
+        expect(getMaxMemoryIdForProjects(db, identities, ...ownOnlyArgs)).toBe(ownAlias.id);
+
+        const allIds = getMemoriesByProjects(
+            db,
+            identities,
+            ["active", "permanent"],
+            Date.now(),
+            ownIdentities,
+            null,
+        )
+            .map((memory) => memory.id)
+            .sort((left, right) => left - right);
+        expect(allIds).toEqual([ownRule.id, ownAlias.id, foreignShared.id, foreignHidden.id]);
+        expect(getMaxMemoryIdForProjects(db, identities, ownIdentities, null)).toBe(
+            foreignHidden.id,
+        );
     });
 
     describe("#given embedding storage", () => {

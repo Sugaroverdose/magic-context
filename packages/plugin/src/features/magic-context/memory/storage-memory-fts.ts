@@ -1,5 +1,10 @@
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
-import { getMemorySelectColumns, isMemoryRow, toMemory } from "./storage-memory";
+import {
+    buildWorkspaceMemorySqlFilter,
+    getMemorySelectColumns,
+    isMemoryRow,
+    toMemory,
+} from "./storage-memory";
 import type { Memory } from "./types";
 
 const DEFAULT_SEARCH_LIMIT = 10;
@@ -81,19 +86,36 @@ export function searchMemoriesFTSUnion(
     projectPaths: readonly string[],
     query: string,
     limit = DEFAULT_SEARCH_LIMIT,
+    ownIdentities?: readonly string[],
+    shareCategories?: readonly string[] | null,
 ): Memory[] {
     const identities = uniqueProjectPaths(projectPaths);
     if (identities.length === 0) return [];
-    if (identities.length === 1) return searchMemoriesFTS(db, identities[0], query, limit);
+    const sharingFilter = buildWorkspaceMemorySqlFilter({
+        identities,
+        ownIdentities,
+        shareCategories,
+        tableName: "memories",
+    });
+    if (identities.length === 1 && !sharingFilter.active) {
+        return searchMemoriesFTS(db, identities[0], query, limit);
+    }
 
     const trimmedQuery = query.trim();
     if (trimmedQuery.length === 0 || limit <= 0) return [];
     const sanitized = sanitizeFtsQuery(trimmedQuery);
     if (sanitized.length === 0) return [];
 
-    const rows = getUnionSearchStatement(db, identities.length)
-        .all(...identities, Date.now(), sanitized, limit)
-        .filter(isMemoryRow);
+    const rows = sharingFilter.active
+        ? db
+              .prepare(
+                  `SELECT ${getMemorySelectColumns(db)} FROM memories_fts INNER JOIN memories ON memories.id = memories_fts.rowid WHERE memories.project_path IN (${identities.map(() => "?").join(", ")}) AND memories.status IN ('active', 'permanent') AND (memories.expires_at IS NULL OR memories.expires_at > ?) AND memories_fts MATCH ?${sharingFilter.clause} ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id ASC LIMIT ?`,
+              )
+              .all(...identities, Date.now(), sanitized, ...sharingFilter.params, limit)
+              .filter(isMemoryRow)
+        : getUnionSearchStatement(db, identities.length)
+              .all(...identities, Date.now(), sanitized, limit)
+              .filter(isMemoryRow);
 
     return rows.map(toMemory);
 }

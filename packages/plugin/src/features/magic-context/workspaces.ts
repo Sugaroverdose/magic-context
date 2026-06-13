@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Database } from "../../shared/sqlite";
+import { V2_MEMORY_CATEGORIES } from "./memory/constants";
 import { normalizeStoredProjectPath, storedPathBelongsToIdentity } from "./project-identity";
 
 export interface WorkspaceIdentitySet {
@@ -22,11 +23,22 @@ interface IdentityAliasRow {
     newProjectPath: string;
 }
 
+interface WorkspaceShareCategoriesRow {
+    shareCategories: string | null;
+}
+
+const VALID_SHARE_CATEGORIES = new Set<string>(V2_MEMORY_CATEGORIES);
+
 function tableExists(db: Database, tableName: string): boolean {
     const row = db
         .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1")
         .get(tableName);
     return Boolean(row);
+}
+
+function columnExists(db: Database, tableName: string, columnName: string): boolean {
+    const rows = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name?: string }>;
+    return rows.some((row) => row.name === columnName);
 }
 
 function uniqueSorted(values: Iterable<string>): string[] {
@@ -35,6 +47,59 @@ function uniqueSorted(values: Iterable<string>): string[] {
 
 function placeholders(values: readonly unknown[]): string {
     return values.map(() => "?").join(", ");
+}
+
+function normalizeShareCategories(raw: unknown): string[] | null {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== "string") return null;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(parsed)) return null;
+    const categories: string[] = [];
+    for (const value of parsed) {
+        if (typeof value !== "string" || !VALID_SHARE_CATEGORIES.has(value)) {
+            return null;
+        }
+        if (!categories.includes(value)) categories.push(value);
+    }
+    return categories.sort((left, right) => left.localeCompare(right));
+}
+
+function selectWorkspaceShareCategories(
+    db: Database,
+    identities: readonly string[],
+): string[] | null {
+    const candidates = uniqueSorted(identities.filter((identity) => identity.length > 0));
+    if (
+        candidates.length === 0 ||
+        !tableExists(db, "workspace_members") ||
+        !tableExists(db, "workspaces") ||
+        !columnExists(db, "workspaces", "share_categories")
+    ) {
+        return null;
+    }
+    const row = db
+        .prepare(
+            `SELECT workspace.share_categories AS shareCategories
+               FROM workspace_members AS member
+               JOIN workspaces AS workspace ON workspace.id = member.workspace_id
+              WHERE member.project_path IN (${placeholders(candidates)})
+              ORDER BY workspace.id ASC
+              LIMIT 1`,
+        )
+        .get(...candidates) as WorkspaceShareCategoriesRow | undefined;
+    return normalizeShareCategories(row?.shareCategories ?? null);
+}
+
+export function resolveWorkspaceShareCategories(
+    db: Database,
+    projectIdentity: string,
+): string[] | null {
+    return selectWorkspaceShareCategories(db, [projectIdentity]);
 }
 
 export function resolveWorkspaceIdentitySet(
@@ -191,7 +256,12 @@ export function computeWorkspaceEpochFingerprint(
 ): string {
     const canonical = uniqueSorted(identities.filter((identity) => identity.length > 0));
     const epochs = getEpochMap(db, canonical);
+    const shareCategories = selectWorkspaceShareCategories(db, canonical);
     const hash = createHash("sha256");
+    hash.update("share_categories", "utf8");
+    hash.update("\0");
+    hash.update(shareCategories === null ? "ALL" : JSON.stringify(shareCategories), "utf8");
+    hash.update("\n");
     for (const identity of canonical) {
         hash.update(identity, "utf8");
         hash.update("\0");

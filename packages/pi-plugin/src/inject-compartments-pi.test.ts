@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -60,6 +60,55 @@ function result(toolCallId: string) {
 		timestamp: 1,
 	};
 }
+
+describe("workspace memory sharing", () => {
+	it("filters foreign categories consistently in Pi m[0] and status counts", () => {
+		const db = createTestDb();
+		const dir = mkdtempSync(join(tmpdir(), "mc-pi-share-"));
+		try {
+			db.exec(`
+				INSERT INTO workspaces (id, name, share_categories, created_at, updated_at)
+				VALUES (1, 'ws', '["CONSTRAINTS"]', 1, 1);
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, 'git:own', 'Own', '/own', 1), (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			insertMemory(db, {
+				projectPath: "git:own",
+				category: "NAMING",
+				content: "own naming remains visible",
+			});
+			insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "CONSTRAINTS",
+				content: "foreign constraint is shared",
+			});
+			insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "NAMING",
+				content: "foreign naming is hidden",
+			});
+			const state = {
+				sessionId: "pi-share",
+				projectIdentity: "git:own",
+				projectDirectory: dir,
+			};
+
+			const m0 = renderM0Pi(state, db, "");
+			expect(m0).toContain("own naming remains visible");
+			expect(m0).toContain("foreign constraint is shared");
+			expect(m0).not.toContain("foreign naming is hidden");
+
+			const messages = [userMessage("hello")];
+			const result = injectM0M1Pi(state, db, messages);
+			expect(result.memoryCount).toBe(2);
+			expect(textOf(messages[0])).toContain("foreign constraint is shared");
+			expect(textOf(messages[0])).not.toContain("foreign naming is hidden");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+});
 
 describe("trimPiMessagesToBoundary", () => {
 	it("sweeps non-contiguous toolResults whose assistant toolCall was trimmed", () => {

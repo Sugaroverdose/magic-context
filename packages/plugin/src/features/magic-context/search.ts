@@ -24,6 +24,7 @@ import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
+    resolveWorkspaceShareCategories,
     sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "./workspaces";
@@ -178,6 +179,8 @@ function previewText(text: string): string {
 interface SearchWorkspaceContext {
     identities: string[];
     expandedIdentities: string[];
+    ownIdentities: string[];
+    shareCategories: string[] | null;
     namesByIdentity: Map<string, string>;
     canonicalIdentityByStoredPath: Map<string, string>;
     isWorkspaced: boolean;
@@ -189,17 +192,23 @@ function resolveSearchWorkspaceContext(
     identitySet?: WorkspaceIdentitySet,
 ): SearchWorkspaceContext {
     const resolved = identitySet ?? resolveWorkspaceIdentitySet(db, projectPath);
+    const isWorkspaced = resolved.identities.length > 1;
     const expanded = expandWorkspaceIdentitySetWithAliases(db, resolved.identities);
+    const expandedIdentities = isWorkspaced ? expanded.expandedIdentities : resolved.identities;
+    const canonicalIdentityByStoredPath = isWorkspaced
+        ? expanded.canonicalIdentityByStoredPath
+        : new Map(resolved.identities.map((identity) => [identity, identity]));
+    const ownIdentities = expandedIdentities.filter(
+        (identity) => canonicalIdentityByStoredPath.get(identity) === projectPath,
+    );
     return {
         identities: resolved.identities,
-        expandedIdentities:
-            resolved.identities.length > 1 ? expanded.expandedIdentities : resolved.identities,
+        expandedIdentities,
+        ownIdentities,
+        shareCategories: isWorkspaced ? resolveWorkspaceShareCategories(db, projectPath) : null,
         namesByIdentity: resolved.namesByIdentity,
-        canonicalIdentityByStoredPath:
-            resolved.identities.length > 1
-                ? expanded.canonicalIdentityByStoredPath
-                : new Map(resolved.identities.map((identity) => [identity, identity])),
-        isWorkspaced: resolved.identities.length > 1,
+        canonicalIdentityByStoredPath,
+        isWorkspaced,
     };
 }
 
@@ -390,6 +399,8 @@ function getFtsMatches(args: {
                   args.workspace.expandedIdentities,
                   args.query,
                   args.limit,
+                  args.workspace.ownIdentities,
+                  args.workspace.shareCategories,
               )
             : searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
     } catch (error) {
@@ -514,7 +525,14 @@ async function searchMemories(args: {
     }
 
     const memories = args.workspace?.isWorkspaced
-        ? getMemoriesByProjects(args.db, args.workspace.expandedIdentities)
+        ? getMemoriesByProjects(
+              args.db,
+              args.workspace.expandedIdentities,
+              ["active", "permanent"],
+              Date.now(),
+              args.workspace.ownIdentities,
+              args.workspace.shareCategories,
+          )
         : getMemoriesByProject(args.db, args.projectPath);
     if (memories.length === 0) {
         return [];
@@ -557,6 +575,8 @@ async function searchMemories(args: {
                 expandedIdentities: [args.projectPath],
                 namesByIdentity: new Map(),
                 canonicalIdentityByStoredPath: new Map([[args.projectPath, args.projectPath]]),
+                ownIdentities: [args.projectPath],
+                shareCategories: null,
                 isWorkspaced: false,
             },
         }),

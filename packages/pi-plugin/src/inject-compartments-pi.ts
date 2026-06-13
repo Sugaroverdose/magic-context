@@ -56,6 +56,7 @@ import {
 	computeWorkspaceEpochFingerprint,
 	expandWorkspaceIdentitySetWithAliases,
 	resolveWorkspaceIdentitySet,
+	resolveWorkspaceShareCategories,
 	sourceNameForMemory,
 } from "@magic-context/core/features/magic-context/workspaces";
 import {
@@ -533,30 +534,41 @@ function resolveWorkspaceRenderContextPi(
 		return {
 			identities: [],
 			expandedIdentities: [],
+			ownIdentities: [],
+			shareCategories: null,
 			namesByIdentity: new Map(),
 			canonicalIdentityByStoredPath: new Map(),
 			isWorkspaced: false,
 		};
 	}
 	const identitySet = resolveWorkspaceIdentitySet(db, memPath);
+	const isWorkspaced = identitySet.identities.length > 1;
 	const expanded = expandWorkspaceIdentitySetWithAliases(
 		db,
 		identitySet.identities,
 	);
+	const expandedIdentities = isWorkspaced
+		? expanded.expandedIdentities
+		: identitySet.identities;
+	const canonicalIdentityByStoredPath = isWorkspaced
+		? expanded.canonicalIdentityByStoredPath
+		: new Map(identitySet.identities.map((identity) => [identity, identity]));
+	let ownIdentities = expandedIdentities.filter(
+		(identity) => canonicalIdentityByStoredPath.get(identity) === memPath,
+	);
+	if (ownIdentities.length === 0 && expandedIdentities.includes(memPath)) {
+		ownIdentities = [memPath];
+	}
 	return {
 		identities: identitySet.identities,
-		expandedIdentities:
-			identitySet.identities.length > 1
-				? expanded.expandedIdentities
-				: identitySet.identities,
+		expandedIdentities,
+		ownIdentities,
+		shareCategories: isWorkspaced
+			? resolveWorkspaceShareCategories(db, memPath)
+			: null,
 		namesByIdentity: identitySet.namesByIdentity,
-		canonicalIdentityByStoredPath:
-			identitySet.identities.length > 1
-				? expanded.canonicalIdentityByStoredPath
-				: new Map(
-						identitySet.identities.map((identity) => [identity, identity]),
-					),
-		isWorkspaced: identitySet.identities.length > 1,
+		canonicalIdentityByStoredPath,
+		isWorkspaced,
 	};
 }
 
@@ -793,7 +805,12 @@ function readCurrentMarkersFromCompartments(
 	const workspace = resolveWorkspaceRenderContextPi(state, db);
 	const maxMemoryId = memPath
 		? workspace.isWorkspaced
-			? getMaxMemoryIdForProjects(db, workspace.expandedIdentities)
+			? getMaxMemoryIdForProjects(
+					db,
+					workspace.expandedIdentities,
+					workspace.ownIdentities,
+					workspace.shareCategories,
+				)
 			: getMaxMemoryIdForProjects(db, [memPath])
 		: 0;
 	const projectState = memPath ? getProjectState(db, memPath) : undefined;
@@ -982,10 +999,14 @@ export function renderM0Pi(
 		memoriesOverride ??
 		(memPath
 			? workspace.isWorkspaced
-				? getMemoriesByProjects(db, workspace.expandedIdentities, [
-						"active",
-						"permanent",
-					])
+				? getMemoriesByProjects(
+						db,
+						workspace.expandedIdentities,
+						["active", "permanent"],
+						Date.now(),
+						workspace.ownIdentities,
+						workspace.shareCategories,
+					)
 				: getMemoriesByProject(db, memPath, ["active", "permanent"])
 			: []);
 	// Use the V2 trim + render helpers (shared with OpenCode) so both harnesses
@@ -1154,6 +1175,8 @@ function readFrozenM0InputsPi(
 						workspace.expandedIdentities,
 						["active", "permanent"],
 						memoryCutoff,
+						workspace.ownIdentities,
+						workspace.shareCategories,
 					)
 				: getMemoriesByProject(
 						db,
@@ -1173,7 +1196,12 @@ function readFrozenM0InputsPi(
 			),
 			maxMemoryId: memPath
 				? workspace.isWorkspaced
-					? getMaxMemoryIdForProjects(db, workspace.expandedIdentities)
+					? getMaxMemoryIdForProjects(
+							db,
+							workspace.expandedIdentities,
+							workspace.ownIdentities,
+							workspace.shareCategories,
+						)
 					: getMaxMemoryIdForProjects(db, [memPath])
 				: 0,
 			maxMutationId: getMaxM0MutationId(db, state.sessionId) ?? 0,
@@ -1611,6 +1639,8 @@ function renderM1PiWithMetadata(
 					// so a memory crossing expires_at between passes can't silently shift
 					// m[1].
 					markers.materializedAt,
+					workspace.ownIdentities,
+					workspace.shareCategories,
 				)
 			: getMemoriesByProject(
 					db,
@@ -2234,10 +2264,14 @@ export function injectM0M1Pi(
 	const workspace = resolveWorkspaceRenderContextPi(state, db);
 	const memoryCount = memPath
 		? workspace.isWorkspaced
-			? getMemoriesByProjects(db, workspace.expandedIdentities, [
-					"active",
-					"permanent",
-				]).length
+			? getMemoriesByProjects(
+					db,
+					workspace.expandedIdentities,
+					["active", "permanent"],
+					Date.now(),
+					workspace.ownIdentities,
+					workspace.shareCategories,
+				).length
 			: getMemoriesByProject(db, memPath, ["active", "permanent"]).length
 		: 0;
 	return {

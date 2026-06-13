@@ -1,6 +1,7 @@
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { ensureColumn, healAllNullColumns } from "./storage-db";
+import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
 /**
  * Versioned migration framework for magic-context's SQLite database.
@@ -26,6 +27,11 @@ function tableExists(db: Database, name: string): boolean {
     return Boolean(
         db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?").get(name),
     );
+}
+
+function columnExists(db: Database, table: string, column: string): boolean {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    return rows.some((row) => row.name === column);
 }
 
 const MIGRATIONS: Migration[] = [
@@ -1340,6 +1346,48 @@ const MIGRATIONS: Migration[] = [
             }
             if (setClauses.length > 0) {
                 db.prepare(`UPDATE session_meta SET ${setClauses.join(", ")}`).run(...values);
+            }
+        },
+    },
+
+    {
+        version: 35,
+        description: "workspace per-category share defaults and epoch refresh",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
+                );
+            `);
+            if (!columnExists(db, "workspaces", "share_categories")) {
+                db.exec(
+                    `ALTER TABLE workspaces ADD COLUMN share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`,
+                );
+            }
+            db.prepare(
+                `UPDATE workspaces
+                    SET share_categories = '["CONSTRAINTS"]'
+                  WHERE share_categories IS NULL OR share_categories = ''`,
+            ).run();
+
+            if (!tableExists(db, "workspace_members")) return;
+            const rows = db
+                .prepare(
+                    `SELECT DISTINCT project_path AS identity
+                       FROM workspace_members
+                      WHERE project_path IS NOT NULL AND project_path <> ''
+                      ORDER BY project_path ASC`,
+                )
+                .all() as Array<{ identity?: unknown }>;
+            const identities = rows
+                .map((row) => (typeof row.identity === "string" ? row.identity : ""))
+                .filter((identity) => identity.length > 0);
+            if (identities.length > 0) {
+                bumpEpochsForWorkspaceMemberSet(db, identities, Date.now());
             }
         },
     },
