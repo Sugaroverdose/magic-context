@@ -103,9 +103,7 @@ fn main() {
             commands::create_workspace,
             commands::rename_workspace,
             commands::delete_workspace,
-            commands::add_workspace_member,
-            commands::remove_workspace_member,
-            commands::set_member_display_name,
+            commands::apply_workspace_changes,
         ])
         .setup(|app| {
             // ── macOS app menu bar ──

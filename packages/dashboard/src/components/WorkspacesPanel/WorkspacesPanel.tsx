@@ -1,17 +1,26 @@
 import { createResource, createSignal, Index, Show } from "solid-js";
 import {
-  addWorkspaceMember,
+  applyWorkspaceChanges,
   createWorkspace,
   deleteWorkspace,
   enumerateMemoryProjects,
   listWorkspaces,
-  removeWorkspaceMember,
-  renameWorkspace,
-  setMemberDisplayName,
   workspaceSchemaReady,
 } from "../../lib/api";
-import type { ProjectRow, WorkspaceListItem } from "../../lib/types";
+import type { WorkspaceListItem } from "../../lib/types";
 import FilterSelect from "../shared/FilterSelect";
+import {
+  availableProjectsForWorkspace,
+  categorySummary,
+  createWorkspaceStage,
+  finalMemberCount,
+  SHARE_CATEGORY_OPTIONS,
+  stagedMemberRows,
+  toggleShareCategory,
+  type WorkspaceStage,
+  workspaceStageDirty,
+  workspaceStageToPayload,
+} from "./workspace-staging";
 
 export default function WorkspacesPanel() {
   const [ready] = createResource(workspaceSchemaReady);
@@ -19,8 +28,7 @@ export default function WorkspacesPanel() {
   const [projects] = createResource(enumerateMemoryProjects);
   const [error, setError] = createSignal<string | null>(null);
   const [newName, setNewName] = createSignal("");
-  const [renameId, setRenameId] = createSignal<number | null>(null);
-  const [renameValue, setRenameValue] = createSignal("");
+  const [stages, setStages] = createSignal<Record<number, WorkspaceStage>>({});
   const [addMemberWsId, setAddMemberWsId] = createSignal<number | null>(null);
   const [addMemberProject, setAddMemberProject] = createSignal("");
   const [addMemberDisplayName, setAddMemberDisplayName] = createSignal("");
@@ -30,6 +38,48 @@ export default function WorkspacesPanel() {
   const [editingDisplayValue, setEditingDisplayValue] = createSignal("");
   let confirmDeleteTimer: ReturnType<typeof setTimeout> | undefined;
   let confirmRemoveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const cloneStage = (stage: WorkspaceStage): WorkspaceStage => ({
+    rename: stage.rename,
+    addMembers: stage.addMembers.map((member) => ({ ...member })),
+    removeMembers: [...stage.removeMembers],
+    setNames: { ...stage.setNames },
+    shareCategories: [...stage.shareCategories],
+  });
+
+  const stageFor = (workspace: WorkspaceListItem): WorkspaceStage =>
+    stages()[workspace.id] ?? createWorkspaceStage(workspace);
+
+  const updateStage = (
+    workspace: WorkspaceListItem,
+    updater: (stage: WorkspaceStage) => WorkspaceStage,
+  ) => {
+    setStages((prev) => {
+      const current = cloneStage(prev[workspace.id] ?? createWorkspaceStage(workspace));
+      return { ...prev, [workspace.id]: updater(current) };
+    });
+  };
+
+  const clearStage = (workspaceId: number) => {
+    setStages((prev) => {
+      const next = { ...prev };
+      delete next[workspaceId];
+      return next;
+    });
+  };
+
+  const discardStage = (workspace: WorkspaceListItem) => {
+    clearStage(workspace.id);
+    if (addMemberWsId() === workspace.id) {
+      setAddMemberWsId(null);
+      setAddMemberProject("");
+      setAddMemberDisplayName("");
+    }
+    if (editingDisplayKey()?.startsWith(`${workspace.id}:`)) {
+      setEditingDisplayKey(null);
+      setEditingDisplayValue("");
+    }
+  };
 
   const twoClickDelete = (id: number, perform: () => void) => {
     if (confirmDeleteId() !== id) {
@@ -68,72 +118,99 @@ export default function WorkspacesPanel() {
     }
   };
 
-  const handleRename = async (id: number) => {
-    const name = renameValue().trim();
-    if (!name) return;
-    try {
-      setError(null);
-      await renameWorkspace(id, name);
-      setRenameId(null);
-      refetch();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const handleDelete = async (id: number) => {
     try {
       setError(null);
       await deleteWorkspace(id);
+      clearStage(id);
       refetch();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const memberProjectsForWorkspace = (ws: WorkspaceListItem): ProjectRow[] => {
-    const memberIds = new Set(ws.members.map((m) => m.project_path));
-    return (projects() ?? []).filter((p) => !memberIds.has(p.identity));
-  };
+  const memberProjectsForWorkspace = (ws: WorkspaceListItem) =>
+    availableProjectsForWorkspace(ws, projects() ?? [], stageFor(ws));
 
-  const handleAddMember = async (workspaceId: number) => {
+  const handleStageAddMember = (workspace: WorkspaceListItem) => {
     const identity = addMemberProject();
     if (!identity) return;
     const row = (projects() ?? []).find((p) => p.identity === identity);
     if (!row) return;
     const displayName = addMemberDisplayName().trim() || row.display_name;
-    try {
-      setError(null);
-      await addWorkspaceMember(workspaceId, row.identity, displayName, row.primary_path);
-      setAddMemberWsId(null);
-      setAddMemberProject("");
-      setAddMemberDisplayName("");
-      refetch();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    updateStage(workspace, (stage) => {
+      if (!stage.addMembers.some((member) => member.project_path === row.identity)) {
+        stage.addMembers.push({
+          project_path: row.identity,
+          display_name: displayName,
+          display_path: row.primary_path,
+        });
+      }
+      return stage;
+    });
+    setAddMemberWsId(null);
+    setAddMemberProject("");
+    setAddMemberDisplayName("");
   };
 
-  const handleRemoveMember = async (workspaceId: number, projectPath: string) => {
-    try {
-      setError(null);
-      await removeWorkspaceMember(workspaceId, projectPath);
-      refetch();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  const handleStageRemoveMember = (
+    workspace: WorkspaceListItem,
+    projectPath: string,
+    pending: boolean,
+  ) => {
+    updateStage(workspace, (stage) => {
+      if (pending) {
+        stage.addMembers = stage.addMembers.filter((member) => member.project_path !== projectPath);
+        return stage;
+      }
+      if (!stage.removeMembers.includes(projectPath)) {
+        stage.removeMembers.push(projectPath);
+      }
+      return stage;
+    });
   };
 
-  const handleSaveDisplayName = async (workspaceId: number, projectPath: string) => {
+  const handleUndoRemoveMember = (workspace: WorkspaceListItem, projectPath: string) => {
+    updateStage(workspace, (stage) => {
+      stage.removeMembers = stage.removeMembers.filter((identity) => identity !== projectPath);
+      return stage;
+    });
+  };
+
+  const handleStageDisplayName = (workspace: WorkspaceListItem, projectPath: string) => {
     const name = editingDisplayValue().trim();
     if (!name) {
       setError("Display name cannot be empty.");
       return;
     }
+    updateStage(workspace, (stage) => {
+      const pending = stage.addMembers.find((member) => member.project_path === projectPath);
+      if (pending) pending.display_name = name;
+      else stage.setNames[projectPath] = name;
+      return stage;
+    });
+    setEditingDisplayKey(null);
+    setEditingDisplayValue("");
+  };
+
+  const handleSaveChanges = async (workspace: WorkspaceListItem) => {
+    const stage = stageFor(workspace);
+    if (!workspaceStageDirty(workspace, stage)) return;
+    if (!stage.rename.trim()) {
+      setError("Workspace name cannot be empty.");
+      return;
+    }
     try {
       setError(null);
-      await setMemberDisplayName(workspaceId, projectPath, name);
+      await applyWorkspaceChanges(workspaceStageToPayload(workspace, stage));
+      clearStage(workspace.id);
       setEditingDisplayKey(null);
+      setEditingDisplayValue("");
+      if (addMemberWsId() === workspace.id) {
+        setAddMemberWsId(null);
+        setAddMemberProject("");
+        setAddMemberDisplayName("");
+      }
       refetch();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -211,6 +288,8 @@ export default function WorkspacesPanel() {
             <Index each={workspaces() ?? []}>
               {(ws) => {
                 const item = () => ws() as WorkspaceListItem;
+                const stage = () => stageFor(item());
+                const dirty = () => workspaceStageDirty(item(), stage());
                 const removeKey = (projectPath: string) => `${item().id}:${projectPath}`;
                 return (
                   <div class="card" style={{ padding: "12px 14px" }}>
@@ -218,60 +297,108 @@ export default function WorkspacesPanel() {
                       style={{
                         display: "flex",
                         "justify-content": "space-between",
-                        "align-items": "center",
+                        "align-items": "flex-start",
                         gap: "8px",
                         "flex-wrap": "wrap",
                       }}
                     >
-                      <Show
-                        when={renameId() === item().id}
-                        fallback={<strong style={{ "font-size": "15px" }}>{item().name}</strong>}
-                      >
+                      <div style={{ display: "grid", gap: "6px", "min-width": "220px" }}>
+                        <span
+                          style={{
+                            "font-size": "11px",
+                            color: "var(--text-muted)",
+                            "text-transform": "uppercase",
+                            "letter-spacing": "0.04em",
+                          }}
+                        >
+                          Workspace name
+                        </span>
                         <input
                           class="search-input"
-                          value={renameValue()}
-                          onInput={(e) => setRenameValue(e.currentTarget.value)}
-                          style={{ "max-width": "200px" }}
+                          value={stage().rename}
+                          onInput={(e) =>
+                            updateStage(item(), (next) => {
+                              next.rename = e.currentTarget.value;
+                              return next;
+                            })
+                          }
+                          style={{ "max-width": "260px" }}
                         />
+                        <Show when={dirty()}>
+                          <span style={{ color: "var(--text-muted)", "font-size": "12px" }}>
+                            {finalMemberCount(item(), stage())} members, categories:{" "}
+                            {categorySummary(stage().shareCategories)} — unsaved
+                          </span>
+                        </Show>
+                      </div>
+                      <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
                         <button
                           type="button"
                           class="btn sm primary"
-                          onClick={() => handleRename(item().id)}
+                          disabled={!dirty()}
+                          onClick={() => handleSaveChanges(item())}
                         >
-                          Save
+                          Save changes
                         </button>
-                        <button type="button" class="btn sm" onClick={() => setRenameId(null)}>
-                          Cancel
+                        <button
+                          type="button"
+                          class="btn sm"
+                          disabled={!dirty()}
+                          onClick={() => discardStage(item())}
+                        >
+                          Discard
                         </button>
-                      </Show>
-                      <Show when={renameId() !== item().id}>
-                        <div style={{ display: "flex", gap: "6px" }}>
-                          <button
-                            type="button"
-                            class="btn sm"
-                            onClick={() => {
-                              setRenameId(item().id);
-                              setRenameValue(item().name);
-                            }}
-                          >
-                            Rename
-                          </button>
-                          <button
-                            type="button"
-                            class="btn sm danger"
-                            onClick={() => twoClickDelete(item().id, () => handleDelete(item().id))}
-                          >
-                            {confirmDeleteId() === item().id ? "Click again to confirm" : "Delete"}
-                          </button>
-                        </div>
-                      </Show>
+                        <button
+                          type="button"
+                          class="btn sm danger"
+                          onClick={() => twoClickDelete(item().id, () => handleDelete(item().id))}
+                        >
+                          {confirmDeleteId() === item().id ? "Click again to confirm" : "Delete"}
+                        </button>
+                      </div>
                     </div>
 
-                    <div style={{ "margin-top": "12px" }}>
+                    <div style={{ "margin-top": "14px" }}>
                       <div class="category-header" style={{ "margin-bottom": "8px" }}>
-                        Members <span class="category-count">({item().members.length})</span>
+                        Shared categories
                       </div>
-                      <Index each={item().members}>
+                      <div style={{ display: "flex", gap: "10px", "flex-wrap": "wrap" }}>
+                        <Index each={SHARE_CATEGORY_OPTIONS}>
+                          {(option) => (
+                            <label
+                              style={{
+                                display: "flex",
+                                "align-items": "center",
+                                gap: "5px",
+                                "font-size": "12px",
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={stage().shareCategories.includes(option().value)}
+                                onChange={() =>
+                                  updateStage(item(), (next) => {
+                                    next.shareCategories = toggleShareCategory(
+                                      next.shareCategories,
+                                      option().value,
+                                    );
+                                    return next;
+                                  })
+                                }
+                              />
+                              {option().label}
+                            </label>
+                          )}
+                        </Index>
+                      </div>
+                    </div>
+
+                    <div style={{ "margin-top": "14px" }}>
+                      <div class="category-header" style={{ "margin-bottom": "8px" }}>
+                        Members{" "}
+                        <span class="category-count">({finalMemberCount(item(), stage())})</span>
+                      </div>
+                      <Index each={stagedMemberRows(item(), stage())}>
                         {(member) => {
                           const m = () => member();
                           const key = () => removeKey(m().project_path);
@@ -285,21 +412,38 @@ export default function WorkspacesPanel() {
                                 "align-items": "center",
                                 gap: "8px",
                                 "flex-wrap": "wrap",
+                                opacity: m().removed ? 0.62 : 1,
                               }}
                             >
                               <Show
                                 when={editingDisplayKey() === key()}
                                 fallback={
                                   <>
-                                    <span class="pill blue">{m().display_name}</span>
                                     <span
-                                      style={{ color: "var(--text-muted)", "font-size": "12px" }}
+                                      class="pill blue"
+                                      style={{
+                                        "text-decoration": m().removed ? "line-through" : "none",
+                                      }}
                                     >
-                                      {m().memory_count} memories · {m().display_path}
+                                      {m().pending
+                                        ? `+ ${m().display_name} (pending)`
+                                        : m().display_name}
+                                      {m().removed ? " (remove pending)" : ""}
+                                    </span>
+                                    <span
+                                      style={{
+                                        color: "var(--text-muted)",
+                                        "font-size": "12px",
+                                        "text-decoration": m().removed ? "line-through" : "none",
+                                      }}
+                                    >
+                                      {m().pending ? "Pending" : `${m().memory_count} memories`} ·{" "}
+                                      {m().display_path}
                                     </span>
                                     <button
                                       type="button"
                                       class="btn sm ghost"
+                                      disabled={m().removed}
                                       onClick={() => {
                                         setEditingDisplayKey(key());
                                         setEditingDisplayValue(m().display_name);
@@ -319,7 +463,7 @@ export default function WorkspacesPanel() {
                                 <button
                                   type="button"
                                   class="btn sm"
-                                  onClick={() => handleSaveDisplayName(item().id, m().project_path)}
+                                  onClick={() => handleStageDisplayName(item(), m().project_path)}
                                 >
                                   Save
                                 </button>
@@ -331,18 +475,39 @@ export default function WorkspacesPanel() {
                                   Cancel
                                 </button>
                               </Show>
-                              <button
-                                type="button"
-                                class="btn sm danger"
-                                style={{ "margin-left": "auto" }}
-                                onClick={() =>
-                                  twoClickRemove(key(), () =>
-                                    handleRemoveMember(item().id, m().project_path),
-                                  )
+                              <Show
+                                when={m().removed}
+                                fallback={
+                                  <button
+                                    type="button"
+                                    class="btn sm danger"
+                                    style={{ "margin-left": "auto" }}
+                                    onClick={() => {
+                                      if (m().pending)
+                                        handleStageRemoveMember(item(), m().project_path, true);
+                                      else
+                                        twoClickRemove(key(), () =>
+                                          handleStageRemoveMember(item(), m().project_path, false),
+                                        );
+                                    }}
+                                  >
+                                    {m().pending
+                                      ? "Remove pending"
+                                      : confirmRemoveKey() === key()
+                                        ? "Confirm remove"
+                                        : "Remove"}
+                                  </button>
                                 }
                               >
-                                {confirmRemoveKey() === key() ? "Confirm remove" : "Remove"}
-                              </button>
+                                <button
+                                  type="button"
+                                  class="btn sm"
+                                  style={{ "margin-left": "auto" }}
+                                  onClick={() => handleUndoRemoveMember(item(), m().project_path)}
+                                >
+                                  Undo remove
+                                </button>
+                              </Show>
                             </div>
                           );
                         }}
@@ -381,7 +546,7 @@ export default function WorkspacesPanel() {
                           <button
                             type="button"
                             class="btn sm primary"
-                            onClick={() => handleAddMember(item().id)}
+                            onClick={() => handleStageAddMember(item())}
                           >
                             Add
                           </button>
@@ -391,6 +556,7 @@ export default function WorkspacesPanel() {
                             onClick={() => {
                               setAddMemberWsId(null);
                               setAddMemberProject("");
+                              setAddMemberDisplayName("");
                             }}
                           >
                             Cancel
@@ -402,7 +568,11 @@ export default function WorkspacesPanel() {
                           type="button"
                           class="btn sm"
                           style={{ "margin-top": "8px" }}
-                          onClick={() => setAddMemberWsId(item().id)}
+                          onClick={() => {
+                            setAddMemberWsId(item().id);
+                            setAddMemberProject("");
+                            setAddMemberDisplayName("");
+                          }}
                         >
                           + Add member
                         </button>

@@ -439,6 +439,13 @@ export interface UserMemoryCandidate {
   created_at: number;
 }
 
+export type WorkspaceShareCategory =
+  | "PROJECT_RULES"
+  | "ARCHITECTURE"
+  | "CONSTRAINTS"
+  | "CONFIG_VALUES"
+  | "NAMING";
+
 export interface WorkspaceMemberView {
   project_path: string;
   display_name: string;
@@ -452,6 +459,7 @@ export interface WorkspaceListItem {
   name: string;
   created_at: number;
   updated_at: number;
+  share_categories: WorkspaceShareCategory[];
   members: WorkspaceMemberView[];
 }
 

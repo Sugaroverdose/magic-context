@@ -30,6 +30,7 @@ import type {
   UserMemory,
   UserMemoryCandidate,
   WorkspaceListItem,
+  WorkspaceShareCategory,
   WorkspaceSummary,
 } from "./types";
 
@@ -93,33 +94,26 @@ export async function deleteWorkspace(workspaceId: number): Promise<void> {
   return invoke("delete_workspace", { workspaceId });
 }
 
-export async function addWorkspaceMember(
-  workspaceId: number,
-  projectPath: string,
-  displayName: string,
-  displayPath: string,
-): Promise<void> {
-  return invoke("add_workspace_member", {
-    workspaceId,
-    projectPath,
-    displayName,
-    displayPath,
-  });
+export interface WorkspaceMemberChange {
+  project_path: string;
+  display_name: string;
+  display_path: string;
 }
 
-export async function removeWorkspaceMember(
-  workspaceId: number,
-  projectPath: string,
-): Promise<void> {
-  return invoke("remove_workspace_member", { workspaceId, projectPath });
+export interface WorkspaceDisplayNameChange {
+  project_path: string;
+  display_name: string;
 }
 
-export async function setMemberDisplayName(
-  workspaceId: number,
-  projectPath: string,
-  displayName: string,
-): Promise<void> {
-  return invoke("set_member_display_name", { workspaceId, projectPath, displayName });
+export async function applyWorkspaceChanges(params: {
+  workspaceId: number;
+  rename: string | null;
+  addMembers: WorkspaceMemberChange[];
+  removeMembers: string[];
+  setDisplayNames: WorkspaceDisplayNameChange[];
+  shareCategories: WorkspaceShareCategory[];
+}): Promise<void> {
+  return invoke("apply_workspace_changes", params);
 }
 
 export async function updateMemoryStatus(memoryId: number, status: string): Promise<void> {

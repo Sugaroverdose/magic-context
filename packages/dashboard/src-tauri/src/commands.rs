@@ -69,7 +69,9 @@ pub fn workspace_schema_ready(state: State<'_, AppState>) -> Result<bool, String
 }
 
 #[tauri::command(async)]
-pub fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<crate::workspaces::WorkspaceListItem>, String> {
+pub fn list_workspaces(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::workspaces::WorkspaceListItem>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     crate::workspaces::list_workspaces(&conn).map_err(|e| e.to_string())
@@ -110,51 +112,25 @@ pub fn delete_workspace(state: State<'_, AppState>, workspace_id: i64) -> Result
 }
 
 #[tauri::command(async)]
-pub fn add_workspace_member(
+pub fn apply_workspace_changes(
     state: State<'_, AppState>,
     workspace_id: i64,
-    project_path: String,
-    display_name: String,
-    display_path: String,
+    rename: Option<String>,
+    add_members: Vec<crate::workspaces::WorkspaceMemberChange>,
+    remove_members: Vec<String>,
+    set_display_names: Vec<crate::workspaces::WorkspaceDisplayNameChange>,
+    share_categories: Vec<String>,
 ) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    crate::workspaces::add_workspace_member(
+    crate::workspaces::apply_workspace_changes(
         &mut conn,
         workspace_id,
-        project_path,
-        display_name,
-        display_path,
-    )
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command(async)]
-pub fn remove_workspace_member(
-    state: State<'_, AppState>,
-    workspace_id: i64,
-    project_path: String,
-) -> Result<(), String> {
-    let path = state.get_db_path()?;
-    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    crate::workspaces::remove_workspace_member(&mut conn, workspace_id, &project_path)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command(async)]
-pub fn set_member_display_name(
-    state: State<'_, AppState>,
-    workspace_id: i64,
-    project_path: String,
-    display_name: String,
-) -> Result<(), String> {
-    let path = state.get_db_path()?;
-    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    crate::workspaces::set_member_display_name(
-        &mut conn,
-        workspace_id,
-        &project_path,
-        display_name,
+        rename,
+        add_members,
+        remove_members,
+        set_display_names,
+        share_categories,
     )
     .map_err(|e| e.to_string())
 }

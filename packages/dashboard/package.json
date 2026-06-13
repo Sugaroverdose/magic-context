@@ -12,6 +12,7 @@
     "tauri": "bunx tauri",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src",
+    "check": "bun run typecheck && bun run lint && bun run build",
     "test": "bun test src"
   },
   "dependencies": {
