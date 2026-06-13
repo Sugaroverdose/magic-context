@@ -556,6 +556,41 @@ pub fn save_project_config(project_path: String, content: String) -> Result<(), 
 
 // ── Model commands ──────────────────────────────────────────
 
+/// Run `command` through the user's login shell and return its stdout on
+/// success. GUI apps don't inherit the shell PATH, and version managers
+/// (mise/nvm/fnm/volta/asdf) install binaries under per-version directories
+/// that cannot be hardcoded — but a login shell resolves them exactly as the
+/// user's terminal does. Bounded by a timeout so a slow/misconfigured shell rc
+/// can't hang the model dropdown. Unix-only: Windows version managers write to
+/// known dirs already covered by the candidate paths, and `-l -c` is not a
+/// portable Windows shell idiom.
+///
+/// Owned `String` arg (not `&str`): this lives in the commands module and an
+/// async fn with a reference input would trip Tauri's command macro rules.
+#[cfg(unix)]
+async fn run_via_login_shell(command: String) -> Option<String> {
+    // Only the user's real login shell carries their version-manager PATH; a
+    // bare /bin/sh fallback wouldn't, so skip when SHELL is unset.
+    let shell = std::env::var("SHELL").ok()?;
+    let fut = tokio::process::Command::new(&shell)
+        .arg("-l")
+        .arg("-c")
+        .arg(&command)
+        .no_window()
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(8), fut).await {
+        Ok(Ok(output)) if output.status.success() => {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(unix))]
+async fn run_via_login_shell(_command: String) -> Option<String> {
+    None
+}
+
 #[tauri::command]
 pub async fn get_available_models() -> Vec<String> {
     // GUI apps on macOS don't inherit shell PATH; try common locations.
@@ -586,7 +621,17 @@ pub async fn get_available_models() -> Vec<String> {
             format!("{}/.local/bin/opencode", home),
             "/usr/local/bin/opencode".to_string(),
             "/opt/homebrew/bin/opencode".to_string(),
+            format!("{}/.local/share/mise/shims/opencode", home),
+            format!("{}/.asdf/shims/opencode", home),
+            format!("{}/.volta/bin/opencode", home),
         ]
+    };
+
+    let parse = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
     };
 
     for bin in &candidates {
@@ -597,13 +642,18 @@ pub async fn get_available_models() -> Vec<String> {
             .await
         {
             if output.status.success() {
-                return String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect();
+                let models = parse(&String::from_utf8_lossy(&output.stdout));
+                if !models.is_empty() {
+                    return models;
+                }
             }
         }
+    }
+
+    // Login-shell fallback for version-manager (mise/nvm/fnm) installs the
+    // hardcoded candidates can't enumerate — see run_via_login_shell.
+    if let Some(text) = run_via_login_shell("opencode models".to_string()).await {
+        return parse(&text);
     }
 
     Vec::new()
@@ -648,6 +698,11 @@ pub async fn get_available_pi_models() -> Vec<String> {
             format!("{}/.local/bin/pi", home),
             "/usr/local/bin/pi".to_string(),
             "/opt/homebrew/bin/pi".to_string(),
+            // Version-manager shim dirs (stable across the managed runtime's
+            // version bumps, unlike the per-version install dir).
+            format!("{}/.local/share/mise/shims/pi", home),
+            format!("{}/.asdf/shims/pi", home),
+            format!("{}/.volta/bin/pi", home),
         ]
     };
 
@@ -660,9 +715,20 @@ pub async fn get_available_pi_models() -> Vec<String> {
         {
             if output.status.success() {
                 let text = String::from_utf8_lossy(&output.stdout);
-                return parse_pi_models_output(&text);
+                let models = parse_pi_models_output(&text);
+                if !models.is_empty() {
+                    return models;
+                }
             }
         }
+    }
+
+    // Last resort: resolve `pi` through the user's login shell. This is the
+    // universal fallback for version managers (mise/nvm/fnm) that install into
+    // per-version dirs the candidates above can't enumerate — the login shell
+    // carries the same PATH the user's terminal uses to find `pi`.
+    if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
+        return parse_pi_models_output(&text);
     }
 
     Vec::new()
