@@ -48,15 +48,18 @@ demotion *aligns* with the decay philosophy (older history is the first to lose
 fidelity). A round-robin / even-distribution demotion would add complexity for a
 path that seldom runs and whose bias is already the desired one. Accepted.
 
-### A4. `ctx_memory merge` does not enforce single-project ownership
+### A4. `ctx_memory merge` ownership is split by caller: primary-gated, dreamer cross-identity
 
-`tools.ts` — unlike `update`/`delete`/`archive` (which guard that the target
-belongs to the current project), `merge` intentionally allows cross-identity
-consolidation. The merge loop supersedes each source memory under **its own**
-project identity and queues a per-project supersede-delta row, so every affected
-project's m[1] reconciles correctly. This is a supported dreamer capability
-(see the "merging across identities" test). Do not add an ownership guard to
-`merge`.
+`tools.ts` — `merge` is in the primary action set, so a **primary** caller is
+held to the same visibility gate as `update`/`archive`: every source memory must
+pass `memoryVisibleToTool` (own project in any category, or a foreign workspace
+member only in a shared category). A primary agent cannot consolidate a memory it
+cannot see. The **dreamer** keeps the unrestricted cross-identity path — its merge
+loop supersedes each source under **its own** project identity and queues a
+per-project supersede-delta row, so every affected project's m[1] reconciles
+(see the "merging across identities" test). The gate is the same one
+update/archive use; do not weaken `merge` back to a bare project-ownership check —
+that reintroduces the foreign-non-shared-category mutation hole.
 
 ### A5. Re-observing a fact does not revive an archived memory
 
