@@ -443,18 +443,54 @@ describe("strip-content", () => {
                         [user3NoImage, 5],
                     ]);
 
-                    const stripped = stripProcessedImages(
+                    const result = stripProcessedImages(
                         [user1, assistant1, user2, assistant2, user3NoImage],
-                        3,
-                        tags,
+                        new Set(),
+                        { detect: true, watermark: 3, messageTagNumbers: tags },
                     );
 
-                    expect(stripped).toBe(2);
+                    expect(result.stripped).toBe(2);
+                    expect(result.newlyStrippedIds.sort()).toEqual(["m-1", "m-3"]);
                     // Array lengths preserved
                     expect(user1.parts).toHaveLength(1);
                     expect(user2.parts).toHaveLength(1);
                     expect(user1.parts[0]).toEqual(SENTINEL);
                     expect(user2.parts[0]).toEqual(SENTINEL);
+                });
+
+                it("#then a DEFER pass (detect=false) does NOT first-strip an aged image, but a frozen id does", () => {
+                    // This is the regression: an aged, processed image must never
+                    // be first-removed on a defer pass (Anthropic cache bust). It
+                    // only strips once its id was frozen on a cache-busting pass.
+                    const user = message("m-1", "user", [
+                        { type: "file", mime: "image/png", url: buildDataUrl(2000) },
+                    ]);
+                    const assistant = message("m-2", "assistant", [
+                        { type: "text", text: "processed" },
+                    ]);
+                    const tags = new Map<MessageLike, number>([
+                        [user, 1],
+                        [assistant, 2],
+                    ]);
+
+                    // Defer pass, nothing frozen → image survives untouched.
+                    const deferResult = stripProcessedImages([user, assistant], new Set(), {
+                        detect: false,
+                        watermark: 5,
+                        messageTagNumbers: tags,
+                    });
+                    expect(deferResult.stripped).toBe(0);
+                    expect((user.parts[0] as { type: string }).type).toBe("file");
+
+                    // Same defer pass but the id is frozen → replayed strip fires.
+                    const replayResult = stripProcessedImages([user, assistant], new Set(["m-1"]), {
+                        detect: false,
+                        watermark: 5,
+                        messageTagNumbers: tags,
+                    });
+                    expect(replayResult.stripped).toBe(1);
+                    expect(replayResult.newlyStrippedIds).toEqual([]);
+                    expect(user.parts[0]).toEqual(SENTINEL);
                 });
 
                 it("#then leaves images above the watermark untouched", () => {
@@ -485,13 +521,13 @@ describe("strip-content", () => {
                         [recentAssistant, 11],
                     ]);
 
-                    const stripped = stripProcessedImages(
+                    const result = stripProcessedImages(
                         [user1, assistant1, recentUser, recentAssistant],
-                        5,
-                        tags,
+                        new Set(),
+                        { detect: true, watermark: 5, messageTagNumbers: tags },
                     );
 
-                    expect(stripped).toBe(1);
+                    expect(result.stripped).toBe(1);
                     expect(user1.parts[0]).toEqual(SENTINEL);
                     // Recent user's image survives
                     expect((recentUser.parts[0] as { type: string }).type).toBe("file");
@@ -517,9 +553,13 @@ describe("strip-content", () => {
                         [assistant, 2],
                     ]);
 
-                    stripProcessedImages([user, assistant], 5, tags);
+                    const opts = { detect: true, watermark: 5, messageTagNumbers: tags };
+                    stripProcessedImages([user, assistant], new Set(), opts);
                     const firstPass = JSON.stringify([user, assistant]);
-                    stripProcessedImages([user, assistant], 5, tags);
+                    stripProcessedImages([user, assistant], new Set(["m-1"]), {
+                        ...opts,
+                        detect: false,
+                    });
 
                     expect(JSON.stringify([user, assistant])).toBe(firstPass);
                 });
@@ -530,7 +570,13 @@ describe("strip-content", () => {
             describe("#when stripping processed images", () => {
                 it("#then it returns zero", () => {
                     const tags = new Map<MessageLike, number>();
-                    expect(stripProcessedImages([], 5, tags)).toBe(0);
+                    expect(
+                        stripProcessedImages([], new Set(), {
+                            detect: true,
+                            watermark: 5,
+                            messageTagNumbers: tags,
+                        }).stripped,
+                    ).toBe(0);
                 });
             });
         });

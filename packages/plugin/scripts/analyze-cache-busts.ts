@@ -29,6 +29,8 @@
  *   --limit <N>      only the last N requests in range
  *   --show-diff      print before/after snippet of the first-diverging segment
  *   --all-busts      list every diverging segment, not just the first
+ *   --all-rows       also print STABLE/SAME rows (default: only BUST rows, so a
+ *                    real prefix bust is never buried under ordinary tail growth)
  */
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
@@ -64,6 +66,7 @@ function parseArgs(argv: string[]): {
     limit?: number;
     showDiff: boolean;
     allBusts: boolean;
+    allRows: boolean;
 } {
     const args = argv.slice(2);
     const sessionPrefix = args.find((a) => !a.startsWith("--")) ?? "";
@@ -82,6 +85,7 @@ function parseArgs(argv: string[]): {
         limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
         showDiff: args.includes("--show-diff"),
         allBusts: args.includes("--all-busts"),
+        allRows: args.includes("--all-rows"),
     };
 }
 
@@ -264,20 +268,29 @@ function main(): void {
         "-------------------|------|---------|-------------------------|-----------------------------|------------------------",
     );
 
+    // By default only BUST rows are printed so a genuine prefix bust is never
+    // buried under ordinary tail-growth (STABLE) or no-op (SAME) rows. STABLE =
+    // divergence is past prev's last breakpoint (pure tail addition, still a
+    // cache hit). --all-rows restores the full per-request table.
+    let bustCount = 0;
     for (let k = 0; k < snaps.length; k += 1) {
         const cur = snaps[k];
         if (k === 0) {
-            console.log(
-                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | BASE    | (first request)         |                             |`,
-            );
+            if (opts.allRows) {
+                console.log(
+                    `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | BASE    | (first request)         |                             |`,
+                );
+            }
             continue;
         }
         const prev = snaps[k - 1];
         const idx = firstDivergence(prev.segments, cur.segments);
         if (idx === -1) {
-            console.log(
-                `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | SAME    | (identical to prev)     |                             |`,
-            );
+            if (opts.allRows) {
+                console.log(
+                    `${fmtTime(cur.createdAt)} | ${String(cur.segments.length).padStart(4)} | SAME    | (identical to prev)     |                             |`,
+                );
+            }
             continue;
         }
         const seg = cur.segments[idx] ?? prev.segments[idx];
@@ -286,6 +299,8 @@ function main(): void {
         // breakpoint mislabels ordinary tail growth as a bust.
         const prevLastBreakpoint = lastBreakpointIndex(prev.segments);
         const verdict = idx > prevLastBreakpoint ? "STABLE" : "BUST";
+        if (verdict === "BUST") bustCount += 1;
+        if (verdict !== "BUST" && !opts.allRows) continue;
         const prevPrefix = cachedPrefixBytes(prev.segments, prev.segments.length);
         const cp = cachedPrefixBytes(cur.segments, idx);
         const byteDelta = `${prevPrefix.bytes.toLocaleString()}B → ${cp.bytes.toLocaleString()}B`;
@@ -309,6 +324,17 @@ function main(): void {
                 );
             }
         }
+    }
+
+    console.log("");
+    if (bustCount === 0) {
+        console.log(
+            `No busts across ${snaps.length} request(s) — the cached prefix held (only tail growth).`,
+        );
+    } else {
+        console.log(
+            `${bustCount} bust(s) across ${snaps.length} request(s).${opts.allRows ? "" : " (STABLE/SAME rows hidden; pass --all-rows to show them.)"}`,
+        );
     }
 }
 

@@ -79,6 +79,7 @@ export {
 export {
     type AppendAutoSearchHintOutcome,
     type AutoSearchHintDecision,
+    addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
@@ -115,6 +116,7 @@ export {
     getPersistedNoteNudge,
     getPersistedReasoningWatermark,
     getPersistedTodoSyntheticAnchor,
+    getProcessedImageStrippedIds,
     getSessionsWithPendingMarker,
     getSessionsWithPendingPiMarker,
     getSessionWorkMetrics,

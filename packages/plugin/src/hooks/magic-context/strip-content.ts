@@ -596,19 +596,47 @@ export function stripReasoningFromMergedAssistants(
     return stripped;
 }
 
+export interface StripProcessedImagesResult {
+    stripped: number;
+    newlyStrippedIds: string[];
+}
+
 /**
  * Neutralize large image-data-URL file parts on already-processed user
- * messages. Replaces them in place with empty-text sentinels so message
- * parts length stays constant between passes. Caller contract: run only when
- * `modelAcceptsEmptyContent(providerID)` is true, because non-Anthropic
- * adapters can forward the empty text replacement to the wire.
+ * messages, replacing them in place with empty-text sentinels (which the
+ * Anthropic adapter then filters off the wire entirely).
+ *
+ * REPLAY/DETECT split — mirrors `dropStaleReduceCalls`, and for the same
+ * reason. The empty sentinel is filtered for Anthropic, so the FIRST time a
+ * message is sentinelized its image blocks VANISH from the wire — a real byte
+ * change. The earlier "strip every pass when `maxTag <= watermark`" version
+ * keyed that first-strip on the live watermark, which advances with tail
+ * growth: a DEFER pass could newly cross an older image message and strip it
+ * mid-prefix, busting the Anthropic cache on a pass that must replay
+ * byte-identically (observed live — a processed-screenshot message lost its
+ * images on a defer pass and collapsed the cached prefix). Freezing the id set
+ * on cache-busting passes and replaying it everywhere removes the moving
+ * boundary: DETECT (cache-busting passes only) finds newly-aged processed image
+ * messages, strips them, and returns their ids to persist; REPLAY (every pass,
+ * incl. defer) re-strips only already-frozen ids, byte-identical regardless of
+ * how the live array grew.
+ *
+ * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is
+ * true, because non-Anthropic adapters can forward the empty text replacement
+ * to the wire.
  */
 export function stripProcessedImages(
     messages: MessageLike[],
-    watermark: number,
-    messageTagNumbers: Map<MessageLike, number>,
-): number {
+    frozenIds: Set<string>,
+    options: {
+        detect: boolean;
+        watermark: number;
+        messageTagNumbers: Map<MessageLike, number>;
+    },
+): StripProcessedImagesResult {
+    const { detect, watermark, messageTagNumbers } = options;
     let stripped = 0;
+    const newlyStrippedIds: string[] = [];
     let hasAssistantResponse = false;
 
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -617,15 +645,23 @@ export function stripProcessedImages(
             hasAssistantResponse = true;
             continue;
         }
-        if (msg.info.role !== "user" || !hasAssistantResponse) {
+        if (msg.info.role !== "user") {
             continue;
         }
 
+        const id = typeof msg.info.id === "string" ? msg.info.id : undefined;
+        const inFrozen = id !== undefined && frozenIds.has(id);
+        // DETECT (cache-busting passes only): a processed (assistant-answered),
+        // aged (maxTag <= watermark) user message not yet frozen.
         const maxTag = messageTagNumbers.get(msg) ?? 0;
-        if (maxTag > watermark) {
+        const isNewDetection =
+            !inFrozen && detect && hasAssistantResponse && id !== undefined && maxTag <= watermark;
+
+        if (!inFrozen && !isNewDetection) {
             continue;
         }
 
+        let touchedThisMsg = false;
         for (let j = 0; j < msg.parts.length; j++) {
             const part = msg.parts[j];
             if (!isRecord(part) || part.type !== "file") {
@@ -641,9 +677,13 @@ export function stripProcessedImages(
             ) {
                 msg.parts[j] = makeSentinel(part);
                 stripped++;
+                touchedThisMsg = true;
             }
+        }
+        if (touchedThisMsg && isNewDetection && id !== undefined) {
+            newlyStrippedIds.push(id);
         }
     }
 
-    return stripped;
+    return { stripped, newlyStrippedIds };
 }

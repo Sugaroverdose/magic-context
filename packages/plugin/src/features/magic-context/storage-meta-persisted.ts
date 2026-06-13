@@ -1536,6 +1536,62 @@ export function addStaleReduceStrippedIds(
     return false;
 }
 
+/**
+ * Message ids whose processed-image file parts have been sentinel-stripped.
+ * Frozen replay watermark for `stripProcessedImages`, identical in purpose to
+ * `stale_reduce_stripped_ids`: it advances ONLY on cache-busting passes and is
+ * replayed verbatim every pass, so an aged image message can never have its
+ * images first-removed on a defer pass (which busts the Anthropic prompt cache,
+ * because the empty sentinel is filtered off the Anthropic wire).
+ */
+export function getProcessedImageStrippedIds(db: Database, sessionId: string): Set<string> {
+    const row = db
+        .prepare("SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { processed_image_stripped_ids?: string } | null;
+    return new Set(parseStrippedBlob(row?.processed_image_stripped_ids));
+}
+
+/**
+ * CAS-merge new processed-image message ids into the frozen set, retrying on a
+ * concurrent write so sibling processes sharing the session DB merge instead of
+ * clobbering. Returns true when the set ended in the intended state (incl.
+ * no-op), false only when retries were exhausted.
+ */
+export function addProcessedImageStrippedIds(
+    db: Database,
+    sessionId: string,
+    ids: Iterable<string>,
+): boolean {
+    const add = [...ids];
+    if (add.length === 0) return true;
+    ensureSessionMetaRow(db, sessionId);
+
+    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
+        const row = db
+            .prepare("SELECT processed_image_stripped_ids FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { processed_image_stripped_ids?: string | null } | undefined;
+        const rawStored = row ? (row.processed_image_stripped_ids ?? null) : null;
+        const current = new Set<string>(parseStrippedBlob(rawStored));
+        let changed = false;
+        for (const id of add) {
+            if (!current.has(id)) {
+                current.add(id);
+                changed = true;
+            }
+        }
+        if (!changed) return true;
+        const nextBlob = JSON.stringify([...current]);
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET processed_image_stripped_ids = ? WHERE session_id = ? AND processed_image_stripped_ids IS ?",
+            )
+            .run(nextBlob, sessionId, rawStored);
+        if (result.changes > 0) return true;
+    }
+    sessionLog(sessionId, `processed_image_stripped_ids CAS: ${CAS_RETRY_LIMIT} retries exhausted`);
+    return false;
+}
+
 // ── Pending compaction marker state (plan v6 deferred drain) ──
 
 /**

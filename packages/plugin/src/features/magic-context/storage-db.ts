@@ -814,6 +814,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // never recomputes a volatile messages.length boundary that would silently
     // strip newly-aged calls mid-prefix on a defer pass (Anthropic cache bust).
     ensureColumn(db, "session_meta", "stale_reduce_stripped_ids", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "processed_image_stripped_ids", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "start_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "end_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
@@ -1173,6 +1174,7 @@ function healNullTextColumns(db: Database): void {
         ["system_prompt_hash", ""],
         ["stripped_placeholder_ids", ""],
         ["stale_reduce_stripped_ids", ""],
+        ["processed_image_stripped_ids", ""],
         ["memory_block_cache", ""],
         ["memory_block_ids", ""],
         ["compaction_marker_state", ""],

@@ -1,4 +1,5 @@
 import {
+    addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
     applyStrippedPlaceholderDelta,
     type ContextDatabase,
@@ -12,6 +13,7 @@ import {
     getPendingCompactionMarkerState,
     getPendingOps,
     getPersistedTodoSyntheticAnchor,
+    getProcessedImageStrippedIds,
     getStaleReduceStrippedIds,
     getStrippedPlaceholderIds,
     peekDeferredExecutePending,
@@ -499,9 +501,6 @@ export async function runPostTransformPhase(
         if (args.watermark > 0) {
             const tWatermarkCleanup = performance.now();
             truncateErroredTools(args.messages, args.watermark, args.messageTagNumbers);
-            if (canUseEmptySentinels) {
-                stripProcessedImages(args.messages, args.watermark, args.messageTagNumbers);
-            }
             logTransformTiming(args.sessionId, "watermarkCleanup", tWatermarkCleanup);
         }
         if (shouldApplyPendingOps) {
@@ -548,6 +547,30 @@ export async function runPostTransformPhase(
             logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
         } catch (error) {
             sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
+        }
+    }
+
+    // Processed-image strip — same REPLAY/DETECT freeze as stale ctx_reduce.
+    // The empty image sentinel is filtered off the Anthropic wire, so the first
+    // strip of a message removes its image blocks (a real byte change). Keying
+    // that first strip on the live watermark let a DEFER pass cross an older
+    // image message and remove its images mid-prefix, busting the cache.
+    // Freeze the id set on cache-busting passes; replay it every pass.
+    if (canUseEmptySentinels && args.watermark > 0) {
+        try {
+            const tImg = performance.now();
+            const frozenImageIds = getProcessedImageStrippedIds(args.db, args.sessionId);
+            const imageResult = stripProcessedImages(args.messages, frozenImageIds, {
+                detect: isCacheBustingPass,
+                watermark: args.watermark,
+                messageTagNumbers: args.messageTagNumbers,
+            });
+            if (isCacheBustingPass && imageResult.newlyStrippedIds.length > 0) {
+                addProcessedImageStrippedIds(args.db, args.sessionId, imageResult.newlyStrippedIds);
+            }
+            logTransformTiming(args.sessionId, "stripProcessedImages", tImg);
+        } catch (error) {
+            sessionLog(args.sessionId, "transform failed stripping processed images:", error);
         }
     }
 

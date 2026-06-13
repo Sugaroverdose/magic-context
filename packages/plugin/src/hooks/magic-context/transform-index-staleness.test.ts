@@ -245,7 +245,7 @@ describe("createTransform index staleness regressions", () => {
     it("replays errored-tool truncation and processed-image stripping on defer passes", async () => {
         useTempDataHome("context-transform-defer-watermark-replay-");
         const sessionId = "ses-defer-watermark-replay";
-        const { transform } = createTestTransform(sessionId);
+        const { transform, shouldExecute } = createTestTransform(sessionId);
         const longDataUrl = `data:image/png;base64,${"A".repeat(300)}`;
         const longError = "E".repeat(180);
 
@@ -283,6 +283,14 @@ describe("createTransform index staleness regressions", () => {
         const tags = getTagsBySession(db, sessionId);
         const watermarkTag = Math.max(...tags.map((tag) => tag.tagNumber));
         updateTagStatus(db, sessionId, watermarkTag, "dropped");
+
+        // The processed-image strip first-fires only on a cache-busting (execute)
+        // pass, which freezes its id; afterwards it replays on every defer pass.
+        // Errored-tool truncation already fires every pass.
+        shouldExecute.mockImplementationOnce(() => "execute");
+        const bustPass = buildMessages();
+        await transform({}, { messages: bustPass });
+        expect(bustPass[0].parts[1]).toEqual({ type: "text", text: "" });
 
         const firstDeferPass = buildMessages();
         await transform({}, { messages: firstDeferPass });

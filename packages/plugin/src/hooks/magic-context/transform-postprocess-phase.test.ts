@@ -5,6 +5,7 @@ import {
     addStaleReduceStrippedIds,
     getActiveTagsBySession,
     getOrCreateSessionMeta,
+    getProcessedImageStrippedIds,
     getTagsBySession,
     insertTag,
     queueM0Mutation,
@@ -295,15 +296,21 @@ describe("postprocess empty-sentinel provider gate", () => {
             },
         ] as unknown as MessageLike[];
 
+        // First-strip now requires a cache-busting (execute) pass; the id is
+        // then frozen so it replays on later defer passes.
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 watermark: 1,
                 messageTagNumbers: new Map([[userMessage, 1]]),
                 resolvedProviderID: "anthropic",
+                schedulerDecision: "execute",
+                contextUsage: { percentage: 60, inputTokens: 6000 },
+                currentTurnId: "turn-img",
             }),
         );
 
         expect(userMessage.parts).toEqual([{ type: "text", text: "" }]);
+        expect([...getProcessedImageStrippedIds(db, sessionId)]).toEqual(["m-image"]);
     });
 
     it("does not replay stale ctx_reduce frozen ids as empty sentinels for github-copilot", async () => {
