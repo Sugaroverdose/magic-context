@@ -1,6 +1,5 @@
 import {
     embedAndStoreCompartmentChunks,
-    embedAndStoreCompartments,
 } from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
 import {
@@ -628,16 +627,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             }
         }
 
-        // v2 (E2): compute + store P1 embeddings (LOCKED substrate for ctx_search
-        // + future dreamer cross-linking). Fire-and-forget, best-effort, gated by
+        // v2: compute + store raw chunk embeddings (the ctx_search semantic
+        // substrate over session history). Fire-and-forget, best-effort, gated by
         // memory flags so a memory-off user never hits the embedding endpoint.
         if (embeddingActive) {
             const projectIdentity = resolveProjectIdentity(promotionDirectory);
-            const toEmbed = persistedCompartments
-                .map((c, i) => ({ id: persistedIds[i], p1: c.p1 ?? c.content }))
-                .filter((c) => typeof c.id === "number" && c.p1.length > 0);
-            void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
-
             const chunksToEmbed = persistedCompartments
                 .map((c, i) => ({
                     id: persistedIds[i],

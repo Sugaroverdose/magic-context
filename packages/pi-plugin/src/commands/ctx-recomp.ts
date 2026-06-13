@@ -162,8 +162,8 @@ export function registerCtxRecompCommand(
 							memoryEnabled: deps.memoryEnabled,
 							autoPromote: deps.autoPromote,
 							// Embedding substrate: register before the recomp publish
-							// path calls embedAndStoreCompartments, else rebuilt rows
-							// keep NULL p1_embedding (dropped from ctx_search / dreamer).
+							// path computes chunk embeddings, else rebuilt rows get
+							// none and drop out of ctx_search semantic results.
 							ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 							// Recomp-runner model chain parity with OpenCode: configured
 							// fallbacks + the session's own model as last-ditch retry.

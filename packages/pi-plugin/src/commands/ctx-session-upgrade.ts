@@ -237,9 +237,8 @@ export function registerCtxSessionUpgradeCommand(
 							memoryEnabled: deps.memoryEnabled,
 							autoPromote: deps.autoPromote,
 							// Embedding substrate: without this the recomp publish path
-							// no-ops embedAndStoreCompartments on an unregistered project,
-							// leaving rebuilt compartments with NULL p1_embedding (dropped
-							// from ctx_search / dreamer linkage). Parity with OpenCode.
+							// no-ops chunk embedding on an unregistered project, leaving
+							// rebuilt compartments out of ctx_search. Parity with OpenCode.
 							ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 							// Recomp-runner model chain (parity with OpenCode
 							// recomp-orchestrator): configured fallbacks + the session's

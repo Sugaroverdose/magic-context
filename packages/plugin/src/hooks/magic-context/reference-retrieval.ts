@@ -12,8 +12,9 @@
  *       session wrote, full stored form (all tiers + importance + episode_type).
  *       Continuity + same-project format/importance calibration. RECENCY-based
  *       (no embedding at historian time — embedding K/L/M was dropped; see
- *       AUDIT E1 input-model decisions). p1_embedding is still computed on
- *       publish, but only for ctx_search + future dreamer cross-linking.
+ *       AUDIT E1 input-model decisions). ctx_search semantic retrieval over
+ *       compartments is served by per-compartment chunk embeddings computed on
+ *       publish (compartment-embedding.ts).
  *
  * Budget: 4 seeds + up to 6 session refs = the validated 10-example budget.
  * Embedding work at historian time: ZERO.

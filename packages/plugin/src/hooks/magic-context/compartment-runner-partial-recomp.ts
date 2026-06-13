@@ -1,6 +1,5 @@
 import {
     embedAndStoreCompartmentChunks,
-    embedAndStoreCompartments,
 } from "../../features/magic-context/compartment-embedding";
 import type {
     Compartment,
@@ -335,38 +334,31 @@ export async function executePartialRecompInternal(
             }
             deps.onCompartmentStatePublished?.(sessionId);
 
-            // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments.
-            // Partial recomp deletes + reinserts compartments with fresh P1 text
-            // (the rebuilt range), so their embeddings must be regenerated or the
-            // rebuilt rows have NULL p1_embedding and vanish from ctx_search +
-            // dreamer cross-linking. Embedding is the search substrate (gated on
-            // memory-enabled), distinct from fact promotion (which recomp skips).
-            // Mirrors the full-recomp success path. Fire-and-forget, best-effort.
+            // v2: recompute raw chunk embeddings for the rebuilt compartments.
+            // Partial recomp deletes + reinserts compartments, so their chunk
+            // embeddings must be regenerated or the rebuilt rows vanish from
+            // ctx_search semantic results. Gated on memory-enabled, distinct from
+            // fact promotion (which recomp skips). Fire-and-forget, best-effort.
             if (deps.memoryEnabled !== false) {
                 const projectIdentity = resolveProjectIdentity(sessionDirectory);
                 const liveCompartments = getCompartments(db, sessionId);
-                const toEmbed = liveCompartments
-                    .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
-                    .filter((c) => typeof c.id === "number" && c.p1.length > 0);
                 const chunksToEmbed = liveCompartments.map((c) => ({
                     id: c.id,
                     startMessage: c.startMessage,
                     endMessage: c.endMessage,
                 }));
-                // Register the embedding provider FIRST; embedTextForProject
-                // silently no-ops for unregistered projects, leaving NULL
-                // p1_embedding/chunk rows on the rebuilt rows. This block is sync,
-                // so chain register→embed as fire-and-forget (matches the prior void call).
+                // Register the embedding provider FIRST; embedBatchForProject
+                // silently no-ops for unregistered projects, leaving the rebuilt
+                // rows without chunk embeddings. This block is sync, so chain
+                // register→embed as fire-and-forget.
                 void Promise.resolve(deps.ensureProjectRegistered?.(sessionDirectory, db)).then(
-                    () => {
-                        void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
-                        return embedAndStoreCompartmentChunks(
+                    () =>
+                        embedAndStoreCompartmentChunks(
                             db,
                             sessionId,
                             projectIdentity,
                             chunksToEmbed,
-                        );
-                    },
+                        ),
                 );
             }
 

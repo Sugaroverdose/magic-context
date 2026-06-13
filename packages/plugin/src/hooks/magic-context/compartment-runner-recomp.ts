@@ -1,6 +1,5 @@
 import {
     embedAndStoreCompartmentChunks,
-    embedAndStoreCompartments,
 } from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
@@ -282,15 +281,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             if (deps.memoryEnabled !== false) {
                 const projectIdentity = resolveProjectIdentity(sessionDirectory);
                 // Register the project's embedding provider before embedding;
-                // embedTextForProject silently no-ops for unregistered projects,
-                // so without this the rebuilt rows keep NULL p1_embedding.
+                // embedBatchForProject silently no-ops for unregistered projects,
+                // so without this the rebuilt rows get no chunk embeddings.
                 await deps.ensureProjectRegistered?.(sessionDirectory, db);
                 const liveCompartments = getCompartments(db, sessionId);
-                const toEmbed = liveCompartments
-                    .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
-                    .filter((c) => typeof c.id === "number" && c.p1.length > 0);
-                void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
-
                 const chunksToEmbed = liveCompartments.map((c) => ({
                     id: c.id,
                     startMessage: c.startMessage,
@@ -597,20 +591,15 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which
         // handles early-exit/partial cases and already embeds). Without this, a
-        // fully-completed recomp leaves NULL p1_embedding → rebuilds vanish from
-        // ctx_search + dreamer cross-linking. Embedding is the search substrate
-        // (gated on memory-enabled), distinct from fact promotion (recomp skips).
+        // fully-completed recomp leaves the rebuilt rows without chunk embeddings
+        // → they vanish from ctx_search semantic results. Gated on memory-enabled,
+        // distinct from fact promotion (recomp skips).
         if (deps.memoryEnabled !== false) {
             const projectIdentity = resolveProjectIdentity(sessionDirectory);
-            // Register the embedding provider first; embedTextForProject silently
-            // no-ops for unregistered projects, leaving NULL p1_embedding.
+            // Register the embedding provider first; embedBatchForProject silently
+            // no-ops for unregistered projects, leaving no chunk embeddings.
             await deps.ensureProjectRegistered?.(sessionDirectory, db);
             const liveCompartments = getCompartments(db, sessionId);
-            const toEmbed = liveCompartments
-                .map((c) => ({ id: c.id, p1: c.p1 ?? c.content }))
-                .filter((c) => typeof c.id === "number" && c.p1.length > 0);
-            void embedAndStoreCompartments(db, sessionId, projectIdentity, toEmbed);
-
             const chunksToEmbed = liveCompartments.map((c) => ({
                 id: c.id,
                 startMessage: c.startMessage,
