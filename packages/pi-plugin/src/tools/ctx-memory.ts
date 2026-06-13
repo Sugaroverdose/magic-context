@@ -295,7 +295,10 @@ export function createCtxMemoryTool(
 			// Mirrors buildWorkspaceMemorySqlFilter's own/foreign split.
 			const memoryVisibleToTool = (memory: Memory): boolean => {
 				if (workspaceIdentitySet.identities.length <= 1) {
-					return storedPathBelongsToIdentity(memory.projectPath, projectIdentity);
+					return storedPathBelongsToIdentity(
+						memory.projectPath,
+						projectIdentity,
+					);
 				}
 				if (
 					!storedPathBelongsToWorkspace(

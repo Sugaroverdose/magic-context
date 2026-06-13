@@ -104,6 +104,9 @@ describe("createCtxMemoryTool", () => {
 			});
 			const ctx = fakeContext("ses-memory") as never;
 			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			// Default workspace shares CONSTRAINTS; this test exercises
+			// target-identity routing, so use a shared category (foreign memory
+			// visible) and verify the mutation routes under the target identity.
 			db.exec(`
 				INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
 				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
@@ -112,12 +115,12 @@ describe("createCtxMemoryTool", () => {
 			`);
 			insertMemory(db, {
 				projectPath: ownIdentity,
-				category: "USER_DIRECTIVES",
+				category: "CONSTRAINTS",
 				content: "Use the shared formatter.",
 			});
 			const foreign = insertMemory(db, {
 				projectPath: "git:foreign",
-				category: "USER_DIRECTIVES",
+				category: "CONSTRAINTS",
 				content: "Old foreign directive.",
 			});
 
@@ -159,6 +162,8 @@ describe("createCtxMemoryTool", () => {
 			});
 			const ctx = fakeContext("ses-memory") as never;
 			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			// Default workspace shares CONSTRAINTS; this test exercises
+			// target-identity routing, so use a shared category (foreign visible).
 			db.exec(`
 				INSERT INTO workspaces (id, name, created_at, updated_at) VALUES (1, 'ws', 1, 1);
 				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
@@ -167,7 +172,7 @@ describe("createCtxMemoryTool", () => {
 			`);
 			const foreign = insertMemory(db, {
 				projectPath: "git:foreign",
-				category: "KNOWN_ISSUES",
+				category: "CONSTRAINTS",
 				content: "Foreign issue.",
 			});
 
@@ -184,6 +189,83 @@ describe("createCtxMemoryTool", () => {
 			expect(
 				getMemoryMutationsForRender(db, "git:foreign", 0, [foreign.id]),
 			).toHaveLength(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("REFUSES to archive a foreign memory in a NON-shared category (P0 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			// Workspace shares only CONSTRAINTS; a foreign ARCHITECTURE memory is
+			// invisible in the render and must not be mutable by the tool either.
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const foreignHidden = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "ARCHITECTURE",
+				content: "Foreign architecture detail not shared.",
+			});
+
+			const result = await primary.execute(
+				"call-block",
+				{ action: "archive", ids: [foreignHidden.id] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("archives a foreign memory in a SHARED category (P0 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const foreignShared = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "CONSTRAINTS",
+				content: "Foreign constraint shared with this project.",
+			});
+
+			const result = await primary.execute(
+				"call-ok",
+				{ action: "archive", ids: [foreignShared.id] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
 		} finally {
 			closeQuietly(db);
 		}
