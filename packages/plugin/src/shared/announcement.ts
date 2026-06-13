@@ -23,18 +23,18 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.23.0";
+export const ANNOUNCEMENT_VERSION = "0.24.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Smarter context nudges: gentle <system-reminder> notes on tool outputs replace the old chat nudges — quieter, cache-safe, and they now also help subagents manage their own context.",
-    "The agent can now maintain its own project memories: update, archive (batch), and merge the memories it sees — not just write new ones. Memory categories are schema-enforced.",
-    "Big-session performance: historian trigger and token math moved off the database hot path — multi-second stalls on large sessions are gone (measured 250ms → 2.4ms per pass).",
-    "History compaction unstuck for sparse sessions: the protected-tail boundary is now size-based, so sessions with few user turns compact reliably instead of growing forever (issue #132).",
-    "Fixed: session titles no longer fail to generate in fresh directories (issue #129), plus 20+ correctness fixes from three audit rounds.",
+    "Searchable session history: ctx_search can now find older discussion by meaning, not just keywords. New history is embedded automatically — to backfill an EXISTING session's older history, run /ctx-embed-history once (it works in the background).",
+    "Cross-project workspaces: group related repos and share project memories across them, with per-category control over what's shared. Set them up in the dashboard's Workspaces panel.",
+    "Pi: fixed sessions overflowing the model context while still showing moderate usage — Pi now sheds context before a tool-heavy turn overflows.",
+    "Fewer prompt-cache busts: doc edits, processed screenshots, and a rebuild-then-bust-again case no longer re-bill large prompt prefixes.",
+    "Setup wizard now lists your actual models with type-ahead instead of fixed recommendations, and explains the historian/dreamer roles (issue #144). Plus a GitHub Copilot tool-pairing fix (#135).",
 ];
 
 /**
