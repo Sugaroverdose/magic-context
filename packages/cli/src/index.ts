@@ -68,6 +68,7 @@ function printUsage(): void {
     console.log("");
     console.log("  Usage:");
     console.log("    npx @cortexkit/magic-context@latest setup");
+    console.log("        # add --dry-run to preview the wizard without writing any files");
     console.log("    npx @cortexkit/magic-context@latest doctor");
     console.log("    npx @cortexkit/magic-context@latest doctor --issue");
     console.log("    npx @cortexkit/magic-context@latest doctor migrate \\");

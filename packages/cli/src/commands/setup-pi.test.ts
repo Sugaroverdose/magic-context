@@ -65,6 +65,11 @@ class MockPrompts implements PromptIO {
         const recommended = options.find((option) => option.recommended);
         return (recommended ?? options[0]).value;
     }
+
+    async selectAutocomplete(_message: string, options: SelectOption[]): Promise<string> {
+        const recommended = options.find((option) => option.recommended);
+        return (recommended ?? options[0]).value;
+    }
 }
 
 afterEach(() => {
@@ -162,11 +167,13 @@ describe("runSetup", () => {
             sidekick?: { enabled?: boolean; disable?: boolean };
             embedding?: { provider?: string; model?: string };
         };
-        // anthropic model — no thinking_level needed
+        // No recommendation tree anymore: the picker shows the full model list
+        // sorted, and the mock selects the first option — alphabetically
+        // "anthropic/claude-haiku-4-5" for BOTH historian and dreamer.
         expect(config.historian?.model).toBe("anthropic/claude-haiku-4-5");
         expect(config.historian?.thinking_level).toBeUndefined();
         expect(config.dreamer).toEqual({
-            model: "anthropic/claude-sonnet-4-6",
+            model: "anthropic/claude-haiku-4-5",
         });
         expect(config.dreamer).not.toHaveProperty("enabled");
         expect(config.sidekick?.disable).toBe(true);
@@ -175,6 +182,43 @@ describe("runSetup", () => {
             provider: "local",
             model: "Xenova/all-MiniLM-L6-v2",
         });
+    });
+
+    it("does not ask for a dreamer model when the dreamer is declined (issue #144)", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        mkdirSync(agentDir, { recursive: true });
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-6"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        // confirms: configurePi=true, dreamerEnabled=FALSE, sidekickEnabled=false.
+        // The picker is invoked once (historian); a 2nd autocomplete call would
+        // mean the dreamer model was wrongly requested after the user declined.
+        let autocompleteCalls = 0;
+        const prompts = new MockPrompts({ confirms: [true, false, false] });
+        const origAuto = prompts.selectAutocomplete.bind(prompts);
+        prompts.selectAutocomplete = async (message, options) => {
+            autocompleteCalls += 1;
+            return origAuto(message, options);
+        };
+
+        const code = await runSetup({ prompts, env });
+        expect(code).toBe(0);
+        expect(autocompleteCalls).toBe(1); // historian only — not dreamer
+
+        const config = parseJsonc(readFileSync(join(agentDir, "magic-context.jsonc"), "utf-8")) as {
+            dreamer?: { model?: string; disable?: boolean };
+        };
+        expect(config.dreamer?.disable).toBe(true);
+        expect(config.dreamer).not.toHaveProperty("model");
     });
 
     it("prompts for thinking_level when historian model is github-copilot", async () => {

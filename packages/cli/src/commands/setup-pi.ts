@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { pickModel } from "../lib/model-picker";
 import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "../lib/paths";
 import {
-    buildModelSelection,
     detectPiBinary,
     getAvailableModels,
     getPiVersion,
@@ -36,6 +36,13 @@ export interface SetupEnvironment {
 export interface RunSetupOptions {
     prompts?: PromptIO;
     env?: SetupEnvironment;
+    /**
+     * When true, run the full interactive wizard (detection, model fetch,
+     * type-ahead picker, all prompts) but write NO files and register NO
+     * package — print what WOULD be written. Lets the flow be exercised end to
+     * end without mutating the user's real Pi config.
+     */
+    dryRun?: boolean;
 }
 
 const DEFAULT_ENV: SetupEnvironment = {
@@ -121,7 +128,7 @@ export function writeMagicContextConfig(
         historianModel: string;
         historianThinkingLevel?: string;
         dreamerEnabled: boolean;
-        dreamerModel: string;
+        dreamerModel?: string;
         sidekickEnabled: boolean;
         sidekickModel?: string;
         embedding: EmbeddingChoice;
@@ -160,16 +167,6 @@ export function writeMagicContextConfig(
 
     config.embedding = options.embedding;
     writeFileSync(configPath, `${stringifyJsonc(config, null, 2)}\n`);
-}
-
-async function chooseModel(
-    prompts: PromptIO,
-    allModels: string[],
-    role: "historian" | "dreamer" | "sidekick",
-    message: string,
-): Promise<string> {
-    const options = buildModelSelection(allModels, role);
-    return prompts.selectOne(message, options);
 }
 
 async function chooseEmbedding(prompts: PromptIO): Promise<EmbeddingChoice> {
@@ -254,32 +251,35 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const allModels = env.getAvailableModels(pi.path);
     spinner.stop(`Found ${allModels.length} model choices`);
 
+    const dryRun = options.dryRun === true;
+    if (dryRun) {
+        prompts.log.warn("Dry run — no files will be written and no package will be registered.");
+    }
+
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();
     const configurePi = await prompts.confirm("Configure Pi to load Magic Context?", true);
-    let packageAdded = false;
     if (configurePi) {
-        packageAdded = writePiSettingsPackage(settingsPath);
-        prompts.log.success(
-            packageAdded
-                ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
-                : `Magic Context package already present in ${settingsPath}`,
-        );
-        prompts.log.message(
-            "This mirrors `pi install npm:@cortexkit/pi-magic-context` without running installs during setup verification.",
-        );
+        if (dryRun) {
+            prompts.log.message(`[dry-run] would add ${PI_PACKAGE_SOURCE} to ${settingsPath}`);
+        } else {
+            const packageAdded = writePiSettingsPackage(settingsPath);
+            prompts.log.success(
+                packageAdded
+                    ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
+                    : `Magic Context package already present in ${settingsPath}`,
+            );
+            prompts.log.message(
+                "This mirrors `pi install npm:@cortexkit/pi-magic-context` without running installs during setup verification.",
+            );
+        }
     } else {
         prompts.log.warn(
             "Skipped Pi package registration; install manually with `pi install npm:@cortexkit/pi-magic-context`.",
         );
     }
 
-    const historianModel = await chooseModel(
-        prompts,
-        allModels,
-        "historian",
-        "Select a model for historian (background context compressor)",
-    );
+    const historianModel = await pickModel(prompts, allModels, "historian");
 
     // GitHub Copilot reasoning models need an explicit thinking_level because
     // the Copilot API injects "minimal" as a default and then rejects it (400).
@@ -308,33 +308,32 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         "Enable dreamer for overnight memory maintenance?",
         true,
     );
-    const dreamerModel = await chooseModel(
-        prompts,
-        allModels,
-        "dreamer",
-        "Select a model for dreamer (overnight memory maintenance)",
-    );
+    // Only ask for a dreamer model when the dreamer is actually enabled — asking
+    // after the user declined (the prior behavior) was the #144 "still wanted a
+    // model after I said no" complaint.
+    const dreamerModel = dreamerEnabled
+        ? await pickModel(prompts, allModels, "dreamer")
+        : undefined;
     const sidekickEnabled = await prompts.confirm("Enable sidekick for /ctx-aug?", false);
     const sidekickModel = sidekickEnabled
-        ? await chooseModel(
-              prompts,
-              allModels,
-              "sidekick",
-              "Select a model for sidekick (fast models preferred)",
-          )
+        ? await pickModel(prompts, allModels, "sidekick")
         : undefined;
     const embedding = await chooseEmbedding(prompts);
 
-    writeMagicContextConfig(configPath, {
-        historianModel,
-        historianThinkingLevel,
-        dreamerEnabled,
-        dreamerModel,
-        sidekickEnabled,
-        sidekickModel,
-        embedding,
-    });
-    prompts.log.success(`Config written to ${configPath}`);
+    if (dryRun) {
+        prompts.log.message(`[dry-run] would write Magic Context config to ${configPath}`);
+    } else {
+        writeMagicContextConfig(configPath, {
+            historianModel,
+            historianThinkingLevel,
+            dreamerEnabled,
+            dreamerModel,
+            sidekickEnabled,
+            sidekickModel,
+            embedding,
+        });
+        prompts.log.success(`Config written to ${configPath}`);
+    }
 
     const thinkingLevelSuffix = historianThinkingLevel
         ? ` (thinking: ${historianThinkingLevel})`
@@ -343,12 +342,14 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         `Pi settings: ${configurePi ? settingsPath : "skipped"}`,
         `Magic Context config: ${configPath}`,
         `Historian: ${historianModel}${thinkingLevelSuffix}`,
-        `Dreamer: ${dreamerModel} (${dreamerEnabled ? "enabled" : "disabled"})`,
+        `Dreamer: ${dreamerEnabled ? dreamerModel : "disabled"}`,
         sidekickEnabled ? `Sidekick: ${sidekickModel}` : "Sidekick: disabled",
         `Embedding: ${embedding.provider}${"model" in embedding ? ` (${embedding.model})` : ""}`,
     ].join("\n");
 
-    prompts.note(summary, "Configuration");
-    prompts.outro("Start a Pi session and try /ctx-aug");
+    prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
+    prompts.outro(
+        dryRun ? "Dry run complete — nothing was written." : "Start a Pi session and try /ctx-aug",
+    );
     return 0;
 }

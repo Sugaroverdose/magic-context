@@ -4,14 +4,14 @@ import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
+import { pickModel } from "../lib/model-picker";
 import {
-    buildModelSelection,
     getAvailableModels,
     getOpenCodeVersion,
     isOpenCodeInstalled,
 } from "../lib/opencode-helpers";
 import { detectConfigPaths } from "../lib/paths";
-import { confirm, intro, log, note, outro, selectOne, spinner } from "../lib/prompts";
+import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY = "@cortexkit/opencode-magic-context@latest";
@@ -212,8 +212,11 @@ function writeMagicContextConfig(
 }
 // ─── Main Setup Flow ──────────────────────────────────────
 
-export async function runSetup(): Promise<number> {
+export async function runSetup(dryRun = false): Promise<number> {
     intro("Magic Context — Setup");
+    if (dryRun) {
+        log.warn("Dry run — no files will be written and no config will be changed.");
+    }
 
     // ─── Step 1: Check OpenCode ─────────────────────────
     const s = spinner();
@@ -255,13 +258,23 @@ export async function runSetup(): Promise<number> {
         paths.tuiConfigFormat !== "none";
 
     // ─── Step 4: Check for DCP plugin conflict before mutating setup files ────────
-    await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+    if (!dryRun) {
+        await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+    }
 
     // ─── Step 5: Add plugin & disable compaction ────────
-    addPluginToOpenCodeConfig(paths.opencodeConfig, paths.opencodeConfigFormat);
-    log.success(`Plugin added to ${paths.opencodeConfig}`);
-    log.info("Disabled built-in compaction (auto=false, prune=false)");
-    log.message("Magic Context handles context management — built-in compaction would interfere");
+    if (dryRun) {
+        log.message(
+            `[dry-run] would add the plugin to ${paths.opencodeConfig} and disable compaction`,
+        );
+    } else {
+        addPluginToOpenCodeConfig(paths.opencodeConfig, paths.opencodeConfigFormat);
+        log.success(`Plugin added to ${paths.opencodeConfig}`);
+        log.info("Disabled built-in compaction (auto=false, prune=false)");
+        log.message(
+            "Magic Context handles context management — built-in compaction would interfere",
+        );
+    }
 
     if (hadExistingSetup) {
         const conflicts = detectConflicts(process.cwd());
@@ -271,79 +284,61 @@ export async function runSetup(): Promise<number> {
                 log.message(`  • ${reason}`);
             }
 
-            const shouldFixConflicts = await confirm(
-                "Apply automatic conflict fixes to your OpenCode and OMO config files?",
-                true,
-            );
+            if (dryRun) {
+                log.message("[dry-run] would offer to apply automatic conflict fixes");
+            } else {
+                const shouldFixConflicts = await confirm(
+                    "Apply automatic conflict fixes to your OpenCode and OMO config files?",
+                    true,
+                );
 
-            if (shouldFixConflicts) {
-                const actions = fixConflicts(process.cwd(), conflicts.conflicts);
-                if (actions.length > 0) {
-                    for (const action of actions) {
-                        log.success(action);
+                if (shouldFixConflicts) {
+                    const actions = fixConflicts(process.cwd(), conflicts.conflicts);
+                    if (actions.length > 0) {
+                        for (const action of actions) {
+                            log.success(action);
+                        }
+                    } else {
+                        log.info("No additional conflict changes were needed");
                     }
                 } else {
-                    log.info("No additional conflict changes were needed");
+                    log.warn(
+                        "Skipped automatic conflict fixes — Magic Context may remain disabled",
+                    );
                 }
-            } else {
-                log.warn("Skipped automatic conflict fixes — Magic Context may remain disabled");
             }
         }
     }
 
     // ─── Step 5: Historian model ────────────────────────
+    // No recommendation tree: pickModel shows the user's FULL model list in a
+    // type-ahead picker with role guidance. When no models were detected we keep
+    // the runtime built-in fallback chain (model stays null) rather than forcing
+    // a manual entry.
     let historianModel: string | null = null;
     if (allModels.length > 0) {
-        const historianOptions = buildModelSelection(allModels, "historian");
-        if (historianOptions.length > 0) {
-            historianModel = await selectOne(
-                "Select a model for historian (background context compressor)",
-                historianOptions,
-            );
-            log.success(`Historian: ${historianModel}`);
-        } else {
-            log.info("No suitable historian models found — using built-in fallback chain");
-        }
+        historianModel = await pickModel(promptIO, allModels, "historian");
+        log.success(`Historian: ${historianModel}`);
     } else {
         log.info("Skipping model selection — using built-in fallback chain");
     }
 
     // ─── Step 6: Dreamer ────────────────────────────────
-    log.message("The dreamer runs overnight to consolidate and maintain project memories.");
     const dreamerEnabled = await confirm("Enable dreamer?", true);
     let dreamerModel: string | null = null;
-
     if (dreamerEnabled && allModels.length > 0) {
-        const dreamerOptions = buildModelSelection(allModels, "dreamer");
-        if (dreamerOptions.length > 0) {
-            dreamerModel = await selectOne(
-                "Select a model for dreamer (runs in background, local LLMs ideal)",
-                dreamerOptions,
-            );
-            log.success(`Dreamer: ${dreamerModel}`);
-        } else {
-            log.info("No suitable dreamer models — using built-in fallback chain");
-        }
+        dreamerModel = await pickModel(promptIO, allModels, "dreamer");
+        log.success(`Dreamer: ${dreamerModel}`);
     } else if (dreamerEnabled) {
         log.info("Using built-in fallback chain for dreamer");
     }
 
     // ─── Step 7: Sidekick ───────────────────────────────
-    log.message("Sidekick augments prompts with project context via /ctx-aug command.");
     const sidekickEnabled = await confirm("Enable sidekick?", false);
     let sidekickModel: string | null = null;
-
     if (sidekickEnabled && allModels.length > 0) {
-        const sidekickOptions = buildModelSelection(allModels, "sidekick");
-        if (sidekickOptions.length > 0) {
-            sidekickModel = await selectOne(
-                "Select a model for sidekick (fast models preferred)",
-                sidekickOptions,
-            );
-            log.success(`Sidekick: ${sidekickModel}`);
-        } else {
-            log.info("No suitable sidekick models — using built-in fallback chain");
-        }
+        sidekickModel = await pickModel(promptIO, allModels, "sidekick");
+        log.success(`Sidekick: ${sidekickModel}`);
     } else if (sidekickEnabled) {
         log.info("Using built-in fallback chain for sidekick");
     }
@@ -363,17 +358,22 @@ export async function runSetup(): Promise<number> {
     }
 
     // Write magic-context config
-    writeMagicContextConfig(paths.magicContextConfig, {
-        historianModel,
-        dreamerEnabled,
-        dreamerModel,
-        sidekickEnabled,
-        sidekickModel,
-        claudeMax,
-    });
-    log.success(`Config written to ${paths.magicContextConfig}`);
-    addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
-    log.success("TUI sidebar plugin added to tui.json");
+    if (dryRun) {
+        log.message(`[dry-run] would write Magic Context config to ${paths.magicContextConfig}`);
+        log.message("[dry-run] would add the TUI sidebar plugin to tui.json");
+    } else {
+        writeMagicContextConfig(paths.magicContextConfig, {
+            historianModel,
+            dreamerEnabled,
+            dreamerModel,
+            sidekickEnabled,
+            sidekickModel,
+            claudeMax,
+        });
+        log.success(`Config written to ${paths.magicContextConfig}`);
+        addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
+        log.success("TUI sidebar plugin added to tui.json");
+    }
 
     // ─── Step 8: Oh-My-OpenCode compatibility ───────────
     // Intentional: this branch handles the FIRST-TIME-INSTALL case only.
@@ -392,7 +392,12 @@ export async function runSetup(): Promise<number> {
                 "  • anthropic-context-window-limit-recovery",
         );
 
-        const shouldDisable = await confirm("Disable these hooks in oh-my-opencode?", true);
+        const shouldDisable = dryRun
+            ? false
+            : await confirm("Disable these hooks in oh-my-opencode?", true);
+        if (dryRun) {
+            log.message("[dry-run] would offer to disable conflicting oh-my-opencode hooks");
+        }
         if (shouldDisable) {
             const actions = fixConflicts(process.cwd(), {
                 compactionAuto: false,
@@ -424,7 +429,12 @@ export async function runSetup(): Promise<number> {
             : "Sidekick: disabled",
     ].join("\n");
 
-    note(summary, "Configuration");
+    note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
+
+    if (dryRun) {
+        outro("Dry run complete — nothing was written.");
+        return 0;
+    }
 
     // Ask user to star the repo
     const shouldStar = await confirm("★ Star the repo on GitHub?", true);

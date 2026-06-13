@@ -17,7 +17,8 @@ import { runSetup as runOpenCodeSetup } from "./setup-opencode";
 import { runSetup as runPiSetup } from "./setup-pi";
 
 export async function runSetup(argv: string[]): Promise<number> {
-    intro("Magic Context setup");
+    const dryRun = argv.includes("--dry-run");
+    intro(dryRun ? "Magic Context setup (dry run)" : "Magic Context setup");
 
     const adapters = await resolveAdaptersForCommand(argv, {
         allowMulti: true,
@@ -39,25 +40,25 @@ export async function runSetup(argv: string[]): Promise<number> {
             continue;
         }
 
-        const code = await dispatchSetup(adapter);
+        const code = await dispatchSetup(adapter, dryRun);
         if (code !== 0) anyFailure = true;
-        printNextSteps(adapter);
+        if (!dryRun) printNextSteps(adapter);
     }
 
     if (anyFailure) {
         outro("Setup finished with warnings — see above.");
         return 1;
     }
-    outro("Done.");
+    outro(dryRun ? "Dry run done — no changes were made." : "Done.");
     return 0;
 }
 
-async function dispatchSetup(adapter: HarnessAdapter): Promise<number> {
+async function dispatchSetup(adapter: HarnessAdapter, dryRun: boolean): Promise<number> {
     switch (adapter.kind) {
         case "opencode":
-            return runOpenCodeSetup();
+            return runOpenCodeSetup(dryRun);
         case "pi":
-            return runPiSetup();
+            return runPiSetup({ dryRun });
     }
 }
 

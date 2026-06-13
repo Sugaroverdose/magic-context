@@ -10,6 +10,7 @@
  * raw-mode `select()` prompt still works under `curl | bash`.
  */
 import {
+    autocomplete as clackAutocomplete,
     cancel as clackCancel,
     confirm as clackConfirm,
     intro as clackIntro,
@@ -64,6 +65,17 @@ export interface PromptIO {
     ): Promise<string>;
     selectOne(message: string, options: SelectOption[]): Promise<string>;
     selectMany(message: string, options: SelectOption[], initial?: string[]): Promise<string[]>;
+    /**
+     * Scrollable list you can also narrow by typing (type-ahead filter). Used
+     * for long lists like the full model catalog: the user sees options AND can
+     * type a fragment (e.g. "sonnet") to filter. `placeholder` shows before any
+     * input. Returns the selected `value`.
+     */
+    selectAutocomplete(
+        message: string,
+        options: SelectOption[],
+        opts?: { placeholder?: string; maxItems?: number },
+    ): Promise<string>;
 }
 
 function handleCancel(value: unknown, cancelMessage = "Cancelled."): void {
@@ -187,6 +199,21 @@ export async function selectMany(
     return result as string[];
 }
 
+export async function selectAutocomplete(
+    message: string,
+    options: SelectOption[],
+    opts: { placeholder?: string; maxItems?: number } = {},
+): Promise<string> {
+    const result = await clackAutocomplete<string>({
+        message,
+        options: options.map(toClackOption) as ClackOptionsArray,
+        placeholder: opts.placeholder,
+        maxItems: opts.maxItems ?? 10,
+    });
+    handleCancel(result);
+    return result as string;
+}
+
 /** Default PromptIO implementation backed by @clack/prompts. */
 export const promptIO: PromptIO = {
     intro,
@@ -198,6 +225,7 @@ export const promptIO: PromptIO = {
     text,
     selectOne,
     selectMany,
+    selectAutocomplete,
 };
 
 export { isCancel };
