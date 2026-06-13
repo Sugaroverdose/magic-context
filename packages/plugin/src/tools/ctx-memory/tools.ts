@@ -493,9 +493,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 // its own resolved project. The dreamer keeps the cross-identity
                 // path (see the "merging across identities" test).
                 if (toolContext.agent !== DREAMER_AGENT) {
-                    const foreign = sourceMemories.find(
-                        (memory) => !memoryBelongsToProject(memory, projectPath),
-                    );
+                    const foreign = sourceMemories.find((memory) => !memoryVisibleToTool(memory));
                     if (foreign) {
                         return `Error: Memory with ID ${foreign.id} was not found.`;
                     }

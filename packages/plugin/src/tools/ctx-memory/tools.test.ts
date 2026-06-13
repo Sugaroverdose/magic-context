@@ -511,6 +511,77 @@ describe("createCtxMemoryTools", () => {
         expect(getMemoryById(db, own.id)?.status).toBe("archived");
     });
 
+    it("REFUSES a PRIMARY merge that pulls in a foreign memory in a NON-shared category", async () => {
+        // merge MUST gate on the same own/foreign-by-category visibility as
+        // update/archive: a primary agent cannot consolidate a foreign member's
+        // memory it can't even see in its rendered context.
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const own = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE",
+            content: "Own architecture detail A.",
+        });
+        const foreignHidden = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "ARCHITECTURE",
+            content: "Foreign architecture detail not shared with this project.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "merge",
+                ids: [own.id, foreignHidden.id],
+                content: "Merged architecture detail.",
+                category: "ARCHITECTURE",
+            },
+            toolContext(),
+        );
+
+        expect(result).toContain(`Memory with ID ${foreignHidden.id} was not found`);
+        expect(getMemoryById(db, own.id)?.status).toBe("active");
+        expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+    });
+
+    it("allows a PRIMARY merge of a foreign memory in a SHARED category", async () => {
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const own = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "CONSTRAINTS",
+            content: "Own constraint A.",
+        });
+        const foreignShared = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "CONSTRAINTS",
+            content: "Foreign constraint shared with this project.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "merge",
+                ids: [own.id, foreignShared.id],
+                content: "Merged shared constraint.",
+                category: "CONSTRAINTS",
+            },
+            toolContext(),
+        );
+
+        expect(result).not.toContain("was not found");
+        expect(getMemoryById(db, own.id)?.status).toBe("archived");
+        expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+    });
+
     describe("#given update action", () => {
         it("updates a foreign workspace memory with duplicate checks and mutations under the target identity", async () => {
             db.exec(`

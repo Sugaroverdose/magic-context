@@ -63,4 +63,48 @@ describe("migration v36 — session project ownership", () => {
             closeQuietly(db);
         }
     });
+
+    test("v36 seeds ownership for already-chunk-embedded sessions, skipping ambiguous ones", () => {
+        const db = new Database(":memory:");
+        try {
+            // A v35 DB whose chunk-embedding table predates the ownership map.
+            db.exec(`
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL);
+                INSERT INTO schema_migrations (version, description, applied_at) VALUES (35, 'pre-v36 fixture', 1);
+                CREATE TABLE compartment_chunk_embeddings (
+                    compartment_id INTEGER NOT NULL,
+                    session_id TEXT NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    project_path TEXT NOT NULL,
+                    window_index INTEGER NOT NULL,
+                    chunk_hash TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    vector BLOB NOT NULL
+                );
+                -- clean single-project session (two windows, same project): seed it
+                INSERT INTO compartment_chunk_embeddings VALUES (1,'sesA','opencode','git:alpha',0,'h1','m',x'00');
+                INSERT INTO compartment_chunk_embeddings VALUES (1,'sesA','opencode','git:alpha',1,'h2','m',x'00');
+                -- same session id under a DIFFERENT harness: independent ownership row
+                INSERT INTO compartment_chunk_embeddings VALUES (2,'sesA','pi','git:beta',0,'h3','m',x'00');
+                -- ambiguous session (pre-scope bug split across two projects): skip
+                INSERT INTO compartment_chunk_embeddings VALUES (3,'sesB','opencode','git:gamma',0,'h4','m',x'00');
+                INSERT INTO compartment_chunk_embeddings VALUES (3,'sesB','opencode','git:delta',0,'h5','m',x'00');
+            `);
+
+            runMigrations(db);
+
+            const rows = db
+                .prepare(
+                    "SELECT session_id, harness, project_path FROM session_projects ORDER BY session_id, harness",
+                )
+                .all();
+            // sesA/opencode→alpha and sesA/pi→beta seeded; sesB skipped (ambiguous).
+            expect(rows).toEqual([
+                { session_id: "sesA", harness: "opencode", project_path: "git:alpha" },
+                { session_id: "sesA", harness: "pi", project_path: "git:beta" },
+            ]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });

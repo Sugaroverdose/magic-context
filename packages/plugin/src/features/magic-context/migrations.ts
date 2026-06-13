@@ -1407,6 +1407,32 @@ const MIGRATIONS: Migration[] = [
                 CREATE INDEX IF NOT EXISTS idx_session_projects_project
                     ON session_projects(project_path);
             `);
+            // Seed ownership for sessions that were ALREADY chunk-embedded before
+            // this table existed, so their compartments stay visible to the
+            // project-scoped backfill/count JOINs (a fresh table would otherwise
+            // hide every pre-v36 embedded session until re-observed). The only
+            // trustworthy pre-existing source is compartment_chunk_embeddings
+            // itself, which already carries (session_id, harness, project_path).
+            // NOTE: compartments has no project_path column — do not read from it.
+            // Seed ONLY unambiguous sessions (a single distinct project_path);
+            // skip any session whose chunks are split across projects (the
+            // pre-scope bug) so the heal path, not a coin-flip, decides its owner.
+            // Guarded on the source table existing — it is created at v33, so any
+            // real upgrade has it, but a partial/older fixture might not.
+            const hasChunkTable = db
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='compartment_chunk_embeddings'",
+                )
+                .get();
+            if (hasChunkTable) {
+                db.exec(`
+                    INSERT OR IGNORE INTO session_projects (session_id, harness, project_path, updated_at)
+                    SELECT session_id, harness, MIN(project_path), 0
+                    FROM compartment_chunk_embeddings
+                    GROUP BY session_id, harness
+                    HAVING COUNT(DISTINCT project_path) = 1;
+                `);
+            }
         },
     },
 ];

@@ -52,6 +52,7 @@ import {
 	parseCacheTtl,
 	type Scheduler,
 } from "@magic-context/core/features/magic-context/scheduler";
+import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	adoptFallbackTagMessageId,
 	type ContextDatabase,
@@ -443,6 +444,7 @@ function isContextHandlerSessionActive(sessionId: string): boolean {
 function updateSessionProjectTracking(
 	sessionId: string,
 	projectIdentity: string,
+	db?: ContextDatabase,
 ): void {
 	const prev = lastSeenProjectIdentityBySession.get(sessionId);
 	if (prev && prev !== projectIdentity) {
@@ -450,6 +452,21 @@ function updateSessionProjectTracking(
 		prevSessions?.delete(sessionId);
 		if (prevSessions?.size === 0) sessionsByProject.delete(prev);
 		clearPiSystemPromptSession(sessionId);
+	}
+	// Persist the session→project ownership binding so the project-scoped
+	// compartment-chunk backfill (/ctx-embed-history) can attribute this
+	// session's compartments to the right project. ctx.cwd is the authoritative
+	// session directory in Pi (no SDK/launch-dir ambiguity), so every observation
+	// is host-safe. Guarded to the once-per-(session,identity) transition — only
+	// on first sight or an actual identity change — so steady-state passes carry
+	// no per-pass DB write. embedSessionCompartmentChunks also self-records, so
+	// this only widens coverage to passively-published sessions.
+	if (db && prev !== projectIdentity) {
+		try {
+			recordSessionProjectIdentity(db, sessionId, projectIdentity);
+		} catch {
+			// best-effort; backfill re-records on demand from the session command
+		}
 	}
 	trackSessionForProject(projectIdentity, sessionId);
 	lastSeenProjectIdentityBySession.set(sessionId, projectIdentity);
@@ -1373,7 +1390,7 @@ export function registerPiContextHandler(
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
 			const projectIdentity = resolveProjectIdentity(projectDirectory);
-			updateSessionProjectTracking(sessionId, projectIdentity);
+			updateSessionProjectTracking(sessionId, projectIdentity, options.db);
 			logTransformTiming(
 				sessionId,
 				"findSessionId",

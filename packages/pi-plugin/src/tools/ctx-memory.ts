@@ -472,10 +472,7 @@ export function createCtxMemoryTool(
 				// must not reach into ANOTHER project's memories — mirror
 				// update/archive ownership (parity with OpenCode).
 				if (!dreamerAllowed) {
-					const foreign = sourceMemories.find(
-						(memory) =>
-							!storedPathBelongsToIdentity(memory.projectPath, projectIdentity),
-					);
+					const foreign = sourceMemories.find((memory) => !memoryVisibleToTool(memory));
 					if (foreign) {
 						return err(`Error: Memory with ID ${foreign.id} was not found.`);
 					}
