@@ -85,6 +85,7 @@ import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/injec
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
 	createDefaultBoundarySnapshotForTests,
+	hasRunnableCompartmentWindow,
 	type ProtectedTailBoundarySnapshot,
 	recordHighPressureNoEligibleHead,
 	selectPerRunCap,
@@ -168,6 +169,11 @@ export interface PiHistorianDeps {
 	historianChunkTokens: number;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	/**
+	 * Optional live boundary resolver used only to recover a stale trigger snapshot.
+	 * It must recompute against the currently registered Pi raw-message provider.
+	 */
+	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	/** Current resolved context limit used to reject stale snapshots after model switches. */
 	currentContextLimit?: number;
 	/** Optional per-call timeout (default 120s). */
@@ -217,6 +223,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		fallbackModels,
 		historianChunkTokens,
 		boundarySnapshot: providedBoundarySnapshot,
+		refreshBoundarySnapshot,
 		currentContextLimit,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
 		twoPass,
@@ -298,7 +305,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					? priorCompartments[priorCompartments.length - 1].endMessage + 1
 					: 1;
 
-			const boundarySnapshot =
+			let boundarySnapshot =
 				providedBoundarySnapshot ??
 				(process.env.NODE_ENV === "test"
 					? createDefaultBoundarySnapshotForTests(sessionId)
@@ -310,7 +317,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				);
 				return;
 			}
-			const validation =
+			let validation =
 				boundarySnapshot.rawRangeFingerprint.length > 0
 					? validateBoundarySnapshot({
 							db,
@@ -319,6 +326,35 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 								currentContextLimit ?? boundarySnapshot.contextLimit,
 						})
 					: { ok: true as const };
+			// A boundary captured at trigger time can go stale before the detached
+			// historian validates it because new live-tail messages may arrive. Re-resolve
+			// once from the current Pi messages and adopt the result only when it still
+			// exposes an eligible head. The refreshed snapshot recomputes the protected
+			// tail from live messages, so the compacted head cannot include a message that
+			// now belongs to the protected tail.
+			if (
+				!validation.ok &&
+				validation.reason === "stale_snapshot" &&
+				refreshBoundarySnapshot
+			) {
+				try {
+					const refreshed = refreshBoundarySnapshot();
+					if (hasRunnableCompartmentWindow(refreshed)) {
+						sessionLog(
+							sessionId,
+							`historian: refreshed stale protected-tail snapshot at run time (was: ${validation.detail ?? "stale"}) — eligible head ${refreshed.offset}-${refreshed.eligibleEndOrdinal - 1}`,
+						);
+						boundarySnapshot = refreshed;
+						validation = { ok: true };
+					}
+				} catch (error) {
+					const desc = describeError(error);
+					sessionLog(
+						sessionId,
+						`historian: failed to refresh stale protected-tail snapshot at run time (${validation.detail ?? "stale"}): ${desc.brief}`,
+					);
+				}
+			}
 			if (!validation.ok) {
 				sessionLog(
 					sessionId,

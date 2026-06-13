@@ -2617,6 +2617,7 @@ function spawnPiHistorianRun(args: {
 	provider: { readMessages: () => ReturnType<typeof readPiSessionMessages> };
 	unregister: () => void;
 	boundarySnapshot: ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	currentContextLimit: number;
 }): void {
 	const {
@@ -2627,6 +2628,7 @@ function spawnPiHistorianRun(args: {
 		provider,
 		unregister,
 		boundarySnapshot,
+		refreshBoundarySnapshot,
 		currentContextLimit,
 	} = args;
 	const holderId = crypto.randomUUID();
@@ -2653,6 +2655,7 @@ function spawnPiHistorianRun(args: {
 				fallbackModels: historian.fallbackModels,
 				historianChunkTokens: historian.historianChunkTokens,
 				boundarySnapshot,
+				refreshBoundarySnapshot,
 				currentContextLimit,
 				historianTimeoutMs: historian.timeoutMs,
 				twoPass: historian.twoPass,
@@ -2908,17 +2911,19 @@ function maybeFireHistorian(args: {
 				emergencyTailScale,
 			}),
 		);
-	let boundarySnapshot = ensureRunnablePiBoundaryForTests(
-		resolvePiBoundarySnapshot(),
-	);
-	if (
-		!hasRunnableCompartmentWindow(boundarySnapshot) &&
-		usage.percentage >= 80
-	) {
-		boundarySnapshot = ensureRunnablePiBoundaryForTests(
-			resolvePiBoundarySnapshot(usage.percentage >= 95 ? 0.25 : 0.5),
-		);
-	}
+	const resolveRunnablePiBoundarySnapshot =
+		(): ProtectedTailBoundarySnapshot => {
+			let snapshot = ensureRunnablePiBoundaryForTests(
+				resolvePiBoundarySnapshot(),
+			);
+			if (!hasRunnableCompartmentWindow(snapshot) && usage.percentage >= 80) {
+				snapshot = ensureRunnablePiBoundaryForTests(
+					resolvePiBoundarySnapshot(usage.percentage >= 95 ? 0.25 : 0.5),
+				);
+			}
+			return snapshot;
+		};
+	const boundarySnapshot = resolveRunnablePiBoundarySnapshot();
 
 	let triggered = false;
 	try {
@@ -2957,6 +2962,7 @@ function maybeFireHistorian(args: {
 					provider,
 					unregister,
 					boundarySnapshot,
+					refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 					currentContextLimit: boundaryContextLimit,
 				});
 				return;
@@ -3007,6 +3013,7 @@ function maybeFireHistorian(args: {
 				resolvedBoundarySnapshot: boundarySnapshot,
 				triggerBoundarySnapshot: trigger.boundarySnapshot,
 			}),
+			refreshBoundarySnapshot: resolveRunnablePiBoundarySnapshot,
 			currentContextLimit: boundaryContextLimit,
 		});
 	} catch (err) {

@@ -137,6 +137,7 @@ async function runHistorianWith(args: {
 	appendCompaction?: Parameters<typeof runPiHistorian>[0]["appendCompaction"];
 	readBranchEntries?: () => unknown[];
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
+	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	providerMessages?: ReturnType<typeof rawMessages>;
 	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
 }) {
@@ -161,6 +162,7 @@ async function runHistorianWith(args: {
 		appendCompaction: args.appendCompaction,
 		readBranchEntries: args.readBranchEntries,
 		boundarySnapshot: args.boundarySnapshot,
+		refreshBoundarySnapshot: args.refreshBoundarySnapshot,
 		compartmentLeaseHolderId: holderId,
 	});
 	return { db, runner };
@@ -291,6 +293,67 @@ describe("runPiHistorian", () => {
 			expect(
 				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
 			).toBe(0);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("refreshes a stale protected-tail snapshot and proceeds when the current boundary is runnable", async () => {
+		const staleBoundary = makeBoundarySnapshot({
+			rawLastMessageIdAtTrigger: "old-m12",
+			rawRangeFingerprint: "stale-fingerprint",
+		});
+		const refreshedBoundary = makeBoundarySnapshot({
+			protectedTailStart: 3,
+			protectedTailStartMessageId: "m3",
+			eligibleEndOrdinal: 3,
+			eligibleEndMessageId: "m2",
+		});
+		const refreshBoundarySnapshot = mock(() => refreshedBoundary);
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: staleBoundary,
+			refreshBoundarySnapshot,
+		});
+		try {
+			expect(refreshBoundarySnapshot).toHaveBeenCalledTimes(1);
+			expect(runner.run).toHaveBeenCalledTimes(1);
+			expect(getCompartments(db, "ses-historian")).toEqual([
+				expect.objectContaining({
+					sequence: 0,
+					startMessage: 1,
+					endMessage: 2,
+					title: "Initial Pi slice",
+				}),
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps the stale-snapshot no-op fallback when the refreshed boundary is not runnable", async () => {
+		const staleBoundary = makeBoundarySnapshot({
+			rawLastMessageIdAtTrigger: "old-m12",
+			rawRangeFingerprint: "stale-fingerprint",
+		});
+		const refreshBoundarySnapshot = mock(() =>
+			makeBoundarySnapshot({
+				protectedTailStart: 1,
+				protectedTailStartMessageId: "m1",
+				eligibleEndOrdinal: 1,
+				eligibleEndMessageId: null,
+				trueRawEligibleTokens: 0,
+			}),
+		);
+		const { db, runner } = await runHistorianWith({
+			outputs: [successXml()],
+			boundarySnapshot: staleBoundary,
+			refreshBoundarySnapshot,
+		});
+		try {
+			expect(refreshBoundarySnapshot).toHaveBeenCalledTimes(1);
+			expect(runner.run).not.toHaveBeenCalled();
+			expect(getCompartments(db, "ses-historian")).toEqual([]);
 		} finally {
 			closeQuietly(db);
 		}
