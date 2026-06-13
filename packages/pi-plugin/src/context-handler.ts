@@ -40,6 +40,7 @@ import {
 	releaseCompartmentLease,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
+import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	clearSessionTracking,
@@ -148,6 +149,7 @@ import {
 import {
 	clearM0M1PiCache,
 	injectM0M1Pi,
+	mustMaterializePi,
 	type PiM0M1InjectionResult as PiInjectionResult,
 } from "./inject-compartments-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
@@ -3251,6 +3253,60 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const deferredMaterializeEligible =
 		canConsumeDeferredLate &&
 		deferredMaterializationSessions.has(args.sessionId);
+	// Known-bust fold: if Pi m[0] is going to HARD-fold this pass (model /
+	// system-hash / ttl-idle / project-memory epoch / mutation id / upgrade —
+	// whatever mustMaterializePi decides), the Anthropic prefix is being
+	// re-cached regardless. Drain queued tool-drops + run heuristics into THAT
+	// bust instead of causing a second bust on a later execute pass. Advisory
+	// only: early-true widens the gates below; early-false changes nothing —
+	// injectM0M1Pi keeps its own independent late mustMaterializePi recheck, so a
+	// cross-process epoch/mutation bump arriving after this read still folds via
+	// the late path. Keep this as a separate boolean; do not fold it into the
+	// deferred/explicit materialization signals, which drive their own drain
+	// bookkeeping.
+	const piHardSignals = args.injection
+		? (() => {
+				// HARD-bust signals (parity with OpenCode). systemHash + TTL idle
+				// derive from freshly-read session_meta; modelKey from the volatile live
+				// map.
+				const hardMeta = getOrCreateSessionMeta(args.db, args.sessionId);
+				let piTtlMs = 5 * 60 * 1000;
+				try {
+					piTtlMs = parseCacheTtl(hardMeta.cacheTtl);
+				} catch {
+					// invalid cache_ttl → 5m default (parity with execute-status)
+				}
+				return {
+					systemHash:
+						typeof hardMeta.systemPromptHash === "string"
+							? hardMeta.systemPromptHash
+							: "",
+					modelKey: liveModelBySession.get(args.sessionId) ?? "",
+					cacheExpired:
+						hardMeta.lastResponseTime > 0 &&
+						Date.now() - hardMeta.lastResponseTime >= piTtlMs,
+					lastResponseTime: hardMeta.lastResponseTime,
+				};
+			})()
+		: undefined;
+	const m0HardFoldThisPass =
+		args.injection && piHardSignals
+			? mustMaterializePi(
+					{
+						sessionId: args.sessionId,
+						projectIdentity: args.projectIdentity,
+						projectDirectory: args.projectDirectory,
+						memoryEnabled: args.injection.memoryEnabled,
+						injectionBudgetTokens: args.injection.injectionBudgetTokens,
+						historyBudgetTokens: args.injection.historyBudgetTokens,
+						keyFilesEnabled: args.injection.keyFilesEnabled,
+						keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
+						hardSignals: piHardSignals,
+					},
+					args.db,
+					getCompartments(args.db, args.sessionId),
+				).value
+			: false;
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
@@ -3259,6 +3315,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		(args.forceMaterialization === true ||
 			hasPendingMaterialization(args.sessionId) ||
 			deferredMaterializeEligible ||
+			// A known m[0] hard fold busts the prefix regardless, so fold this
+			// pass's reductions into that unavoidable bust instead of waiting for a
+			// later execute pass.
+			m0HardFoldThisPass ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
@@ -3357,7 +3417,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const baseShouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
-		hasPendingMaterializeSignal;
+		hasPendingMaterializeSignal ||
+		m0HardFoldThisPass;
 	// `canConsumeDeferredLate` is computed ONCE, earlier (above shouldRunHeuristics),
 	// as a mid-turn-aware gate independent of shouldRunHeuristics — mirroring
 	// OpenCode's canConsumeDeferredOnThisPass. It must NOT be re-derived from
@@ -3378,7 +3439,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				? "deferred_publication"
 				: args.forceMaterialization
 					? "force_materialization"
-					: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+					: m0HardFoldThisPass && args.schedulerDecision !== "execute"
+						? `m0_hard_fold (drain folded into known m[0] bust, scheduler=${args.schedulerDecision})`
+						: `scheduler_execute (scheduler=${args.schedulerDecision})`;
 		sessionLog(
 			args.sessionId,
 			`pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
@@ -3590,7 +3653,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (shouldRunHeuristics) {
 		const reason = args.forceMaterialization
 			? "force_materialization"
-			: `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+			: m0HardFoldThisPass && args.schedulerDecision !== "execute"
+				? `m0_hard_fold (drain folded into known m[0] bust, scheduler=${args.schedulerDecision})`
+				: `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
 		sessionLog(
 			args.sessionId,
 			`heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=n/a`,
@@ -3797,27 +3862,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// now keeps cached m[0] and soft-refreshes m[1] with the new compartment;
 			// HARD triggers (model/system/ttl/epoch/docs/upgrade/mutation) still
 			// re-materialize inside mustMaterializePi when genuinely needed.
-			// HARD-bust signals (parity with OpenCode). systemHash + TTL idle derive
-			// from the freshly-read session_meta; modelKey from the volatile live
-			// map.
-			const hardMeta = getOrCreateSessionMeta(args.db, args.sessionId);
-			let piTtlMs = 5 * 60 * 1000;
-			try {
-				piTtlMs = parseCacheTtl(hardMeta.cacheTtl);
-			} catch {
-				// invalid cache_ttl → 5m default (parity with execute-status)
-			}
-			const piHardSignals = {
-				systemHash:
-					typeof hardMeta.systemPromptHash === "string"
-						? hardMeta.systemPromptHash
-						: "",
-				modelKey: liveModelBySession.get(args.sessionId) ?? "",
-				cacheExpired:
-					hardMeta.lastResponseTime > 0 &&
-					Date.now() - hardMeta.lastResponseTime >= piTtlMs,
-				lastResponseTime: hardMeta.lastResponseTime,
-			};
 			injectionResult = injectM0M1Pi(
 				{
 					sessionId: args.sessionId,

@@ -1754,6 +1754,127 @@ describe("registerPiContextHandler", () => {
 			closeQuietly(db);
 		}
 	});
+	describe("known m[0] hard-fold folds the execute pass in", () => {
+		const BASE_MODEL = "anthropic/opus";
+		const HARD_MODEL = "anthropic/sonnet";
+		const BASE_SYSTEM_HASH = "sys-v1";
+		const entryIds = ["entry-user", "entry-call", "entry-result"];
+
+		const buildMessages = () =>
+			[
+				userMessage("start", 1),
+				assistantToolCall("call-1", "bash", {}, 2),
+				{
+					...toolResultMessage("call-1", "x".repeat(4000), 3),
+					toolName: "bash",
+				},
+			] as never[];
+
+		function contextFor(sessionId: string, messages: never[]) {
+			return {
+				...fakeContext(sessionId, process.cwd(), entryIds, messages),
+				getContextUsage: () => ({
+					tokens: 4_000,
+					percent: 4,
+					contextWindow: 100_000,
+				}),
+			} as never;
+		}
+
+		async function primeBaseline(
+			db: ReturnType<typeof createTestDb>,
+			sessionId: string,
+		) {
+			updateSessionMeta(db, sessionId, {
+				piStableIdScheme: 1,
+				systemPromptHash: BASE_SYSTEM_HASH,
+			});
+			recordPiLiveModel(sessionId, BASE_MODEL);
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				heuristics: {},
+				injection: { injectionBudgetTokens: 10_000 },
+				scheduler: { executeThresholdPercentage: 80 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+
+			const firstMessages = buildMessages();
+			await handler(
+				{ messages: firstMessages },
+				contextFor(sessionId, firstMessages),
+			);
+
+			const toolTag = getTagsBySession(db, sessionId).find(
+				(tag) => tag.type === "tool",
+			);
+			if (!toolTag) throw new Error("expected Pi tool tag after baseline pass");
+			queuePendingOp(db, sessionId, toolTag.tagNumber, "drop", 1);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 40,
+				lastInputTokens: 4_000,
+			});
+
+			return { handler, toolTagNumber: toolTag.tagNumber };
+		}
+
+		it("drains queued pending ops on a DEFER scheduler pass when m[0] HARD-folds", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-hardfold-drain";
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+				recordPiLiveModel(sessionId, HARD_MODEL);
+
+				const secondMessages = buildMessages();
+				await handler(
+					{ messages: secondMessages },
+					contextFor(sessionId, secondMessages),
+				);
+
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("dropped");
+				expect(getPendingOps(db, sessionId)).toHaveLength(0);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+
+		it("leaves queued drops untouched on a plain DEFER pass with unchanged markers", async () => {
+			const db = createTestDb();
+			const sessionId = "ses-pi-hardfold-nodrain";
+			try {
+				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
+
+				const secondMessages = buildMessages();
+				await handler(
+					{ messages: secondMessages },
+					contextFor(sessionId, secondMessages),
+				);
+
+				expect(
+					getTagsBySession(db, sessionId).find(
+						(tag) => tag.tagNumber === toolTagNumber,
+					)?.status,
+				).toBe("active");
+				expect(getPendingOps(db, sessionId)).toHaveLength(1);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	});
+
 	describe("Pi deferred compaction marker drain", () => {
 		function seedCompartment(
 			db: ReturnType<typeof createTestDb>,
