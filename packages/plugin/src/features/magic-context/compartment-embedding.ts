@@ -10,8 +10,8 @@ import {
 } from "./compartment-chunk-embedding";
 import {
     embedBatchForProject,
+    getProjectChunkEmbeddingModelId,
     getProjectEmbeddingMaxInputTokens,
-    getProjectEmbeddingSnapshot,
 } from "./project-embedding-registry";
 
 /**
@@ -79,11 +79,16 @@ export async function embedAndStoreCompartmentChunks(
             );
             if (windows.length === 0) continue;
 
-            const currentModelId = getProjectEmbeddingSnapshot(projectPath)?.modelId;
+            const currentModelId = getProjectChunkEmbeddingModelId(projectPath);
             if (
-                currentModelId &&
                 currentModelId !== "off" &&
-                chunkEmbeddingWindowsAreCurrent(db, compartment.id, currentModelId, windows)
+                chunkEmbeddingWindowsAreCurrent(
+                    db,
+                    compartment.id,
+                    currentModelId,
+                    windows,
+                    projectPath,
+                )
             ) {
                 continue;
             }
@@ -93,7 +98,15 @@ export async function embedAndStoreCompartmentChunks(
                 windows.map((window) => window.text),
             );
             if (!result) continue;
-            if (chunkEmbeddingWindowsAreCurrent(db, compartment.id, result.modelId, windows)) {
+            if (
+                chunkEmbeddingWindowsAreCurrent(
+                    db,
+                    compartment.id,
+                    currentModelId,
+                    windows,
+                    projectPath,
+                )
+            ) {
                 continue;
             }
 
@@ -106,7 +119,7 @@ export async function embedAndStoreCompartmentChunks(
                     sessionId,
                     projectPath,
                     window,
-                    modelId: result.modelId,
+                    modelId: currentModelId,
                     vector,
                 });
             }

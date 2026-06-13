@@ -29,6 +29,7 @@ const SESSION_SCOPED_TABLES = [
     "recomp_compartments",
     "recomp_facts",
     "message_history_index",
+    "session_projects",
     "notes",
 ] as const;
 

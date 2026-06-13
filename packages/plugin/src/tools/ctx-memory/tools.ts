@@ -333,7 +333,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
                 const isOwn = targetIdentityForStoredPath(memory.projectPath) === projectPath;
                 if (isOwn) return true;
-                return toolShareCategories === null || toolShareCategories.includes(memory.category);
+                return (
+                    toolShareCategories === null || toolShareCategories.includes(memory.category)
+                );
             };
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             if (

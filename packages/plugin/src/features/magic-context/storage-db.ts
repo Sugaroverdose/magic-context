@@ -36,7 +36,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 35;
+export const LATEST_SUPPORTED_VERSION = 36;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -330,6 +330,16 @@ export function initializeDatabase(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
     CREATE INDEX IF NOT EXISTS idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
+
+    CREATE TABLE IF NOT EXISTS session_projects (
+      session_id TEXT NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      project_path TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(session_id, harness)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_projects_project
+      ON session_projects(project_path);
 
     CREATE TABLE IF NOT EXISTS compartment_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -985,6 +995,15 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         project_user_profile_version INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS session_projects (
+        session_id TEXT NOT NULL,
+        harness TEXT NOT NULL DEFAULT 'opencode',
+        project_path TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(session_id, harness)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_projects_project
+        ON session_projects(project_path);
       CREATE TABLE IF NOT EXISTS m0_mutation_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,

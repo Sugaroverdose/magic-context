@@ -86,6 +86,7 @@ export interface SaveCompartmentChunkEmbeddingInput {
 
 const loadFtsRowsStatements = new WeakMap<Database, PreparedStatement>();
 const existingHashStatements = new WeakMap<Database, PreparedStatement>();
+const existingHashByProjectStatements = new WeakMap<Database, PreparedStatement>();
 const deleteByCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertEmbeddingStatements = new WeakMap<Database, PreparedStatement>();
 const distinctModelStatements = new WeakMap<Database, PreparedStatement>();
@@ -112,16 +113,19 @@ function getLoadFtsRowsStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
-function getExistingHashStatement(db: Database): PreparedStatement {
-    let stmt = existingHashStatements.get(db);
+function getExistingHashStatement(db: Database, scopedToProject: boolean): PreparedStatement {
+    const map = scopedToProject ? existingHashByProjectStatements : existingHashStatements;
+    let stmt = map.get(db);
     if (!stmt) {
         stmt = db.prepare(
             `SELECT window_index AS windowIndex, chunk_hash AS chunkHash
              FROM compartment_chunk_embeddings
-             WHERE compartment_id = ? AND model_id = ?
+             WHERE compartment_id = ?
+               AND model_id = ?
+               ${scopedToProject ? "AND project_path = ?" : ""}
              ORDER BY window_index ASC`,
         );
-        existingHashStatements.set(db, stmt);
+        map.set(db, stmt);
     }
     return stmt;
 }
@@ -221,24 +225,18 @@ function getBackfillCandidateStatement(db: Database): PreparedStatement {
                     c.end_message AS endMessage,
                     c.title AS title
              FROM compartments c
-             WHERE NOT EXISTS (
-                 SELECT 1
-                 FROM compartment_chunk_embeddings current
-                 WHERE current.compartment_id = c.id
-                   AND current.model_id = ?
-             )
-               AND (
-                 EXISTS (
-                     SELECT 1
-                     FROM compartment_chunk_embeddings scoped
-                     WHERE scoped.session_id = c.session_id
-                       AND scoped.project_path = ?
-                 )
-                 OR NOT EXISTS (
-                     SELECT 1
-                     FROM compartment_chunk_embeddings any_scope
-                     WHERE any_scope.session_id = c.session_id
-                 )
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
+             WHERE c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM compartment_chunk_embeddings current
+                   WHERE current.compartment_id = c.id
+                     AND current.project_path = ?
+                     AND current.model_id = ?
                )
              ORDER BY c.created_at DESC, c.id DESC
              LIMIT ?`,
@@ -476,8 +474,14 @@ export function getExistingChunkHashes(
     db: Database,
     compartmentId: number,
     modelId: string,
+    projectPath?: string,
 ): Map<number, string> {
-    const rows = getExistingHashStatement(db).all(compartmentId, modelId) as ExistingChunkHashRow[];
+    const scoped = typeof projectPath === "string" && projectPath.length > 0;
+    const rows = (
+        scoped
+            ? getExistingHashStatement(db, true).all(compartmentId, modelId, projectPath)
+            : getExistingHashStatement(db, false).all(compartmentId, modelId)
+    ) as ExistingChunkHashRow[];
     return new Map(
         rows
             .filter(
@@ -492,8 +496,9 @@ export function chunkEmbeddingWindowsAreCurrent(
     compartmentId: number,
     modelId: string,
     windows: readonly CompartmentChunkWindow[],
+    projectPath?: string,
 ): boolean {
-    const existing = getExistingChunkHashes(db, compartmentId, modelId);
+    const existing = getExistingChunkHashes(db, compartmentId, modelId, projectPath);
     if (existing.size !== windows.length) return false;
     return windows.every((window) => existing.get(window.windowIndex) === window.chunkHash);
 }
@@ -598,8 +603,9 @@ export function loadUnembeddedCompartmentChunkCandidates(
     limit: number,
 ): CompartmentChunkBackfillCandidate[] {
     const rows = getBackfillCandidateStatement(db).all(
-        modelId,
         projectPath,
+        projectPath,
+        modelId,
         Math.max(1, limit),
     ) as unknown[];
     return mapBackfillCandidateRows(rows);
@@ -641,6 +647,7 @@ const sessionBackfillCandidateStatements = new WeakMap<Database, PreparedStateme
  *  the oldest-first query would re-select the same stuck prefix forever. */
 export function loadUnembeddedSessionChunkCandidates(
     db: Database,
+    projectPath: string,
     sessionId: string,
     modelId: string,
     limit: number,
@@ -657,6 +664,10 @@ export function loadUnembeddedSessionChunkCandidates(
                     c.end_message AS endMessage,
                     c.title AS title
              FROM compartments c
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
              WHERE c.session_id = ?
                AND c.start_message IS NOT NULL
                AND c.end_message IS NOT NULL
@@ -665,12 +676,20 @@ export function loadUnembeddedSessionChunkCandidates(
                    SELECT 1
                    FROM compartment_chunk_embeddings current
                    WHERE current.compartment_id = c.id
+                     AND current.project_path = ?
                      AND current.model_id = ?
                )
              ORDER BY c.start_message ASC, c.id ASC
              LIMIT ?`,
         );
-        const rows = stmt.all(sessionId, ...excludeIds, modelId, Math.max(1, limit)) as unknown[];
+        const rows = stmt.all(
+            projectPath,
+            sessionId,
+            ...excludeIds,
+            projectPath,
+            modelId,
+            Math.max(1, limit),
+        ) as unknown[];
         return mapBackfillCandidateRows(rows);
     }
     let stmt = sessionBackfillCandidateStatements.get(db);
@@ -682,6 +701,10 @@ export function loadUnembeddedSessionChunkCandidates(
                     c.end_message AS endMessage,
                     c.title AS title
              FROM compartments c
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
              WHERE c.session_id = ?
                AND c.start_message IS NOT NULL
                AND c.end_message IS NOT NULL
@@ -689,6 +712,7 @@ export function loadUnembeddedSessionChunkCandidates(
                    SELECT 1
                    FROM compartment_chunk_embeddings current
                    WHERE current.compartment_id = c.id
+                     AND current.project_path = ?
                      AND current.model_id = ?
                )
              ORDER BY c.start_message ASC, c.id ASC
@@ -696,7 +720,13 @@ export function loadUnembeddedSessionChunkCandidates(
         );
         sessionBackfillCandidateStatements.set(db, stmt);
     }
-    const rows = stmt.all(sessionId, modelId, Math.max(1, limit)) as unknown[];
+    const rows = stmt.all(
+        projectPath,
+        sessionId,
+        projectPath,
+        modelId,
+        Math.max(1, limit),
+    ) as unknown[];
     return mapBackfillCandidateRows(rows);
 }
 
@@ -704,6 +734,7 @@ export function loadUnembeddedSessionChunkCandidates(
  *  `modelId` — drives the `/ctx-embed-history` progress total. */
 export function countUnembeddedSessionCompartments(
     db: Database,
+    projectPath: string,
     sessionId: string,
     modelId: string,
 ): number {
@@ -711,6 +742,10 @@ export function countUnembeddedSessionCompartments(
         .prepare(
             `SELECT COUNT(*) AS n
              FROM compartments c
+             JOIN session_projects sp
+               ON sp.session_id = c.session_id
+              AND sp.harness = c.harness
+              AND sp.project_path = ?
              WHERE c.session_id = ?
                AND c.start_message IS NOT NULL
                AND c.end_message IS NOT NULL
@@ -718,9 +753,10 @@ export function countUnembeddedSessionCompartments(
                    SELECT 1
                    FROM compartment_chunk_embeddings current
                    WHERE current.compartment_id = c.id
+                     AND current.project_path = ?
                      AND current.model_id = ?
                )`,
         )
-        .get(sessionId, modelId) as { n?: number } | undefined;
+        .get(projectPath, sessionId, projectPath, modelId) as { n?: number } | undefined;
     return typeof row?.n === "number" ? row.n : 0;
 }

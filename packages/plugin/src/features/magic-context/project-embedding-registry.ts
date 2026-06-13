@@ -39,6 +39,10 @@ import {
     getDistinctStoredModelIds,
     saveEmbedding,
 } from "./memory/storage-memory-embeddings";
+import {
+    recordSessionProjectIdentity,
+    repairMisScopedCompartmentChunkEmbeddingsForProject,
+} from "./session-project-storage";
 
 const OFF_PROVIDER_IDENTITY = "embedding-provider:off";
 const SWEEP_MAX_WALL_CLOCK_MS = 10 * 60 * 1000;
@@ -77,6 +81,7 @@ export interface ProjectEmbeddingRegistrationSnapshot {
     enabled: boolean;
     gitCommitEnabled: boolean;
     modelId: string;
+    chunkModelId: string;
 }
 
 interface ProjectEmbeddingRegistration {
@@ -89,6 +94,7 @@ interface ProjectEmbeddingRegistration {
     generation: number;
     features: EmbeddingFeatures;
     modelId: string;
+    chunkModelId: string;
     observationMode: boolean;
 }
 
@@ -194,6 +200,24 @@ function getRuntimeFingerprint(config: EmbeddingConfig): string {
     return `${getEmbeddingProviderIdentity(config)}:${sha256Prefix(stableStringify(config))}`;
 }
 
+function getChunkEmbeddingModelId(config: EmbeddingConfig, providerIdentity: string): string {
+    if (config.provider === "off") {
+        return OFF_PROVIDER_IDENTITY;
+    }
+    // Chunk vectors depend on the provider vector space AND the exact windowing
+    // contract used to derive chunk text. Memory/commit vectors intentionally use
+    // only providerIdentity so a chunk-window change does not wipe unrelated stores.
+    const chunkIdentity = {
+        providerIdentity,
+        chunkerVersion: 1,
+        maxInputTokens: normalizeCompartmentChunkMaxInputTokens(
+            "max_input_tokens" in config ? config.max_input_tokens : undefined,
+        ),
+        truncate: config.provider === "openai-compatible" ? (config.truncate ?? "") : "",
+    };
+    return `${providerIdentity}:chunk:${sha256Prefix(stableStringify(chunkIdentity))}`;
+}
+
 function sameFeatures(a: EmbeddingFeatures, b: EmbeddingFeatures): boolean {
     return a.memoryEnabled === b.memoryEnabled && a.gitCommitEnabled === b.gitCommitEnabled;
 }
@@ -216,6 +240,8 @@ function snapshotFor(
         enabled,
         gitCommitEnabled,
         modelId: registration.observationMode || !providerIsOn ? "off" : registration.modelId,
+        chunkModelId:
+            registration.observationMode || !providerIsOn ? "off" : registration.chunkModelId,
     };
 }
 
@@ -240,6 +266,7 @@ function maybeWipeStaleEmbeddings(
     db: Database,
     projectIdentity: string,
     currentProviderIdentity: string,
+    currentChunkIdentity: string,
     features: EmbeddingFeatures,
 ): boolean {
     if (currentProviderIdentity === OFF_PROVIDER_IDENTITY) {
@@ -266,8 +293,9 @@ function maybeWipeStaleEmbeddings(
         }
 
         if (features.memoryEnabled) {
+            repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
             const chunkIds = getDistinctChunkEmbeddingModelIds(db, projectIdentity);
-            if (anyStoredModelIdIsStale(chunkIds, currentProviderIdentity)) {
+            if (anyStoredModelIdIsStale(chunkIds, currentChunkIdentity)) {
                 clearChunkEmbeddingsForProject(db, projectIdentity);
                 wiped = true;
             }
@@ -287,17 +315,25 @@ export function registerProjectEmbeddingAndMaybeWipe(
     const resolvedConfig = resolveEmbeddingConfig(config);
     const providerIdentity = getEmbeddingProviderIdentity(resolvedConfig);
     const runtimeFingerprint = getRuntimeFingerprint(resolvedConfig);
+    const chunkModelId = getChunkEmbeddingModelId(resolvedConfig, providerIdentity);
     const prior = projectRegistrations.get(projectIdentity);
     const canReuseProvider =
         prior !== undefined &&
         !prior.observationMode &&
         prior.runtimeFingerprint === runtimeFingerprint &&
         prior.providerIdentity === providerIdentity;
-    const wiped = maybeWipeStaleEmbeddings(db, projectIdentity, providerIdentity, features);
+    const wiped = maybeWipeStaleEmbeddings(
+        db,
+        projectIdentity,
+        providerIdentity,
+        chunkModelId,
+        features,
+    );
     const generationChanged =
         prior === undefined ||
         prior.observationMode ||
         prior.runtimeFingerprint !== runtimeFingerprint ||
+        prior.chunkModelId !== chunkModelId ||
         !sameFeatures(prior.features, features) ||
         wiped;
     const generation = generationChanged ? ++globalRegistrationGeneration : prior.generation;
@@ -311,6 +347,7 @@ export function registerProjectEmbeddingAndMaybeWipe(
         generation,
         features: { ...features },
         modelId: providerIdentity === OFF_PROVIDER_IDENTITY ? "off" : providerIdentity,
+        chunkModelId: providerIdentity === OFF_PROVIDER_IDENTITY ? "off" : chunkModelId,
         observationMode: false,
     };
 
@@ -347,6 +384,7 @@ export function registerProjectInObservationMode(
         generation,
         features: { memoryEnabled: false, gitCommitEnabled: false },
         modelId: "off",
+        chunkModelId: "off",
         observationMode: true,
     };
 
@@ -369,6 +407,11 @@ export function getProjectEmbeddingSnapshot(
 ): ProjectEmbeddingRegistrationSnapshot | null {
     const registration = projectRegistrations.get(projectIdentity);
     return registration ? snapshotFor(registration) : null;
+}
+
+export function getProjectChunkEmbeddingModelId(projectIdentity: string): string {
+    const registration = projectRegistrations.get(projectIdentity);
+    return registration && !registration.observationMode ? registration.chunkModelId : "off";
 }
 
 export function getProjectEmbeddingMaxInputTokens(projectIdentity: string): number {
@@ -584,19 +627,20 @@ async function embedCompartmentChunkBatch(
     batchSize: number,
 ): Promise<number> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled || snapshot.modelId === "off") return 0;
+    if (!snapshot?.enabled || snapshot.chunkModelId === "off") return 0;
 
+    repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
     const candidates = loadUnembeddedCompartmentChunkCandidates(
         db,
         projectIdentity,
-        snapshot.modelId,
+        snapshot.chunkModelId,
         batchSize,
     );
     if (candidates.length === 0) return 0;
     const { embedded } = await embedCandidateChunkBatch(
         db,
         projectIdentity,
-        snapshot.modelId,
+        snapshot.chunkModelId,
         candidates,
     );
     return embedded;
@@ -652,7 +696,7 @@ async function embedCandidateChunkBatch(
         );
         if (
             windows.length === 0 ||
-            chunkEmbeddingWindowsAreCurrent(db, candidate.id, modelId, windows)
+            chunkEmbeddingWindowsAreCurrent(db, candidate.id, modelId, windows, projectIdentity)
         ) {
             noWork.push(candidate.id);
             continue;
@@ -702,7 +746,7 @@ async function embedCandidateChunkBatch(
                         sessionId: item.candidate.sessionId,
                         projectPath: projectIdentity,
                         window,
-                        modelId: result.modelId,
+                        modelId,
                         vector: vectors[index] as Float32Array,
                     }),
                 );
@@ -798,10 +842,19 @@ export async function embedSessionCompartmentChunks(
     },
 ): Promise<SessionChunkBackfillOutcome> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled || snapshot.modelId === "off") {
+    if (!snapshot?.enabled || snapshot.chunkModelId === "off") {
         return { status: "disabled", embedded: 0, total: 0 };
     }
-    const total = countUnembeddedSessionCompartments(db, sessionId, snapshot.modelId);
+    // The session command path resolves this identity from the host session;
+    // persist it before counting so stale rows under another project cannot make
+    // this session look already embedded forever.
+    recordSessionProjectIdentity(db, sessionId, projectIdentity);
+    const total = countUnembeddedSessionCompartments(
+        db,
+        projectIdentity,
+        sessionId,
+        snapshot.chunkModelId,
+    );
     if (total === 0) return { status: "nothing", embedded: 0, total: 0 };
 
     const holderId = `session-embed-${randomUUID()}`;
@@ -843,8 +896,9 @@ export async function embedSessionCompartmentChunks(
             }
             const candidates = loadUnembeddedSessionChunkCandidates(
                 db,
+                projectIdentity,
                 sessionId,
-                snapshot.modelId,
+                snapshot.chunkModelId,
                 batchSize,
                 skipIds,
             );
@@ -852,7 +906,7 @@ export async function embedSessionCompartmentChunks(
             const { embedded: n, noWork } = await embedCandidateChunkBatch(
                 db,
                 projectIdentity,
-                snapshot.modelId,
+                snapshot.chunkModelId,
                 candidates,
                 options?.signal,
             );
@@ -882,7 +936,12 @@ export async function embedSessionCompartmentChunks(
         // unembeddable empty-text compartments, not a stall).
         const remaining = Math.max(
             0,
-            countUnembeddedSessionCompartments(db, sessionId, snapshot.modelId) - skipIds.length,
+            countUnembeddedSessionCompartments(
+                db,
+                projectIdentity,
+                sessionId,
+                snapshot.chunkModelId,
+            ) - skipIds.length,
         );
         if (remaining > 0) return { status: "stalled", embedded, total, remaining };
     }

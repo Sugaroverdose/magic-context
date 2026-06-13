@@ -152,6 +152,7 @@ export function clearSession(db: Database, sessionId: string): void {
         db.prepare("DELETE FROM source_contents WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM tags WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM session_meta WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM session_projects WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM compartment_chunk_embeddings WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM compartments WHERE session_id = ?").run(sessionId);
         clearCompressionDepth(db, sessionId);

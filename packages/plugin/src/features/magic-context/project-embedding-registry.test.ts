@@ -11,16 +11,20 @@ import {
 } from "./compartment-chunk-embedding";
 import { appendCompartments, getCompartments } from "./compartment-storage";
 import type { EmbeddingProvider } from "./memory/embedding-provider";
+import { insertMemory } from "./memory/storage-memory";
+import { getStoredModelId, saveEmbedding } from "./memory/storage-memory-embeddings";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
     embedSessionCompartmentChunks,
     embedTextForProject,
+    embedUnembeddedCompartmentChunksForProject,
     getProjectEmbeddingSnapshot,
     registerProjectEmbeddingAndMaybeWipe,
     registerProjectInObservationMode,
     sweepAllRegisteredProjects,
 } from "./project-embedding-registry";
+import { recordSessionProjectIdentity } from "./session-project-storage";
 import { closeDatabase, openDatabase } from "./storage";
 
 class FakeEmbeddingProvider implements EmbeddingProvider {
@@ -52,8 +56,12 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
     }
 }
 
-function localConfig(model: string): EmbeddingConfig {
-    return { provider: "local", model };
+function localConfig(model: string, maxInputTokens?: number): EmbeddingConfig {
+    return {
+        provider: "local",
+        model,
+        ...(maxInputTokens !== undefined ? { max_input_tokens: maxInputTokens } : {}),
+    };
 }
 
 function seedCompartmentWithFts(
@@ -266,6 +274,7 @@ describe("project embedding registry", () => {
         );
         const db = useTempDb();
         seedCompartmentWithFts(db, "ses-backfill");
+        recordSessionProjectIdentity(db, "ses-backfill", "git:backfill");
         registerProjectEmbeddingAndMaybeWipe(
             db,
             "git:backfill",
@@ -285,6 +294,64 @@ describe("project embedding registry", () => {
         expect(batchCalls).toBe(1);
     });
 
+    it("keeps passive chunk backfill scoped to the caller project", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-project-a");
+        seedCompartmentWithFts(db, "ses-project-b");
+        recordSessionProjectIdentity(db, "ses-project-a", "git:project-a");
+        recordSessionProjectIdentity(db, "ses-project-b", "git:project-b");
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:project-a",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/project-a",
+        );
+
+        const embedded = await embedUnembeddedCompartmentChunksForProject(db, "git:project-a");
+
+        expect(embedded).toBe(1);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-project-a", "git:project-a"),
+        ).toHaveLength(1);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-project-b", "git:project-a"),
+        ).toHaveLength(0);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-project-b", "git:project-b"),
+        ).toHaveLength(0);
+    });
+
+    it("repairs chunk rows stamped with a different project than their session owner", () => {
+        const db = useTempDb();
+        const compartmentId = seedCompartmentWithFts(db, "ses-repair");
+        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        replaceCompartmentChunkEmbeddings(
+            db,
+            windows.map((window) => ({
+                compartmentId,
+                sessionId: "ses-repair",
+                projectPath: "git:wrong",
+                window,
+                modelId: "chunk:model",
+                vector: new Float32Array([1, 0]),
+            })),
+        );
+
+        recordSessionProjectIdentity(db, "ses-repair", "git:right");
+
+        expect(loadCompartmentChunkEmbeddingsForSearch(db, "ses-repair", "git:wrong")).toHaveLength(
+            0,
+        );
+        expect(loadCompartmentChunkEmbeddingsForSearch(db, "ses-repair", "git:right")).toHaveLength(
+            1,
+        );
+    });
+
     it("does not backfill compartment chunks when memory is disabled", async () => {
         _setTestProviderFactoryForProject(
             (config) =>
@@ -292,6 +359,7 @@ describe("project embedding registry", () => {
         );
         const db = useTempDb();
         seedCompartmentWithFts(db, "ses-memory-off");
+        recordSessionProjectIdentity(db, "ses-memory-off", "git:off");
         registerProjectEmbeddingAndMaybeWipe(
             db,
             "git:off",
@@ -305,6 +373,54 @@ describe("project embedding registry", () => {
         expect(
             loadCompartmentChunkEmbeddingsForSearch(db, "ses-memory-off", "git:off"),
         ).toHaveLength(0);
+    });
+
+    it("re-embeds chunks but preserves memory vectors when max_input_tokens changes", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-window");
+        const firstSnapshot = registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:window",
+            localConfig("model-a", 1),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/window",
+        );
+        const memory = insertMemory(db, {
+            projectPath: "git:window",
+            category: "CONSTRAINTS",
+            content: "Preserve provider-scoped memory vectors across chunk window changes.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 2]), firstSnapshot.modelId);
+
+        const first = await embedSessionCompartmentChunks(db, "git:window", "ses-window");
+        expect(first.status).toBe("done");
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-window", "git:window"),
+        ).not.toHaveLength(0);
+
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:window",
+            localConfig("model-a", 10_000),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/window",
+        );
+
+        expect(getStoredModelId(db, "git:window")).toBe(firstSnapshot.modelId);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-window", "git:window"),
+        ).toHaveLength(0);
+
+        const second = await embedSessionCompartmentChunks(db, "git:window", "ses-window");
+        expect(second.status).toBe("done");
+        expect(second.embedded).toBe(1);
+        expect(
+            loadCompartmentChunkEmbeddingsForSearch(db, "ses-window", "git:window"),
+        ).toHaveLength(1);
     });
 
     it("embedSessionCompartmentChunks drains a whole session and reports progress", async () => {

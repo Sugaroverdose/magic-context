@@ -1391,6 +1391,24 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+
+    {
+        version: 36,
+        description: "session project ownership map for compartment chunk backfill scoping",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS session_projects (
+                    session_id TEXT NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    project_path TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY(session_id, harness)
+                );
+                CREATE INDEX IF NOT EXISTS idx_session_projects_project
+                    ON session_projects(project_path);
+            `);
+        },
+    },
 ];
 
 /**

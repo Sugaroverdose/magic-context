@@ -1100,7 +1100,9 @@ export async function unifiedSearch(
     // embedding-dependent searches in parallel using the same vector.
     const queryEmbedding = await queryEmbeddingPromise;
     const workspace = resolveSearchWorkspaceContext(db, projectPath);
-    const embeddingModelId = getProjectEmbeddingSnapshot(projectPath)?.modelId;
+    const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
+    const embeddingModelId = embeddingSnapshot?.modelId;
+    const chunkModelId = embeddingSnapshot?.chunkModelId;
     const compartmentResults = runCompartmentChunks
         ? searchCompartmentChunks({
               db,
@@ -1109,7 +1111,7 @@ export async function unifiedSearch(
               queryEmbedding,
               limit: tierLimit,
               maxOrdinal: options.maxMessageOrdinal,
-              modelId: embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+              modelId: chunkModelId && chunkModelId !== "off" ? chunkModelId : null,
           })
         : [];
     const messageLikeResults = mergeMessageAndCompartmentResults({

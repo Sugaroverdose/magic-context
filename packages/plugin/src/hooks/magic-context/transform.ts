@@ -3,6 +3,7 @@ import { resolveProjectIdentity } from "../../features/magic-context/memory/proj
 import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
+import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 
 import {
     type ContextDatabase,
@@ -126,6 +127,12 @@ export function clearMessageTokensCache(sessionId: string, messageId?: string): 
     const cache = messageTokensBySession.get(sessionId);
     if (cache) cache.delete(messageId);
 }
+
+// Hot-path guard: the session→project ownership binding is immutable per session,
+// so the DB upsert+repair only needs to run when the resolved identity first
+// appears (or changes) for a session in this process — not on every transform
+// pass. Bounded so crashed/abandoned sessions can't leak the guard forever.
+const recordedSessionProjectIdentity = new BoundedSessionMap<string>(MESSAGE_TOKENS_CACHE_MAX);
 
 /**
  * Test-only accessor that returns (and lazily creates) the per-session token
@@ -387,9 +394,11 @@ export function createTransform(deps: TransformDeps) {
         // session.get failure is non-fatal — fall back to deps.directory so
         // transform never blocks on a permanent SDK error.
         let sessionDirectory: string = deps.directory ?? "";
+        let sessionDirectoryResolvedFromHost = false;
         const cachedDirectory = deps.sessionDirectoryBySession?.get(sessionId);
         if (cachedDirectory && cachedDirectory.length > 0) {
             sessionDirectory = cachedDirectory;
+            sessionDirectoryResolvedFromHost = true;
         } else if (deps.client !== undefined) {
             try {
                 const sessionResponse = await deps.client.session
@@ -408,6 +417,7 @@ export function createTransform(deps: TransformDeps) {
                     // wrong for `opencode -s <id>` launches from a different
                     // cwd, and the next transform should retry the SDK lookup.
                     deps.sessionDirectoryBySession?.set(sessionId, sessionDirectory);
+                    sessionDirectoryResolvedFromHost = true;
                 }
             } catch {
                 // ignore; fallback already in place
@@ -970,6 +980,19 @@ export function createTransform(deps: TransformDeps) {
         const sessionProjectIdentity =
             projectIdentity ??
             (sessionDirectory ? resolveProjectIdentity(sessionDirectory) : deps.projectPath);
+        // Persist only host-resolved session bindings. The launch-directory
+        // fallback keeps transforms non-fatal, but storing it as ownership would
+        // let a transient SDK failure permanently mis-scope chunk backfills.
+        // Guarded to fire once per (session, identity) in this process so the
+        // hot path carries no per-pass DB write once the binding is recorded.
+        if (
+            sessionProjectIdentity &&
+            sessionDirectoryResolvedFromHost &&
+            recordedSessionProjectIdentity.get(sessionId) !== sessionProjectIdentity
+        ) {
+            recordSessionProjectIdentity(db, sessionId, sessionProjectIdentity);
+            recordedSessionProjectIdentity.set(sessionId, sessionProjectIdentity);
+        }
 
         // Historian trigger decision — relocated here from the message.updated
         // event handler. The event handler has no message array, so it re-read
