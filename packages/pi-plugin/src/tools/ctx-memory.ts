@@ -617,16 +617,18 @@ export function createCtxMemoryTool(
 			}
 
 			if (params.action === "archive") {
-				const archiveIds = params.ids;
+				const rawArchiveIds = params.ids;
 				if (
-					!archiveIds ||
-					archiveIds.length === 0 ||
-					!archiveIds.every(Number.isInteger)
+					!rawArchiveIds ||
+					rawArchiveIds.length === 0 ||
+					!rawArchiveIds.every(Number.isInteger)
 				) {
 					return err(
 						"Error: 'ids' must contain at least one integer memory ID when action is 'archive'.",
 					);
 				}
+				// De-dupe (first-seen order): `ids:[42,42]` archives once.
+				const archiveIds = [...new Set(rawArchiveIds)];
 				// Validate the whole batch BEFORE mutating so a typo'd id can't
 				// half-archive a batch (all-or-nothing, matching the transaction).
 				for (const memoryId of archiveIds) {

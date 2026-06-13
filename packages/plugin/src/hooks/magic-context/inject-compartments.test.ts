@@ -444,6 +444,42 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe("project_memory_epoch");
     });
 
+    it("mustMaterialize folds when a cached WORKSPACED m[0] becomes single-project", () => {
+        // Transition guard: a cached union m[0] carries a non-null workspace
+        // fingerprint; if the session then LEAVES its workspace, the current pass
+        // is single-project (fingerprint null). Keying the HARD gate only on the
+        // current `isWorkspaced` would fall through to the integer-epoch compare
+        // and keep rendering the stale union if a membership bump were missed.
+        // The fix compares fingerprints whenever EITHER side is non-null.
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        // Simulate a cached baseline that WAS workspaced (non-null fingerprint),
+        // while the live project (PROJECT_PATH) is not in any workspace, so the
+        // current pass resolves to single-project (fingerprint null).
+        const state = {
+            ...readStateFromMeta(),
+            cachedM0WorkspaceFingerprint: "ws:deadbeef",
+        };
+
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+
+        expect(decision.value).toBe(true);
+        expect(decision.reason).toBe("project_memory_epoch");
+    });
+
     it("mustMaterialize does NOT materialize m[0] on a new compartment (it rides m[1])", () => {
         // Taxonomy invariant: a new compartment is a SOFT delta that surfaces in
         // m[1] via renderM1's <new-compartments> (sequence > cachedM0Seq). It must

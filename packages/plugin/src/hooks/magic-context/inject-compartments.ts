@@ -1000,11 +1000,9 @@ export function mustMaterialize(args: {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
     if (!args.state.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
-    const workspace = resolveWorkspaceRenderContext({
-        db: args.db,
-        projectPath: args.projectPath,
-        workspaceIdentitySet: args.workspaceIdentitySet,
-    });
+    // `current.workspaceFingerprint` is resolved inside readCurrentM0SnapshotMarkers
+    // (it resolves its own workspace context); the HARD memory gate below keys on
+    // that vs the cached fingerprint, so no local workspace context is needed here.
     const current = readCurrentM0SnapshotMarkers(args);
 
     // ── HARD: provider-side cache eviction (the cache was already dead) ──
@@ -1035,7 +1033,16 @@ export function mustMaterialize(args: {
     }
 
     // ── HARD: genuine m[0] CONTENT change (the rendered baseline bytes differ) ──
-    if (workspace.isWorkspaced) {
+    // Compare the workspace fingerprint whenever EITHER the cached baseline or
+    // the current pass is workspaced — keying only on current `isWorkspaced`
+    // would miss the workspace→single transition: a cached union m[0] whose
+    // session just left its workspace would fall through to the integer-epoch
+    // compare and keep rendering the stale union if a membership bump were
+    // missed. Mirrors renderM1's soft-refresh gate and Pi's mustMaterializePi.
+    if (
+        current.workspaceFingerprint !== null ||
+        (args.state.cachedM0WorkspaceFingerprint ?? null) !== null
+    ) {
         if ((args.state.cachedM0WorkspaceFingerprint ?? null) !== current.workspaceFingerprint) {
             return { value: true, reason: "project_memory_epoch" };
         }

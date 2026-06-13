@@ -614,10 +614,17 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             }
 
             if (args.action === "archive") {
-                const archiveIds = args.ids;
-                if (!archiveIds || archiveIds.length === 0 || !archiveIds.every(Number.isInteger)) {
+                const rawArchiveIds = args.ids;
+                if (
+                    !rawArchiveIds ||
+                    rawArchiveIds.length === 0 ||
+                    !rawArchiveIds.every(Number.isInteger)
+                ) {
                     return "Error: 'ids' must contain at least one integer memory ID when action is 'archive'.";
                 }
+                // De-dupe (first-seen order) so `ids:[42,42]` archives once and
+                // queues one mutation-log row instead of two.
+                const archiveIds = [...new Set(rawArchiveIds)];
 
                 // Validate the whole batch BEFORE mutating anything so a typo'd
                 // id can't half-archive a batch (all-or-nothing, matching the

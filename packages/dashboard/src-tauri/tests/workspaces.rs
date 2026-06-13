@@ -292,6 +292,64 @@ fn workspace_filter_paths_union_members() {
 }
 
 #[test]
+fn empty_workspace_filter_returns_no_memories_or_stats() {
+    let _g = env_lock();
+    let mut conn = make_db_v34();
+    // A workspace with ZERO members. There ARE global memories in the DB.
+    let ws = workspaces::create_workspace(&mut conn, "empty").unwrap();
+    conn.execute(
+        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
+         VALUES ('git:somewhere', 'C', 'global', 'h1', 'active', 1, 1, 1, 1),
+                ('git:elsewhere', 'C', 'other', 'h2', 'active', 1, 1, 1, 1)",
+        [],
+    )
+    .unwrap();
+
+    // Filtering by the empty workspace must NOT leak global memories/stats.
+    let mems = db::get_memories(&conn, None, Some(ws), None, None, None, 50, 0).unwrap();
+    assert_eq!(mems.len(), 0, "empty workspace must not surface global memories");
+
+    let stats = db::get_memory_stats(&conn, None, Some(ws)).unwrap();
+    assert_eq!(stats.active, 0, "empty workspace stats must be zero");
+    assert_eq!(stats.archived, 0);
+    assert_eq!(stats.permanent, 0);
+
+    // Sanity: no filter still sees the globals (the gate is filter-specific).
+    let all = db::get_memories(&conn, None, None, None, None, None, 50, 0).unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn rename_workspace_does_not_bump_member_epochs() {
+    let _g = env_lock();
+    let mut conn = make_db_v34();
+    let ws = workspaces::create_workspace(&mut conn, "before").unwrap();
+    workspaces::add_workspace_member(&mut conn, ws, "git:m".into(), "m".into(), "/m".into())
+        .unwrap();
+    let epoch_before: i64 = conn
+        .query_row(
+            "SELECT project_memory_epoch FROM project_state WHERE project_path = 'git:m'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    workspaces::rename_workspace(&mut conn, ws, "after").unwrap();
+
+    let epoch_after: i64 = conn
+        .query_row(
+            "SELECT project_memory_epoch FROM project_state WHERE project_path = 'git:m'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(
+        epoch_before, epoch_after,
+        "renaming the workspace must not fold member m[0] (name is not rendered)"
+    );
+}
+
+#[test]
 fn workspace_member_identities_union_helper() {
     let old: HashSet<String> = ["git:a".into(), "git:b".into()].into_iter().collect();
     let new: HashSet<String> = ["git:b".into(), "git:c".into()].into_iter().collect();

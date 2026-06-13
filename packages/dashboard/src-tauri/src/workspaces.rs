@@ -409,12 +409,13 @@ pub fn rename_workspace(
     }
     let now = now_millis();
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let old_members = members_of_workspace(&tx, workspace_id)?;
+    // No epoch bump: the workspace NAME is not rendered into m[0]/m[1] (only
+    // member `display_name` affects the `source=` attribution), so renaming the
+    // workspace must not force a hard m[0] re-fold in every member session.
     tx.execute(
         "UPDATE workspaces SET name = ?1, updated_at = ?2 WHERE id = ?3",
         params![trimmed, now, workspace_id],
     )?;
-    bump_epochs_for_workspace_mutation(&tx, &old_members, &old_members)?;
     tx.commit()?;
     Ok(())
 }

@@ -648,3 +648,45 @@ differently, so boundary sizes can be off by tens of tokens for files dense in
 them. This replaced a production CRASH (encode threw on special tokens) and the
 residual error is far below the boundary's natural estimator-vs-provider delta.
 Accepted; do not re-introduce special-token parsing.
+
+### A41. Dashboard memory archive does NOT bump workspace member epochs (by design — supersede-delta)
+
+Audits flag that a dashboard archive (`active/permanent -> archived`) only
+queues a `memory_mutation_log` row and does not bump the project (or workspace
+member) epoch, so a running session's cached m[0] is not hard-invalidated. This
+is the deliberate supersede-delta contract: non-additive memory mutations ride
+the m[1] `<memory-updates>` delta (`getMemoryMutationsForRenderByProjects` reads
+the union `WHERE project_path IN (members)`), and reconcile into m[0] on the
+next NATURAL hard bust — bumping the epoch on every archive would force a hard
+m[0] re-fold in every workspaced sibling session, the exact cache-thrash the
+supersede-delta was built to eliminate. Only RESTORE (`archived -> active/
+permanent`) bumps, because a re-appearing memory has no delta row to surface it.
+
+### A42. Workspace semantic search does not backfill FOREIGN members' embeddings (by design)
+
+`ensureMemoryEmbeddings` runs only for the session's OWN project; foreign
+workspace members are scored from their already-stored embeddings (and skipped
+when their stored `model_id` differs from the query model). Backfilling every
+member's missing embeddings from a member session would re-introduce the
+cross-project re-embed loop the per-project embedding ownership was designed to
+prevent (each project embeds its own corpus via its own publish/sweep). Foreign
+members surface via FTS regardless; semantic recall over them catches up once
+their own host embeds them. Accepted v1 workspace behavior.
+
+### A43. Workspaced m[1] `<new-memories>` delta uses the flat budget trim, not per-member floors (by design)
+
+The per-member fairness floor (`trimWorkspaceMemoriesToBudgetV2`) applies to the
+m[0] baseline only. The m[1] new-memories delta is a small, recency-driven
+slice (25% of the memory budget) reconciled into m[0] on the next hard bust, so
+it intentionally uses `trimMemoriesToBudgetV2` — applying floors to a tiny delta
+adds determinism cost for no fairness benefit. Matches the v2.2 workspace spec.
+
+### A44. `ctx_search` cross-source rank uses linear-band remap, not raw IDF magnitude (parked — message embeddings supersede)
+
+A common-literal probe-only message can still reach the top of the message list
+and, after the `linearDecayScore(rank, n)` remap, present as a strong score that
+can edge out a single-source memory hit. The linear-band remap was ADDED to stop
+message hits from crowding memories (note #235); retaining full IDF magnitude
+post-fusion is a finer tuning. Parked deliberately: the lexical ctx_search
+ranking is being replaced by compartment/message embedding recall, which changes
+this surface wholesale — re-tuning the RRF band now is wasted churn.

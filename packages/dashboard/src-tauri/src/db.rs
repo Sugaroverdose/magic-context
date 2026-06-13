@@ -1858,6 +1858,12 @@ pub fn get_memories(
         }
         let placeholders = build_in_placeholders(resolved_paths.len(), start_idx);
         conditions.push(format!("m.project_path IN ({})", placeholders));
+    } else if workspace_filter.is_some() || project_filter.is_some() {
+        // A filter WAS requested but resolved to zero paths (e.g. a workspace
+        // with no members). Force an empty result — falling through to "no
+        // filter" would surface ALL memories under that filter, risking a
+        // bulk archive/delete against the wrong rows.
+        conditions.push("0 = 1".to_string());
     }
     if let Some(s) = status_filter {
         params.push(Box::new(s.to_string()));
@@ -2076,11 +2082,20 @@ pub fn get_memory_stats(
         Vec::new()
     };
 
+    // A filter requested but resolved to zero paths (e.g. an empty workspace)
+    // must report ZERO stats, not global totals — otherwise the UI shows every
+    // memory's counts under an empty workspace.
+    let filter_requested = workspace_filter.is_some() || project_filter.is_some();
+
     // Build a `project_path IN (?, ?, ...)` fragment and the param refs that
     // back it. Both are empty when no project filter is active.
     let (path_in_clause, path_params): (String, Vec<&dyn rusqlite::types::ToSql>) =
         if resolved_paths.is_empty() {
-            (String::new(), Vec::new())
+            if filter_requested {
+                ("0 = 1".to_string(), Vec::new())
+            } else {
+                (String::new(), Vec::new())
+            }
         } else {
             let placeholders = build_in_placeholders(resolved_paths.len(), 1);
             (
@@ -2103,7 +2118,10 @@ pub fn get_memory_stats(
         }
     };
 
-    let has_filter = !resolved_paths.is_empty();
+    // `path_in_clause` is non-empty both for a real IN-list AND for the forced
+    // `0 = 1` empty-filter case, so key the WHERE assembly off it (not off
+    // resolved_paths) to honor the zero-stats contract above.
+    let has_filter = !path_in_clause.is_empty();
 
     let total: i64 = conn.query_row(
         &format!(
@@ -2455,11 +2473,6 @@ pub fn update_memory_status(
         None
     };
     let is_archive = new_status == "archived" && prior_status != Some("archived");
-    let epoch_bump_identities = if let Some(ref id) = project_identity {
-        Some(crate::workspaces::workspace_member_identities_for_project(conn, id)?)
-    } else {
-        None
-    };
 
     // Phase B: re-check the target row, mutate, and queue/bump in one tx.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2468,6 +2481,16 @@ pub fn update_memory_status(
         "UPDATE memories SET status = ?1, updated_at = ?2 WHERE id = ?3",
         params![new_status, now_millis(), memory_id],
     )?;
+    // Resolve workspace fan-out INSIDE the write transaction so a concurrent
+    // add-member committing between Phase A and here can't leave a new member's
+    // epoch un-bumped (it would then miss this restored memory).
+    let epoch_bump_identities = if let Some(ref id) = project_identity {
+        Some(crate::workspaces::workspace_member_identities_for_project(
+            &tx, id,
+        )?)
+    } else {
+        None
+    };
     if let Some(identities) = epoch_bump_identities.as_ref() {
         crate::workspaces::bump_epochs_for_identities(&tx, identities)?;
     } else if is_archive {
@@ -2611,14 +2634,6 @@ pub fn bulk_update_memory_status(
     } else {
         HashSet::new()
     };
-    let mut epoch_bump_identities = HashSet::new();
-    if is_restore {
-        for identity in &phase_a_identities {
-            epoch_bump_identities.extend(
-                crate::workspaces::workspace_member_identities_for_project(conn, identity)?,
-            );
-        }
-    }
 
     let placeholders = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql =
@@ -2638,7 +2653,16 @@ pub fn bulk_update_memory_status(
         }
         tx.execute(&sql, params_from_iter(params_vec))?
     };
+    // Resolve workspace fan-out INSIDE the write transaction (same TOCTOU fix as
+    // update_memory_status): a concurrent add-member must not slip a new member
+    // in with a stale epoch between Phase A and the bump.
     if is_restore {
+        let mut epoch_bump_identities = HashSet::new();
+        for identity in &phase_a_identities {
+            epoch_bump_identities.extend(
+                crate::workspaces::workspace_member_identities_for_project(&tx, identity)?,
+            );
+        }
         crate::workspaces::bump_epochs_for_identities(&tx, &epoch_bump_identities)?;
     } else if is_archive {
         for id in memory_ids {
