@@ -633,13 +633,46 @@ const sessionBackfillCandidateStatements = new WeakMap<Database, PreparedStateme
  *  Used by the on-demand `/ctx-embed-history` command, which backfills ONE
  *  session at a time (oldest-first so the user watches it fill chronologically),
  *  unlike the project-wide passive drain. A compartment is a candidate when it
- *  has no chunk-embedding row for `modelId` yet. */
+ *  has no chunk-embedding row for `modelId` yet.
+ *
+ *  `excludeIds` lets the drain loop advance past compartments that produced no
+ *  embeddable work this run (empty canonical text / windows already current) so
+ *  one un-embeddable old compartment can't block every newer one — without it
+ *  the oldest-first query would re-select the same stuck prefix forever. */
 export function loadUnembeddedSessionChunkCandidates(
     db: Database,
     sessionId: string,
     modelId: string,
     limit: number,
+    excludeIds?: readonly number[],
 ): CompartmentChunkBackfillCandidate[] {
+    if (excludeIds && excludeIds.length > 0) {
+        // Exclusion sets are per-run and unbounded in shape, so this statement
+        // is built ad hoc (not cached) with an inline placeholder list.
+        const placeholders = excludeIds.map(() => "?").join(", ");
+        const stmt = db.prepare(
+            `SELECT c.id AS id,
+                    c.session_id AS sessionId,
+                    c.start_message AS startMessage,
+                    c.end_message AS endMessage,
+                    c.title AS title
+             FROM compartments c
+             WHERE c.session_id = ?
+               AND c.start_message IS NOT NULL
+               AND c.end_message IS NOT NULL
+               AND c.id NOT IN (${placeholders})
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM compartment_chunk_embeddings current
+                   WHERE current.compartment_id = c.id
+                     AND current.model_id = ?
+               )
+             ORDER BY c.start_message ASC, c.id ASC
+             LIMIT ?`,
+        );
+        const rows = stmt.all(sessionId, ...excludeIds, modelId, Math.max(1, limit)) as unknown[];
+        return mapBackfillCandidateRows(rows);
+    }
     let stmt = sessionBackfillCandidateStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(

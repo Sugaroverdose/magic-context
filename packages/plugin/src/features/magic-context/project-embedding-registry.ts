@@ -24,7 +24,11 @@ import {
     loadUnembeddedCommits,
     saveCommitEmbedding,
 } from "./git-commits/storage-git-commit-embeddings";
-import { acquireGitSweepLease, releaseGitSweepLease } from "./git-commits/sweep-coordinator";
+import {
+    acquireGitSweepLease,
+    releaseGitSweepLease,
+    renewGitSweepLease,
+} from "./git-commits/sweep-coordinator";
 import { invalidateProject } from "./memory/embedding-cache";
 import { getEmbeddingProviderIdentity } from "./memory/embedding-identity";
 import { LocalEmbeddingProvider } from "./memory/embedding-local";
@@ -48,6 +52,15 @@ const COMMIT_DRAIN_BATCH_SIZE = 16;
 const COMMIT_DRAIN_MAX_PER_SWEEP = 500;
 const CHUNK_DRAIN_BATCH_SIZE = 8;
 const CHUNK_DRAIN_MAX_PER_SWEEP = 200;
+// Hard cap on embedding-window texts sent in ONE provider call. Bounds the
+// payload regardless of compartment size / batch size — a single 200-window
+// compartment would otherwise build one enormous padded tensor (local) or JSON
+// body (HTTP). Compartments are never split across calls; a compartment with
+// more windows than this still embeds as its own (single) over-cap call.
+const MAX_WINDOWS_PER_EMBED_CALL = 16;
+// Session backfill (/ctx-embed-history) holds the coordinator lease for an
+// unbounded run, so it must renew before the TTL lapses (mirrors the git sweep).
+const SESSION_EMBED_LEASE_RENEWAL_MS = 60 * 1000;
 
 export interface EmbeddingFeatures {
     memoryEnabled: boolean;
@@ -580,27 +593,46 @@ async function embedCompartmentChunkBatch(
         batchSize,
     );
     if (candidates.length === 0) return 0;
-    return embedCandidateChunkBatch(db, projectIdentity, snapshot.modelId, candidates);
+    const { embedded } = await embedCandidateChunkBatch(
+        db,
+        projectIdentity,
+        snapshot.modelId,
+        candidates,
+    );
+    return embedded;
+}
+
+interface CandidateChunkBatchResult {
+    /** Compartments fully embedded + persisted this call. */
+    embedded: number;
+    /** Candidates that yielded NO embeddable work (empty canonical text or
+     *  windows already current) — they are not failures and the session drain
+     *  must skip past them rather than re-select them forever. */
+    noWork: number[];
 }
 
 /** Embed + persist chunk vectors for an already-selected candidate batch.
  *  Shared by the project-wide passive drain and the session-scoped on-demand
- *  backfill. Returns the number of compartments fully embedded this call. */
+ *  backfill. Provider calls are sub-batched by window count
+ *  (`MAX_WINDOWS_PER_EMBED_CALL`) so a single large compartment (or a big
+ *  `batchSize`) can't build one enormous payload tensor. Each compartment is the
+ *  atomic persist unit — its windows are never split across provider calls. */
 async function embedCandidateChunkBatch(
     db: Database,
     projectIdentity: string,
     modelId: string,
     candidates: CompartmentChunkBackfillCandidate[],
-): Promise<number> {
-    if (candidates.length === 0) return 0;
+    signal?: AbortSignal,
+): Promise<CandidateChunkBatchResult> {
+    const noWork: number[] = [];
+    if (candidates.length === 0) return { embedded: 0, noWork };
     const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectIdentity);
-    const prepared: Array<{
-        candidate: (typeof candidates)[number];
-        windows: ReturnType<typeof chunkCanonicalText>;
-        textOffset: number;
-    }> = [];
-    const texts: string[] = [];
 
+    type Prepared = {
+        candidate: CompartmentChunkBackfillCandidate;
+        windows: ReturnType<typeof chunkCanonicalText>;
+    };
+    const prepared: Prepared[] = [];
     for (const candidate of candidates) {
         const canonicalText = buildCanonicalChunkTextFromFts(
             db,
@@ -608,54 +640,80 @@ async function embedCandidateChunkBatch(
             candidate.startMessage,
             candidate.endMessage,
         );
-        if (canonicalText.length === 0) continue;
+        if (canonicalText.length === 0) {
+            noWork.push(candidate.id);
+            continue;
+        }
         const windows = chunkCanonicalText(
             canonicalText,
             candidate.startMessage,
             candidate.endMessage,
             maxInputTokens,
         );
-        if (windows.length === 0) continue;
-        if (chunkEmbeddingWindowsAreCurrent(db, candidate.id, modelId, windows)) {
+        if (
+            windows.length === 0 ||
+            chunkEmbeddingWindowsAreCurrent(db, candidate.id, modelId, windows)
+        ) {
+            noWork.push(candidate.id);
             continue;
         }
-        prepared.push({ candidate, windows, textOffset: texts.length });
-        texts.push(...windows.map((window) => window.text));
+        prepared.push({ candidate, windows });
     }
 
-    if (texts.length === 0) return 0;
+    if (prepared.length === 0) return { embedded: 0, noWork };
 
-    try {
-        const result = await embedBatchForProject(projectIdentity, texts);
-        if (!result) return 0;
+    // Embed the prepared compartments in sub-batches bounded by window count so
+    // the per-call payload (and the provider's padded tensor / JSON body) stays
+    // bounded regardless of how many windows a single compartment produced.
+    let embedded = 0;
+    let i = 0;
+    while (i < prepared.length) {
+        if (signal?.aborted) break;
+        const slice: Prepared[] = [];
+        let windowCount = 0;
+        // Always include at least one compartment, even if it alone exceeds the
+        // cap (a single very large compartment must still be embeddable).
+        do {
+            const item = prepared[i];
+            slice.push(item);
+            windowCount += item.windows.length;
+            i += 1;
+        } while (
+            i < prepared.length &&
+            windowCount + prepared[i].windows.length <= MAX_WINDOWS_PER_EMBED_CALL
+        );
 
-        let embeddedCount = 0;
-        for (const item of prepared) {
-            const vectors = result.vectors.slice(
-                item.textOffset,
-                item.textOffset + item.windows.length,
-            );
-            if (vectors.length !== item.windows.length || vectors.some((vector) => !vector)) {
-                continue;
+        const texts: string[] = [];
+        for (const item of slice) texts.push(...item.windows.map((w) => w.text));
+        try {
+            const result = await embedBatchForProject(projectIdentity, texts, signal);
+            if (!result) continue;
+            if (signal?.aborted) break;
+            let offset = 0;
+            for (const item of slice) {
+                const vectors = result.vectors.slice(offset, offset + item.windows.length);
+                offset += item.windows.length;
+                if (vectors.length !== item.windows.length || vectors.some((v) => !v)) {
+                    continue;
+                }
+                const rows: SaveCompartmentChunkEmbeddingInput[] = item.windows.map(
+                    (window, index) => ({
+                        compartmentId: item.candidate.id,
+                        sessionId: item.candidate.sessionId,
+                        projectPath: projectIdentity,
+                        window,
+                        modelId: result.modelId,
+                        vector: vectors[index] as Float32Array,
+                    }),
+                );
+                replaceCompartmentChunkEmbeddings(db, rows);
+                embedded += 1;
             }
-            const rows: SaveCompartmentChunkEmbeddingInput[] = item.windows.map(
-                (window, index) => ({
-                    compartmentId: item.candidate.id,
-                    sessionId: item.candidate.sessionId,
-                    projectPath: projectIdentity,
-                    window,
-                    modelId: result.modelId,
-                    vector: vectors[index] as Float32Array,
-                }),
-            );
-            replaceCompartmentChunkEmbeddings(db, rows);
-            embeddedCount += 1;
+        } catch (error) {
+            log("[magic-context] failed to proactively embed compartment chunks:", error);
         }
-        return embeddedCount;
-    } catch (error) {
-        log("[magic-context] failed to proactively embed compartment chunks:", error);
-        return 0;
     }
+    return { embedded, noWork };
 }
 
 async function drainCompartmentChunkBacklogForProject(
@@ -713,7 +771,11 @@ export type SessionChunkBackfillOutcome =
     | { status: "nothing"; embedded: 0; total: 0 }
     | { status: "disabled"; embedded: 0; total: 0 }
     | { status: "busy"; embedded: 0; total: number }
-    | { status: "aborted"; embedded: number; total: number };
+    | { status: "aborted"; embedded: number; total: number }
+    // Some candidates could not be embedded this run (provider returned no
+    // vectors for them) and were not skippable no-work rows — surfaced so the
+    // command can tell the user it stopped early instead of falsely "done".
+    | { status: "stalled"; embedded: number; total: number; remaining: number };
 
 /**
  * Backfill ALL un-embedded compartment chunks for ONE session in a single run
@@ -746,38 +808,63 @@ export async function embedSessionCompartmentChunks(
     const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
     if (!lease.acquired) return { status: "busy", embedded: 0, total };
 
+    // Unbounded run → renew the lease before the TTL lapses so a sibling process
+    // or the passive sweep can't acquire the "expired" lease mid-run (mirrors the
+    // git sweep's renewal loop). Cleared in finally.
+    const renewal = setInterval(() => {
+        try {
+            renewGitSweepLease(db, projectIdentity, holderId);
+        } catch {
+            /* best-effort; a failed renewal just risks the busy-window above */
+        }
+    }, SESSION_EMBED_LEASE_RENEWAL_MS);
+    (renewal as { unref?: () => void }).unref?.();
+
     const batchSize = Math.max(1, options?.batchSize ?? CHUNK_DRAIN_BATCH_SIZE);
+    // Compartments that produced no embeddable work (empty canonical text /
+    // already-current windows) accumulate here and are excluded from subsequent
+    // candidate queries, so one un-embeddable old compartment can't block the
+    // oldest-first cursor from reaching newer ones (no infinite re-select).
+    const skipIds: number[] = [];
     let embedded = 0;
+    let aborted = false;
+    let providerStalled = false;
     try {
         options?.onProgress?.({ embedded, total });
         // Re-query each iteration (rather than pre-loading all candidates) so
-        // newly-published compartments mid-run are picked up and so chunk_hash
-        // dedup is re-checked against fresh state. Loop ends when a query
-        // returns no candidates (all embedded) — `total` is the start-of-run
-        // figure for the progress denominator, embedded may exceed it only if
-        // the historian published during the run (clamped in the callback).
+        // newly-published compartments mid-run are picked up and chunk_hash dedup
+        // is re-checked against fresh state. `total` is the start-of-run
+        // denominator; `embedded` is clamped to it in the callback in case the
+        // historian published mid-run.
         for (;;) {
             if (options?.signal?.aborted) {
-                return { status: "aborted", embedded, total };
+                aborted = true;
+                break;
             }
             const candidates = loadUnembeddedSessionChunkCandidates(
                 db,
                 sessionId,
                 snapshot.modelId,
                 batchSize,
+                skipIds,
             );
             if (candidates.length === 0) break;
-            const n = await embedCandidateChunkBatch(
+            const { embedded: n, noWork } = await embedCandidateChunkBatch(
                 db,
                 projectIdentity,
                 snapshot.modelId,
                 candidates,
+                options?.signal,
             );
-            // A batch that selected candidates but embedded 0 (all skipped:
-            // empty canonical text / windows-already-current) would loop
-            // forever since the candidate query still returns them. Guard by
-            // breaking when no forward progress is made on a non-empty batch.
-            if (n === 0) break;
+            // Record no-work candidates so the next query advances past them.
+            for (const id of noWork) skipIds.push(id);
+            // If the batch made zero forward progress AND nothing was skippable,
+            // the provider failed on these rows — don't spin; stop and report
+            // remaining so the user knows it's incomplete (not falsely "done").
+            if (n === 0 && noWork.length === 0) {
+                providerStalled = true;
+                break;
+            }
             embedded += n;
             options?.onProgress?.({ embedded: Math.min(embedded, total), total });
             // Yield to the event loop so the burst stays interruptible and the
@@ -785,7 +872,19 @@ export async function embedSessionCompartmentChunks(
             await new Promise((resolve) => setTimeout(resolve, 0));
         }
     } finally {
+        clearInterval(renewal);
         releaseGitSweepLease(db, projectIdentity, holderId);
+    }
+    if (aborted) return { status: "aborted", embedded, total };
+    if (providerStalled) {
+        // Count what's genuinely still embeddable (the candidate query excludes
+        // already-embedded rows; no-work skips are subtracted as permanently
+        // unembeddable empty-text compartments, not a stall).
+        const remaining = Math.max(
+            0,
+            countUnembeddedSessionCompartments(db, sessionId, snapshot.modelId) - skipIds.length,
+        );
+        if (remaining > 0) return { status: "stalled", embedded, total, remaining };
     }
     return { status: "done", embedded, total };
 }

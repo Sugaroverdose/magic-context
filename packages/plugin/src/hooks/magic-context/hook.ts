@@ -396,6 +396,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     "done",
                     `Embedded ${outcome.embedded} of ${outcome.total} compartments before stopping.`,
                 );
+            case "stalled":
+                return terminal(
+                    "skipped",
+                    `Embedded ${outcome.embedded} compartments; ${outcome.remaining} could not be embedded (the provider returned no result). Run /ctx-embed-history again to retry them.`,
+                );
             default:
                 return terminal(
                     "done",

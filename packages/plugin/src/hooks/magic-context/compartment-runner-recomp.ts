@@ -269,13 +269,12 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // (see final-success path below for rationale). Structural rebuild only.
             void promoted.facts;
 
-            // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments.
-            // Recomp deletes + reinserts every compartment with fresh P1 text, so
-            // their embeddings must be regenerated — otherwise the rebuilt rows
-            // have NULL p1_embedding and vanish from ctx_search semantic results +
-            // the dreamer cross-linking substrate. Embedding is the search/linking
-            // substrate (gated on memory-enabled), distinct from fact promotion
-            // (which recomp deliberately skips). Fire-and-forget, best-effort.
+            // v2: recompute raw chunk embeddings for the rebuilt compartments.
+            // Recomp deletes + reinserts every compartment, so their chunk
+            // embeddings must be regenerated — otherwise the rebuilt rows have no
+            // embeddings and vanish from ctx_search semantic results. Embedding is
+            // the search substrate (gated on memory-enabled), distinct from fact
+            // promotion (which recomp deliberately skips). Fire-and-forget.
             if (deps.memoryEnabled !== false) {
                 const projectIdentity = resolveProjectIdentity(sessionDirectory);
                 // Register the project's embedding provider before embedding;
@@ -586,7 +585,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // history/materialize signals must find the drop rows durable.
         deps.onCompartmentStatePublished?.(sessionId);
 
-        // v2 (E2): recompute P1 embeddings and raw chunk embeddings for the rebuilt compartments. This is
+        // v2: recompute raw chunk embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which
         // handles early-exit/partial cases and already embeds). Without this, a
         // fully-completed recomp leaves the rebuilt rows without chunk embeddings

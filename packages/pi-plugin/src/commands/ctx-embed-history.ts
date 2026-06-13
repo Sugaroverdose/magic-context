@@ -78,6 +78,11 @@ export function registerCtxEmbedHistoryCommand(
 							text: `## /ctx-embed-history\n\nEmbedding is already running for this project — ${outcome.total} compartment${outcome.total === 1 ? "" : "s"} still pending. Try again shortly.`,
 							level: "info",
 						};
+					case "stalled":
+						return {
+							text: `## /ctx-embed-history\n\nEmbedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"}; ${outcome.remaining} could not be embedded (the provider returned no result). Run /ctx-embed-history again to retry them.`,
+							level: "info",
+						};
 					default:
 						return {
 							text: `## /ctx-embed-history\n\nEmbedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"} of history for semantic search.`,

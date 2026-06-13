@@ -339,14 +339,80 @@ describe("project embedding registry", () => {
         expect(
             loadCompartmentChunkEmbeddingsForSearch(db, "ses-embed", "git:embed").length,
         ).toBeGreaterThanOrEqual(3);
-        expect(
-            loadCompartmentChunkEmbeddingsForSearch(db, "ses-other", "git:embed"),
-        ).toHaveLength(0);
+        expect(loadCompartmentChunkEmbeddingsForSearch(db, "ses-other", "git:embed")).toHaveLength(
+            0,
+        );
 
         // Idempotent: a second run finds nothing.
         const again = await embedSessionCompartmentChunks(db, "git:embed", "ses-embed");
         expect(again.status).toBe("nothing");
         expect(again.total).toBe(0);
+    });
+
+    it("embedSessionCompartmentChunks reports stalled when the provider returns null vectors", async () => {
+        // Provider that yields null for every text → no compartment can persist.
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        return texts.map(() => null as unknown as Float32Array);
+                    }
+                })(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        seedManyCompartmentsWithFts(db, "ses-stall", 2);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:stall",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/stall",
+        );
+
+        const outcome = await embedSessionCompartmentChunks(db, "git:stall", "ses-stall", {
+            batchSize: 1,
+        });
+        expect(outcome.status).toBe("stalled");
+        expect(outcome.embedded).toBe(0);
+        if (outcome.status === "stalled") {
+            expect(outcome.remaining).toBe(2);
+        }
+    });
+
+    it("embedSessionCompartmentChunks caps windows per provider call across compartments", async () => {
+        const callWindowCounts: number[] = [];
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new (class extends FakeEmbeddingProvider {
+                    override async embedBatch(texts: string[]): Promise<Float32Array[]> {
+                        callWindowCounts.push(texts.length);
+                        return super.embedBatch(texts);
+                    }
+                })(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        // 20 single-window compartments + a large batchSize so the drain selects
+        // many at once — the per-call WINDOW cap (16) must split them across
+        // multiple provider calls even though they fit in one candidate query.
+        const sessionId = "ses-manycomp";
+        seedManyCompartmentsWithFts(db, sessionId, 20);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            "git:manycomp",
+            localConfig("model-a"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/manycomp",
+        );
+
+        const outcome = await embedSessionCompartmentChunks(db, "git:manycomp", sessionId, {
+            batchSize: 20,
+        });
+        expect(outcome.status).toBe("done");
+        expect(outcome.embedded).toBe(20);
+        // No single provider call exceeded the window cap, and 20 one-window
+        // compartments required more than one call (20 > 16).
+        expect(callWindowCounts.length).toBeGreaterThan(1);
+        expect(Math.max(...callWindowCounts)).toBeLessThanOrEqual(16);
     });
 
     it("embedSessionCompartmentChunks returns disabled when memory is off", async () => {
