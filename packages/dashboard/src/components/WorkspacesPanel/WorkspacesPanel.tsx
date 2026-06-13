@@ -332,22 +332,22 @@ export default function WorkspacesPanel() {
                         </Show>
                       </div>
                       <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap" }}>
-                        <button
-                          type="button"
-                          class="btn sm primary"
-                          disabled={!dirty()}
-                          onClick={() => handleSaveChanges(item())}
-                        >
-                          Save changes
-                        </button>
-                        <button
-                          type="button"
-                          class="btn sm"
-                          disabled={!dirty()}
-                          onClick={() => discardStage(item())}
-                        >
-                          Discard
-                        </button>
+                        {/* Save + Discard only appear when there are unsaved
+                            edits — this keeps Save out of the way at rest and
+                            disambiguates Discard (revert unsaved edits) from
+                            Delete (remove the workspace), which is always shown. */}
+                        <Show when={dirty()}>
+                          <button
+                            type="button"
+                            class="btn sm primary"
+                            onClick={() => handleSaveChanges(item())}
+                          >
+                            Save changes
+                          </button>
+                          <button type="button" class="btn sm" onClick={() => discardStage(item())}>
+                            Discard
+                          </button>
+                        </Show>
                         <button
                           type="button"
                           class="btn sm danger"
@@ -362,17 +362,10 @@ export default function WorkspacesPanel() {
                       <div class="category-header" style={{ "margin-bottom": "8px" }}>
                         Shared categories
                       </div>
-                      <div style={{ display: "flex", gap: "10px", "flex-wrap": "wrap" }}>
+                      <div class="share-categories-row">
                         <Index each={SHARE_CATEGORY_OPTIONS}>
                           {(option) => (
-                            <label
-                              style={{
-                                display: "flex",
-                                "align-items": "center",
-                                gap: "5px",
-                                "font-size": "12px",
-                              }}
-                            >
+                            <label class="share-category-label">
                               <input
                                 type="checkbox"
                                 checked={stage().shareCategories.includes(option().value)}

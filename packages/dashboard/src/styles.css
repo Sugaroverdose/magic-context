@@ -553,7 +553,8 @@ body {
    imperatively via ref in JS — CSS alone can't style it reliably across
    all browsers. */
 .tri-checkbox,
-.memory-card-checkbox input[type="checkbox"] {
+.memory-card-checkbox input[type="checkbox"],
+.share-category-label input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
   width: 14px;
@@ -571,18 +572,21 @@ body {
 }
 
 .tri-checkbox:hover,
-.memory-card-checkbox input[type="checkbox"]:hover {
+.memory-card-checkbox input[type="checkbox"]:hover,
+.share-category-label input[type="checkbox"]:hover {
   border-color: var(--accent);
 }
 
 .tri-checkbox:checked,
-.memory-card-checkbox input[type="checkbox"]:checked {
+.memory-card-checkbox input[type="checkbox"]:checked,
+.share-category-label input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: var(--accent);
 }
 
 .tri-checkbox:checked::after,
-.memory-card-checkbox input[type="checkbox"]:checked::after {
+.memory-card-checkbox input[type="checkbox"]:checked::after,
+.share-category-label input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
   top: 1px;
@@ -592,6 +596,24 @@ body {
   border: solid #fff;
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
+}
+
+/* Shared-categories checkbox row (workspaces panel) */
+.share-categories-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.share-category-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
 }
 
 /* Indeterminate (tri-state "some") — JS sets .indeterminate on the element */
