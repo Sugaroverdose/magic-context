@@ -210,6 +210,35 @@ the harness I/O differs:
 
 ---
 
+## 9b. Pi floors persisted pressure with live forward usage
+
+**OpenCode:** pressure is refreshed per step through `message.updated` /
+`step-finish`, so a tool-heavy turn sees context usage climb before the next
+request is assembled. OpenCode also performs its own step-finish overflow check,
+so no explicit forward floor is needed in the shared pressure path.
+
+**Pi:** `message_end` persists `lastContextPercentage` only after the whole turn.
+During a long multi-step turn that value can stay frozen while the live
+`AgentMessage[]` grows. Pi therefore floors both scheduler and historian trigger
+pressure with `ctx.getContextUsage().tokens`, which is recomputed from the live
+message array each context pass.
+
+The floor scales only the forward-pressure denominator (`contextLimit × 0.85`)
+to compensate for Pi's estimate-token undercount. It does **not** mutate the real
+context limit, and it passes the raw forward token count onward so emergency drop
+planning still sees the current assembled size. The floor is monotonic: it never
+lowers the persisted pressure, and missing/null forward usage preserves the old
+behavior. Earlier Channel 1/2 ctx_reduce nudges can result because their
+usable/reclaimable math consumes the same corrected input-token reading; those
+nudges are persisted/replayed like the rest of Pi's sticky context hints.
+
+Emergency drops remain cache-stable: repeated force passes on the same provider
+usage sample are latched by `last_emergency_input_sample`, fresh same-turn
+forward growth may force another pass, and a no-candidate force pass leaves wire
+bytes unchanged.
+
+---
+
 ## 10. Cleared reasoning keeps its original signature (matches OpenCode)
 
 When Magic Context clears an aged reasoning/thinking block, it rewrites the

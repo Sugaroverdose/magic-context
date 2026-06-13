@@ -26,6 +26,7 @@ import {
 	setPendingPiCompactionMarkerState,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { getEmergencyInputSample } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
@@ -42,6 +43,7 @@ import {
 	collectMessageEntryIdsStrict,
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
+	__test as contextHandlerInternals,
 	recordPiLiveModel,
 	registerPiContextHandler,
 	resolvePiHistorianTriggerInputs,
@@ -56,6 +58,7 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import {
 	assistantMessage,
+	assistantToolCall,
 	createFakePi,
 	createTestDb,
 	fakeContext,
@@ -63,6 +66,74 @@ import {
 	toolResultMessage,
 	userMessage,
 } from "./test-utils.test";
+
+describe("applyForwardPressureFloor", () => {
+	const { FORWARD_PRESSURE_LIMIT_FACTOR, applyForwardPressureFloor } =
+		contextHandlerInternals;
+
+	it("floors stale trailing pressure with Pi's live forward token estimate", () => {
+		const result = applyForwardPressureFloor(68, 273_200, 340_000, 400_000);
+
+		expect(FORWARD_PRESSURE_LIMIT_FACTOR).toBe(0.85);
+		expect(result.percentage).toBeCloseTo(100, 8);
+		expect(result.inputTokens).toBe(340_000);
+	});
+
+	it("leaves trailing pressure unchanged without usable forward tokens or a sane limit", () => {
+		const trailing = { percentage: 68, inputTokens: 273_200 };
+
+		expect(
+			applyForwardPressureFloor(
+				trailing.percentage,
+				trailing.inputTokens,
+				undefined,
+				400_000,
+			),
+		).toEqual(trailing);
+		expect(
+			applyForwardPressureFloor(
+				trailing.percentage,
+				trailing.inputTokens,
+				null,
+				400_000,
+			),
+		).toEqual(trailing);
+		expect(
+			applyForwardPressureFloor(
+				trailing.percentage,
+				trailing.inputTokens,
+				340_000,
+				6_748,
+			),
+		).toEqual(trailing);
+	});
+
+	it("never lowers pressure or input-token accounting", () => {
+		expect(applyForwardPressureFloor(80, 80_000, 10_000, 100_000)).toEqual({
+			percentage: 80,
+			inputTokens: 80_000,
+		});
+	});
+
+	it("maps forward tokens at limit × 0.85 to 100%", () => {
+		const atMargin = applyForwardPressureFloor(0, 0, 85_000, 100_000);
+		const belowMargin = applyForwardPressureFloor(0, 0, 84_999, 100_000);
+
+		expect(atMargin.percentage).toBeCloseTo(100, 8);
+		expect(atMargin.inputTokens).toBe(85_000);
+		expect(belowMargin.percentage).toBeLessThan(100);
+	});
+
+	it("keeps the emergency recovery bump as a floor instead of a cap", () => {
+		const src = readFileSync(
+			join(import.meta.dir, "context-handler.ts"),
+			"utf8",
+		);
+
+		expect(src).toContain("usagePercentage = Math.max(usagePercentage, 95)");
+		expect(src).not.toContain("usagePercentage = 95;");
+	});
+});
 
 describe("registerPiContextHandler", () => {
 	afterEach(() => {
@@ -835,6 +906,272 @@ describe("registerPiContextHandler", () => {
 			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
 		} finally {
 			clearContextHandlerSession("ses-context");
+			closeQuietly(db);
+		}
+	});
+
+	it("uses live forward pressure to execute when persisted pressure is stale", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-forward-scheduler-floor";
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				scheduler: { executeThresholdPercentage: 80 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const buildMessages = () =>
+				[
+					userMessage("keep", 1),
+					assistantMessage("drop when forward pressure crosses threshold", 2),
+				] as never[];
+			const entryIds = ["entry-1", "entry-2"];
+
+			let messages = buildMessages();
+			await handler({ messages }, {
+				...fakeContext(sessionId, process.cwd(), entryIds, messages),
+				getContextUsage: () => ({
+					tokens: 1_000,
+					percent: 1,
+					contextWindow: 100_000,
+				}),
+			} as never);
+			queuePendingOp(db, sessionId, 2, "drop");
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 68,
+				lastInputTokens: 68_000,
+			});
+
+			messages = buildMessages();
+			const result = await handler({ messages }, {
+				...fakeContext(sessionId, process.cwd(), entryIds, messages),
+				getContextUsage: () => ({
+					tokens: 85_000,
+					percent: 10,
+					contextWindow: 100_000,
+				}),
+			} as never);
+
+			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("latches same-sample emergency drops but re-runs on fresh forward growth", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-forward-emergency-latch";
+		const largeToolOutput = "x".repeat(12_000);
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				heuristics: {},
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const buildMessages = () => {
+				const messages = [userMessage("start tool burst", 1)];
+				for (let i = 0; i < 20; i++) {
+					messages.push(assistantToolCall(`call-${i}`, "bash", {}, 2 + i * 2), {
+						...toolResultMessage(`call-${i}`, largeToolOutput, 3 + i * 2),
+						toolName: "bash",
+					});
+				}
+				messages.push(userMessage("continue", 50));
+				return messages as never[];
+			};
+			const entryIds = Array.from(
+				{ length: buildMessages().length },
+				(_, index) => `entry-${index + 1}`,
+			);
+			const runPass = (tokens: number) => {
+				const messages = buildMessages();
+				return handler({ messages }, {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages),
+					getContextUsage: () => ({
+						tokens,
+						percent: 10,
+						contextWindow: 100_000,
+					}),
+				} as never);
+			};
+			await runPass(1_000);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 68,
+				lastInputTokens: 68_000,
+			});
+
+			await runPass(85_000);
+			const firstDropped = getTagsBySession(db, sessionId).filter(
+				(tag) => tag.type === "tool" && tag.status === "dropped",
+			).length;
+			const toolCount = getTagsBySession(db, sessionId).filter(
+				(tag) => tag.type === "tool",
+			).length;
+			expect(firstDropped).toBeGreaterThan(0);
+			expect(firstDropped).toBeLessThan(toolCount);
+			expect(getEmergencyInputSample(db, sessionId)).toBe(85_000);
+
+			await runPass(85_000);
+			const sameSampleDropped = getTagsBySession(db, sessionId).filter(
+				(tag) => tag.type === "tool" && tag.status === "dropped",
+			).length;
+			expect(sameSampleDropped).toBe(firstDropped);
+
+			await runPass(90_000);
+			const freshGrowthDropped = getTagsBySession(db, sessionId).filter(
+				(tag) => tag.type === "tool" && tag.status === "dropped",
+			).length;
+			expect(freshGrowthDropped).toBeGreaterThan(sameSampleDropped);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps wire bytes stable on a forced pass with no emergency candidates", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-forward-no-candidates";
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				heuristics: {},
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const buildMessages = () =>
+				[
+					userMessage("stable user", 1),
+					assistantMessage("stable answer", 2),
+				] as never[];
+			const entryIds = ["entry-1", "entry-2"];
+			const runPass = async (tokens: number) => {
+				const messages = buildMessages();
+				return handler({ messages }, {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages),
+					getContextUsage: () => ({
+						tokens,
+						percent: 10,
+						contextWindow: 100_000,
+					}),
+				} as never);
+			};
+			const prime = await runPass(1_000);
+			const stableWire = prime.messages.map((message) =>
+				textOf(message as never),
+			);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 68,
+				lastInputTokens: 68_000,
+			});
+
+			const forced = await runPass(85_000);
+
+			expect(
+				forced.messages.map((message) => textOf(message as never)),
+			).toEqual(stableWire);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("uses live forward pressure when deciding whether to fire the historian", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-forward-historian-floor";
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const runner = {
+				harness: "pi",
+				run: mock(async () => ({
+					ok: true as const,
+					assistantText:
+						'<compartment start="1" end="2" title="Forward">Forward pressure history.</compartment>',
+					durationMs: 1,
+				})),
+			} as unknown as SubagentRunner;
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				historian: {
+					runner,
+					model: "test/historian",
+					historianChunkTokens: 20_000,
+					executeThresholdPercentage: 80,
+					protectedTags: 0,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const prime = [userMessage("prime", 1)] as never[];
+			await handler({ messages: prime }, {
+				...fakeContext(sessionId, process.cwd(), ["entry-prime"], prime),
+				getContextUsage: () => ({
+					tokens: 1_000,
+					percent: 1,
+					contextWindow: 100_000,
+				}),
+			} as never);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 68,
+				lastInputTokens: 68_000,
+			});
+			const messages = Array.from({ length: 12 }, (_, index) =>
+				index % 2 === 0
+					? userMessage(`user ${index}`, index + 2)
+					: assistantMessage(`assistant ${index}`, index + 2),
+			) as never[];
+			await handler({ messages }, {
+				...fakeContext(
+					sessionId,
+					process.cwd(),
+					messages.map((_, index) => `entry-${index + 1}`),
+					messages,
+				),
+				getContextUsage: () => ({
+					tokens: 85_000,
+					percent: 10,
+					contextWindow: 100_000,
+				}),
+			} as never);
+			await awaitInFlightHistorians();
+
+			expect(runner.run).toHaveBeenCalledTimes(1);
+		} finally {
+			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}
 	});

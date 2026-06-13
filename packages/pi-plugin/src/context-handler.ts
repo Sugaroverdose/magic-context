@@ -180,6 +180,52 @@ const FORCE_MATERIALIZATION_PERCENTAGE = 85;
 /** Emergency-block threshold — mirrors OpenCode's >=95% emergency path. */
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
 
+// estimateTokens (char-based) under-counts the real provider
+// tokenizer + untagged structural/reasoning parts: the observed overflow was
+// >400K real vs a ~340K forward estimate (~15% gap). Scaling the limit DOWN for
+// the forward percentage trips the 85% force / 95% emergency bands at a real size
+// that genuinely corresponds to the window, not at the under-counted estimate.
+// 0.85 (not 0.90): 0.90 would make the 95% emergency band fire only at ~360K
+// estimated, still short of the >400K real seen here.
+const FORWARD_PRESSURE_LIMIT_FACTOR = 0.85;
+
+// Returns { percentage, inputTokens } floored by Pi's FORWARD usage estimate.
+// piUsage.tokens = last assistant usage + estimateTokens of every message after
+// it (pi-mono estimateContextTokens), recomputed from the LIVE array each call —
+// so it catches a mid-turn balloon the message_end-persisted trailing number
+// misses. Keep ONLY .tokens (forward, input-side); .percent is discarded (counts
+// output on Pi's own denominator). Immune to NULL token_count (live array, not
+// our tag store). NEVER lowers (max), so it's never less reactive than today.
+function applyForwardPressureFloor(
+	trailingPercentage: number,
+	trailingInputTokens: number,
+	piUsageTokens: number | null | undefined,
+	correctedLimit: number | undefined,
+): { percentage: number; inputTokens: number } {
+	const forwardTokens =
+		typeof piUsageTokens === "number" && piUsageTokens > 0 ? piUsageTokens : 0;
+	if (forwardTokens === 0 || !isSaneLimit(correctedLimit)) {
+		return { percentage: trailingPercentage, inputTokens: trailingInputTokens };
+	}
+	// Scale the LIMIT only for this forward percentage — do NOT mutate the real
+	// usageContextLimit (history-budget + emergency-drop ceiling rely on the true
+	// limit) and do NOT inflate forwardTokens (emergency-drop needs the raw
+	// current assembled size).
+	const forwardPressureLimit = correctedLimit * FORWARD_PRESSURE_LIMIT_FACTOR;
+	const forwardPercentage = (forwardTokens / forwardPressureLimit) * 100;
+	return forwardPercentage > trailingPercentage
+		? {
+				percentage: forwardPercentage,
+				inputTokens: Math.max(trailingInputTokens, forwardTokens),
+			}
+		: { percentage: trailingPercentage, inputTokens: trailingInputTokens };
+}
+
+export const __test = {
+	FORWARD_PRESSURE_LIMIT_FACTOR,
+	applyForwardPressureFloor,
+};
+
 /**
  * Default `clear_reasoning_age` when neither the Pi caller nor the user
  * config specifies one. Matches OpenCode's schema default
@@ -1618,13 +1664,21 @@ export function registerPiContextHandler(
 			) {
 				usagePercentage = (usageInputTokens / usageContextLimit) * 100;
 			}
-			// Emergency bump LAST so it wins over any recomputation above.
+			({ percentage: usagePercentage, inputTokens: usageInputTokens } =
+				applyForwardPressureFloor(
+					usagePercentage,
+					usageInputTokens,
+					piUsage?.tokens,
+					usageContextLimit,
+				));
+			// Emergency bump LAST so it floors recovery pressure without capping
+			// a higher live forward-pressure reading.
 			if (needsEmergencyBump) {
 				sessionLog(
 					sessionId,
 					`transform: overflow recovery flag set — bumping percentage to 95% (detectedLimit=${usageContextLimit ?? "unknown"})`,
 				);
-				usagePercentage = 95;
+				usagePercentage = Math.max(usagePercentage, 95);
 			}
 			let schedulerDecision: "execute" | "defer";
 			const tScheduler = performance.now();
@@ -2730,6 +2784,7 @@ function maybeFireHistorian(args: {
 	let usageContextLimit: number | undefined;
 	try {
 		const piUsage = ctx.getContextUsage?.();
+		let usageSource: "session_meta" | "piUsage fallback";
 		// Sane-bound (isSaneLimit, NOT `> 0`) so a garbage-but-positive window
 		// can't drive the trigger budget — mirrors the main pressure pass.
 		usageContextLimit = isSaneLimit(piUsage?.contextWindow)
@@ -2765,10 +2820,7 @@ function maybeFireHistorian(args: {
 				percentage: sessionMetaForUsage.lastContextPercentage,
 				inputTokens: sessionMetaForUsage.lastInputTokens,
 			};
-			sessionLog(
-				sessionId,
-				`historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [from session_meta], checking trigger...`,
-			);
+			usageSource = "session_meta";
 		} else {
 			// Fallback to Pi-reported usage when no message_end has
 			// landed yet (first turn). This is the same fallback the
@@ -2798,11 +2850,18 @@ function maybeFireHistorian(args: {
 				percentage: fallbackPercentage,
 				inputTokens: piUsage.tokens,
 			};
-			sessionLog(
-				sessionId,
-				`historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [piUsage fallback], checking trigger...`,
-			);
+			usageSource = "piUsage fallback";
 		}
+		usage = applyForwardPressureFloor(
+			usage.percentage,
+			usage.inputTokens,
+			piUsage?.tokens,
+			usageContextLimit,
+		);
+		sessionLog(
+			sessionId,
+			`historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [${usageSource}], checking trigger...`,
+		);
 	} catch (err) {
 		sessionLog(
 			sessionId,
