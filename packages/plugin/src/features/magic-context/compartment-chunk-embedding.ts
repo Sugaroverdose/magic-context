@@ -5,6 +5,17 @@ import type { Database, Statement as PreparedStatement } from "../../shared/sqli
 
 export const DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS = 512;
 
+/**
+ * Fraction of the configured `max_input_tokens` we actually fill per window.
+ *
+ * `max_input_tokens` is the provider's HARD context ceiling, but we window using
+ * our own `estimateTokens` heuristic, which drifts from the provider's real
+ * tokenizer (observed ~1% on Qwen3 — a chunk we sized at 8192 counted 8261 on
+ * the server and was silently truncated). Targeting 90% of the ceiling absorbs
+ * that cross-tokenizer drift so a window never exceeds the provider limit.
+ */
+export const CHUNK_WINDOW_SAFETY_RATIO = 0.9;
+
 interface FtsChunkRow {
     messageOrdinal: number | string;
     role: string;
@@ -415,8 +426,11 @@ export function chunkCanonicalText(
     if (lines.length === 0 || endOrdinal < startOrdinal) return [];
 
     const normalizedMax = normalizeCompartmentChunkMaxInputTokens(maxInputTokens);
+    // Window against a safety-margined budget, not the raw ceiling, so estimator
+    // drift can't push a window past the provider's real token limit.
+    const effectiveMax = Math.max(1, Math.floor(normalizedMax * CHUNK_WINDOW_SAFETY_RATIO));
     const fullText = lines.join("\n");
-    if (estimateTokens(fullText) <= normalizedMax) {
+    if (estimateTokens(fullText) <= effectiveMax) {
         return [
             {
                 windowIndex: 0,
@@ -455,7 +469,7 @@ export function chunkCanonicalText(
         const lineStart = range?.start ?? startOrdinal;
         const lineEnd = range?.end ?? lineStart;
         const lineTokens = estimateTokens(line);
-        if (currentLines.length > 0 && currentTokens + lineTokens > normalizedMax) {
+        if (currentLines.length > 0 && currentTokens + lineTokens > effectiveMax) {
             flush();
         }
         if (currentLines.length === 0) {

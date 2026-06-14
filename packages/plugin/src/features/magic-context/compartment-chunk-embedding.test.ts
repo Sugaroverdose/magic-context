@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     buildCanonicalChunkTextFromFts,
+    CHUNK_WINDOW_SAFETY_RATIO,
     canonicalizeInMemoryChunkTextForEmbedding,
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
@@ -130,6 +132,26 @@ describe("compartment chunk embedding core", () => {
             [2, 2],
             [3, 3],
         ]);
+    });
+
+    test("every window stays under the safety-margined budget (never exceeds the provider ceiling)", () => {
+        // Many short lines so windowing is driven by the token budget, not by
+        // line count. With a ceiling of 200, the effective budget is 180 (90%),
+        // leaving headroom for cross-tokenizer drift below the hard ceiling.
+        const maxInputTokens = 200;
+        const effective = Math.floor(maxInputTokens * CHUNK_WINDOW_SAFETY_RATIO);
+        const lines = Array.from(
+            { length: 60 },
+            (_, i) => `[${i + 1}] U: lorem ipsum dolor sit amet consectetur adipiscing elit ${i}`,
+        );
+        const windows = chunkCanonicalText(lines.join("\n"), 1, 60, maxInputTokens);
+        expect(windows.length).toBeGreaterThan(1);
+        for (const window of windows) {
+            // Each window's own estimate stays at/under the 90% budget, so the
+            // real provider count (which drifts only slightly) stays under the
+            // configured ceiling.
+            expect(estimateTokens(window.text)).toBeLessThanOrEqual(effective);
+        }
     });
 
     test("storage replaces chunks idempotently and clearSession removes rows", () => {

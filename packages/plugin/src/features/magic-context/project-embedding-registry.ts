@@ -209,7 +209,9 @@ function getChunkEmbeddingModelId(config: EmbeddingConfig, providerIdentity: str
     // only providerIdentity so a chunk-window change does not wipe unrelated stores.
     const chunkIdentity = {
         providerIdentity,
-        chunkerVersion: 1,
+        // v2: windowing targets CHUNK_WINDOW_SAFETY_RATIO * max_input_tokens
+        // instead of the raw ceiling, so boundaries shifted — bump to re-embed.
+        chunkerVersion: 2,
         maxInputTokens: normalizeCompartmentChunkMaxInputTokens(
             "max_input_tokens" in config ? config.max_input_tokens : undefined,
         ),
