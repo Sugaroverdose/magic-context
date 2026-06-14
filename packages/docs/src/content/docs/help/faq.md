@@ -56,16 +56,24 @@ This is about 90 MB and is downloaded on first use. It can be safely deleted —
 
 Yes.
 
-- **Via the agent:** Ask the agent to call `ctx_memory` with `action="write"` or `action="delete"`. This works in any session.
+- **Via the agent:** Ask the agent to call `ctx_memory` with `action="write"` (add) or `action="archive"` (retire). This works in any session.
 - **Via the dashboard:** The [desktop app](https://github.com/cortexkit/magic-context/releases) has a memory browser that lets you search, filter, edit, and bulk-delete memories.
 
 Memories are scoped to a project (identified by git root commit hash). Deleting a memory removes it from all future sessions on that project.
 
+## Why doesn't my token count drop after I cross the execute threshold?
+
+This is usually working as intended. The execute threshold is not a "compact to a lower number" button — it triggers the historian to compress **older conversation** and applies any drops the agent already queued. It does **not** drop **tool outputs** (file reads, search results, command output) on its own.
+
+Tool outputs are reclaimed two ways: the agent calling `ctx_reduce` to mark spent ones (the normal path), or the **tiered emergency drop at 85%** (the safety net). Between 65% and 85% there is no automatic tool-output reduction. So a session whose bulk is tool calls — and whose model isn't actively calling `ctx_reduce` — will see the historian run while the percentage parks in the 65–85% range.
+
+Check the token breakdown in the TUI sidebar or `/ctx-status`: if **Tool Calls** dominates, the lever is `ctx_reduce` (or waiting for 85%), not the threshold. The full model is documented in [Context reduction → Why your token count can stay high](/concepts/context-reduction/#why-your-token-count-can-stay-high-after-the-threshold).
+
 ## What happens when context hits 85% or 95%?
 
-Magic Context's execution threshold is configurable (default: 65% of the model's context window). When context usage exceeds this threshold, queued operations are executed.
+Magic Context's execute threshold is configurable (default: 65% of the model's context window). When usage crosses it, the system runs heuristic cleanup and applies any queued `ctx_reduce` drops, and the historian compresses settled conversation into compartments.
 
-If context rises to 95% before queued operations clear it (which should be rare), the historian fires immediately in "emergency" mode, compressing as aggressively as needed to bring usage down. This is a last-resort operation — normal operation keeps context well below this level.
+At **85%**, a tiered emergency drop sheds tool outputs oldest-first (this is the automatic backstop for tool output that `ctx_reduce` didn't reach). At **95%**, the session blocks new messages and runs emergency recovery — a last resort that normal operation rarely reaches.
 
 You can check the current state with `/ctx-status` and force a flush with `/ctx-flush`.
 

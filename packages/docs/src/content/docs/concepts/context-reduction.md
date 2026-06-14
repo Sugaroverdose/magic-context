@@ -39,7 +39,7 @@ Both channels suppress themselves after the agent calls `ctx_reduce` — no nagg
 
 If the agent doesn't reduce and pressure keeps building, automatic safety nets kick in:
 
-**Execute threshold.** At the configured execute threshold (default: 65% of context), the system runs heuristic cleanup: deduplicating identical tool calls, stripping system injections, and clearing old reasoning. This is routine maintenance, not an emergency.
+**Execute threshold.** At the configured execute threshold (default: 65% of context), the system runs heuristic cleanup: deduplicating identical tool calls, stripping system injections, and clearing old reasoning. It also applies any `ctx_reduce` drops the agent already queued. Crucially, the execute threshold does **not** drop tool outputs on its own — see [Why your token count can stay high after the threshold](#why-your-token-count-can-stay-high-after-the-threshold) below.
 
 **85% — tiered emergency drop.** At 85% usage, a target-headroom eviction kicks in. Tool outputs are dropped oldest-first across three tiers: miscellaneous tools first (bash, web), then edit/search tools, then navigation tools last. The newest 20% of navigation and edit tools are reserved as continuation context. This is a cache-busting pass — the prompt cache rebuilds, but the system was heading there anyway.
 
@@ -49,6 +49,30 @@ If the agent doesn't reduce and pressure keeps building, automatic safety nets k
 These thresholds are safety nets, not the normal path. A well-behaved session with an agent that uses `ctx_reduce` stays well below the execute threshold and never triggers emergency drops.
 :::
 
+## Why your token count can stay high after the threshold
+
+A common surprise: you cross the execute threshold, you see the historian run, but the token count barely moves. This is usually working as intended — the two are different jobs.
+
+**The execute threshold is not a "compact now to a lower number" button.** What reduces tokens is split across three independent mechanisms, each targeting a different part of the window:
+
+| Source of bulk | What reclaims it | When |
+|---|---|---|
+| **Older conversation** (above the protected tail) | **Historian** — compresses it into compartments | At the execute threshold and as narratable history accumulates |
+| **Tool outputs** (file reads, search results, command output) | **`ctx_reduce`** (agent marks spent outputs) — or the **85% emergency drop** | Continuously, as the agent works — or only at 85% |
+| **Recent conversation + tool calls** (the protected tail) | Nothing — it is deliberately protected | Stays until it ages out of the protected window |
+
+The key consequence: **tool outputs have no automatic reduction in the 65%–85% band.** Magic Context does not drop them by age. They are reclaimed either when the agent calls `ctx_reduce` to mark spent ones, or — as a safety net — by the tiered emergency drop at 85%.
+
+So if your session's bulk is **tool calls** (common for heavy file-reading or build-running work), and your model isn't actively calling `ctx_reduce`, the historian will compress the older conversation but the tool outputs sit there until 85%. The percentage parks in the 65–85% range and looks "stuck."
+
+**What to do about it:**
+
+- **Let the agent reduce.** `ctx_reduce` is the primary lever for tool output. Capable models call it in response to the built-in nudges. The dashboard and `/ctx-status` show how much reclaimable tool output is sitting unreduced.
+- **Lower the emergency line is not configurable, but you can lower the execute threshold** so the historian compresses conversation earlier. Note this only helps the *conversation* portion, not tool outputs.
+- **Check the breakdown.** In the TUI sidebar or `/ctx-status`, look at the token breakdown. If **Tool Calls** dominates, the fix is `ctx_reduce` usage (or waiting for 85%), not the threshold. If **Conversation** dominates and the historian is idle, the eligible history above the protected tail is already compressed — what remains is the protected recent window.
+
+This division is intentional: the historian works safely in the background on settled history, while tool-output reduction stays under the agent's control (or the 85% net) so an in-progress task never loses the outputs it's still using.
+
 ## Automatic-only mode
 
 Set `ctx_reduce_enabled: false` in your config to remove the agent-facing reduction machinery entirely:
@@ -57,9 +81,9 @@ Set `ctx_reduce_enabled: false` in your config to remove the agent-facing reduct
 - No `§N§` tag prefixes in message text
 - No nudges
 
-The deterministic parts keep running: the historian still compresses, heuristic drops still fire, compartments still inject, and memory still works. Stale tool output is shed automatically by age.
+The deterministic parts keep running: the historian still compresses older conversation into compartments, heuristic cleanup still fires (dedup, system-injection stripping, reasoning clearing), the 85% emergency drop still sheds tool outputs, compartments still inject, and memory still works.
 
-This mode is for users who want a fully automatic pipeline. You can optionally enable caveman text compression to recover some of the benefit that manual `ctx_reduce` provides for long user and assistant text. See the [configuration reference](/reference/configuration/) for the setting.
+Note that in this mode there is no agent-driven `ctx_reduce`, so **tool outputs are only reclaimed by the 85% emergency drop** (Magic Context does not drop tool output by age). Sessions whose bulk is tool output will run closer to the 85% line than sessions where the agent actively reduces. You can optionally enable caveman text compression to recover some of the benefit that manual `ctx_reduce` provides for long user and assistant text. See the [configuration reference](/reference/configuration/) for the setting.
 
 See [session modes](/concepts/session-modes/) for the full feature comparison across modes.
 
