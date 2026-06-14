@@ -337,11 +337,13 @@ describe("OpenAICompatibleEmbeddingProvider model-substitution guard", () => {
     });
 
     test("accepts when the endpoint omits the model field (cannot compare)", async () => {
-        fetchSpy.mockImplementation((async () =>
-            new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), {
-                status: 200,
-                headers: { "content-type": "application/json" },
-            })) as FetchLike);
+        fetchSpy.mockImplementation(
+            (async () =>
+                new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                })) as FetchLike,
+        );
         const provider = new OpenAICompatibleEmbeddingProvider({
             endpoint: "http://127.0.0.1:65535",
             model: "any-model",

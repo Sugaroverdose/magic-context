@@ -33,7 +33,9 @@ function findOrphanedFunctionCallOutputs(messages: unknown[]): string[] {
 			const producesOutput = blocks.some(
 				(b) =>
 					b?.type === "toolCall" ||
-					(b?.type === "text" && typeof b.text === "string" && b.text.length > 0),
+					(b?.type === "text" &&
+						typeof b.text === "string" &&
+						b.text.length > 0),
 			);
 			if (!producesOutput) continue;
 			for (const b of blocks) {
@@ -60,15 +62,27 @@ function thinkingToolCall(
 	return {
 		role: "assistant",
 		content: [
-			{ type: "thinking", thinking: "...", thinkingSignature: `{"id":"rs_${callId}"}` },
-			{ type: "toolCall", id: `${callId}|fc_${callId}`, name: "read", arguments: {} },
+			{
+				type: "thinking",
+				thinking: "...",
+				thinkingSignature: `{"id":"rs_${callId}"}`,
+			},
+			{
+				type: "toolCall",
+				id: `${callId}|fc_${callId}`,
+				name: "read",
+				arguments: {},
+			},
 		],
 		responseId,
 		timestamp,
 	};
 }
 
-function toolResultMsg(callId: string, timestamp: number): Record<string, unknown> {
+function toolResultMsg(
+	callId: string,
+	timestamp: number,
+): Record<string, unknown> {
 	return {
 		role: "toolResult",
 		toolCallId: `${callId}|fc_${callId}`,
@@ -137,14 +151,25 @@ describe("injectSyntheticTodowriteForPi", () => {
 		try {
 			const sessionId = "ses-pi-todo-shared-responseid";
 			const stateJson = JSON.stringify([
-				{ content: "Refresh PR metadata", status: "in_progress", priority: "high" },
+				{
+					content: "Refresh PR metadata",
+					status: "in_progress",
+					priority: "high",
+				},
 			]);
 			const callId = computeSyntheticCallId(stateJson);
-			const sharedResponseId = "resp_040c5c13bbb6f3bc016a2d8705d29c819181a2638024c55a80";
+			const sharedResponseId =
+				"resp_040c5c13bbb6f3bc016a2d8705d29c819181a2638024c55a80";
 
 			// The latest-assistant inject path anchored to the LAST message
 			// carrying the shared responseId (the empty reasoning-only segment).
-			setPersistedTodoSyntheticAnchor(db, sessionId, callId, sharedResponseId, stateJson);
+			setPersistedTodoSyntheticAnchor(
+				db,
+				sessionId,
+				callId,
+				sharedResponseId,
+				stateJson,
+			);
 
 			const messages = [
 				thinkingToolCall(sharedResponseId, "a1", 1),
@@ -152,7 +177,12 @@ describe("injectSyntheticTodowriteForPi", () => {
 				thinkingToolCall(sharedResponseId, "a2", 2),
 				toolResultMsg("a2", 2),
 				// Trailing reasoning-only segment of the SAME response: empty content.
-				{ role: "assistant", content: [], responseId: sharedResponseId, timestamp: 3 },
+				{
+					role: "assistant",
+					content: [],
+					responseId: sharedResponseId,
+					timestamp: 3,
+				},
 			] as Parameters<typeof injectSyntheticTodowriteForPi>[0]["messages"];
 
 			injectSyntheticTodowriteForPi({
