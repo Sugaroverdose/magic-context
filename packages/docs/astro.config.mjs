@@ -59,6 +59,7 @@ export default defineConfig({
                         { slug: "reference/tools" },
                         { slug: "reference/commands" },
                         { slug: "reference/configuration" },
+                        { slug: "reference/tui-sidebar" },
                         { slug: "reference/dashboard" },
                     ],
                 },

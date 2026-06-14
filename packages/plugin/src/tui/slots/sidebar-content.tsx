@@ -4,6 +4,17 @@ import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { formatThresholdPercent } from "../../shared/format-threshold"
+import {
+    computeEffectiveOrder,
+    DEFAULT_SLOT_ORDER,
+    type MagicContextTuiPrefs,
+    PLUGIN_KEY,
+    queueTuiPreferenceUpdate,
+    readTuiPreferencesFile,
+    readTuiPreferencesFileSync,
+    resolveMagicContextPrefs,
+    watchTuiPreferences,
+} from "../../shared/tui-preferences"
 
 // Module-level hook so the upgrade/recomp dialog can kick the sidebar into its
 // fast recomp self-poll the INSTANT the user confirms — without waiting for a
@@ -16,6 +27,64 @@ export function kickRecompProgressRefresh(): void {
 
 const SINGLE_BORDER = { type: "single" } as any
 const REFRESH_DEBOUNCE_MS = 150
+
+export interface SidebarController {
+    prefs: () => MagicContextTuiPrefs
+    collapsed: () => boolean
+    toggleCollapsed: () => void
+}
+
+// The TUI may unmount and remount sidebar_content when the user switches views
+// (main -> subagent -> main). A remount re-runs the component body, so a signal
+// created inside the component would reset to its seed. The controller lives in
+// the slot-factory closure (plugin/process lifetime) and owns the durable
+// prefs/collapse signals plus the single shared file watcher, so collapse state
+// and live pref reloads survive remounts. No Solid effects/memos here — those
+// need an owner; the poll-interval effect stays inside the component.
+function createSidebarController(initialPrefs: MagicContextTuiPrefs): SidebarController {
+    const [prefs, setPrefs] = createSignal<MagicContextTuiPrefs>(initialPrefs)
+    const seedCollapsed =
+        initialPrefs.rememberCollapsed && initialPrefs.collapsed != null
+            ? initialPrefs.collapsed
+            : initialPrefs.startCollapsed
+    const [collapsed, setCollapsed] = createSignal(seedCollapsed)
+    let lastPersistedCollapsed: boolean | null = initialPrefs.collapsed
+    let lastApplied = JSON.stringify(initialPrefs)
+
+    // Watcher lives for the process lifetime — intentionally never disposed.
+    // Collapse echo guard: lastPersistedCollapsed advances only once our own
+    // write lands, so a watcher echo of the value we just wrote is rejected by
+    // the `!==` check and cannot revert a user click.
+    watchTuiPreferences(() => {
+        void (async () => {
+            const next = resolveMagicContextPrefs(await readTuiPreferencesFile())
+            const serialized = JSON.stringify(next)
+            if (serialized === lastApplied) return
+            lastApplied = serialized
+            setPrefs(next)
+            if (
+                next.rememberCollapsed &&
+                next.collapsed != null &&
+                next.collapsed !== lastPersistedCollapsed
+            ) {
+                lastPersistedCollapsed = next.collapsed
+                setCollapsed(next.collapsed)
+            }
+        })()
+    })
+
+    function toggleCollapsed() {
+        const next = !collapsed()
+        setCollapsed(next)
+        if (prefs().rememberCollapsed) {
+            void queueTuiPreferenceUpdate(PLUGIN_KEY, ["collapsed"], next).then(() => {
+                lastPersistedCollapsed = next
+            })
+        }
+    }
+
+    return { prefs, collapsed, toggleCollapsed }
+}
 
 function compactTokens(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
@@ -382,12 +451,15 @@ const SidebarContent = (props: {
     api: TuiPluginApi
     sessionID: () => string
     theme: TuiThemeCurrent
+    controller: SidebarController
 }) => {
     const [snapshot, setSnapshot] = createSignal<SidebarSnapshot | null>(null)
-    // Collapsed view: progress bar + 3 summary lines (Historian / Memories /
-    // Status), no per-category legend or section grid. In-memory only (resets
-    // to expanded on TUI restart), mirroring the native MCP sidebar toggle.
-    const [collapsed, setCollapsed] = createSignal(false)
+    // Collapse state + section visibility prefs live in the controller (plugin
+    // closure), so they survive view-switch remounts and persist across restarts
+    // via ~/.config/opencode/tui-preferences.jsonc. Read reactively.
+    const collapsed = props.controller.collapsed
+    const sections = () => props.controller.prefs().sections
+    const headerLabel = () => props.controller.prefs().header.label
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
     // Self-sustaining poll while a recomp/upgrade is running. Recomp work
     // happens in CHILD sessions whose message events are filtered out of the
@@ -610,11 +682,11 @@ const SidebarContent = (props: {
                 flexDirection="row"
                 justifyContent="space-between"
                 alignItems="center"
-                onMouseDown={() => setCollapsed((x) => !x)}
+                onMouseDown={() => props.controller.toggleCollapsed()}
             >
                 <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.accent}>
                     <text fg={props.theme.background}>
-                        <b>{collapsed() ? "▶ " : "▼ "}Magic Context</b>
+                        <b>{collapsed() ? "▶ " : "▼ "}{headerLabel()}</b>
                     </text>
                 </box>
                 <text fg={props.theme.textMuted}>v{packageJson.version}</text>
@@ -688,6 +760,8 @@ const SidebarContent = (props: {
             {!collapsed() && (
                 <>
             {/* Historian section */}
+            {sections().historian && (
+                <>
             <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
                 <text fg={props.theme.text}>
                     <b>Historian</b>
@@ -713,8 +787,12 @@ const SidebarContent = (props: {
             {s()?.recompProgress && (
                 <RecompProgressSection theme={props.theme} progress={s()!.recompProgress!} />
             )}
+                </>
+            )}
 
             {/* Memory section */}
+            {sections().memory && (
+                <>
             <SectionHeader theme={props.theme} title="Memory" />
             <StatRow
                 theme={props.theme}
@@ -730,9 +808,12 @@ const SidebarContent = (props: {
                     dim
                 />
             )}
+                </>
+            )}
 
             {/* Queue & Status */}
-            {((s()?.pendingOpsCount ?? 0) > 0 ||
+            {sections().status &&
+                ((s()?.pendingOpsCount ?? 0) > 0 ||
                 (s()?.sessionNoteCount ?? 0) > 0 ||
                 (s()?.readySmartNoteCount ?? 0) > 0) && (
                 <>
@@ -764,7 +845,7 @@ const SidebarContent = (props: {
             )}
 
             {/* Dreamer */}
-            {s()?.lastDreamerRunAt && (
+            {sections().dreamer && s()?.lastDreamerRunAt && (
                 <>
                     <SectionHeader theme={props.theme} title="Dreamer" />
                     <StatRow
@@ -782,7 +863,7 @@ const SidebarContent = (props: {
                 snapshot fields (newWorkTokens, totalInputTokens) and the
                 session_meta columns are still populated; only the UI is
                 simplified for now. */}
-            {s()?.totalInputTokens != null && (
+            {sections().stats && s()?.totalInputTokens != null && (
                 <>
                     <SectionHeader theme={props.theme} title="Stats" />
                     <StatRow
@@ -800,8 +881,15 @@ const SidebarContent = (props: {
 }
 
 export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
+    // Seed synchronously at slot construction so the sidebar renders at its
+    // final collapse state + order on the first paint (no async flicker). The
+    // controller lives here in the factory closure for the plugin lifetime, so
+    // collapse state and live pref reloads survive sidebar_content remounts.
+    const seedRoot = readTuiPreferencesFileSync()
+    const controller = createSidebarController(resolveMagicContextPrefs(seedRoot))
+    const effectiveOrder = computeEffectiveOrder(seedRoot, PLUGIN_KEY, DEFAULT_SLOT_ORDER)
     return {
-        order: 150,
+        order: effectiveOrder,
         slots: {
             sidebar_content: (ctx, value) => {
                 const theme = createMemo(() => ctx.theme.current)
@@ -810,6 +898,7 @@ export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
                         api={api}
                         sessionID={() => value.session_id}
                         theme={theme()}
+                        controller={controller}
                     />
                 )
             },
