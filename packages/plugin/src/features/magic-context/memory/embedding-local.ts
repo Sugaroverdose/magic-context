@@ -257,6 +257,43 @@ async function withQuietConsole<T>(fn: () => Promise<T>): Promise<T> {
  * pipeline within the same window. The on-disk model file is intact; the
  * failure mode is ephemeral and resolves on retry.
  */
+/**
+ * Recognizes the PERMANENT "native runtime not installed" failure: the plugin's
+ * `@huggingface/transformers` Node entry does a static `import "onnxruntime-node"`,
+ * so when that package is missing/broken in the install tree (seen on Windows
+ * when its platform binary fails to install, issue #128), the import throws
+ * `Cannot find package 'onnxruntime-node'` / `ERR_MODULE_NOT_FOUND` before
+ * transformers' own WASM-fallback hook is even reachable. This is environmental,
+ * not transient — retrying just re-spams the cryptic resolver error every time an
+ * embedding is needed. We latch it and degrade cleanly with one actionable line.
+ */
+// Process-global latch: once the native ONNX runtime is confirmed missing, every
+// LocalEmbeddingProvider in this process short-circuits initialize() instead of
+// re-importing transformers and re-failing. Process-global (not per-instance)
+// because the missing package affects the whole install, not one model.
+let nativeRuntimeMissing = false;
+
+/** Whether local embeddings have been disabled this process due to a missing
+ * native runtime (issue #128). Used by callers/tests to detect the degraded state. */
+export function isLocalEmbeddingRuntimeMissing(): boolean {
+    return nativeRuntimeMissing;
+}
+
+export function isNativeRuntimeMissingError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (!message.toLowerCase().includes("onnxruntime-node")) return false;
+    const code = (error as { code?: unknown } | null)?.code;
+    const name = (error as { name?: unknown } | null)?.name;
+    const lower = message.toLowerCase();
+    return (
+        code === "ERR_MODULE_NOT_FOUND" ||
+        name === "ResolveMessage" ||
+        lower.includes("cannot find package") ||
+        lower.includes("cannot find module") ||
+        lower.includes("err_module_not_found")
+    );
+}
+
 function isTransientLoadError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error ?? "");
     if (!message) return false;
@@ -354,6 +391,12 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
         if (this.pipeline) {
             return true;
+        }
+
+        // Native runtime confirmed missing earlier this process — don't re-import
+        // transformers just to re-fail and re-spam the resolver error (issue #128).
+        if (nativeRuntimeMissing) {
+            return false;
         }
 
         if (this.initPromise) {
@@ -471,7 +514,23 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                     await releaseLock();
                 }
             } catch (error) {
-                log("[magic-context] embedding model failed to load:", error);
+                if (isNativeRuntimeMissingError(error)) {
+                    // Permanent, environmental: latch so we degrade once and stop
+                    // re-importing (which would re-spam the cryptic resolver error
+                    // on every embedding). One actionable line; local embeddings
+                    // are disabled for this process until the install is repaired.
+                    nativeRuntimeMissing = true;
+                    log(
+                        "[magic-context] local embedding runtime is not installed " +
+                            "(onnxruntime-node missing from this install). Local embeddings " +
+                            "are disabled. Fix: reinstall the plugin (run `npx " +
+                            "@cortexkit/magic-context@latest doctor --force`), or configure an " +
+                            "`openai-compatible`/`ollama` embedding endpoint instead. " +
+                            "Existing memories are unaffected.",
+                    );
+                } else {
+                    log("[magic-context] embedding model failed to load:", error);
+                }
                 this.pipeline = null;
             } finally {
                 this.initPromise = null;

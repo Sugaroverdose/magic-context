@@ -22,6 +22,7 @@ import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
+import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
@@ -357,7 +358,9 @@ async function runIssueFlow(): Promise<number> {
  *   - Provider that accepts the URL shape but doesn't implement embeddings
  *     (OpenRouter's /v1 for example) — same detection path.
  */
-async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ issues: number }> {
+async function checkEmbeddingConfig(
+    magicContextConfigPath: string,
+): Promise<{ issues: number; localRuntimeBroken?: boolean }> {
     if (!existsSync(magicContextConfigPath)) {
         // No config → local provider defaults apply, nothing to check.
         return { issues: 0 };
@@ -398,6 +401,25 @@ async function checkEmbeddingConfig(magicContextConfigPath: string): Promise<{ i
     }
 
     if (provider === undefined || provider === "local") {
+        // Local embeddings need the native ONNX runtime (onnxruntime-node). On
+        // Windows it sometimes fails to install (its native binary download is
+        // interrupted), and the plugin's static `import "onnxruntime-node"` then
+        // throws on every embedding (#128). Surface it here with the fix instead
+        // of leaving users with the cryptic resolver error in the log.
+        const runtime = checkLocalEmbeddingRuntime([
+            join(getOpenCodeCacheDir(), "packages", PLUGIN_ENTRY_WITH_VERSION),
+            join(getOpenCodeCacheDir(), "packages", PLUGIN_NAME),
+        ]);
+        if (runtime.state === "package-missing" || runtime.state === "binary-missing") {
+            log.warn(
+                "Embedding provider: local — but the native runtime (onnxruntime-node) " +
+                    `is ${runtime.state === "package-missing" ? "not installed" : "missing its platform binary"}. ` +
+                    "Local embeddings won't work. Fix: re-run with `doctor --force` to reinstall " +
+                    "the plugin, or set `embedding.provider` to `openai-compatible` (LM Studio / " +
+                    "Ollama) or `off`. Existing memories are unaffected.",
+            );
+            return { issues: 1, localRuntimeBroken: true };
+        }
         log.success("Embedding provider: local (Xenova/all-MiniLM-L6-v2 bundled)");
         return { issues: 0 };
     }
