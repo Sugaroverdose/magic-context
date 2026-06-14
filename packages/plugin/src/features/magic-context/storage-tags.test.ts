@@ -7,6 +7,7 @@ import {
     adoptFallbackTagMessageId,
     findAdoptableFallbackTags,
     getActiveTagsBySession,
+    getActiveTagTokenAggregate,
     getMaxDroppedTagNumber,
     getTagById,
     getTagsByNumbers,
@@ -627,6 +628,58 @@ describe("storage-tags", () => {
             // (only pi-msg-* shaped rows are adoptable).
             insertTag(db, "ses-1", "real-entry-x:p0", "message", 100, 1, 0, null, 0, null, "FP-X");
             expect(findAdoptableFallbackTags(db, "ses-1", "FP-X")).toHaveLength(0);
+        });
+    });
+
+    describe("#given getActiveTagTokenAggregate with protectedTags", () => {
+        function insertToolTag(
+            d: Database,
+            sessionId: string,
+            tagNumber: number,
+            outputTokens: number,
+        ): void {
+            d.prepare(
+                `INSERT INTO tags (session_id, message_id, type, status, tag_number, byte_size, reasoning_byte_size, token_count, input_token_count)
+                 VALUES (?, ?, 'tool', 'active', ?, 0, 0, ?, 0)`,
+            ).run(sessionId, `call:${tagNumber}`, tagNumber, outputTokens);
+        }
+
+        it("#when protectedTags=0 #then counts all active tool output", () => {
+            db = makeMemoryDatabase();
+            insertToolTag(db, "ses-1", 1, 100);
+            insertToolTag(db, "ses-1", 2, 200);
+            insertToolTag(db, "ses-1", 3, 300);
+            expect(getActiveTagTokenAggregate(db, "ses-1", 0).toolOutput).toBe(600);
+        });
+
+        it("#when protectedTags=2 #then excludes the top-2 active tag numbers from reclaimable", () => {
+            db = makeMemoryDatabase();
+            insertToolTag(db, "ses-1", 1, 100);
+            insertToolTag(db, "ses-1", 2, 200);
+            insertToolTag(db, "ses-1", 3, 300); // protected (top 2)
+            insertToolTag(db, "ses-1", 4, 400); // protected (top 2)
+            // only tags 1 and 2 are reclaimable: 100 + 200 = 300
+            expect(getActiveTagTokenAggregate(db, "ses-1", 2).toolOutput).toBe(300);
+        });
+
+        it("#when fewer active tags than protectedTags #then nothing is reclaimable", () => {
+            db = makeMemoryDatabase();
+            insertToolTag(db, "ses-1", 1, 100);
+            insertToolTag(db, "ses-1", 2, 200);
+            // all 2 tags are within the protected window of 20 → reclaimable 0
+            expect(getActiveTagTokenAggregate(db, "ses-1", 20).toolOutput).toBe(0);
+        });
+
+        it("#when protected #then liveTail (conversation+toolCall) is NOT narrowed", () => {
+            db = makeMemoryDatabase();
+            insertToolTag(db, "ses-1", 1, 100);
+            insertToolTag(db, "ses-1", 2, 200);
+            insertToolTag(db, "ses-1", 3, 300);
+            const agg = getActiveTagTokenAggregate(db, "ses-1", 2);
+            // toolCall counts ALL tool output (+input) regardless of protection
+            expect(agg.toolCall).toBe(600);
+            // but reclaimable toolOutput excludes the protected top-2
+            expect(agg.toolOutput).toBe(100);
         });
     });
 });

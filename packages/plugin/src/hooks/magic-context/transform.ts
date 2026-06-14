@@ -1811,7 +1811,11 @@ export function createTransform(deps: TransformDeps) {
                 let tailToolTokens: number;
                 let liveTailTokens: number;
                 try {
-                    const agg = getActiveTagTokenAggregate(db, sessionId);
+                    // reclaimable (toolOutput) excludes the protected top-N tags —
+                    // the agent can't ctx_reduce those, so they must not count
+                    // toward the nudge's "reclaimable" figure (else it nags forever
+                    // about protected-tail output it cannot drop).
+                    const agg = getActiveTagTokenAggregate(db, sessionId, deps.protectedTags);
                     tailToolTokens = agg.toolOutput;
                     liveTailTokens = agg.conversation + agg.toolCall;
                 } catch {
