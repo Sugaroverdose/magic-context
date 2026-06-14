@@ -19,10 +19,31 @@ interface EmbeddingResponseBody {
     data?: Array<{
         embedding?: number[];
     }>;
+    /** The model the endpoint actually served. OpenAI and most compatible
+     *  servers echo back the requested model; LMStudio/Ollama return the model
+     *  they ACTUALLY ran, which can differ from the request when the requested
+     *  model isn't loaded and the server substitutes a loaded one. */
+    model?: string;
 }
 
 function normalizeEndpoint(endpoint?: string): string {
     return endpoint?.trim().replace(/\/+$/, "") ?? "";
+}
+
+/**
+ * Whether the model an endpoint served is the model we asked for.
+ *
+ * Exact match after trim+lowercase, with prefix/suffix tolerance so a server
+ * that version-expands a name (`text-embedding-3-small` → `…-small-v1`) or
+ * trims a vendor prefix still counts as a match. A genuine substitution to a
+ * DIFFERENT model (e.g. requested `qwen3-embedding-4b-dwq`, served
+ * `text-embedding-qwen3-embedding-0.6b` — neither contains the other) does not.
+ */
+export function embeddingModelsMatch(served: string, requested: string): boolean {
+    const a = served.trim().toLowerCase();
+    const b = requested.trim().toLowerCase();
+    if (a.length === 0 || b.length === 0) return true; // can't compare → don't reject
+    return a === b || a.includes(b) || b.includes(a);
 }
 
 /**
@@ -72,6 +93,10 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private failureTimes: number[] = [];
     private circuitOpenUntil = 0;
     private openLogged = false;
+    /** One-shot guard so a persistent model substitution doesn't flood the log
+     *  with one line per batch. Resets with the provider instance (i.e. on any
+     *  config change), so a corrected config logs again if it regresses. */
+    private modelMismatchLogged = false;
     /** True while a half-open probe is in flight. Only the caller who set this
      *  to true is allowed to make a real HTTP call; everyone else short-
      *  circuits as if the circuit were still OPEN. */
@@ -227,6 +252,26 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 this.recordFailure(isProbe);
                 return Array.from({ length: texts.length }, () => null);
             }
+            // Model-substitution guard. A local server (LMStudio/Ollama) can
+            // return HTTP 200 with a DIFFERENT model's vectors when the
+            // requested model isn't the one currently loaded — e.g. a shared
+            // endpoint where another tool keeps a smaller embedding model hot.
+            // The substituted vectors have a different dimensionality and live
+            // in a different vector space, so storing them under our requested
+            // model's identity silently corrupts the index. Refuse the result
+            // instead of trusting the substitute.
+            const servedModel = typeof body.model === "string" ? body.model : "";
+            if (this.model && servedModel && !embeddingModelsMatch(servedModel, this.model)) {
+                if (!this.modelMismatchLogged) {
+                    log(
+                        `[magic-context] embedding endpoint served a DIFFERENT model than requested — refusing the substituted vectors (they have the wrong dimensions/space). requested="${this.model}" served="${servedModel}". The endpoint likely substituted a loaded model; load/select "${this.model}" on the endpoint, or set embedding.model to the served model.`,
+                    );
+                    this.modelMismatchLogged = true;
+                }
+                this.recordFailure(isProbe);
+                return Array.from({ length: texts.length }, () => null);
+            }
+
             const items = Array.isArray(body.data) ? body.data : [];
 
             const results = Array.from({ length: texts.length }, (_, index) => {

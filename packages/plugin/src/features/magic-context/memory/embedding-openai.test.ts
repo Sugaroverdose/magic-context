@@ -281,3 +281,73 @@ describe("OpenAICompatibleEmbeddingProvider circuit breaker", () => {
         expect(provider._getFailureCount()).toBe(1);
     });
 });
+
+describe("OpenAICompatibleEmbeddingProvider model-substitution guard", () => {
+    let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+    beforeEach(() => {
+        fetchSpy = spyOn(globalThis, "fetch");
+    });
+    afterEach(() => {
+        fetchSpy.mockRestore();
+    });
+
+    function modelResponse(model: string): Response {
+        return new Response(JSON.stringify({ model, data: [{ embedding: [0.1, 0.2, 0.3] }] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+        });
+    }
+
+    test("rejects vectors when the endpoint serves a DIFFERENT model (LMStudio substitution)", async () => {
+        fetchSpy.mockImplementation((async () =>
+            // requested qwen3-embedding-4b-dwq but LMStudio serves the loaded 0.6b
+            modelResponse("text-embedding-qwen3-embedding-0.6b")) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen3-embedding-4b-dwq",
+        });
+        const result = await provider.embed("text");
+        expect(result).toBeNull();
+        // Treated as a failure so the circuit breaker backs off the misrouting endpoint.
+        expect(provider._getFailureCount()).toBe(1);
+    });
+
+    test("accepts vectors when the served model matches exactly", async () => {
+        fetchSpy.mockImplementation((async () =>
+            modelResponse("qwen3-embedding-4b-dwq")) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "qwen3-embedding-4b-dwq",
+        });
+        const result = await provider.embed("text");
+        expect(result).not.toBeNull();
+        expect(provider._getFailureCount()).toBe(0);
+    });
+
+    test("tolerates version-expanded / prefix model names (no false rejection)", async () => {
+        fetchSpy.mockImplementation((async () =>
+            modelResponse("text-embedding-3-small-v1")) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "text-embedding-3-small",
+        });
+        const result = await provider.embed("text");
+        expect(result).not.toBeNull();
+        expect(provider._getFailureCount()).toBe(0);
+    });
+
+    test("accepts when the endpoint omits the model field (cannot compare)", async () => {
+        fetchSpy.mockImplementation((async () =>
+            new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+            })) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "any-model",
+        });
+        const result = await provider.embed("text");
+        expect(result).not.toBeNull();
+        expect(provider._getFailureCount()).toBe(0);
+    });
+});
