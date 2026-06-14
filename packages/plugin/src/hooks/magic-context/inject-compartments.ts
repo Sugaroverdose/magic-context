@@ -536,9 +536,12 @@ export function renderCompartmentInjection(
     const firstMessage = messages[0];
     const textPart = firstMessage ? findFirstTextPart(firstMessage.parts) : null;
     if (!firstMessage || !textPart || isDroppedPlaceholder(textPart.text)) {
+        // synthetic: true — injected context, not a real user turn. Keeps it out
+        // of OpenCode's auto-title gate (issue #129) while still reaching the
+        // model (toModelMessagesEffect filters `ignored`, not `synthetic`).
         messages.unshift({
             info: { role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: historyBlock }],
+            parts: [{ type: "text", text: historyBlock, synthetic: true }],
         });
     } else {
         textPart.text = `${historyBlock}\n\n${textPart.text}`;
@@ -2169,14 +2172,29 @@ function prependM0M1Messages(
     m0Text: string,
     m1Text: string,
 ): void {
+    // `synthetic: true` marks these as injected context, not real user turns.
+    // OpenCode's `toModelMessagesEffect` filters on `ignored` (NOT `synthetic`),
+    // so the blocks STILL reach the model — but its title-generation gate
+    // (`ensureTitle`) counts a message as a real user turn only when not every
+    // part is synthetic, and skips titling unless exactly one real user message
+    // exists. Without this flag, m[0]+m[1] add two phantom user turns on the
+    // first message and permanently suppress the session's auto-title (issue
+    // #129). Must NOT use `ignored` here — that would strip the history
+    // injection from the real model call.
     messages.unshift(
         {
             info: { role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: m0Text.length > 0 ? m0Text : M0_EMPTY_BODY }],
+            parts: [
+                {
+                    type: "text",
+                    text: m0Text.length > 0 ? m0Text : M0_EMPTY_BODY,
+                    synthetic: true,
+                },
+            ],
         },
         {
             info: { role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: m1Text }],
+            parts: [{ type: "text", text: m1Text, synthetic: true }],
         },
     );
 }
