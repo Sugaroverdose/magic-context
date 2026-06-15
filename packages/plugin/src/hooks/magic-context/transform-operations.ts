@@ -4,7 +4,6 @@ export {
     stripClearedReasoning,
     stripInlineThinking,
     stripProcessedImages,
-    truncateErroredTools,
 } from "./strip-content";
 export { stripStructuralNoise } from "./strip-structural-noise";
 export { type MessageLike, type TagTarget, tagMessages } from "./tag-messages";

@@ -9,7 +9,6 @@ import {
     stripProcessedImages,
     stripReasoningFromMergedAssistants,
     stripSystemInjectedMessages,
-    truncateErroredTools,
 } from "./strip-content";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
@@ -304,105 +303,6 @@ describe("strip-content", () => {
                     const tags = new Map<MessageLike, number>();
 
                     expect(stripInlineThinking([msg], tags, 5)).toBe(0);
-                });
-            });
-        });
-    });
-
-    describe("truncateErroredTools", () => {
-        describe("#given tool error parts above and below a watermark", () => {
-            describe("#when truncating errored tools", () => {
-                it("#then it truncates only long errors at or below the watermark", () => {
-                    const below = message("m-1", "assistant", [
-                        {
-                            type: "tool",
-                            state: {
-                                status: "error",
-                                error: "e".repeat(200),
-                            },
-                        },
-                    ]);
-                    const above = message("m-2", "assistant", [
-                        {
-                            type: "tool",
-                            state: {
-                                status: "error",
-                                error: "f".repeat(200),
-                            },
-                        },
-                    ]);
-                    const shortError = message("m-3", "assistant", [
-                        {
-                            type: "tool",
-                            state: {
-                                status: "error",
-                                error: "short",
-                            },
-                        },
-                    ]);
-                    const success = message("m-4", "assistant", [
-                        {
-                            type: "tool",
-                            state: {
-                                status: "completed",
-                                output: "done",
-                            },
-                        },
-                    ]);
-                    const tags = new Map<MessageLike, number>([
-                        [below, 1],
-                        [above, 10],
-                        [shortError, 2],
-                        [success, 3],
-                    ]);
-
-                    const truncated = truncateErroredTools(
-                        [below, above, shortError, success],
-                        5,
-                        tags,
-                    );
-
-                    expect(truncated).toBe(1);
-                    const belowPart = below.parts[0] as {
-                        state: { error: string };
-                    };
-                    const abovePart = above.parts[0] as {
-                        state: { error: string };
-                    };
-                    expect(belowPart.state.error.endsWith("[truncated]")).toBe(true);
-                    expect(abovePart.state.error.length).toBe(200);
-                });
-            });
-        });
-
-        describe("#given an already truncated long error", () => {
-            describe("#when truncating errored tools again", () => {
-                it("#then it is byte-identical after the second pass", () => {
-                    const tool = message("m-1", "assistant", [
-                        {
-                            type: "tool",
-                            state: {
-                                status: "error",
-                                error: "e".repeat(200),
-                            },
-                        },
-                    ]);
-                    const tags = new Map<MessageLike, number>([[tool, 1]]);
-
-                    truncateErroredTools([tool], 5, tags);
-                    const firstPass = JSON.stringify(tool);
-                    truncateErroredTools([tool], 5, tags);
-
-                    expect(JSON.stringify(tool)).toBe(firstPass);
-                });
-            });
-        });
-
-        describe("#given empty messages", () => {
-            describe("#when truncating errored tools", () => {
-                it("#then it returns zero", () => {
-                    const tags = new Map<MessageLike, number>();
-                    expect(truncateErroredTools([], 5, tags)).toBe(0);
                 });
             });
         });

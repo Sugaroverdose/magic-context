@@ -80,7 +80,7 @@ function createTestTransform(sessionId: string) {
     return { transform, shouldExecute };
 }
 describe("createTransform index staleness regressions", () => {
-    it("does not truncate errored tools above watermark after tool-drop pruning", async () => {
+    it("never truncates errored tool output (truncation removed — it busted prompt cache)", async () => {
         useTempDataHome("context-transform-stale-truncate-");
         const sessionId = "ses-stale-truncate";
         const { transform } = createTestTransform(sessionId);
@@ -242,7 +242,7 @@ describe("createTransform index staleness regressions", () => {
         expect(secondPass[2].parts.some((part) => part.type === "file")).toBe(true);
     });
 
-    it("replays errored-tool truncation and processed-image stripping on defer passes", async () => {
+    it("replays processed-image stripping on defer passes (errored-tool truncation removed)", async () => {
         useTempDataHome("context-transform-defer-watermark-replay-");
         const sessionId = "ses-defer-watermark-replay";
         const { transform, shouldExecute } = createTestTransform(sessionId);
@@ -286,7 +286,6 @@ describe("createTransform index staleness regressions", () => {
 
         // The processed-image strip first-fires only on a cache-busting (execute)
         // pass, which freezes its id; afterwards it replays on every defer pass.
-        // Errored-tool truncation already fires every pass.
         shouldExecute.mockImplementationOnce(() => "execute");
         const bustPass = buildMessages();
         await transform({}, { messages: bustPass });
@@ -299,7 +298,10 @@ describe("createTransform index staleness regressions", () => {
         const filePartAfterReplay = firstDeferPass[0].parts[1];
         const toolPartAfterReplay = firstDeferPass[2].parts[0] as ToolPart;
         expect(filePartAfterReplay).toEqual({ type: "text", text: "" });
-        expect(toolPartAfterReplay.state.error).toBe(`${longError.slice(0, 100)}... [truncated]`);
+        // Errored-tool truncation was REMOVED — the error text must be left
+        // untouched and byte-identical across passes (its watermark-gated
+        // first-truncation on an arbitrary pass was a cache-bust source).
+        expect(toolPartAfterReplay.state.error).toBe(longError);
 
         const secondDeferPass = buildMessages();
         await transform({}, { messages: secondDeferPass });

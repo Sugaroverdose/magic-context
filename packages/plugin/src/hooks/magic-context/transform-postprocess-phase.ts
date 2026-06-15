@@ -67,7 +67,6 @@ import {
     type MessageLike,
     stripProcessedImages,
     type TagTarget,
-    truncateErroredTools,
 } from "./transform-operations";
 import { logTransformTiming } from "./transform-stage-logger";
 
@@ -588,11 +587,6 @@ export async function runPostTransformPhase(
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
             heuristicsRanSuccessfully = true;
-        }
-        if (args.watermark > 0) {
-            const tWatermarkCleanup = performance.now();
-            truncateErroredTools(args.messages, args.watermark, args.messageTagNumbers);
-            logTransformTiming(args.sessionId, "watermarkCleanup", tWatermarkCleanup);
         }
         if (shouldApplyPendingOps) {
             pendingOpsRanSuccessfully = true;

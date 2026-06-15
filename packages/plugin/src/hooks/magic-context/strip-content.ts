@@ -420,34 +420,6 @@ export function stripInlineThinking(
     return stripped;
 }
 
-export function truncateErroredTools(
-    messages: MessageLike[],
-    watermark: number,
-    messageTagNumbers: Map<MessageLike, number>,
-): number {
-    let truncated = 0;
-    for (let i = 0; i < messages.length; i++) {
-        const maxTag = messageTagNumbers.get(messages[i]) ?? 0;
-        if (maxTag > watermark) {
-            continue;
-        }
-
-        for (const part of messages[i].parts) {
-            if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state)) {
-                continue;
-            }
-            if (part.state.status !== "error") {
-                continue;
-            }
-            if (typeof part.state.error === "string" && part.state.error.length > 100) {
-                part.state.error = `${part.state.error.slice(0, 100)}... [truncated]`;
-                truncated++;
-            }
-        }
-    }
-    return truncated;
-}
-
 // Parts that the AI SDK ignores when converting OpenCode messages to the
 // Anthropic request body. Treating them as invisible when deciding whether
 // a reasoning part lands at the start of the eventual assistant block.
