@@ -44,6 +44,22 @@ try {
     check("run() returns changes+lastInsertRowid", r.changes === 1 && Number(r.lastInsertRowid) === 1, JSON.stringify(r));
     check("get() returns row", (db.prepare("SELECT v FROM t WHERE id=?").get(1) as { v: string }).v === "a");
 
+    // Array-form bind normalization (issue #151): bare node:sqlite throws
+    // `Unknown named parameter '0'` on `.run([a,b])`; the chokepoint shim must
+    // make it behave like bun:sqlite (positional). Exercise run/get with array binds.
+    let arrayBindOk = false;
+    try {
+        db.prepare("INSERT INTO t(v, flag) VALUES(?, ?)").run(["arr", 1]);
+        const got = db.prepare("SELECT v FROM t WHERE v=?").get(["arr"]) as { v: string } | undefined;
+        arrayBindOk = got?.v === "arr";
+        // Clean up so the row-count assertions below stay valid.
+        db.prepare("DELETE FROM t WHERE v=?").run(["arr"]);
+    } catch (e) {
+        arrayBindOk = false;
+        check("array-bind normalized to positional", false, (e as Error).message);
+    }
+    check("array-bind normalized to positional (issue #151)", arrayBindOk);
+
     // transaction() shim — top-level commit.
     db.transaction(() => {
         db.prepare("INSERT INTO t(v, flag) VALUES(?, ?)").run("b", 0);

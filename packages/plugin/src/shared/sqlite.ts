@@ -25,12 +25,16 @@
  *   - db.transaction(fn) → wrapped function        ← shimmed for node:sqlite
  *   - db.close()
  *
- * The two backend differences we bridge for node:sqlite:
+ * The three backend differences we bridge for node:sqlite:
  *   1. node:sqlite has no `db.transaction(fn)` helper — we add a savepoint-aware
  *      shim (below) that matches better-sqlite3/bun semantics.
  *   2. node:sqlite's constructor option is `readOnly` (camel-case), not
  *      better-sqlite3/bun's `readonly` — we translate it so call sites are
  *      unchanged.
+ *   3. node:sqlite reads a lone array bind arg (`.run([a,b])`) as NAMED params
+ *      and throws `Unknown named parameter '0'`; bun binds it positionally. We
+ *      normalize it in the `prepare()` override (below) so the bind surface is
+ *      identical (issue #151 / Pi /ctx-dream).
  * Everything else (named params with bare keys, ATTACH under defensive mode,
  * `run()` → {changes,lastInsertRowid}) is identical and was verified directly.
  */
@@ -102,6 +106,31 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
                 delete translated.readonly;
             }
             super(typeof filename === "string" ? filename : ":memory:", translated);
+        }
+
+        // Normalize a single ARRAY bind arg to spread positional, matching
+        // bun:sqlite. bun's `.run([a,b])` binds positionally; node:sqlite instead
+        // reads a lone array as NAMED params with keys "0","1" and throws
+        // `Unknown named parameter '0'`. That divergence let an array-form bind
+        // (e.g. `.run([x, y])`) silently work on OpenCode/Bun yet break Pi and
+        // OpenCode Desktop (both node:sqlite) — issue #151 (/ctx-dream). Wrapping
+        // every prepared statement here keeps the two backends' bind surface
+        // truly identical so this whole class is impossible regardless of how a
+        // call site writes its bind. Named-object binds (`.run({k:v})`), no-arg
+        // calls, and already-spread positional args are passed through unchanged;
+        // the normalization only triggers on the exact 1-array shape. Overhead
+        // measured at ~12ns/call against real node:sqlite (negligible).
+        // biome-ignore lint/suspicious/noExplicitAny: node:sqlite StatementSync has no shipped types here.
+        prepare(sql: string): any {
+            const stmt = super.prepare(sql);
+            for (const method of ["run", "get", "all"] as const) {
+                const original = stmt[method].bind(stmt);
+                stmt[method] = (...args: unknown[]): unknown =>
+                    args.length === 1 && Array.isArray(args[0])
+                        ? original(...args[0])
+                        : original(...args);
+            }
+            return stmt;
         }
 
         // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3's generic transaction(fn) signature.
