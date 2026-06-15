@@ -1785,8 +1785,8 @@ export function createTransform(deps: TransformDeps) {
         // the agent has the §N§ prefix + the tool — i.e. any session with
         // ctx_reduce enabled, INCLUDING subagents (which self-manage tool
         // bloat). It must NOT fire for a ctx_reduce_enabled:false primary (no
-        // tool to act on). Channel 2 (the synthetic-user ceiling) stays
-        // primary-only — see the fullFeatureMode guard on its trigger below.
+        // tool to act on). Channel 2 (the synthetic-user ceiling) rides the same
+        // gate — it fires for any ctx_reduce-effective session, subagents included.
         if (ctxReduceEnabledEffective && deps.channel1StateBySession) {
             try {
                 // Always resolve through resolveExecuteThreshold — even when the
@@ -1855,11 +1855,15 @@ export function createTransform(deps: TransformDeps) {
                 // ('') state so we never reset an in-flight claim/delivery; the cap
                 // is one delivery per session lifetime.
                 //
-                // PRIMARY-ONLY (fullFeatureMode): Channel 2 injects a synthetic
-                // user message via promptAsync, whose interaction with a parent
-                // task() await is unverified for subagents. Subagents rely on
-                // Channel 1 + the ≥85% tiered floor. (Deferred behind an
-                // integration test — see plan.)
+                // Subagents included: Channel 2 injects a synthetic user message
+                // via promptAsync, which a subagent's run loop picks up at its next
+                // step boundary and addresses like any queued message — verified
+                // safe (a subagent running under the live server is reachable the
+                // same as a primary; delivery self-gates on the live-server probe,
+                // so plain TUI still 404s out). The only gate is ctx_reduce being
+                // effectively enabled (this whole block), so we never nudge toward
+                // an uncallable tool. resolvedContextLimit/threshold known is all
+                // that's required.
                 // usable = the agent's working range = the gap between the fixed
                 // overhead floor (everything that ISN'T live tail: system + tool
                 // defs + m[0] + m[1]) and the execute-threshold ceiling. Derived
@@ -1871,7 +1875,6 @@ export function createTransform(deps: TransformDeps) {
                 // (executeThresholdTokens/usableTokens computed above, alongside
                 // the Channel-1 baseline they're persisted with.)
                 const channel2MetricsKnown =
-                    fullFeatureMode &&
                     resolvedContextLimit !== undefined &&
                     resolvedContextLimit > 0 &&
                     resolvedExecuteThresholdPct > 0;

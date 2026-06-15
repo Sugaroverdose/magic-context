@@ -121,18 +121,11 @@ function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry
  */
 async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: string): Promise<void> {
     try {
-        // Channel 2 is primary-only. The trigger in transform.ts is already
-        // gated fullFeatureMode-only (a subagent never records a `pending`
-        // intent), but guard delivery too: a subagent's synthetic-user nudge
-        // via promptAsync has unverified interaction with the parent task()
-        // await, so subagent Channel 2 is deferred behind an integration test.
-        try {
-            const meta = getOrCreateSessionMeta(deps.db, sessionId);
-            if (meta.isSubagent) return;
-        } catch {
-            // meta load failure: fall through (delivery itself no-ops unless a
-            // `pending` intent exists, which only a primary could have set).
-        }
+        // Channel 2 fires for primaries AND subagents. A subagent runs under the
+        // same live server, so promptAsync reaches it and its run loop addresses
+        // the queued synthetic-user nudge at the next step boundary. Delivery
+        // self-gates on the live-server probe (channel2-delivery.ts), so plain
+        // TUI still 404s out; it no-ops unless a `pending` intent exists.
         const baseline = deps.channel1StateBySession?.get(sessionId);
         await maybeDeliverChannel2(sessionId, {
             db: deps.db,
@@ -567,8 +560,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // coalesces into the in-flight run, never splicing mid-prefix.
             // The delivery itself no-ops unless a `pending` intent exists and
             // the live server is reachable, so this is cheap per event.
-            // deliverChannel2IfPending guards isSubagent internally (subagent
-            // Channel 2 is deferred). Fire-and-forget — never block the event loop.
+            // Fires for primaries and subagents alike; no-ops unless a `pending`
+            // intent exists. Fire-and-forget — never block the event loop.
             if (
                 (info.finish === "stop" || info.finish === "tool-calls") &&
                 deps.serverUrl &&
