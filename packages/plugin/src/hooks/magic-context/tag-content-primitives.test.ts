@@ -5,6 +5,7 @@ import {
     isThinkingPart,
     peelLeadingMcTagNotation,
     prependTag,
+    stripDanglingTagNotationGlobally,
     stripPersistedAssistantText,
     stripTagPrefix,
     stripTagSectionCharacters,
@@ -14,6 +15,45 @@ import {
 const SECTION = "\u00a7";
 
 const DEGREE = "\u00b0";
+const CYRILLIC_HA = "\u04a9"; // ҩ — a stray closer a model improvised in the wild
+
+describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", () => {
+    it("strips §N$ — the agent opened the tag and closed with $ (would orphan '$')", () => {
+        // Exact production shape: §103012$ → before this, stray-§ left "103012$".
+        expect(stripPersistedAssistantText(`${SECTION}103012$ Fixed it`)).toBe("Fixed it");
+    });
+
+    it("strips §N + a non-ASCII improvised closer (§11865ҩ → '')", () => {
+        expect(stripPersistedAssistantText(`${SECTION}11865${CYRILLIC_HA} done`)).toBe("done");
+        expect(stripDanglingTagNotationGlobally(`mid ${SECTION}11865${CYRILLIC_HA} text`)).toBe(
+            "mid  text",
+        );
+    });
+
+    it("strips a dangling §N with NO closer, keeping the content after the space", () => {
+        expect(stripPersistedAssistantText(`${SECTION}42 files changed`)).toBe("files changed");
+    });
+
+    it("strips a dangling leading §N$ via stripTagPrefix without orphaning", () => {
+        expect(stripTagPrefix(`${SECTION}103012$ Fixed it`)).toBe("Fixed it");
+    });
+
+    it("does NOT eat a real letter following §N (only a non-word closer)", () => {
+        // `i` is a word char, so it is NOT consumed as a closer.
+        expect(stripDanglingTagNotationGlobally(`${SECTION}42important`)).toBe("important");
+    });
+
+    it("leaves well-formed §N§ to the pair/prefix passes (not mangled by dangling)", () => {
+        expect(stripPersistedAssistantText(`${SECTION}42${SECTION} hi`)).toBe("hi");
+        expect(stripTagPrefix(`${SECTION}42${SECTION} hi`)).toBe("hi");
+    });
+
+    it("does not touch bare digits (no leading §)", () => {
+        expect(stripDanglingTagNotationGlobally("99 files, 2024 roadmap")).toBe(
+            "99 files, 2024 roadmap",
+        );
+    });
+});
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
     it("#given well-formed leading prefix #when stripTagPrefix runs #then removes it", () => {
