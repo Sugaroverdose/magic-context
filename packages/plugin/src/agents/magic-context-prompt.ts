@@ -65,7 +65,7 @@ Use \`ctx_expand\` to recover the raw conversation behind a \`<compartment>\` su
 \`ctx_search\` returns ranked results from memories, git commits, and raw message history. Use message ordinals from results with \`ctx_expand\` to retrieve surrounding conversation context.
 ${TOOL_HISTORY_GUIDANCE}
 NEVER drop large ranges blindly (e.g., "1-50"). Review each tag before deciding.
-NEVER drop user messages — they are short and will be summarized by compartmentalization automatically. Dropping them loses context the historian needs.
+Keep your user's instructions and intent — never drop a user message for its directive, even an old one. But a large block of pasted content inside a user message (logs, data dumps, long code, attachments) is fair to mark discardable once you've extracted what you need — it stays searchable via \`ctx_search\`.
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outputs you no longer need.`;
 
