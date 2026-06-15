@@ -729,8 +729,11 @@ describe("strip-content", () => {
             });
         });
 
-        describe("#given an assistant message with [truncated §N§] text", () => {
-            it("#then it does NOT neutralize (truncated marker is distinct from dropped)", () => {
+        describe("#given an assistant message whose text merely contains a [truncated] word", () => {
+            it("#then it does NOT neutralize (only the exact [dropped §N§] placeholder matches)", () => {
+                // The strip pattern must match ONLY our canonical placeholder,
+                // never arbitrary content that happens to contain the word
+                // "truncated" (e.g. a model quoting tool output).
                 const assistant = message("m-a", "assistant", [
                     { type: "text", text: "[truncated §3§] ..." },
                 ]);

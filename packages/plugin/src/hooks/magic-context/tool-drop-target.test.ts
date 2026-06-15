@@ -123,7 +123,7 @@ describe("tool-drop-target", () => {
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
 
-                    const target = createToolDropTarget("call-1", thinkingParts, index, batch);
+                    const target = createToolDropTarget("call-1", thinkingParts, index, batch, 1);
                     const result = target.drop();
 
                     expect(result).toBe("removed");
@@ -154,7 +154,13 @@ describe("tool-drop-target", () => {
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
 
-                    const target = createToolDropTarget("call-orphan", thinkingParts, index, batch);
+                    const target = createToolDropTarget(
+                        "call-orphan",
+                        thinkingParts,
+                        index,
+                        batch,
+                        2,
+                    );
                     const result = target.drop();
 
                     expect(result).toBe("incomplete");
@@ -183,6 +189,7 @@ describe("tool-drop-target", () => {
                         thinkingParts,
                         index,
                         batch,
+                        3,
                     );
                     const result = target.drop();
 
@@ -216,7 +223,7 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-2", thinkingParts, index, batch);
+                    const target = createToolDropTarget("call-2", thinkingParts, index, batch, 4);
 
                     target.setContent("replacement-content");
 
@@ -246,7 +253,7 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-1", [], index, batch);
+                    const target = createToolDropTarget("call-1", [], index, batch, 5);
 
                     expect(target.drop()).toBe("removed");
                     expect(target.drop()).toBe("absent");
@@ -288,7 +295,7 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-3", thinkingParts, index, batch);
+                    const target = createToolDropTarget("call-3", thinkingParts, index, batch, 7);
 
                     expect(target.truncate()).toBe("truncated");
 
@@ -305,9 +312,9 @@ describe("tool-drop-target", () => {
                             exact: true,
                             limit: 2,
                         },
-                        output: "[truncated]",
+                        output: "[dropped \u00a77\u00a7]",
                     });
-                    expect(toolResultPart.content).toBe("[truncated]");
+                    expect(toolResultPart.content).toBe("[dropped \u00a77\u00a7]");
                     expect(thinkingParts[0]?.thinking).toBe("[cleared]");
                     expect(thinkingParts[1]?.text).toBe("[cleared]");
                 });
@@ -338,7 +345,7 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-4", [], index, batch);
+                    const target = createToolDropTarget("call-4", [], index, batch, 9);
 
                     expect(target.truncate()).toBe("truncated");
 
@@ -348,7 +355,7 @@ describe("tool-drop-target", () => {
                             files: "[2 items]",
                             metadata: "[object]",
                         },
-                        output: "[truncated]",
+                        output: "[dropped \u00a79\u00a7]",
                     });
                 });
             });

@@ -203,7 +203,9 @@ describe("tagTranscript tool aggregation", () => {
             result = targets.get(tag ?? -1)?.truncate?.();
         }).not.toThrow();
         expect(result).toBe("truncated");
-        expect(toolUse.getText()).toBe("[truncated]");
+        // Skeleton-drop now renders the one canonical placeholder, not a
+        // separate "[truncated]" vocabulary.
+        expect(toolUse.getText()).toBe(`[dropped \u00a7${tag}\u00a7]`);
     });
 
     it("drops every contiguous folded tool_result block for the paired callId", () => {

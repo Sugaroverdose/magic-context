@@ -611,7 +611,7 @@ function tagToolPart(args: TagToolPartArgs): void {
         args.part.setText(tagged);
     }
 
-    args.targets.set(tagId, buildToolTarget(args.part, args.message));
+    args.targets.set(tagId, buildToolTarget(args.part, args.message, tagId));
 }
 
 function setToolContentOrText(part: TranscriptPart, content: string): boolean {
@@ -679,10 +679,11 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
             return any ? "removed" : "absent";
         },
         truncate(): "truncated" | "absent" {
-            // Truncate BOTH halves. For tool_use, this typically truncates
-            // the args; for tool_result, the output. The sentinel string
-            // matches OpenCode's truncate sentinel exactly.
-            const sentinel = "[truncated]";
+            // Skeleton-drop: replace BOTH halves' content with the one
+            // canonical `[dropped §N§]` placeholder (byte-identical to a full
+            // drop and to OpenCode). Frozen by the dropMode column → replays
+            // the same string every pass. The tool_use call survives intact.
+            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
             let any = false;
             for (const occ of occurrences) {
                 if (setToolContentOrText(occ.part, sentinel)) {
@@ -739,16 +740,17 @@ function buildTextTarget(
 }
 
 /**
- * TagTarget for a tag-eligible tool part. Tool parts get full-drop
- * (replace with `[dropped §N§]`) or truncated-drop (replace with
- * `[truncated]`) treatment from `applyFlushedStatuses` based on the
- * stored `drop_mode` column. We expose both via the standard target
- * surface; replaceWithSentinel is the canonical mutation, with
- * truncated-drop using the "[truncated]" string.
+ * TagTarget for a tag-eligible tool part. Tool parts get full-drop or
+ * skeleton-drop treatment from `applyFlushedStatuses` based on the stored
+ * `drop_mode` column. Both render the SAME canonical `[dropped §N§]`
+ * placeholder — full-drop replaces the whole pair, skeleton-drop keeps the
+ * tool_use call and replaces only its output. One placeholder string,
+ * byte-identical across passes and across harnesses.
  */
 function buildToolTarget(
     part: TranscriptPart,
     message: { info: { id?: string; role: string } },
+    tagId: number,
 ): TagTarget {
     return {
         setContent(content: string): boolean {
@@ -765,15 +767,15 @@ function buildToolTarget(
             // For Pi the current Transcript contract treats both
             // invocation and result parts symmetrically — both expose
             // setText / setToolOutput.
-            const replaced = part.replaceWithSentinel(`[dropped \u00a7${part.id ?? "?"}\u00a7]`);
+            const replaced = part.replaceWithSentinel(`[dropped \u00a7${tagId}\u00a7]`);
             return replaced ? "removed" : "absent";
         },
         truncate(): "truncated" | "absent" {
-            // Truncate the tool output to a fixed sentinel string. Done
-            // via setToolOutput so the underlying tool_result content
-            // gets the truncation; falls back to setText for cases
-            // where the part type doesn't support setToolOutput.
-            const ok = setToolContentOrText(part, "[truncated]");
+            // Skeleton-drop: replace the tool output with the one canonical
+            // `[dropped §N§]` placeholder (byte-identical to a full drop and to
+            // OpenCode). Frozen by the dropMode column, so it replays the same
+            // string every pass. The tool_use call itself survives intact.
+            const ok = setToolContentOrText(part, `[dropped \u00a7${tagId}\u00a7]`);
             return ok ? "truncated" : "absent";
         },
         message: {

@@ -20,7 +20,7 @@ import { PiTestHarness } from "../src/pi-harness";
  *
  * Bug B — Pi uses the shared `apply-operations.ts` drop/truncate path plus
  * Pi-specific `strip-placeholders-pi.ts`. User turn boundaries between signed
- * assistant messages must survive as a `[truncated §N§]` user shell so provider
+ * assistant messages must survive as a `[dropped §N§]` user shell so provider
  * adapters cannot merge adjacent assistants or change thinking block layout.
  *
  * Bug C — Pi image prompts arrive as typed `image` parts. Dropping the companion
@@ -147,7 +147,7 @@ describe("pi thinking-block safety (Anthropic 400 regression)", () => {
     });
 
     describe("Bug B: dropped user text between assistants preserves turn boundary", () => {
-        it("keeps the user shell as [truncated §N§] so signed assistants stay separated", async () => {
+        it("keeps the user shell as [dropped §N§] so signed assistants stay separated", async () => {
             h.mock.reset();
             const signedThinkingA = "Pi first signed thinking.";
             const signedThinkingB = "Pi second signed thinking.";
@@ -210,8 +210,10 @@ describe("pi thinking-block safety (Anthropic 400 regression)", () => {
                 .filter((block) => block.type === "text")
                 .map((block) => block.text ?? "")
                 .join("\n");
-            expect(allUserText).toMatch(/\[truncated §\d+§\]/);
-            expect(allUserText).toContain("Here is a Pi log of the failing session");
+            expect(allUserText).toMatch(/\[dropped §\d+§\]/);
+            // Raw paste body is replaced by the canonical placeholder; the
+            // user-text preview was removed for prompt-cache stability.
+            expect(allUserText).not.toContain("Here is a Pi log of the failing session");
 
             const signatures = new Set(findThinkingBlocks(lastReq).map((block) => block.signature));
             expect(signatures.has(sigA) || signatures.has(sigB)).toBe(true);

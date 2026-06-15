@@ -337,7 +337,7 @@ describe("pi cache stability", () => {
                 expect(h.countPendingOps(first.sessionId!)).toBe(1);
                 expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain(firstText);
                 expect(JSON.stringify(h.mock.lastRequest()!.body)).not.toContain(
-                    `truncated §${dropTag}§`,
+                    `dropped §${dropTag}§`,
                 );
 
                 await h.sendPrompt("third turn sees prior high usage and executes drops", {
@@ -346,7 +346,7 @@ describe("pi cache stability", () => {
                 });
                 expect(h.countPendingOps(first.sessionId!)).toBe(0);
                 expect(h.countDroppedTags(first.sessionId!)).toBeGreaterThanOrEqual(1);
-                expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain(`truncated §${dropTag}§`);
+                expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain(`dropped §${dropTag}§`);
             },
         );
     }, 180_000);
@@ -417,11 +417,13 @@ describe("pi cache stability", () => {
                 const body = JSON.stringify(h.mock.lastRequest()!.body);
                 expect(body).toContain(callId);
                 // The tool call is within the newest-20 skeleton window, so the
-                // drop materializes as a truncated skeleton: tool_use survives
-                // with its input replaced and the paired result truncated —
-                // pairing stays intact instead of the pair being fully removed.
+                // drop materializes as a skeleton: tool_use survives with its
+                // input replaced and the paired result set to the one canonical
+                // `[dropped §N§]` placeholder — pairing stays intact instead of
+                // the pair being fully removed. (`__magic_context_replacement__`
+                // is the arg-replacement marker, distinct from the output text.)
                 expect(body).toContain("__magic_context_replacement__");
-                expect(body).toContain("[truncated]");
+                expect(body).toContain(`dropped \u00a7${toolTag}\u00a7`);
                 expect(body).not.toContain("__magic_context_dropped__");
 
                 const occurrences = body.split(callId).length - 1;

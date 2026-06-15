@@ -658,7 +658,10 @@ export function tagMessages(
 
     for (const [compositeKey, tagId] of toolTagByCallId) {
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
-        targets.set(tagId, createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch));
+        targets.set(
+            tagId,
+            createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch, tagId),
+        );
     }
 
     const hasRecentReduceCall =

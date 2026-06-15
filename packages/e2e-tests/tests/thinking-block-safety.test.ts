@@ -217,7 +217,7 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
 
     describe("Bug B: user-message turn boundary preserved when text tag is dropped", () => {
         it(
-            "keeps the user shell as [truncated §N§] so adjacent assistants are not merged",
+            "keeps the user shell as [dropped §N§] so adjacent assistants are not merged",
             async () => {
                 h.mock.reset();
 
@@ -327,9 +327,11 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
                 expect(mainReqs.length).toBeGreaterThanOrEqual(3);
                 const lastReq = mainReqs[mainReqs.length - 1]!;
 
-                // The paste's text must survive as a `[truncated §N§]` shell
-                // inside a USER message — NOT a `[dropped §N§]` that strips
-                // the turn boundary.
+                // The dropped paste must survive as a `[dropped §N§]` shell
+                // inside a USER message — the content is replaced by the one
+                // canonical placeholder, but the message itself is NEVER
+                // whole-message-stripped (the user-role guard), so it still
+                // anchors the turn boundary and adjacent assistants don't merge.
                 const users = capturedUsers(asAnthropic(lastReq));
                 const allUserText = users
                     .flatMap((u) => (Array.isArray(u.content) ? u.content : []))
@@ -337,17 +339,11 @@ describe("thinking-block safety (Anthropic 400 regression)", () => {
                     .map((b) => b.text ?? "")
                     .join("\n");
 
-                // Must have the truncation marker (proves shell preservation).
-                expect(allUserText).toMatch(/\[truncated \u00a7\d+\u00a7\]/);
-                // Must preserve the START of the original paste (intent).
-                expect(allUserText).toContain("Here is a log of the failing session");
-                // Must NOT have degenerated to a full drop.
-                const hasFullDrop = /\[dropped \u00a7\d+\u00a7\]/.test(allUserText);
-                if (hasFullDrop) {
-                    // Full drops of OTHER tags are fine — we're asserting the
-                    // paste's text did NOT get fully dropped.
-                    expect(allUserText).toContain("Here is a log of the failing session");
-                }
+                // The paste shell renders as the canonical placeholder.
+                expect(allUserText).toMatch(/\[dropped \u00a7\d+\u00a7\]/);
+                // The raw paste body is gone (replaced by the placeholder) — the
+                // user-text preview was removed for prompt-cache stability.
+                expect(allUserText).not.toContain("ERROR: call_failed at line 42.");
 
                 // Thinking blocks from prior turns must be present and
                 // unchanged in the request.

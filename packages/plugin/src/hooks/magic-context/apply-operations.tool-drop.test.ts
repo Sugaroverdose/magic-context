@@ -114,7 +114,7 @@ describe("apply operations for tool drops", () => {
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
     });
 
-    it("keeps a [truncated] skeleton for drops within the recent tool window", () => {
+    it("keeps a skeleton (canonical [dropped §N§] output) for drops within the recent tool window", () => {
         useTempDataHome("context-tool-drop-skeleton-");
         const db = openDatabase();
         const tagger = createTagger();
@@ -144,7 +144,7 @@ describe("apply operations for tool drops", () => {
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-1" && p.type === "tool") as any;
-        expect(toolPart.state.output).toBe("[truncated]");
+        expect(toolPart.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("truncated");
@@ -314,7 +314,7 @@ describe("apply operations for tool drops", () => {
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-2" && p.type === "tool") as any;
-        expect(toolPart.state.output).toBe("[truncated]");
+        expect(toolPart.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
     });
 
     it("fully removes tool parts when drop mode is full", () => {

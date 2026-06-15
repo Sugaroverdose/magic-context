@@ -105,7 +105,9 @@ function makeDropTarget(message: MessageLike): TagTarget {
                 (candidate) => (candidate as { type?: string }).type === "tool",
             ) as { state?: { output?: string } } | undefined;
             if (!part?.state) return "absent";
-            part.state.output = "[truncated]";
+            // Skeleton-drop renders the one canonical placeholder (the real
+            // target uses `[dropped §N§]`); this mock mirrors the word.
+            part.state.output = "[dropped]";
             return "truncated";
         },
         canDrop: () => message.parts.some((part) => (part as { type?: string }).type === "tool"),
@@ -250,7 +252,7 @@ describe("two-pass tool reclaim", () => {
 
         expect(tagStatuses(sessionId).get(1)).toBe("active");
         expect((message.parts[0] as { state?: { output?: string } }).state?.output).not.toBe(
-            "[truncated]",
+            "[dropped]",
         );
     });
 
@@ -281,7 +283,7 @@ describe("two-pass tool reclaim", () => {
         expect(statuses.get(1)).toBe("dropped");
         expect(statuses.get(2)).toBe("dropped");
         expect((second.parts[0] as { state?: { output?: string } }).state?.output).toBe(
-            "[truncated]",
+            "[dropped]",
         );
     });
 

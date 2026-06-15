@@ -58,13 +58,20 @@ function setToolContent(part: unknown, content: string): void {
     }
 }
 
-function truncateToolPart(part: unknown): void {
+function truncateToolPart(part: unknown, tagId: number): void {
     if (!isRecord(part)) return;
+
+    // The skeleton keeps the tool_use call but replaces its OUTPUT with the
+    // one canonical drop placeholder `[dropped §N§]` (byte-identical to a
+    // full message/tool drop). Long input ARG values are separately clamped
+    // with `...[truncated]` — that's value-shortening, not a drop, so it keeps
+    // its own marker. Frozen by the dropMode column, so it replays identically.
+    const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
 
     // OpenCode format: { type: "tool", state: { input: {...}, output: "..." } }
     if (part.type === "tool" && isRecord(part.state)) {
         const state = part.state;
-        state.output = "[truncated]";
+        state.output = sentinel;
 
         if (isRecord(state.input)) {
             const inputSize = estimateInputSize(state.input);
@@ -78,7 +85,7 @@ function truncateToolPart(part: unknown): void {
 
     // Anthropic format: { type: "tool_result", content: "..." }
     if (part.type === "tool_result") {
-        part.content = "[truncated]";
+        part.content = sentinel;
         return;
     }
 
@@ -238,6 +245,7 @@ export function createToolDropTarget(
     thinkingParts: ThinkingLikePart[],
     index: ToolCallIndex,
     batch: ToolMutationBatch,
+    tagId: number,
 ): {
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
@@ -272,7 +280,7 @@ export function createToolDropTarget(
 
         for (const occurrence of entry.occurrences) {
             // Truncate both result parts (output) and invocation parts (args/input)
-            truncateToolPart(occurrence.part);
+            truncateToolPart(occurrence.part, tagId);
         }
         clearThinkingParts(thinkingParts);
         return "truncated";

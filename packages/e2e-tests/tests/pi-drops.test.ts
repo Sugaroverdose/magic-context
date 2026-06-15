@@ -62,6 +62,6 @@ describe("pi drops", () => {
 
         expect(h.countPendingOps(first.sessionId!)).toBe(0);
         expect(h.countDroppedTags(first.sessionId!)).toBeGreaterThan(0);
-        expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain("truncated §1§");
+        expect(JSON.stringify(h.mock.lastRequest()!.body)).toContain("dropped §1§");
     }, 60_000);
 });
