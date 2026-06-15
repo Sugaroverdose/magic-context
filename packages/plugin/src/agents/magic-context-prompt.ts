@@ -46,9 +46,7 @@ const TOOL_HISTORY_GUIDANCE = `Compressed history intentionally omits tool calls
 const BASE_INTRO = (
     protectedTags: number,
 ): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
-Use \`ctx_reduce\` to manage context size. It supports one operation:
-- \`drop\`: Remove entirely (best for tool outputs you already acted on).
-Syntax: "3-5", "1,2,9", or "1-5,8,12-15". Last ${protectedTags} tags are protected.
+Use \`ctx_reduce\` to mark spent tagged content as discardable and reclaim space. Marking is NOT an immediate delete — it queues the content, which stays fully visible until space is actually needed (as soon as the next turn if you're already under pressure, much later if not), so mark a tool output as soon as you're done with it rather than hoarding the call for the end of the turn. The last ${protectedTags} tags are protected (marking one just queues it until it ages out). Syntax: "3-5", "1,2,9", or "1-5,8,12-15".
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 ${CTX_NOTE_GUIDANCE}
 Use \`ctx_memory\` for durable project knowledge: write what future sessions must know, update/archive/merge the memories you see in \`<project-memory>\` when they drift. Memories persist across sessions and every new session starts with them.
