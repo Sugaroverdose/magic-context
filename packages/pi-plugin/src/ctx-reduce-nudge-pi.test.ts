@@ -75,6 +75,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			turnToolTokens: 0,
 			usableTokens: 60_000,
 			reducedSinceRefresh: false,
+			oldestReclaimableToolTags: [{ tagNumber: 9, toolName: "bash" }],
 		});
 	}
 
@@ -103,6 +104,29 @@ describe("maybeChannel1ReminderForToolResult", () => {
 		expect(block?.type).toBe("text");
 		expect(block?.text).toContain("<system-reminder>");
 		expect(block?.text).toContain("ctx_reduce");
+		clearPiChannel1State(SESSION);
+	});
+
+	it("includes oldest reclaimable hints from the baseline", () => {
+		const db = createTestDb();
+		setPiChannel1Baseline(SESSION, {
+			tailToolTokens: 90_000,
+			historyBudgetTokens: 100_000,
+			contextLimit: 200_000,
+			executeThresholdPercentage: 65,
+			lastInputTokens: 150_000,
+			turnToolTokens: 0,
+			usableTokens: 60_000,
+			reducedSinceRefresh: false,
+			oldestReclaimableToolTags: [{ tagNumber: 123, toolName: "read" }],
+		});
+		const block = maybeChannel1ReminderForToolResult({
+			db,
+			sessionId: SESSION,
+			toolName: "bash",
+			content: [{ type: "text", text: "some bash output" }],
+		});
+		expect(block?.text).toContain("oldest reclaimable: §123§ read.");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -171,6 +195,7 @@ describe("maybeDeliverChannel2Pi", () => {
 			turnToolTokens: 0,
 			usableTokens: 60_000, // 30k >= 60k/3 -> trigger holds
 			reducedSinceRefresh: false,
+			oldestReclaimableToolTags: [{ tagNumber: 9, toolName: "bash" }],
 		});
 	}
 
@@ -194,6 +219,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(capturedDeliverAs).toBe("followUp");
 		expect(capturedContent).toContain("<system-reminder>");
 		expect(capturedContent).toContain("ctx_reduce");
+		expect(capturedContent).toContain("oldest reclaimable");
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
@@ -234,6 +260,7 @@ describe("maybeDeliverChannel2Pi", () => {
 			turnToolTokens: 0,
 			usableTokens: 44_000,
 			reducedSinceRefresh: false,
+			oldestReclaimableToolTags: [],
 		});
 		let sent = 0;
 		const delivered = maybeDeliverChannel2Pi(

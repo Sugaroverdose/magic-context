@@ -9,6 +9,7 @@ import {
     getActiveTagsBySession,
     getActiveTagTokenAggregate,
     getMaxDroppedTagNumber,
+    getOldestActiveUnprotectedToolTags,
     getTagById,
     getTagsByNumbers,
     getTagsBySession,
@@ -102,6 +103,24 @@ describe("storage-tags", () => {
 
             expect(id1).toBe(1);
             expect(id2).toBe(2);
+        });
+    });
+
+    describe("#given oldest reclaimable tool hint query", () => {
+        it("#then returns oldest active unprotected tool tags using stored tool names", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-hint", "msg-1", "tool", 100, 1, 0, "read");
+            insertTag(db, "ses-hint", "msg-2", "message", 100, 2);
+            insertTag(db, "ses-hint", "msg-3", "tool", 100, 3, 0, "grep");
+            insertTag(db, "ses-hint", "msg-4", "tool", 100, 4, 0, null);
+            insertTag(db, "ses-hint", "msg-5", "tool", 100, 5, 0, "bash");
+
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-hint", 2, 4);
+
+            expect(hints).toEqual([
+                { tagNumber: 1, toolName: "read" },
+                { tagNumber: 3, toolName: "grep" },
+            ]);
         });
     });
 

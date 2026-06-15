@@ -452,7 +452,11 @@ function maybeInjectChannel1Nudge(
     setLastNudgeLevel(args.db, sessionId, decision.nextLastNudgeLevel);
     if (!decision.fire) return;
 
-    out.output += buildChannel1Reminder(decision.level, decision.undroppedTokens);
+    out.output += buildChannel1Reminder(
+        decision.level,
+        decision.undroppedTokens,
+        state.oldestReclaimableToolTags,
+    );
     sessionLog(
         sessionId,
         `channel1 nudge fired: level=${decision.level} undropped~${Math.round(decision.undroppedTokens / 1000)}k tool=${tool}`,

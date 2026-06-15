@@ -60,6 +60,7 @@ export function applyHeuristicCleanup(
     deduplicatedTools: number;
     droppedInjections: number;
     compressedTextTags: number;
+    mutatedTextTags: number;
 } {
     // All work in this function short-circuits on `tag.status !== "active"`,
     // so callers can pass active-only tags without behavior change. When no
@@ -229,7 +230,9 @@ export function applyHeuristicCleanup(
                     if (result === "incomplete") continue;
                     updateTagDropMode(db, sessionId, tag.tagNumber, "full");
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-                    deduplicatedTools++;
+                    if (result === "removed" || result === "truncated") {
+                        deduplicatedTools++;
+                    }
                 }
             }
         })();
@@ -247,6 +250,7 @@ export function applyHeuristicCleanup(
     // text tags to compress. Caller guarantees config.caveman is provided
     // only when ctx_reduce_enabled=false; we still defensively check enabled.
     let compressedTextTags = 0;
+    let mutatedTextTags = 0;
     if (config.caveman?.enabled) {
         const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
             enabled: true,
@@ -257,9 +261,16 @@ export function applyHeuristicCleanup(
             cavemanResult.compressedToLite +
             cavemanResult.compressedToFull +
             cavemanResult.compressedToUltra;
+        mutatedTextTags = cavemanResult.mutatedTextTags;
     }
 
-    return { droppedTools, deduplicatedTools, droppedInjections, compressedTextTags };
+    return {
+        droppedTools,
+        deduplicatedTools,
+        droppedInjections,
+        compressedTextTags,
+        mutatedTextTags,
+    };
 }
 
 function extractToolInfo(

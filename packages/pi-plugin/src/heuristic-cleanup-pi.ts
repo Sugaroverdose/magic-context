@@ -104,6 +104,7 @@ export interface PiHeuristicCleanupResult {
 	droppedInjections: number;
 	droppedStaleReduceCalls: number;
 	compressedTextTags: number;
+	mutatedTextTags: number;
 }
 
 /**
@@ -377,10 +378,13 @@ export function applyPiHeuristicCleanup(
 					: staleReduce.bareCallIds.has(tag.messageId);
 				if (!matched) continue;
 				const target = targets.get(tag.tagNumber);
-				target?.drop?.();
+				const result = target?.drop?.() ?? "absent";
+				if (result === "incomplete") continue;
 				updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 				updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-				droppedStaleReduceCalls++;
+				if (result === "removed" || result === "truncated") {
+					droppedStaleReduceCalls++;
+				}
 			}
 		})();
 	}
@@ -460,7 +464,9 @@ export function applyPiHeuristicCleanup(
 					if (result === "incomplete") continue;
 					updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-					deduplicatedTools++;
+					if (result === "removed" || result === "truncated") {
+						deduplicatedTools++;
+					}
 				}
 			}
 		})();
@@ -480,6 +486,7 @@ export function applyPiHeuristicCleanup(
 
 	// ── Pass 4: age-tier caveman text compression ─────────────────────
 	let compressedTextTags = 0;
+	let mutatedTextTags = 0;
 	if (config.caveman?.enabled) {
 		const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
 			enabled: true,
@@ -490,6 +497,7 @@ export function applyPiHeuristicCleanup(
 			cavemanResult.compressedToLite +
 			cavemanResult.compressedToFull +
 			cavemanResult.compressedToUltra;
+		mutatedTextTags = cavemanResult.mutatedTextTags;
 	}
 
 	return {
@@ -498,6 +506,7 @@ export function applyPiHeuristicCleanup(
 		droppedInjections,
 		droppedStaleReduceCalls,
 		compressedTextTags,
+		mutatedTextTags,
 	};
 }
 

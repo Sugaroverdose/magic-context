@@ -12,6 +12,7 @@ import {
     getActiveTagTokenTotalsByMessage,
     getHistorianFailureState,
     getMaxDroppedTagNumber,
+    getOldestActiveUnprotectedToolTags,
     getOrCreateSessionMeta,
     getTagsByNumbers,
     loadPersistedUsage,
@@ -1835,6 +1836,11 @@ export function createTransform(deps: TransformDeps) {
                 // drop, pending-op replay), the old band referred to a pile that
                 // no longer exists. Clear it now so regrowth starts a fresh cycle.
                 resetLastNudgeCycleIfTailShrank(db, sessionId, tailToolTokens);
+                const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
+                    db,
+                    sessionId,
+                    deps.protectedTags,
+                );
                 deps.channel1StateBySession.set(sessionId, {
                     tailToolTokens,
                     historyBudgetTokens: historyBudgetTokens ?? 0,
@@ -1844,6 +1850,7 @@ export function createTransform(deps: TransformDeps) {
                     turnToolTokens: 0,
                     usableTokens,
                     reducedSinceRefresh: false,
+                    oldestReclaimableToolTags,
                 });
 
                 // Channel 2 (ceiling) trigger — record a one-shot pending intent

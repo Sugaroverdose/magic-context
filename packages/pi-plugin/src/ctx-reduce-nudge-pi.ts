@@ -266,7 +266,11 @@ export function maybeChannel1ReminderForToolResult(args: {
 
 	return {
 		type: "text",
-		text: buildChannel1Reminder(decision.level, decision.undroppedTokens),
+		text: buildChannel1Reminder(
+			decision.level,
+			decision.undroppedTokens,
+			state.oldestReclaimableToolTags,
+		),
 	};
 }
 
@@ -344,9 +348,12 @@ export function maybeDeliverChannel2Pi(
 	if (!casChannel2NudgeState(db, sessionId, "pending", "claimed")) return false;
 
 	try {
-		pi.sendUserMessage(buildChannel2Reminder(undropped), {
-			deliverAs,
-		});
+		pi.sendUserMessage(
+			buildChannel2Reminder(undropped, baseline.oldestReclaimableToolTags),
+			{
+				deliverAs,
+			},
+		);
 	} catch (error) {
 		try {
 			casChannel2NudgeState(db, sessionId, "claimed", "pending");

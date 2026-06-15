@@ -53,6 +53,10 @@ import {
 } from "./strip-content";
 import { buildSyntheticTodoPart } from "./todo-view";
 import {
+    advanceToolReclaimWatermarkToCurrentMax,
+    buildSyntheticToolReclaimOps,
+} from "./tool-reclaim";
+import {
     appendReminderToUserMessageById,
     findLastUserMessageId,
     injectToolPartIntoAssistantById,
@@ -384,6 +388,8 @@ export async function runPostTransformPhase(
     let deferredMaterializedSuccessfully = false;
     let heuristicsRanSuccessfully = false;
     let pendingOpsRanSuccessfully = false;
+    let pendingOpsDidMutate = false;
+    let heuristicOrReasoningDidMutate = false;
     try {
         if (shouldApplyPendingOps) {
             const applyReason = isExplicitFlush
@@ -407,7 +413,7 @@ export async function runPostTransformPhase(
             //   - When pending ops do exist (rare execute/flush passes),
             //     the load runs once inside the same transaction the
             //     mutations need, which is unavoidable.
-            applyPendingOperations(
+            pendingOpsDidMutate = applyPendingOperations(
                 args.sessionId,
                 args.db,
                 args.targets,
@@ -464,8 +470,13 @@ export async function runPostTransformPhase(
                 args.sessionId,
                 "applyHeuristicCleanup",
                 t5,
-                `droppedTools=${cleanup.droppedTools} deduplicatedTools=${cleanup.deduplicatedTools} droppedInjections=${cleanup.droppedInjections} compressedTextTags=${cleanup.compressedTextTags}`,
+                `droppedTools=${cleanup.droppedTools} deduplicatedTools=${cleanup.deduplicatedTools} droppedInjections=${cleanup.droppedInjections} compressedTextTags=${cleanup.compressedTextTags} mutatedTextTags=${cleanup.mutatedTextTags}`,
             );
+            const heuristicMutationCount =
+                cleanup.droppedTools +
+                cleanup.deduplicatedTools +
+                cleanup.droppedInjections +
+                cleanup.mutatedTextTags;
             const t7 = performance.now();
             const clearedReasoning = clearOldReasoning(
                 args.messages,
@@ -507,6 +518,8 @@ export async function runPostTransformPhase(
                 }
             }
             logTransformTiming(args.sessionId, "clearOldReasoning", t7);
+            heuristicOrReasoningDidMutate =
+                heuristicMutationCount + clearedReasoning + strippedInline > 0;
             // ── Drain pendingMaterializationSessions ──
             // Heuristics + materialization successfully ran on this pass.
             // We've fulfilled every reason the set was added (user
@@ -527,7 +540,46 @@ export async function runPostTransformPhase(
         if (args.schedulerDecision === "execute" && !materializationRequested) {
             updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
         }
+
+        const toolReclaimExecutePass = args.schedulerDecision === "execute";
+        const alreadyMutatingThisPass = pendingOpsDidMutate || heuristicOrReasoningDidMutate;
+        let autoReclaimTargetCount = 0;
+        let autoReclaimDidMutate = false;
+        if (toolReclaimExecutePass && alreadyMutatingThisPass && !emergencyDropEligible) {
+            const syntheticPendingOps = buildSyntheticToolReclaimOps({
+                db: args.db,
+                sessionId: args.sessionId,
+                targets: args.targets,
+                watermark: args.sessionMeta.toolReclaimWatermark ?? 0,
+                pendingOps,
+            });
+            autoReclaimTargetCount = syntheticPendingOps.length;
+            if (syntheticPendingOps.length > 0) {
+                autoReclaimDidMutate = applyPendingOperations(
+                    args.sessionId,
+                    args.db,
+                    args.targets,
+                    args.protectedTags,
+                    undefined,
+                    [],
+                    syntheticPendingOps,
+                );
+            }
+        }
         args.batch?.finalize();
+        if (toolReclaimExecutePass) {
+            const maxTagNumber = advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
+            args.sessionMeta.toolReclaimWatermark = Math.max(
+                args.sessionMeta.toolReclaimWatermark ?? 0,
+                maxTagNumber,
+            );
+        }
+        if (autoReclaimTargetCount > 0) {
+            sessionLog(
+                args.sessionId,
+                `tool reclaim auto-drop: targets=${autoReclaimTargetCount} mutated=${autoReclaimDidMutate}`,
+            );
+        }
         logTransformTiming(args.sessionId, "batchFinalize:heuristics", performance.now());
         if (args.sessionMeta.lastTransformError !== null) {
             updateSessionMeta(args.db, args.sessionId, { lastTransformError: null });

@@ -24,6 +24,7 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     last_transform_error: "'' AS last_transform_error",
     system_prompt_hash: "'' AS system_prompt_hash",
     last_todo_state: "'' AS last_todo_state",
+    tool_reclaim_watermark: "0 AS tool_reclaim_watermark",
     cached_m0_bytes: "NULL AS cached_m0_bytes",
     cached_m1_bytes: "NULL AS cached_m1_bytes",
     cached_m0_project_memory_epoch: "NULL AS cached_m0_project_memory_epoch",
@@ -143,6 +144,20 @@ export function updateSessionMeta(
             ...values,
             sessionId,
         );
+    })();
+}
+
+export function advanceToolReclaimWatermark(
+    db: Database,
+    sessionId: string,
+    maxTagNumber: number,
+): void {
+    if (maxTagNumber <= 0) return;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET tool_reclaim_watermark = MAX(COALESCE(tool_reclaim_watermark, 0), ?) WHERE session_id = ?",
+        ).run(maxTagNumber, sessionId);
     })();
 }
 

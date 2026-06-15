@@ -39,7 +39,11 @@ import {
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
-import { buildChannel2Reminder, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
+import {
+    buildChannel2Reminder,
+    shouldTriggerChannel2,
+    type ToolReclaimHint,
+} from "./ctx-reduce-nudge";
 
 export interface Channel2DeliveryDeps {
     db: Database;
@@ -53,6 +57,7 @@ export interface Channel2DeliveryDeps {
      * predicate at delivery time.
      */
     usableTokens?: number;
+    oldestReclaimableToolTags?: readonly ToolReclaimHint[];
 }
 
 function sealDeliveredAfterUnconfirmedSend(
@@ -153,7 +158,10 @@ export async function maybeDeliverChannel2(
         const promptContext = await resolvePromptContext(client, sessionId);
         // reclaimableTokens is guaranteed defined here (unknown-baseline path
         // returned above), so the wording always reflects a real measurement.
-        const reminder = buildChannel2Reminder(deps.reclaimableTokens);
+        const reminder = buildChannel2Reminder(
+            deps.reclaimableTokens,
+            deps.oldestReclaimableToolTags,
+        );
 
         const body: Record<string, unknown> = {
             noReply: false,

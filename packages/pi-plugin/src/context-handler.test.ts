@@ -133,6 +133,24 @@ describe("applyForwardPressureFloor", () => {
 		expect(src).toContain("usagePercentage = Math.max(usagePercentage, 95)");
 		expect(src).not.toContain("usagePercentage = 95;");
 	});
+	describe("two-pass tool reclaim source invariants", () => {
+		it("uses confirmed mutation booleans rather than executedWorkThisPass for the reclaim gate", () => {
+			const src = readFileSync(
+				join(import.meta.dir, "context-handler.ts"),
+				"utf8",
+			);
+			expect(src).toContain("let pendingOpsDidMutate = false");
+			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
+			expect(src).toContain(
+				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate",
+			);
+			expect(src).toContain("heuristicsResult.droppedStaleReduceCalls");
+			expect(src).toContain("buildSyntheticToolReclaimOps");
+			expect(src).not.toContain(
+				"const alreadyMutatingThisPass = executedWorkThisPass",
+			);
+		});
+	});
 });
 
 describe("registerPiContextHandler", () => {
@@ -158,6 +176,7 @@ describe("registerPiContextHandler", () => {
 			turnToolTokens: 0,
 			usableTokens: 0,
 			reducedSinceRefresh: false,
+			oldestReclaimableToolTags: [],
 		});
 		trackSessionForProject("proj-evict", victim);
 		expect(getPiChannel1Baseline(victim)).toBeDefined();

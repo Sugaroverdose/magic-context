@@ -135,6 +135,7 @@ async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: strin
                 ? baseline.tailToolTokens + baseline.turnToolTokens
                 : undefined,
             usableTokens: baseline?.usableTokens,
+            oldestReclaimableToolTags: baseline?.oldestReclaimableToolTags,
         });
     } catch (error) {
         sessionLog(sessionId, "channel2 delivery wrapper failed (ignored):", error);

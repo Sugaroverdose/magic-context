@@ -25,6 +25,7 @@ export interface SessionMetaRow {
     conversation_tokens: number;
     tool_call_tokens: number;
     cleared_reasoning_through_tag: number;
+    tool_reclaim_watermark: number | null;
     last_todo_state: string;
     cached_m0_bytes: Buffer | Uint8Array | null;
     cached_m1_bytes: Buffer | Uint8Array | null;
@@ -75,6 +76,7 @@ export const SESSION_META_SELECT_COLUMNS = [
     "conversation_tokens",
     "tool_call_tokens",
     "cleared_reasoning_through_tag",
+    "tool_reclaim_watermark",
     "last_todo_state",
     "cached_m0_bytes",
     "cached_m1_bytes",
@@ -124,6 +126,7 @@ export const META_COLUMNS: Record<string, string> = {
     conversationTokens: "conversation_tokens",
     toolCallTokens: "tool_call_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
+    toolReclaimWatermark: "tool_reclaim_watermark",
     lastTodoState: "last_todo_state",
     cachedM0Bytes: "cached_m0_bytes",
     cachedM1Bytes: "cached_m1_bytes",
@@ -265,7 +268,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isNumberOrNull(r.force_emergency_bypass_window_start) &&
         isNumberOrNull(r.force_emergency_bypass_used) &&
         isNumberOrNull(r.upgrade_reminded_at) &&
-        isNumberOrNull(r.pi_stable_id_scheme)
+        isNumberOrNull(r.pi_stable_id_scheme) &&
+        isNumberOrNull(r.tool_reclaim_watermark)
     );
 }
 
@@ -290,6 +294,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         conversationTokens: 0,
         toolCallTokens: 0,
         clearedReasoningThroughTag: 0,
+        toolReclaimWatermark: 0,
         lastTodoState: "",
         cachedM0Bytes: null,
         cachedM1Bytes: null,
@@ -404,6 +409,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         conversationTokens: numOrZero(row.conversation_tokens),
         toolCallTokens: numOrZero(row.tool_call_tokens),
         clearedReasoningThroughTag: numOrZero(row.cleared_reasoning_through_tag),
+        toolReclaimWatermark: numOrZero(row.tool_reclaim_watermark),
         lastTodoState: lastTodoStateRaw,
         cachedM0Bytes: toBufferOrNull(row.cached_m0_bytes),
         cachedM1Bytes: toBufferOrNull(row.cached_m1_bytes),

@@ -64,6 +64,7 @@ export interface SessionMeta {
     conversationTokens: number;
     toolCallTokens: number;
     clearedReasoningThroughTag: number;
+    toolReclaimWatermark: number;
     lastTodoState: string;
     cachedM0Bytes: Buffer | null;
     cachedM1Bytes: Buffer | null;

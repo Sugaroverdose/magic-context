@@ -83,6 +83,7 @@ export {
     setStrippedPlaceholderIds,
 } from "./storage-meta-persisted";
 export {
+    advanceToolReclaimWatermark,
     clearSession,
     getOrCreateSessionMeta,
     updateSessionMeta,

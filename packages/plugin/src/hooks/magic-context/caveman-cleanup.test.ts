@@ -98,6 +98,7 @@ describe("applyCavemanCleanup", () => {
             compressedToLite: 0,
             compressedToFull: 0,
             compressedToUltra: 0,
+            mutatedTextTags: 0,
         });
     });
 

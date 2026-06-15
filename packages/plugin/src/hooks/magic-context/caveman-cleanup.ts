@@ -62,6 +62,7 @@ export interface CavemanCleanupResult {
     compressedToLite: number;
     compressedToFull: number;
     compressedToUltra: number;
+    mutatedTextTags: number;
 }
 
 /**
@@ -95,6 +96,7 @@ export function applyCavemanCleanup(
         compressedToLite: 0,
         compressedToFull: 0,
         compressedToUltra: 0,
+        mutatedTextTags: 0,
     };
 
     if (!config.enabled) return result;
@@ -173,7 +175,8 @@ export function applyCavemanCleanup(
             // the current text — e.g. the text had no caveman-droppable words).
             // Without this, that tag would be re-evaluated on every execute
             // pass forever, producing log noise and burning DB transactions.
-            target.setContent(compressed);
+            const didMutate = target.setContent(compressed);
+            if (didMutate) result.mutatedTextTags += 1;
             updateCavemanDepth(db, sessionId, tag.tagNumber, targetDepth);
             if (targetDepth === DEPTH_LITE) result.compressedToLite += 1;
             else if (targetDepth === DEPTH_FULL) result.compressedToFull += 1;

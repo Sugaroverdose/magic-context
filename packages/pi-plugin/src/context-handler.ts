@@ -62,6 +62,7 @@ import {
 	getActiveTagsBySession,
 	getActiveTagTokenAggregate,
 	getHistorianFailureState,
+	getOldestActiveUnprotectedToolTags,
 	getPendingOps,
 	getPendingPiCompactionMarkerState,
 	getTagsByNumbers,
@@ -124,6 +125,10 @@ import {
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
+import {
+	advanceToolReclaimWatermarkToCurrentMax,
+	buildSyntheticToolReclaimOps,
+} from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
@@ -2309,6 +2314,11 @@ export function registerPiContextHandler(
 						sessionId,
 						tailToolTokens,
 					);
+					const oldestReclaimableToolTags = getOldestActiveUnprotectedToolTags(
+						options.db,
+						sessionId,
+						options.protectedTags ?? 20,
+					);
 					setPiChannel1Baseline(sessionId, {
 						tailToolTokens,
 						historyBudgetTokens: historyBudgetTokens ?? 0,
@@ -2318,6 +2328,7 @@ export function registerPiContextHandler(
 						turnToolTokens: 0,
 						usableTokens: usableTokensPi,
 						reducedSinceRefresh: false,
+						oldestReclaimableToolTags,
 					});
 
 					// Channel 2 (ceiling) trigger — fire when reclaimable tool output
@@ -3228,6 +3239,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let historyWasConsumedThisPass = false;
 	let materializationSatisfiedThisPass = false;
 	let pendingOpsAppliedThisPass = false;
+	let pendingOpsDidMutate = false;
+	let heuristicOrReasoningDidMutate = false;
 	let suppressDeferredHistoryDrain = false;
 	let casLost = false;
 	const deferredHistoryWasPendingAtPassStart =
@@ -3516,7 +3529,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 		try {
 			const tApplyPending = performance.now();
-			applyPendingOperations(
+			pendingOpsDidMutate = applyPendingOperations(
 				args.sessionId,
 				args.db,
 				targets,
@@ -3760,6 +3773,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				activeTags,
 				stableIdResolver,
 			);
+			const heuristicMutationCount =
+				heuristicsResult.droppedTools +
+				heuristicsResult.deduplicatedTools +
+				heuristicsResult.droppedInjections +
+				heuristicsResult.droppedStaleReduceCalls +
+				heuristicsResult.mutatedTextTags;
+			if (heuristicMutationCount > 0) heuristicOrReasoningDidMutate = true;
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
 			if (hasPendingMaterializeSignal) {
@@ -3772,7 +3792,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				"applyHeuristicCleanup",
 				tHeuristic,
-				`droppedTools=${heuristicsResult.droppedTools} deduplicatedTools=${heuristicsResult.deduplicatedTools} droppedInjections=${heuristicsResult.droppedInjections} compressedTextTags=${heuristicsResult.compressedTextTags}`,
+				`droppedTools=${heuristicsResult.droppedTools} deduplicatedTools=${heuristicsResult.deduplicatedTools} droppedInjections=${heuristicsResult.droppedInjections} staleReduce=${heuristicsResult.droppedStaleReduceCalls} compressedTextTags=${heuristicsResult.compressedTextTags} mutatedTextTags=${heuristicsResult.mutatedTextTags}`,
 			);
 		} catch (err) {
 			sessionLog(
@@ -3849,6 +3869,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			}
 			logTransformTiming(args.sessionId, "clearOldReasoning", tClearReasoning);
 			logTransformTiming(args.sessionId, "watermarkCleanup", tClearReasoning);
+			if (clearOutcome.cleared > 0 || stripOutcome.stripped > 0) {
+				heuristicOrReasoningDidMutate = true;
+			}
 			if (
 				combinedWatermark > prevWatermark ||
 				clearOutcome.cleared > 0 ||
@@ -3864,12 +3887,56 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
+	const toolReclaimExecutePass = args.schedulerDecision === "execute";
+	const alreadyMutatingThisPass =
+		pendingOpsDidMutate || heuristicOrReasoningDidMutate;
+	const emergencyDropEligible =
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= FORCE_MATERIALIZATION_PERCENTAGE;
+	let autoReclaimTargetCount = 0;
+	let autoReclaimDidMutate = false;
+	if (
+		toolReclaimExecutePass &&
+		alreadyMutatingThisPass &&
+		!emergencyDropEligible
+	) {
+		const reclaimMeta = getOrCreateSessionMeta(args.db, args.sessionId);
+		const syntheticPendingOps = buildSyntheticToolReclaimOps({
+			db: args.db,
+			sessionId: args.sessionId,
+			targets,
+			watermark: reclaimMeta.toolReclaimWatermark ?? 0,
+			pendingOps,
+		});
+		autoReclaimTargetCount = syntheticPendingOps.length;
+		if (syntheticPendingOps.length > 0) {
+			autoReclaimDidMutate = applyPendingOperations(
+				args.sessionId,
+				args.db,
+				targets,
+				args.protectedTags,
+				undefined,
+				[],
+				syntheticPendingOps,
+			);
+		}
+	}
+
 	// 5. Commit tagging mutations back to Pi messages BEFORE injecting
 	// the history block. Otherwise the injection write target is the
 	// pre-tagged content. Pi's transcript adapter writes mutations
 	// back to the underlying AgentMessage[] via the part proxies, so
 	// commit() just locks the result in.
 	transcript.commit();
+	if (toolReclaimExecutePass) {
+		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
+	}
+	if (autoReclaimTargetCount > 0) {
+		sessionLog(
+			args.sessionId,
+			`tool reclaim auto-drop: targets=${autoReclaimTargetCount} mutated=${autoReclaimDidMutate}`,
+		);
+	}
 
 	// Two post-commit stable-id maps, both keyed by AgentMessage object identity.
 	// Built AFTER commit() — commit reassigns args.messages[idx] = working[idx]

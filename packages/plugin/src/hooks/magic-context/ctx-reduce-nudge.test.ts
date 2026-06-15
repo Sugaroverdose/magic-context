@@ -240,6 +240,22 @@ describe("buildChannel1Reminder", () => {
         expect(r).toContain("</system-reminder>");
         expect(r).toContain("~42k");
     });
+
+    it("renders oldest reclaimable hints from stored tool names", () => {
+        const r = buildChannel1Reminder("firm", 42_000, [
+            { tagNumber: 123, toolName: "read" },
+            { tagNumber: 145, toolName: "grep" },
+            { tagNumber: 150, toolName: null },
+        ]);
+        expect(r).toContain("oldest reclaimable: §123§ read · §145§ grep · §150§ tool.");
+    });
+});
+
+describe("buildChannel2Reminder", () => {
+    it("includes optional oldest reclaimable hints", () => {
+        const r = buildChannel2Reminder(30_000, [{ tagNumber: 7, toolName: "bash" }]);
+        expect(r).toContain("oldest reclaimable: §7§ bash.");
+    });
 });
 
 describe("shouldTriggerChannel2 — ceiling (reclaimable ≥ usable/3)", () => {

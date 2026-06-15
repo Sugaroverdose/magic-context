@@ -6,7 +6,7 @@ import {
     updateTagDropMode,
     updateTagStatus,
 } from "../../features/magic-context/storage";
-import type { TagEntry } from "../../features/magic-context/types";
+import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { stripSystemInjection } from "./system-injection-stripper";
 import type { TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
@@ -107,6 +107,7 @@ export function applyPendingOperations(
     protectedTags: number = 0,
     preloadedTags?: TagEntry[],
     preloadedPendingOps?: ReturnType<typeof getPendingOps>,
+    syntheticPendingOps: PendingOp[] = [],
 ): boolean {
     let didMutateMessage = false;
     db.transaction(() => {
@@ -125,6 +126,10 @@ export function applyPendingOperations(
                 : new Set<number>();
 
         const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
+        const opsToApply: Array<{ op: PendingOp; synthetic: boolean }> = [
+            ...pendingOps.map((op) => ({ op, synthetic: false })),
+            ...syntheticPendingOps.map((op) => ({ op, synthetic: true })),
+        ];
 
         // Newest-K tool calls at THIS moment — the skeleton window. Computed
         // once per apply pass over all tool tags (any status: the window
@@ -137,10 +142,10 @@ export function applyPendingOperations(
                 .slice(0, RECENT_TOOL_SKELETON_WINDOW),
         );
 
-        for (const pendingOp of pendingOps) {
+        for (const { op: pendingOp, synthetic } of opsToApply) {
             const tagStatus = tagStatusById.get(pendingOp.tagId);
             if (tagStatus === "compacted" || tagStatus === "dropped") {
-                removePendingOp(db, sessionId, pendingOp.tagId);
+                if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                 continue;
             }
 
@@ -151,33 +156,52 @@ export function applyPendingOperations(
             const target = targets.get(pendingOp.tagId);
             const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
+            if (synthetic) {
+                // Synthetic two-pass reclaim must never persist a DB-only drop for
+                // a tag that is absent/incomplete on this pass's visible wire. It
+                // only rides an already-mutating pass when the target can actually
+                // reclaim bytes right now; real pending ops keep their legacy
+                // absent persistence semantics for user-requested ctx_reduce.
+                if (!isToolTag || target?.canDrop?.() !== true) continue;
+            }
+
+            let shouldPersistDrop = false;
             if (isToolTag) {
                 if (skeletonWindow.has(pendingOp.tagId)) {
                     const truncResult = target?.truncate?.() ?? "absent";
-                    if (truncResult === "incomplete") {
+                    if (
+                        truncResult === "incomplete" ||
+                        (synthetic && truncResult !== "truncated")
+                    ) {
                         continue;
                     }
                     if (truncResult === "truncated") {
                         didMutateMessage = true;
                     }
                     updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
+                    shouldPersistDrop = true;
                 } else {
                     const dropResult = target?.drop?.() ?? "absent";
-                    if (dropResult === "incomplete") {
+                    if (dropResult === "incomplete" || (synthetic && dropResult !== "removed")) {
                         continue;
                     }
                     if (dropResult === "removed") {
                         didMutateMessage = true;
                     }
                     updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
+                    shouldPersistDrop = true;
                 }
             } else if (target) {
                 const changed = target.setContent(buildReplacementContent(pendingOp.tagId, target));
                 if (changed) didMutateMessage = true;
+                shouldPersistDrop = true;
+            } else if (!synthetic) {
+                shouldPersistDrop = true;
             }
 
+            if (!shouldPersistDrop) continue;
             updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
-            removePendingOp(db, sessionId, pendingOp.tagId);
+            if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
         }
     })();
     return didMutateMessage;

@@ -191,6 +191,53 @@ export function getActiveTagTokenAggregate(
     };
 }
 
+export interface ToolReclaimHintTag {
+    tagNumber: number;
+    toolName: string | null;
+}
+
+/**
+ * Oldest active tool tags the agent can actually drop (excludes the protected
+ * newest active tag window, matching ctx_reduce/applyPendingOperations). Used
+ * only to render lightweight nudge hints; it never mutates tag state.
+ */
+export function getOldestActiveUnprotectedToolTags(
+    db: Database,
+    sessionId: string,
+    protectedTags = 0,
+    limit = 4,
+): ToolReclaimHintTag[] {
+    if (limit <= 0) return [];
+    const boundedLimit = Math.max(1, Math.min(10, Math.floor(limit)));
+    const whereProtected =
+        protectedTags > 0
+            ? `AND tag_number < (
+                    SELECT tag_number FROM tags
+                    WHERE session_id = ? AND status = 'active'
+                    ORDER BY tag_number DESC LIMIT 1 OFFSET ?
+                )`
+            : "";
+    const params =
+        protectedTags > 0
+            ? [sessionId, sessionId, protectedTags - 1, boundedLimit]
+            : [sessionId, boundedLimit];
+    const rows = db
+        .prepare(
+            `SELECT tag_number, tool_name
+             FROM tags
+             WHERE session_id = ? AND status = 'active' AND type = 'tool' ${whereProtected}
+             ORDER BY tag_number ASC, id ASC
+             LIMIT ?`,
+        )
+        .all(...params) as Array<{ tag_number?: unknown; tool_name?: unknown }>;
+    return rows
+        .filter((row) => typeof row.tag_number === "number")
+        .map((row) => ({
+            tagNumber: row.tag_number as number,
+            toolName: typeof row.tool_name === "string" ? row.tool_name : null,
+        }));
+}
+
 /**
  * Upper bound on the historian's true-raw ELIGIBLE tokens for the cheap
  * trigger pre-gate. Sums `active` AND `dropped` tags: a ctx_reduce/emergency

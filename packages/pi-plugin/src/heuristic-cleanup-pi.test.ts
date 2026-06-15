@@ -135,6 +135,53 @@ describe("applyPiHeuristicCleanup", () => {
 		}
 	});
 
+	it("does not count an absent dedup target as a confirmed mutation", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-heuristic-dedup-absent";
+			const messages = [
+				userMessage("read twice", 1),
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "read-call-a",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+						{
+							type: "toolCall",
+							id: "read-call-b",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+					],
+					timestamp: 2,
+				},
+			];
+			const { targets } = tagMessages(sessionId, db, messages);
+			const oldTag = getTagsBySession(db, sessionId).find(
+				(tag) => tag.messageId === "read-call-a",
+			);
+			if (!oldTag) throw new Error("missing old tag");
+			targets.delete(oldTag.tagNumber);
+
+			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
+				protectedTags: 0,
+			});
+
+			expect(result.deduplicatedTools).toBe(0);
+			expect(
+				getTagsBySession(db, sessionId).find(
+					(tag) => tag.tagNumber === oldTag.tagNumber,
+				)?.status,
+			).toBe("dropped");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("persists full drops for stale ctx_reduce calls and paired tool results", () => {
 		const db = createTestDb();
 		try {

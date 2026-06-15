@@ -19,6 +19,11 @@ import type { MessageLike } from "./tag-messages";
 
 export type Channel1Level = "gentle" | "firm" | "urgent";
 
+export interface ToolReclaimHint {
+    tagNumber: number;
+    toolName: string | null;
+}
+
 /**
  * Per-session metric baseline, snapshotted at the END of each transform pass
  * (post-drop, so `tailToolTokens` reflects the actually-rendered tail) and read
@@ -52,6 +57,7 @@ export interface Channel1State {
      * Reset to false on each baseline refresh.
      */
     reducedSinceRefresh: boolean;
+    oldestReclaimableToolTags: ToolReclaimHint[];
 }
 
 // Content-based idempotency guard (robust to callID reuse on retries). The bare
@@ -312,6 +318,18 @@ function approxThousands(tokens: number): string {
     return `${Math.round(tokens / 1000)}k`;
 }
 
+function formatOldestReclaimableHint(hint?: readonly ToolReclaimHint[]): string {
+    if (!hint || hint.length === 0) return "";
+    const rendered = hint
+        .slice(0, 4)
+        .map((tag) => `§${tag.tagNumber}§ ${tag.toolName ?? "tool"}`)
+        .join(" · ");
+    return rendered.length > 0
+        ? `
+oldest reclaimable: ${rendered}.`
+        : "";
+}
+
 // ---- Channel 2 (synthetic-user-message ceiling) ----
 // The ceiling fires when reclaimable tool output is at least a THIRD of the
 // agent's usable working range — the span between the fixed overhead floor
@@ -339,20 +357,29 @@ export function shouldTriggerChannel2(input: {
 }
 
 /** The synthetic user `<system-reminder>` body delivered by Channel 2. */
-export function buildChannel2Reminder(undroppedTokens: number): string {
+export function buildChannel2Reminder(
+    undroppedTokens: number,
+    hint?: readonly ToolReclaimHint[],
+): string {
     const amount = approxThousands(undroppedTokens);
+    const hintText = formatOldestReclaimableHint(hint);
     return (
         `<system-reminder>\n` +
         `Routine context housekeeping is near: a large span of this session will be comparted soon, ` +
         `and ~${amount} tokens of tool output remain unreduced. Drop spent outputs with ctx_reduce ` +
-        `first so the archived span is the part that matters.\n` +
+        `first so the archived span is the part that matters.${hintText}\n` +
         `</system-reminder>`
     );
 }
 
 /** Build the `<system-reminder name="mc-ctx-reduce">…</system-reminder>` body for a level. */
-export function buildChannel1Reminder(level: Channel1Level, undroppedTokens: number): string {
+export function buildChannel1Reminder(
+    level: Channel1Level,
+    undroppedTokens: number,
+    hint?: readonly ToolReclaimHint[],
+): string {
     const amount = approxThousands(undroppedTokens);
+    const hintText = formatOldestReclaimableHint(hint);
     let body: string;
     switch (level) {
         case "gentle":
@@ -371,5 +398,5 @@ export function buildChannel1Reminder(level: Channel1Level, undroppedTokens: num
                 `Consider dropping spent outputs with ctx_reduce so the archived span is the part that matters.`;
             break;
     }
-    return `\n\n<system-reminder>\n${body}\n</system-reminder>`;
+    return `\n\n<system-reminder>\n${body}${hintText}\n</system-reminder>`;
 }

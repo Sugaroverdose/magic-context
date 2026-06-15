@@ -362,5 +362,38 @@ describe("applyHeuristicCleanup", () => {
             expect(tags.find((t) => t.tagNumber === 70)?.status).toBe("dropped");
             expect(tags.find((t) => t.tagNumber === 80)?.status).toBe("active");
         });
+
+        it("does not count an absent dedup target as a confirmed mutation", () => {
+            insertTag(db, SESSION, "call-A", "tool", 1000, 90, 0, "mcp_grep", 0, "m-asst");
+            insertTag(db, SESSION, "call-B", "tool", 2000, 100, 0, "mcp_grep", 0, "m-asst");
+
+            const msg = buildMessageWithId("m-asst", [
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "call-A",
+                    state: { input: { pattern: "z" }, output: "r1", status: "completed" },
+                },
+                {
+                    type: "tool",
+                    tool: "mcp_grep",
+                    callID: "call-B",
+                    state: { input: { pattern: "z" }, output: "r2", status: "completed" },
+                },
+            ]);
+
+            const targets = new Map<number, TagTarget>([[100, makeTarget(msg)]]);
+            const messageTagNumbers = new Map<MessageLike, number>();
+            messageTagNumbers.set(msg, 100);
+
+            const result = applyHeuristicCleanup(SESSION, db, targets, messageTagNumbers, {
+                protectedTags: 0,
+            });
+
+            expect(result.deduplicatedTools).toBe(0);
+            expect(getTagsBySession(db, SESSION).find((t) => t.tagNumber === 90)?.status).toBe(
+                "dropped",
+            );
+        });
     });
 });
