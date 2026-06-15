@@ -44,6 +44,14 @@ import { getAgentFallbackModels } from "./shared/model-requirements";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
+// Hard tool-iteration caps for the hidden agents (loop insurance — see
+// buildHiddenAgentConfig). Sized to bound a runaway weak-model tool loop
+// without truncating legitimate work: the historian/sidekick do a handful of
+// tool calls at most; the dreamer is a real multi-step maintenance loop.
+const HISTORIAN_MAX_STEPS = 40;
+const SIDEKICK_MAX_STEPS = 40;
+const DREAMER_MAX_STEPS = 150;
+
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);
     // Apply SQLite connection tuning before the first openDatabase() below.
@@ -485,6 +493,19 @@ const plugin: Plugin = async (ctx) => {
                 agentId: string,
                 prompt: string,
                 allowedTools: readonly string[],
+                // Hard tool-iteration cap for this hidden agent. WITHOUT it
+                // `agent.steps`/`maxSteps` default to Infinity, so a weak model
+                // (e.g. a local llama.cpp model with poor instruction-following)
+                // can get stuck in a tool-call loop that runs FOREVER: the child
+                // session's run loop is an independent server-side fiber, so our
+                // prompt-timeout (which only aborts our client fetch) and the
+                // user's ESC (which only aborts the MAIN session) do NOT stop it —
+                // it loops until OpenCode fully exits (issue #154). The cap forces
+                // OpenCode to terminate the run after N steps regardless. Set BOTH
+                // `steps` and `maxSteps` because the OpenCode run loop's exact
+                // field name varies across versions; both are valid agent-config
+                // keys, so setting both is a safe hedge.
+                maxSteps: number,
                 overrides?: Record<string, unknown>,
             ) => {
                 const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
@@ -494,6 +515,8 @@ const plugin: Plugin = async (ctx) => {
                 const basePermission = buildAllowOnlyPermission(allowedTools);
                 return {
                     prompt,
+                    steps: maxSteps,
+                    maxSteps,
                     ...(getAgentFallbackModels(agentId)
                         ? { fallback_models: getAgentFallbackModels(agentId) }
                         : {}),
@@ -557,6 +580,12 @@ const plugin: Plugin = async (ctx) => {
                     DREAMER_AGENT,
                     DREAMER_SYSTEM_PROMPT,
                     DREAMER_ALLOWED_TOOLS,
+                    // The dreamer is a genuine multi-step maintenance loop
+                    // (consolidate / verify / archive-stale / improve /
+                    // maintain-docs, ~60-72 model turns observed), so it needs a
+                    // high cap — just high enough to bound a runaway, not low
+                    // enough to truncate legitimate work.
+                    DREAMER_MAX_STEPS,
                     dreamerAgentOverrides,
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
@@ -568,18 +597,24 @@ const plugin: Plugin = async (ctx) => {
                     // preserves prompt-cache byte stability.
                     COMPARTMENT_AGENT_SYSTEM_PROMPT,
                     HISTORIAN_ALLOWED_TOOLS,
+                    // The historian reads its (often inline) prompt and emits
+                    // compartments — a handful of steps at most; the cap is pure
+                    // loop insurance for a weak model.
+                    HISTORIAN_MAX_STEPS,
                     historianAgentOverrides,
                 ),
                 [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_EDITOR_AGENT,
                     HISTORIAN_EDITOR_SYSTEM_PROMPT,
                     HISTORIAN_ALLOWED_TOOLS,
+                    HISTORIAN_MAX_STEPS,
                     historianAgentOverrides,
                 ),
                 [SIDEKICK_AGENT]: buildHiddenAgentConfig(
                     SIDEKICK_AGENT,
                     SIDEKICK_SYSTEM_PROMPT,
                     SIDEKICK_ALLOWED_TOOLS,
+                    SIDEKICK_MAX_STEPS,
                     sidekickAgentOverrides,
                 ),
             };

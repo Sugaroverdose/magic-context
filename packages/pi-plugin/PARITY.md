@@ -439,6 +439,35 @@ Both also clear the flag on a successful `/ctx-recomp` (OpenCode runManagedRecom
 
 ---
 
+## 17. Runaway hidden-agent loop: OpenCode needs an in-config step cap; Pi relies on subprocess-kill
+
+A weak local model (e.g. llama.cpp with poor instruction-following) can get a
+hidden agent (historian/dreamer/sidekick) stuck in an infinite tool-call loop
+(issue #154). The protection differs because the spawn model differs:
+
+- **OpenCode** spawns hidden agents as a child SESSION whose run loop is an
+  independent **instance-scoped server fiber**. Our prompt-timeout's
+  `controller.abort()` cancels only our client fetch — the fiber keeps re-calling
+  the LLM, and the user's ESC only aborts the *main* session (no `parentID`
+  cascade). So OpenCode needs TWO guards: (a) `steps`/`maxSteps` on the hidden
+  agent config (`buildHiddenAgentConfig` in `index.ts`) so OpenCode force-
+  terminates the run loop after N steps, and (b) `client.session.abort({id})` on
+  timeout/external-abort (in the shared `promptWithTimeout`) to interrupt the
+  server-side loop — `controller.abort()` and `session.delete` do NOT stop it.
+
+- **Pi** spawns hidden agents as separate `pi --print` **subprocesses**
+  (`PiSubagentRunner`) and **SIGTERMs the child process** on timeout/abort. Killing
+  the process kills the loop — there is no detached continuation. So Pi is
+  structurally bounded by `timeoutMs` without needing an in-config step cap. A
+  sooner per-step cap would be a nicety (terminate before burning the full
+  timeout of local compute), only if `pi --print` exposes one; the SIGTERM bound
+  is sufficient for correctness.
+
+Same effective guarantee (a runaway hidden agent cannot loop forever), different
+mechanism (OpenCode: in-config step cap + server-side abort; Pi: subprocess-kill).
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

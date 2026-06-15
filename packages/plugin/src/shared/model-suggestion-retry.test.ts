@@ -7,10 +7,11 @@ type PromptCall = {
     signal?: AbortSignal;
 };
 
-function createClient(prompt: ReturnType<typeof mock>) {
+function createClient(prompt: ReturnType<typeof mock>, abort?: ReturnType<typeof mock>) {
     return {
         session: {
             prompt,
+            abort: abort ?? mock(async () => ({})),
         },
     } as never;
 }
@@ -162,6 +163,65 @@ describe("promptSyncWithModelSuggestionRetry", () => {
             }),
         ).rejects.toBe(overflowError);
         expect(prompt).toHaveBeenCalledTimes(1);
+    });
+
+    // #154: our timeout must force-stop the child's SERVER-SIDE run loop via
+    // session.abort — cancelling our client fetch alone leaves the child looping
+    // the LLM past the timeout (uncancellable, only dies on process exit).
+    test("timeout fires session.abort on the child session", async () => {
+        // A prompt that respects the AbortController by hanging until aborted,
+        // then throwing — mirrors a real in-flight request our timeout cancels.
+        const prompt = mock((opts: { signal?: AbortSignal }) => {
+            return new Promise((_resolve, reject) => {
+                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+            });
+        });
+        const abort = mock(async () => ({}));
+        const client = createClient(prompt as never, abort);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
+        ).rejects.toThrow(/timed out/);
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
+    });
+
+    // External abort (e.g. dreamer lease loss) mid-flight must also stop the
+    // server-side loop, not just our fetch.
+    test("external abort fires session.abort on the child session", async () => {
+        const controller = new AbortController();
+        const prompt = mock((opts: { signal?: AbortSignal }) => {
+            return new Promise((_resolve, reject) => {
+                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+            });
+        });
+        const abort = mock(async () => ({}));
+        const client = createClient(prompt as never, abort);
+
+        setTimeout(() => controller.abort(), 10);
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), { signal: controller.signal }),
+        ).rejects.toThrow(/aborted by external signal/);
+        expect(abort).toHaveBeenCalledTimes(1);
+        expect((abort.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe("ses-test");
+    });
+
+    // A failing session.abort must not mask the original timeout/abort error.
+    test("session.abort failure does not mask the timeout error", async () => {
+        const prompt = mock((opts: { signal?: AbortSignal }) => {
+            return new Promise((_resolve, reject) => {
+                opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+            });
+        });
+        const abort = mock(async () => {
+            throw new Error("abort endpoint 500");
+        });
+        const client = createClient(prompt as never, abort);
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), { timeoutMs: 20 }),
+        ).rejects.toThrow(/timed out/);
+        expect(abort).toHaveBeenCalledTimes(1);
     });
 
     test("suggestion retry within attempt succeeds", async () => {

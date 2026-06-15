@@ -143,15 +143,37 @@ async function promptWithTimeout(
         } as Parameters<typeof client.session.prompt>[0]);
     } catch (error) {
         if (signal?.aborted) {
+            // External abort (e.g. dreamer lease loss): the child run loop is an
+            // independent SERVER-SIDE fiber — cancelling our client fetch alone
+            // leaves it looping the LLM forever (issue #154). Force-stop it.
+            await abortChildRun(client, args.path.id);
             throw new Error("prompt aborted by external signal");
         }
         if (controller.signal.aborted) {
+            // Our timeout fired. Same problem: abort the server-side run loop, not
+            // just our fetch, or the child keeps re-calling the LLM past the
+            // timeout (uncancellable by the user's ESC — issue #154).
+            await abortChildRun(client, args.path.id);
             throw new Error(`prompt timed out after ${timeoutMs}ms`);
         }
         throw error;
     } finally {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onExternalAbort);
+    }
+}
+
+/**
+ * Force-stop a spawned child session's server-side run loop. `controller.abort()`
+ * on the prompt signal only cancels OUR client fetch; the run loop is a separate
+ * instance-scoped fiber that `POST /session/{id}/abort` interrupts. Best-effort —
+ * a failure here must not mask the original timeout/abort error.
+ */
+async function abortChildRun(client: Client, sessionId: string): Promise<void> {
+    try {
+        await client.session.abort({ path: { id: sessionId } });
+    } catch (error) {
+        log(`[model-retry] child session abort failed for ${sessionId}: ${String(error)}`);
     }
 }
 
