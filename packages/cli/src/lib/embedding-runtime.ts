@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, sep } from "node:path";
 
 /**
  * Detects whether the local-embedding native runtime (`onnxruntime-node`) is
@@ -86,4 +87,95 @@ export function checkLocalEmbeddingRuntime(
         if (firstFailure === null) firstFailure = status;
     }
     return firstFailure ?? { state: "unknown", reason: "no candidate roots" };
+}
+
+/** Slice a resolved module path back to its package directory (the dir that
+ *  owns `node_modules/<pkg>`), so we can locate the platform binary relative to
+ *  it regardless of how deep the resolved entry (`dist/index.js`) sits. */
+function packageDirFromResolved(resolvedPath: string, packageName: string): string {
+    const marker = `node_modules${sep}${packageName.split("/").join(sep)}`;
+    const idx = resolvedPath.indexOf(marker);
+    return idx >= 0 ? resolvedPath.slice(0, idx + marker.length) : dirname(resolvedPath);
+}
+
+/**
+ * Resolution-based variant for harnesses whose install layout is NOT a single
+ * deterministic `<root>/node_modules/onnxruntime-node` (Pi: dev-path bun
+ * workspace, npm-hoisted user/project install, or pnpm strict store — verified
+ * empirically that the physical path differs across all three). Instead of
+ * guessing a path, it asks Node's resolver exactly as the plugin would at
+ * runtime: resolve onnxruntime-node FROM the installed plugin dir, then locate
+ * the platform binary relative to the resolved package.
+ *
+ * Two resolution attempts, both layout-agnostic:
+ *   A. resolve `onnxruntime-node` directly from the plugin (works when hoisted
+ *      or visible to the plugin — npm/bun default).
+ *   B. resolve `@huggingface/transformers` (a direct plugin dep that OWNS
+ *      onnxruntime-node), then resolve onnxruntime-node from THERE — covers
+ *      pnpm-strict where the transitive dep isn't visible to the plugin itself.
+ *
+ * Returns `unknown` (caller stays SILENT) when the plugin dir doesn't exist or
+ * neither resolution succeeds in a way we can introspect — never a false alarm.
+ */
+export function checkLocalEmbeddingRuntimeByResolution(
+    pluginDir: string,
+    platform: NodeJS.Platform = process.platform,
+    arch: string = process.arch,
+): LocalEmbeddingRuntimeStatus {
+    if (!existsSync(join(pluginDir, "package.json"))) {
+        return { state: "unknown", reason: "plugin package dir not found" };
+    }
+
+    let onnxDir: string | null = null;
+    let resolveError: string | undefined;
+    try {
+        const reqPlugin = createRequire(join(pluginDir, "package.json"));
+        try {
+            // A: direct (hoisted / bun / npm)
+            onnxDir = packageDirFromResolved(
+                reqPlugin.resolve("onnxruntime-node"),
+                "onnxruntime-node",
+            );
+        } catch {
+            // B: through the transformers package that owns it (pnpm strict)
+            const tfResolved = reqPlugin.resolve("@huggingface/transformers");
+            const tfDir = packageDirFromResolved(tfResolved, "@huggingface/transformers");
+            const reqTf = createRequire(join(tfDir, "package.json"));
+            onnxDir = packageDirFromResolved(reqTf.resolve("onnxruntime-node"), "onnxruntime-node");
+        }
+    } catch (error) {
+        // Read `.code` directly off the thrown object — do NOT gate on
+        // `instanceof Error`: Bun's resolver throws a `ResolveMessage` that is
+        // NOT an Error instance (code "MODULE_NOT_FOUND"), Node throws
+        // "ERR_MODULE_NOT_FOUND" (ESM) / "MODULE_NOT_FOUND" (CJS createRequire).
+        resolveError = (error as { code?: string } | null)?.code;
+        // onnxruntime-node genuinely not resolvable from the installed plugin =
+        // the #128 missing-package case (only meaningful because we confirmed
+        // the plugin dir exists above).
+        if (resolveError === "ERR_MODULE_NOT_FOUND" || resolveError === "MODULE_NOT_FOUND") {
+            return {
+                state: "package-missing",
+                packageDir: join(pluginDir, "node_modules", "onnxruntime-node"),
+            };
+        }
+        return {
+            state: "unknown",
+            reason: `could not resolve onnxruntime-node (${resolveError ?? "unknown error"})`,
+        };
+    }
+
+    if (!onnxDir) {
+        return { state: "unknown", reason: "onnxruntime-node resolution produced no path" };
+    }
+
+    const rel = expectedBinaryRelPath(platform, arch);
+    if (rel === null) {
+        // Unknown platform/arch — package resolves; don't guess a binary path.
+        return { state: "ok", binaryPath: onnxDir };
+    }
+    const binaryPath = join(onnxDir, rel);
+    if (!existsSync(binaryPath)) {
+        return { state: "binary-missing", packageDir: onnxDir, expectedBinary: binaryPath };
+    }
+    return { state: "ok", binaryPath };
 }

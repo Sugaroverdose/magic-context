@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
@@ -28,6 +28,7 @@ import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path"
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
+import { checkLocalEmbeddingRuntimeByResolution } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-pi";
 import {
     getMagicContextLogPath,
@@ -228,6 +229,35 @@ function readJsonc(path: string): {
 
 function packagesFrom(settings: Record<string, unknown>): unknown[] {
     return Array.isArray(settings.packages) ? settings.packages : [];
+}
+
+/**
+ * Candidate installed-plugin directories to point the local-embedding-runtime
+ * resolver at. Pi's layout varies (verified on disk): a LOCAL DEV-PATH entry in
+ * packages[] (e.g. "../../repo/packages/pi-plugin", relative to the agent dir),
+ * OR a managed npm install at ~/.pi/agent/npm/node_modules/<pkg> (user) /
+ * <cwd>/.pi/npm/node_modules/<pkg> (project). We collect every plausible dir
+ * with a package.json; the resolver stays SILENT for any that don't exist.
+ */
+function piPluginDirCandidates(packages: unknown[], cwd: string): string[] {
+    const dirs: string[] = [];
+    const agentDir = getPiAgentConfigDir();
+
+    // Local dev-path entries: a string spec that is NOT an npm: specifier and
+    // resolves to a directory on disk. Relative entries are resolved against the
+    // Pi agent dir (Pi's settings.packages base).
+    for (const entry of packages) {
+        const spec = typeof entry === "string" ? entry.trim() : "";
+        if (!spec || spec.startsWith("npm:")) continue;
+        const resolved = isAbsolute(spec) ? spec : join(agentDir, spec);
+        dirs.push(resolved);
+    }
+
+    // Managed npm install roots (hoisted): <root>/node_modules/<pkg>.
+    dirs.push(join(agentDir, "npm", "node_modules", PACKAGE_NAME));
+    dirs.push(join(cwd, ".pi", "npm", "node_modules", PACKAGE_NAME));
+
+    return dirs.filter((dir) => existsSync(join(dir, "package.json")));
 }
 
 function projectConfigPath(cwd: string): string {
@@ -602,7 +632,42 @@ async function runHealthChecks(options: {
     } else if (loadedConfig.config.embedding.provider === "off") {
         add(results, "info", "Embedding provider disabled");
     } else {
-        add(results, "pass", `Embedding provider: ${loadedConfig.config.embedding.provider}`);
+        // Local (default) provider: verify the native ONNX runtime
+        // (onnxruntime-node) actually resolves + has its platform binary. On
+        // Windows it sometimes fails to install and the plugin's static import
+        // throws on every embedding (#128). Layout-agnostic resolution from the
+        // installed plugin dir; stays silent if no plugin dir can be inspected.
+        let runtimeReported = false;
+        for (const pluginDir of piPluginDirCandidates(packages, options.cwd)) {
+            const runtime = checkLocalEmbeddingRuntimeByResolution(pluginDir);
+            if (runtime.state === "ok") {
+                add(
+                    results,
+                    "pass",
+                    `Embedding provider: ${loadedConfig.config.embedding.provider} (native runtime present)`,
+                );
+                runtimeReported = true;
+                break;
+            }
+            if (runtime.state === "package-missing" || runtime.state === "binary-missing") {
+                add(
+                    results,
+                    "warn",
+                    `Embedding provider: local — native runtime (onnxruntime-node) is ${
+                        runtime.state === "package-missing"
+                            ? "not installed"
+                            : "missing its platform binary"
+                    }. Local embeddings won't work. Fix: reinstall the plugin, or set ` +
+                        "`embedding.provider` to `openai-compatible` (LM Studio / Ollama) or `off`. " +
+                        "Existing memories are unaffected.",
+                );
+                runtimeReported = true;
+                break;
+            }
+        }
+        if (!runtimeReported) {
+            add(results, "pass", `Embedding provider: ${loadedConfig.config.embedding.provider}`);
+        }
     }
 
     // Conflict detection — Pi doesn't have known competing context-management

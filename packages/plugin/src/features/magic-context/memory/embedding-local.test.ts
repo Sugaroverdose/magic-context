@@ -54,4 +54,25 @@ describe("isNativeRuntimeMissingError", () => {
         expect(isNativeRuntimeMissingError(undefined)).toBe(false);
         expect(isNativeRuntimeMissingError("onnxruntime-node")).toBe(false);
     });
+
+    // #7: the package IS installed but its native binary fails to dlopen — e.g.
+    // Windows missing the VC++ runtime. The error names the binding file (path
+    // contains "onnxruntime") with code ERR_DLOPEN_FAILED, not "onnxruntime-node".
+    test("ERR_DLOPEN_FAILED on the onnxruntime binding IS missing-runtime", () => {
+        const err = Object.assign(
+            new Error(
+                "\\\\?\\C:\\...\\onnxruntime-node\\bin\\napi-v6\\win32\\x64\\onnxruntime_binding.node " +
+                    "is not a valid Win32 application.",
+            ),
+            { code: "ERR_DLOPEN_FAILED" },
+        );
+        expect(isNativeRuntimeMissingError(err)).toBe(true);
+    });
+
+    test("ERR_DLOPEN_FAILED for an UNRELATED native module is not our runtime", () => {
+        const err = Object.assign(new Error("some-other-native.node failed to load"), {
+            code: "ERR_DLOPEN_FAILED",
+        });
+        expect(isNativeRuntimeMissingError(err)).toBe(false);
+    });
 });

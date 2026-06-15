@@ -281,10 +281,21 @@ export function isLocalEmbeddingRuntimeMissing(): boolean {
 
 export function isNativeRuntimeMissingError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error ?? "");
-    if (!message.toLowerCase().includes("onnxruntime-node")) return false;
+    const lower = message.toLowerCase();
     const code = (error as { code?: unknown } | null)?.code;
     const name = (error as { name?: unknown } | null)?.name;
-    const lower = message.toLowerCase();
+
+    // onnxruntime-node IS installed but its native binary fails to LOAD — e.g.
+    // Windows missing the VC++ runtime throws ERR_DLOPEN_FAILED on the
+    // `onnxruntime_binding.node` file (whose path contains "onnxruntime", not
+    // necessarily the literal "onnxruntime-node"). This is environmental and
+    // permanent, same as the missing-package case: latch and degrade once
+    // instead of re-spamming the load error on every embedding (issue #128).
+    if (code === "ERR_DLOPEN_FAILED" && lower.includes("onnxruntime")) {
+        return true;
+    }
+
+    if (!lower.includes("onnxruntime-node")) return false;
     return (
         code === "ERR_MODULE_NOT_FOUND" ||
         name === "ResolveMessage" ||

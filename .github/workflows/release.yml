@@ -57,6 +57,12 @@ jobs:
         with:
           bun-version: latest
 
+      # node:sqlite (Pi / OpenCode-Desktop backend) is only reachable under
+      # Node; Node 24 also strips the smoke script's inline TS.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Install dependencies
         run: bun install
 
@@ -71,6 +77,11 @@ jobs:
 
       - name: Test
         run: bun run test
+
+      # Verify the node:sqlite branch (transaction shim, readonly mapping,
+      # #151 array-bind normalization) under real Node before publishing.
+      - name: Smoke (node:sqlite backend)
+        run: node packages/plugin/scripts/smoke-node-sqlite.ts
 
   test-pi:
     name: Test (pi-plugin)

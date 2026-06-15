@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkLocalEmbeddingRuntime, checkLocalEmbeddingRuntimeAt } from "./embedding-runtime";
+import {
+    checkLocalEmbeddingRuntime,
+    checkLocalEmbeddingRuntimeAt,
+    checkLocalEmbeddingRuntimeByResolution,
+} from "./embedding-runtime";
 
 function makeRoot(): string {
     return mkdtempSync(join(tmpdir(), "mc-embruntime-"));
@@ -98,6 +102,88 @@ describe("checkLocalEmbeddingRuntime (multi-root)", () => {
             expect(status.state).toBe("package-missing");
         } finally {
             rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+// Build a plugin tree where `require.resolve("onnxruntime-node")` actually
+// succeeds from the plugin dir — mirrors the real on-disk dev-path / hoisted
+// layout (a nested node_modules the package manager populated), which a
+// hardcoded path check would get wrong across layouts.
+function installResolvablePlugin(withPackage: boolean, withBinary: boolean): string {
+    const pluginDir = mkdtempSync(join(tmpdir(), "mc-pi-plugin-"));
+    writeFileSync(
+        join(pluginDir, "package.json"),
+        JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.0.0" }),
+    );
+    if (withPackage) {
+        const pkgDir = join(pluginDir, "node_modules", "onnxruntime-node");
+        mkdirSync(pkgDir, { recursive: true });
+        writeFileSync(
+            join(pkgDir, "package.json"),
+            JSON.stringify({ name: "onnxruntime-node", main: "index.js" }),
+        );
+        writeFileSync(join(pkgDir, "index.js"), "module.exports = {};");
+        if (withBinary) {
+            const binDir = join(pkgDir, "bin", "napi-v6", "win32", "x64");
+            mkdirSync(binDir, { recursive: true });
+            writeFileSync(join(binDir, "onnxruntime_binding.node"), "stub");
+        }
+    }
+    return pluginDir;
+}
+
+describe("checkLocalEmbeddingRuntimeByResolution", () => {
+    test("resolvable package + matching binary → ok (dev-path/hoisted layout)", () => {
+        const dir = installResolvablePlugin(true, true);
+        try {
+            expect(checkLocalEmbeddingRuntimeByResolution(dir, "win32", "x64").state).toBe("ok");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("resolvable package but missing platform binary → binary-missing", () => {
+        const dir = installResolvablePlugin(true, false);
+        try {
+            expect(checkLocalEmbeddingRuntimeByResolution(dir, "win32", "x64").state).toBe(
+                "binary-missing",
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("plugin exists but onnxruntime-node not resolvable → package-missing (#128)", () => {
+        const dir = installResolvablePlugin(false, false);
+        try {
+            expect(checkLocalEmbeddingRuntimeByResolution(dir, "win32", "x64").state).toBe(
+                "package-missing",
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("plugin dir does not exist → unknown (stay silent, never false-alarm)", () => {
+        expect(
+            checkLocalEmbeddingRuntimeByResolution(
+                join(tmpdir(), "mc-pi-plugin-nonexistent-xyz"),
+                "win32",
+                "x64",
+            ).state,
+        ).toBe("unknown");
+    });
+
+    test("unknown platform/arch with package resolvable → ok (don't guess a binary)", () => {
+        const dir = installResolvablePlugin(true, false);
+        try {
+            expect(
+                checkLocalEmbeddingRuntimeByResolution(dir, "freebsd" as NodeJS.Platform, "ppc64")
+                    .state,
+            ).toBe("ok");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
         }
     });
 });
