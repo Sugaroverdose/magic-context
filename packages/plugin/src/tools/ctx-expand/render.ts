@@ -60,12 +60,13 @@ function keyArg(input: Record<string, unknown> | null | undefined): string {
 function asToolPart(part: Record<string, unknown>): {
     name: string;
     callId: string;
+    title: string | null;
     input: Record<string, unknown> | null;
     output: string | null;
 } | null {
     const type = typeof part.type === "string" ? part.type : "";
 
-    // OpenCode merged tool part: { type:"tool", tool, callID, state:{input,output} }
+    // OpenCode merged tool part: { type:"tool", tool, callID, state:{input,output,title} }
     if (type === "tool") {
         const state = isRecord(part.state) ? part.state : null;
         const output =
@@ -74,9 +75,15 @@ function asToolPart(part: Record<string, unknown>): {
                 : state && state.output != null
                   ? JSON.stringify(state.output)
                   : null;
+        const metadata = state && isRecord(state.metadata) ? state.metadata : null;
+        const title =
+            (state && typeof state.title === "string" && state.title) ||
+            (metadata && typeof metadata.title === "string" && metadata.title) ||
+            null;
         return {
             name: typeof part.tool === "string" ? part.tool : "tool",
             callId: typeof part.callID === "string" ? part.callID : "",
+            title,
             input: state && isRecord(state.input) ? state.input : null,
             output,
         };
@@ -87,6 +94,7 @@ function asToolPart(part: Record<string, unknown>): {
         return {
             name: typeof part.name === "string" ? part.name : "tool",
             callId: typeof part.id === "string" ? part.id : "",
+            title: null,
             input: isRecord(part.input) ? part.input : null,
             output: null,
         };
@@ -104,6 +112,7 @@ function asToolPart(part: Record<string, unknown>): {
         return {
             name: "tool_result",
             callId: typeof part.tool_use_id === "string" ? part.tool_use_id : "",
+            title: null,
             input: null,
             output,
         };
@@ -148,24 +157,33 @@ function renderPartPreview(part: unknown): string | null {
     return `    • [${type}]`;
 }
 
-/** One per-part FULL render for by-id recovery (untruncated). */
-function renderPartFull(part: unknown, index: number): string {
-    if (!isRecord(part)) return `  [part ${index}] ${JSON.stringify(part)}`;
+/**
+ * One per-part FULL render for by-ordinal recovery (untruncated). Returns null
+ * for NOISE parts — `step-start` / `step-finish` (and their token/cost metadata
+ * blob), reasoning, and unknown structural shapes carry nothing worth recovering.
+ * The recovery view is the data: tool input + output (+ a description line when
+ * the tool carries one), and the text of non-tool messages.
+ */
+function renderPartFull(part: unknown): string | null {
+    if (!isRecord(part)) return null;
+
     const text = textOf(part);
-    if (text !== null) return `  [text]\n${text}`;
+    if (text !== null) {
+        return text.trim().length > 0 ? `  [text]\n${text}` : null;
+    }
 
     const tool = asToolPart(part);
     if (tool) {
         const lines: string[] = [];
         const idSuffix = tool.callId ? ` #${tool.callId}` : "";
         lines.push(`  [tool: ${tool.name}${idSuffix}]`);
+        if (tool.title && tool.title.trim().length > 0) {
+            lines.push(`  description: ${tool.title.trim()}`);
+        }
         if (tool.input) lines.push(`  input: ${JSON.stringify(tool.input)}`);
         if (tool.output !== null) lines.push(`  output:\n${tool.output}`);
         return lines.join("\n");
     }
-
-    const reasoning = reasoningOf(part);
-    if (reasoning !== null) return `  [reasoning]\n${reasoning}`;
 
     const type = typeof part.type === "string" ? part.type : "part";
     if (type === "file") {
@@ -175,7 +193,10 @@ function renderPartFull(part: unknown, index: number): string {
             "";
         return `  [file]${name ? ` ${name}` : ""}`;
     }
-    return `  [${type}] ${JSON.stringify(part)}`;
+
+    // step-start, step-finish (token/cost metadata), reasoning, and any other
+    // structural part: noise for recovery — skip.
+    return null;
 }
 
 /**
@@ -193,14 +214,14 @@ export function renderMessageByOrdinal(sessionId: string, ordinal: number): stri
             `Re-run the tool if you still need the data.`
         );
     }
-    const lines: string[] = [];
-    lines.push(
-        `[${msg.ordinal}] ${roleLabel(msg.role)} — full recovery (${msg.parts.length} part${msg.parts.length === 1 ? "" : "s"}):`,
-    );
-    lines.push("");
-    msg.parts.forEach((part, i) => {
-        lines.push(renderPartFull(part, i));
-    });
+    const rendered = msg.parts.map(renderPartFull).filter((l): l is string => l !== null);
+
+    const lines: string[] = [`[${msg.ordinal}] ${roleLabel(msg.role)} — full recovery:`, ""];
+    if (rendered.length === 0) {
+        lines.push("  (no recoverable content — message had only structural/reasoning parts)");
+    } else {
+        lines.push(...rendered);
+    }
     return lines.join("\n");
 }
 

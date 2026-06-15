@@ -115,6 +115,51 @@ describe("renderMessageByOrdinal", () => {
         }
     });
 
+    test("strips step-start/step-finish/reasoning noise — only tool input+output remain", () => {
+        const cleanup = provide([
+            {
+                ordinal: 9,
+                id: "msg_noisy",
+                role: "assistant",
+                parts: [
+                    { type: "step-start" },
+                    { type: "reasoning", text: "thinking about which file to read" },
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "read:3",
+                        state: {
+                            status: "completed",
+                            input: { filePath: "a.ts" },
+                            output: "the recovered output",
+                            title: "Read a.ts",
+                        },
+                    },
+                    {
+                        type: "step-finish",
+                        reason: "tool-calls",
+                        tokens: { total: 1234, cache: { read: 999 } },
+                    },
+                ],
+            },
+        ]);
+        try {
+            const out = renderMessageByOrdinal(SESSION, 9);
+            // Tool data present, incl. the non-empty description line.
+            expect(out).toContain("[tool: read #read:3]");
+            expect(out).toContain("description: Read a.ts");
+            expect(out).toContain("the recovered output");
+            // Noise stripped.
+            expect(out).not.toContain("step-start");
+            expect(out).not.toContain("step-finish");
+            expect(out).not.toContain("reasoning");
+            expect(out).not.toContain("thinking about which file");
+            expect(out).not.toContain("1234");
+        } finally {
+            cleanup();
+        }
+    });
+
     test("recovers a non-tool user message in full (any role)", () => {
         const paste = "a very long pasted log\n".repeat(20);
         const cleanup = provide([
