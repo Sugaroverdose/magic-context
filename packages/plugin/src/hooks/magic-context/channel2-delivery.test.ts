@@ -154,12 +154,17 @@ describe("maybeDeliverChannel2", () => {
         expect(promptAsync).toHaveBeenCalledTimes(1);
         const callArg = promptAsync.mock.calls[0]![0] as {
             path: { id: string };
-            body: { noReply: boolean; parts: Array<{ text: string }> };
+            body: { noReply: boolean; parts: Array<{ text: string; synthetic?: boolean }> };
         };
         expect(callArg.path.id).toBe("ses-go");
         expect(callArg.body.noReply).toBe(false);
         expect(callArg.body.parts[0]!.text).toContain("<system-reminder>");
         expect(callArg.body.parts[0]!.text).toContain("ctx_reduce");
+        // synthetic: true — skips OpenCode's queued-message wrapper (issue #129
+        // flip-bust) + TUI render, while still driving the run loop + model. Must
+        // NOT be ignored (that would strip it from the model).
+        expect(callArg.body.parts[0]!.synthetic).toBe(true);
+        expect((callArg.body.parts[0] as { ignored?: boolean }).ignored).not.toBe(true);
         // One-shot cap consumed.
         expect(getChannel2NudgeState(db, "ses-go")).toBe("delivered");
     });
