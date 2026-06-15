@@ -2,67 +2,43 @@
 
 import { describe, expect, it } from "bun:test";
 import { buildReplacementContent } from "./apply-operations";
-import type { TagTarget } from "./tag-messages";
 
-// Minimal TagTarget stub — buildReplacementContent only reads `message.info.role`
-// and `getContent()`.
-function userTarget(content: string): TagTarget {
-    return {
-        message: { info: { role: "user" } },
-        getContent: () => content,
-    } as unknown as TagTarget;
-}
+describe("buildReplacementContent — one canonical placeholder", () => {
+    // The whole point: buildReplacementContent is a PURE function of tagId and
+    // returns exactly `[dropped §N§]` for EVERY message (non-tool) drop, on every
+    // path, every pass. Any version that varied the bytes by role/content/window
+    // (e.g. a `[truncated §N§]` user-text preview) re-derived a DIFFERENT
+    // placeholder across passes, which on a defer pass changed a tail message's
+    // bytes and busted the whole prompt-cache prefix after it. These tests lock
+    // the byte-identity that makes that class impossible.
 
-describe("buildReplacementContent — drop/truncate convergence", () => {
-    // Regression: a system-injected user message that strips to empty must
-    // canonicalize to `[dropped §N§]` — the exact bytes heuristic-cleanup writes
-    // on the execute pass. Before the fix this replay re-derived `[truncated …]`
-    // from the raw rebuilt content, flipping one block of message[0] on the next
-    // defer pass and busting the prompt-cache prefix.
-    it("a whole-message <system-reminder> user tag → [dropped §N§] (matches heuristic-cleanup)", () => {
-        const content =
-            "<system-reminder>\n~80k tokens of unreduced tool output remain. Drop them with ctx_reduce.\n</system-reminder>";
-        expect(buildReplacementContent(100413, userTarget(content))).toBe(
-            "[dropped \u00a7100413\u00a7]",
-        );
+    it("is a pure function of tagId — no target/content needed", () => {
+        expect(buildReplacementContent(42)).toBe("[dropped \u00a742\u00a7]");
+        expect(buildReplacementContent(100413)).toBe("[dropped \u00a7100413\u00a7]");
+        expect(buildReplacementContent(7)).toBe("[dropped \u00a77\u00a7]");
     });
 
-    it("a §N§-tag-prefixed system-reminder still → [dropped §N§]", () => {
-        const content = "\u00a7100413\u00a7 <system-reminder>spend the budget</system-reminder>";
-        expect(buildReplacementContent(100413, userTarget(content))).toBe(
-            "[dropped \u00a7100413\u00a7]",
-        );
+    it("is byte-identical to heuristic-cleanup's message placeholder", () => {
+        // heuristic-cleanup.ts writes `[dropped §${tag.tagNumber}§]` — the two drop
+        // paths MUST agree byte-for-byte or a tag that gets dropped on one path and
+        // replayed on the other flips bytes and busts cache.
+        const n = 591;
+        expect(buildReplacementContent(n)).toBe(`[dropped \u00a7${n}\u00a7]`);
     });
 
-    it("a genuine short user message is preserved as [truncated §N§] + text", () => {
-        const out = buildReplacementContent(42, userTarget("fix the embedding bug"));
-        expect(out.startsWith("[truncated \u00a742\u00a7]")).toBe(true);
-        expect(out).toContain("fix the embedding bug");
+    it("is deterministic across repeated calls (defer-replay stability)", () => {
+        const a = buildReplacementContent(592);
+        const b = buildReplacementContent(592);
+        const c = buildReplacementContent(592);
+        expect(a).toBe(b);
+        expect(b).toBe(c);
     });
 
-    it("a long user message truncates to a preview with an ellipsis", () => {
-        const long = `please ${"x".repeat(500)} done`;
-        const out = buildReplacementContent(7, userTarget(long));
-        expect(out.startsWith("[truncated \u00a77\u00a7]")).toBe(true);
-        expect(out.endsWith("\u2026")).toBe(true);
-        expect(out.length).toBeLessThan(long.length);
-    });
-
-    it("a non-user (assistant) tag → [dropped §N§] regardless of content", () => {
-        const assistant = {
-            message: { info: { role: "assistant" } },
-            getContent: () => "<system-reminder>x</system-reminder>",
-        } as unknown as TagTarget;
-        expect(buildReplacementContent(9, assistant)).toBe("[dropped \u00a79\u00a7]");
-    });
-
-    it("a user message with a reminder BUT real text after it is NOT collapsed to [dropped]", () => {
-        // Mixed content strips the reminder but leaves real text → truncate path,
-        // not the empty-injection drop path.
-        const content =
-            "<system-reminder>housekeeping</system-reminder>\nactually do the release now";
-        const out = buildReplacementContent(11, userTarget(content));
-        expect(out.startsWith("[truncated \u00a711\u00a7]")).toBe(true);
-        expect(out).toContain("actually do the release now");
+    it("matches DROPPED_PLACEHOLDER_PATTERN so a fully-dropped non-user message can be sentinelized", () => {
+        // Old user-text drops used `[truncated §N§]` specifically to NOT match this
+        // pattern; that belt-and-suspenders is gone (user-role messages are already
+        // skipped by stripDroppedPlaceholderMessages' role guard) and was the sole
+        // source of the byte instability.
+        expect(/^\[dropped §\d+§\]$/.test(buildReplacementContent(11))).toBe(true);
     });
 });

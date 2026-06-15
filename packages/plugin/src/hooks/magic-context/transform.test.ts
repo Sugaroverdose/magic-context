@@ -941,16 +941,15 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages: secondPass });
 
-        //#then — user message shell is preserved (turn boundary) with truncated
-        // preview; the tool tag is padded OUT of the newest-20 skeleton window
-        // above, so the tool-only assistant takes the legacy FULL-removal path
-        // and its shell is stripped. (The in-window skeleton path is covered in
-        // apply-operations.tool-drop.test.ts.)
+        //#then — user message shell is preserved (turn boundary) as the canonical
+        // [dropped §N§] placeholder; the tool tag is padded OUT of the newest-20
+        // skeleton window above, so the tool-only assistant takes the legacy
+        // FULL-removal path and its shell is stripped. (The in-window skeleton path
+        // is covered in apply-operations.tool-drop.test.ts.)
         expect(secondPass).toHaveLength(1);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
-        expect(userShellText.startsWith("[truncated \u00a71\u00a7]")).toBe(true);
-        expect(userShellText.includes("initial user text")).toBe(true);
+        expect(userShellText).toBe("[dropped \u00a71\u00a7]");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("full");
@@ -1701,13 +1700,11 @@ describe("createTransform", () => {
         ];
         await transform({}, { messages: secondPass });
 
-        // User messages get a truncated preview (not a full drop) so the turn
-        // boundary survives for AI SDK's Anthropic adapter. The first part is
-        // a text-only synthetic content — it remains marked as truncated while
-        // preserving its original text (which is under the preview window).
-        expect(text(secondPass[0], 0)).toBe(
-            "[truncated \u00a71\u00a7]\n[synthetic injected content]",
-        );
+        // The dropped part gets the canonical [dropped §N§] placeholder (byte-stable
+        // across passes); the user-role message is never whole-message stripped (the
+        // role guard in stripDroppedPlaceholderMessages), so the turn boundary
+        // survives for AI SDK's Anthropic adapter. The sibling part is untouched.
+        expect(text(secondPass[0], 0)).toBe("[dropped \u00a71\u00a7]");
         expect(text(secondPass[0], 1)).toStartWith("\u00a72\u00a7 ");
         expect(text(secondPass[0], 1)).toContain("actual user message");
     });

@@ -462,9 +462,9 @@ describe("apply operations for tool drops", () => {
         expect(messages[1]?.parts).toEqual([{ type: "text", text: "§2§ reduce me later" }]);
     });
 
-    describe("role-aware message drops (user message protection)", () => {
-        it("truncates user message content instead of full drop when tag is queued", () => {
-            useTempDataHome("context-user-msg-truncate-pending-");
+    describe("role-aware message drops (canonical [dropped §N§])", () => {
+        it("drops a user message to the canonical [dropped §N§] placeholder when queued", () => {
+            useTempDataHome("context-user-msg-drop-pending-");
             const db = openDatabase();
             const tagger = createTagger();
             const longPaste = `Here is the log I was debugging:\n${"ERROR: something failed at line 42. ".repeat(50)}`;
@@ -490,16 +490,9 @@ describe("apply operations for tool drops", () => {
             expect(getTagById(db, "ses-1", userMsgTagId!)?.status).toBe("dropped");
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            // Must start with the truncated marker, not the dropped marker.
-            expect(text.startsWith(`[truncated §${userMsgTagId}§]`)).toBe(true);
-            expect(text.includes("[dropped")).toBe(false);
-            // Must preserve the START of the user's original text (intent).
-            expect(text.includes("Here is the log I was debugging")).toBe(true);
-            // Must NOT contain the full original repeated content (50 copies) — it was truncated.
-            const matchCount = (text.match(/ERROR: something failed/g) ?? []).length;
-            expect(matchCount).toBeLessThan(20);
-            // Truncation window is ~250 chars; length must be bounded.
-            expect(text.length).toBeLessThan(400);
+            // ONE canonical placeholder — byte-identical regardless of role/content
+            // so it can never flip across passes and bust the prompt cache.
+            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
         });
 
         it("preserves user message shell when flushed dropped status is re-applied", () => {
@@ -531,9 +524,9 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text.startsWith(`[truncated §${userMsgTagId}§]`)).toBe(true);
-            // Short text should be preserved as-is (under preview window).
-            expect(text.includes("Please fix the bug I mentioned")).toBe(true);
+            // Flushed-status replay produces the SAME canonical placeholder as the
+            // execute-pass drop — byte-identical, no flip across passes.
+            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
         });
 
         it("keeps using [dropped §N§] full drop for assistant messages (no regression)", () => {
@@ -564,7 +557,7 @@ describe("apply operations for tool drops", () => {
             ]);
         });
 
-        it("short user text survives as truncated preview without ellipsis", () => {
+        it("a short user message also drops to the canonical [dropped §N§]", () => {
             useTempDataHome("context-user-msg-short-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -586,9 +579,7 @@ describe("apply operations for tool drops", () => {
             applyPendingOperations("ses-1", db, targets);
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text).toBe(`[truncated §${userMsgTagId}§]\n${shortText}`);
-            // No ellipsis for content that already fits under the preview window.
-            expect(text.includes("\u2026")).toBe(false);
+            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
         });
     });
 });
