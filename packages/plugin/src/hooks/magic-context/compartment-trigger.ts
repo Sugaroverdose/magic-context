@@ -572,14 +572,9 @@ export function checkCompartmentTrigger(
         executeThresholdPercentage,
     );
     if (usage.percentage < proactiveTriggerPercentage) {
-        const b = tailInfo.boundarySnapshot;
         sessionLog(
             sessionId,
-            `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% — below proactive floor (${proactiveTriggerPercentage}%)` +
-                ` [diag hasHead=${tailInfo.hasProtectedEligibleHead} meaningful=${tailInfo.isMeaningful}` +
-                ` offset=${b?.offset} protStart=${b?.protectedTailStart} N=${b?.N}` +
-                ` trueRawEligible=${b?.trueRawEligibleTokens} rawMsgCount=${b?.rawMessageCountAtTrigger}` +
-                ` reason=${b?.boundaryReason} tokEst=${tailInfo.tokenEstimate} chunkMore=${tailInfo.chunkHasMore}]`,
+            `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% — below proactive floor (${proactiveTriggerPercentage}%)`,
         );
         return { shouldFire: false };
     }
