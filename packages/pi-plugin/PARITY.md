@@ -117,13 +117,13 @@ the source array for dirty indices only.
 
 ## 6. Transient UI: Pi uses `ctx.ui.notify` toasts, not persistent dialogs
 
-
+**OpenCode:** TUI dialogs (upgrade prompt, `/ctx-status`, `/ctx-recomp`, `/ctx-embed`, `/ctx-flush`) via RPC,
 with an ignored-message fallback for Desktop/Web. Notification drain is
 **session-scoped** (a notification tagged for one session never surfaces in
 another) because one process can serve multiple sessions and TUI port discovery
 is newest-pid-wins.
 
-
+**Pi:** transient terminal notifications. The upgrade reminder passes
 `deliveryPersists=false` on Pi, so it does NOT durably stamp `upgrade_reminded_at`
 on display (the toast vanishes, leaving no scrollback) — it re-prompts each Pi
 start until the session is actually upgraded. OpenCode (persistent chat message)

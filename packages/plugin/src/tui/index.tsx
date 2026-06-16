@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-
+import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type EmbedDetail, type TuiMessage, type StatusDetail } from "./data/context-db"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"

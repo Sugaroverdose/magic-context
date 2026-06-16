@@ -3,7 +3,7 @@ title: Commands
 description: Slash commands to inspect Magic Context, flush queues, rebuild history, augment prompts, and run dreamer.
 ---
 
-You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-aug`, `ctx-dream`, `ctx-embed-history`, and `ctx-session-upgrade` (type them with a leading `/`).
+You run these slash commands in your harness chat or command box. They execute in the plugin, not in the model. Names are registered as `ctx-status`, `ctx-flush`, `ctx-recomp`, `ctx-aug`, `ctx-dream`, `ctx-embed`, and `ctx-session-upgrade` (type them with a leading `/`).
 
 ## Is something stuck?
 
@@ -73,6 +73,19 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 
 **What you'll see.** `Starting dream run...` then `## /ctx-dream` with per-task timings, or configuration/queue errors.
 
+## /ctx-embed
+
+**What it does.** Shows embedding coverage, or controls the background embedding of this session's history compartments for semantic search.
+
+- `/ctx-embed` — status: the active embedding model, and how many of this session's compartments, the project's memories, and git commits are embedded.
+- `/ctx-embed start` — embed all of this session's still-missing history compartments in one pass (idempotent and resumable; retries transient provider failures and skips past ones it can't embed).
+- `/ctx-embed pause` — pause an in-progress run.
+
+Magic Context also auto-embeds the active session's missing compartments in the background, so you usually only need this to check status or to drive a backfill manually. Requires an embedding provider (or the built-in local model) and `memory.enabled`.
+
+**When to use it.** After changing your embedding model (which re-embeds under the new model), or to check whether `/ctx-search` semantic recall covers this session's older history.
+
+**What you'll see.** On OpenCode TUI, a status dialog (and a live **Embed** progress bar in the sidebar while a run is active); on Desktop/Web, a text status. On Pi, a status message.
 
 
 ## /ctx-session-upgrade
