@@ -293,6 +293,8 @@ export interface TransformDeps {
         enabled: boolean;
         minChars: number;
     };
+    /** Fire-and-forget active-session embed backfill after transform returns. */
+    maybeAutoEmbedSession?: (sessionId: string) => void;
 }
 
 export function createTransform(deps: TransformDeps) {
@@ -1915,6 +1917,8 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             `transform completed in ${elapsed}ms (${messages.length} messages, ${targets.size} targets, watermark: ${watermark})`,
         );
+
+        deps.maybeAutoEmbedSession?.(sessionId);
     };
 }
 

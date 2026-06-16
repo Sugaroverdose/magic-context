@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type TuiMessage, type StatusDetail } from "./data/context-db"
+
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -580,13 +580,52 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
     const directory = api.state.path.directory ?? ""
     const modelKey = getModelKeyFromMessages(api, sessionId)
     const detail = await loadStatusDetail(sessionId, directory, modelKey)
-    // Ack only after the dialog is actually shown for the same active session;
-    // route switches while the RPC detail load is in flight must leave it pending.
     if (getSessionId(api) !== sessionId) return false
 
     api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
     return true
 }
+
+const EmbedDialog = (props: { api: TuiPluginApi; detail: EmbedDetail }) => {
+    const theme = createMemo(() => (props.api as any).theme.current)
+    const t = () => theme()
+    const lines = () => props.detail.statusText.split("\n")
+    return (
+        <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+            <box justifyContent="center" width="100%" marginBottom={1}>
+                <text fg={t().accent}><b>Embedding</b></text>
+            </box>
+            {lines().map((line) => (
+                <text fg={t().text}>{line}</text>
+            ))}
+        </box>
+    )
+}
+
+async function showEmbedDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
+    const sessionId = targetSessionId
+    if (!sessionId) {
+        api.ui.toast({ message: "No active session", variant: "warning" })
+        return false
+    }
+    const directory = api.state.path.directory ?? ""
+    const detail = await loadEmbedDetail(sessionId, directory)
+    if (getSessionId(api) !== sessionId) return false
+    api.ui.dialog.replace(() => <EmbedDialog api={api} detail={detail} />)
+    return true
+}
+
+function showFlushDialog(api: TuiPluginApi, message: string): boolean {
+    api.ui.dialog.replace(() => (
+        <api.ui.DialogAlert
+            title="Flush"
+            message={message}
+            onConfirm={() => {}}
+        />
+    ))
+    return true
+}
+
 
 /**
  * Register Magic Context command palette entries, preferring the v1.14.42+
@@ -840,6 +879,15 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                                   }
                                 : undefined
                         if (showUpgradeDialog(api, resume, requestedSessionId)) {
+                            handledMessageIds.add(msg.id)
+                        }
+                    } else if (action === "show-embed-dialog") {
+                        if (await showEmbedDialog(api, requestedSessionId)) {
+                            handledMessageIds.add(msg.id)
+                        }
+                    } else if (action === "show-flush-dialog") {
+                        const flushMsg = String(msg.payload?.message ?? "Flushed.")
+                        if (showFlushDialog(api, flushMsg)) {
                             handledMessageIds.add(msg.id)
                         }
                     }

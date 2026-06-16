@@ -18,7 +18,10 @@ import {
     registerDreamProjectDirectory,
 } from "../../features/magic-context/dreamer";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
-import { embedSessionCompartmentChunks } from "../../features/magic-context/project-embedding-registry";
+import {
+    embedSessionCompartmentChunks,
+    getEmbeddingCoverageStatus,
+} from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     getDatabasePersistenceError,
@@ -37,10 +40,17 @@ import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications
 import type { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
+import {
+    autoEmbedAttemptedBySession,
+    clearEmbedSessionState,
+    embedPauseBySession,
+    embedRunStateBySession,
+    getEmbedDrainUiStatus,
+} from "./embed-session-state";
 import { createEventHandler } from "./event-handler";
 import { resolveContextLimit, resolveModelKey } from "./event-resolvers";
+import { formatEmbedStatusText } from "./format-embed-status";
 import { clearInjectionCache } from "./inject-compartments";
-
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import {
@@ -340,24 +350,35 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         getNotificationParams: (sid) =>
             getLiveNotificationParams(sid, liveModelBySession, variantBySession, agentBySession),
     });
-    // /ctx-embed-history: backfill ALL of this session's compartment chunk
-    // embeddings in one pass, reusing the recomp progress surface (sidebar +
-    // status bar) with kind="embed". Project registration first so the embedding
-    // provider snapshot is resolved (the drain no-ops on an unregistered project).
-    const executeEmbedHistory = async (sessionId: string): Promise<string> => {
+    // /ctx-embed start: backfill THIS session's compartment chunk embeddings,
+    // reusing the recomp progress surface (sidebar + status bar) with kind="embed".
+    const executeEmbedHistory = async (
+        sessionId: string,
+        options?: { signal?: AbortSignal; silent?: boolean },
+    ): Promise<string> => {
         if (deps.config.memory?.enabled === false) {
             return "Memory is disabled for this project, so there is no semantic embedding to backfill.";
         }
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
         await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
         const sessionProjectIdentity = resolveProjectIdentity(directory);
-        setRecompStarting(
-            { recompProgressBySession } as LiveSessionState,
-            sessionId,
-            "Embedding history…",
-            "embed",
-        );
+        embedPauseBySession.delete(sessionId);
+        const prior = embedRunStateBySession.get(sessionId);
+        if (prior) prior.abort();
+        const controller = new AbortController();
+        embedRunStateBySession.set(sessionId, controller);
+        const signal = options?.signal ?? controller.signal;
+        if (!options?.silent) {
+            setRecompStarting(
+                { recompProgressBySession } as LiveSessionState,
+                sessionId,
+                "Embedding history…",
+                "embed",
+            );
+        }
+        let runFailed = 0;
         const outcome = await embedSessionCompartmentChunks(db, sessionProjectIdentity, sessionId, {
+            signal,
             onProgress: ({ embedded, total }) => {
                 const cur = recompProgressBySession.get(sessionId);
                 if (!cur || cur.phase !== "recomp") return;
@@ -369,13 +390,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 });
             },
         });
+        if (embedRunStateBySession.get(sessionId) === controller) {
+            embedRunStateBySession.delete(sessionId);
+        }
+        if ("failed" in outcome) runFailed = outcome.failed;
         const terminal = (phase: "done" | "skipped", message: string): string => {
-            setRecompTerminal(
-                { recompProgressBySession } as LiveSessionState,
-                sessionId,
-                phase,
-                message,
-            );
+            if (!options?.silent) {
+                setRecompTerminal(
+                    { recompProgressBySession } as LiveSessionState,
+                    sessionId,
+                    phase,
+                    message,
+                );
+            }
             return message;
         };
         switch (outcome.status) {
@@ -389,24 +416,85 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             case "busy":
                 return terminal(
                     "skipped",
-                    `Embedding is already running for this project — ${outcome.total} compartment${outcome.total === 1 ? "" : "s"} still pending. Try again shortly.`,
+                    "Embedding is already running for this project. Try again shortly.",
                 );
-            case "aborted":
-                return terminal(
-                    "done",
-                    `Embedded ${outcome.embedded} of ${outcome.total} compartments before stopping.`,
-                );
+            case "aborted": {
+                const cov = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
+                const msg = `Paused at ${cov.session.embedded}/${cov.session.total} compartments embedded.`;
+                return terminal("done", msg);
+            }
             case "stalled":
                 return terminal(
                     "skipped",
-                    `Embedded ${outcome.embedded} compartments; ${outcome.remaining} could not be embedded (the provider returned no result). Run /ctx-embed-history again to retry them.`,
+                    `Embedded ${outcome.embedded} compartments; ${outcome.remaining} could not be embedded (the provider returned no result). Run /ctx-embed start again to retry them.`,
                 );
             default:
                 return terminal(
                     "done",
-                    `Embedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"} of history for semantic search.`,
+                    `Embedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"} of history for semantic search${runFailed > 0 ? ` (${runFailed} failed)` : ""}.`,
                 );
         }
+    };
+
+    const pauseEmbedDrain = (sessionId: string): string => {
+        embedPauseBySession.add(sessionId);
+        const ctrl = embedRunStateBySession.get(sessionId);
+        if (ctrl) ctrl.abort();
+        const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
+        const sessionProjectIdentity = resolveProjectIdentity(directory);
+        const cov = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
+        return `Paused at ${cov.session.embedded}/${cov.session.total} compartments embedded.`;
+    };
+
+    const getEmbedStatusText = (sessionId: string): string => {
+        const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
+        const sessionProjectIdentity = resolveProjectIdentity(directory);
+        const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
+        const progress = recompProgressBySession.get(sessionId);
+        const drainUi = getEmbedDrainUiStatus(sessionId, progress);
+        return formatEmbedStatusText(coverage, {
+            status: drainUi.status,
+            embedded: progress?.processedMessages,
+            total: progress?.totalMessages,
+        });
+    };
+
+    const maybeAutoEmbedSession = (sessionId: string): void => {
+        if (autoEmbedAttemptedBySession.has(sessionId)) return;
+        if (embedPauseBySession.has(sessionId)) return;
+        if (deps.config.memory?.enabled === false) return;
+        autoEmbedAttemptedBySession.add(sessionId);
+        const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
+        void (async () => {
+            try {
+                await ensureProjectRegisteredFromOpenCodeDirectory(directory, db);
+                const sessionProjectIdentity = resolveProjectIdentity(directory);
+                const coverage = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
+                if (!coverage.enabled) return;
+                const remaining = coverage.session.total - coverage.session.embedded;
+                if (remaining <= 0) return;
+                const notifyParams = getLiveNotificationParams(
+                    sessionId,
+                    liveModelBySession,
+                    variantBySession,
+                    agentBySession,
+                );
+                if (!isTuiConnected(sessionId)) {
+                    const startMsg = `Embedding ${remaining} compartment${remaining === 1 ? "" : "s"} of history in the background…`;
+                    await sendIgnoredMessage(deps.client, sessionId, startMsg, {
+                        ...notifyParams,
+                    });
+                }
+                const summary = await executeEmbedHistory(sessionId);
+                if (!isTuiConnected(sessionId)) {
+                    await sendIgnoredMessage(deps.client, sessionId, summary, {
+                        ...notifyParams,
+                    });
+                }
+            } catch (error) {
+                log("[magic-context] auto-embed drain failed:", error);
+            }
+        })();
     };
 
     const sidekickRunnable = isSidekickRunnable(deps.config);
@@ -491,6 +579,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       minChars: deps.config.caveman_text_compression.min_chars ?? 500,
                   }
                 : undefined,
+        maybeAutoEmbedSession,
     });
     const eventHandler = createEventHandler({
         contextUsageMap,
@@ -534,6 +623,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             recompProgressBySession.delete(sessionId);
             internalChildSessions.delete(sessionId);
             channel1StateBySession.delete(sessionId);
+            clearEmbedSessionState(sessionId);
         },
     });
 
@@ -632,6 +722,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   runManagedUpgrade(buildManagedRecompCtx(sessionId), sessionId)
             : undefined,
         executeEmbedHistory,
+        pauseEmbedDrain,
+        getEmbedStatusText,
         sendNotification: async (sessionId, text, params) => {
             await sendIgnoredMessage(deps.client, sessionId, text, {
                 ...getLiveNotificationParams(

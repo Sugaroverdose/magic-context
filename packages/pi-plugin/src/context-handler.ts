@@ -137,6 +137,7 @@ import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
+import { clearPiEmbedSessionState } from "./commands/ctx-embed";
 import {
 	type ApplyDeferredPiCompactionMarkerDeps,
 	applyDeferredPiCompactionMarker,
@@ -459,7 +460,7 @@ function updateSessionProjectTracking(
 		clearPiSystemPromptSession(sessionId);
 	}
 	// Persist the session→project ownership binding so the project-scoped
-	// compartment-chunk backfill (/ctx-embed-history) can attribute this
+
 	// session's compartments to the right project. ctx.cwd is the authoritative
 	// session directory in Pi (no SDK/launch-dir ambiguity), so every observation
 	// is host-safe. Guarded to the once-per-(session,identity) transition — only
@@ -751,6 +752,11 @@ export interface PiContextHandlerOptions {
 	 * cwd. Tests omit it (the static options are used directly).
 	 */
 	resolveForProject?: (projectDir: string) => PiContextHandlerOptions;
+	maybeAutoEmbedSession?: (
+		sessionId: string,
+		projectDir: string,
+		projectIdentity: string,
+	) => void;
 }
 
 /**
@@ -2397,6 +2403,11 @@ export function registerPiContextHandler(
 			// preserve message identity for unchanged messages and only
 			// rebuild the mutated ones, so this cast is safe at runtime.
 			clearLastTransformErrorIfSet(options.db, sessionId);
+			options.maybeAutoEmbedSession?.(
+				sessionId,
+				projectDirectory,
+				projectIdentity,
+			);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -4638,4 +4649,5 @@ export function clearContextHandlerSession(sessionId: string): void {
 		rawMessageProviderUnregistersBySession.delete(sessionId);
 	}
 	clearSessionTracking(sessionId);
+	clearPiEmbedSessionState(sessionId);
 }

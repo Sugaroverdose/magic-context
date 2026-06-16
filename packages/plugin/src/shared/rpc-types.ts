@@ -123,6 +123,17 @@ export interface StatusDetail extends SidebarSnapshot {
     compressionUsage: string | null;
 }
 
+/** Embedding coverage for `/ctx-embed` status (mirrors getEmbeddingCoverageStatus). */
+export interface EmbedDetail {
+    enabled: boolean;
+    model: string;
+    provider: string;
+    session: { embedded: number; total: number };
+    memories: { embedded: number; total: number };
+    commits: { embedded: number; total: number; gitEnabled: boolean };
+    statusText: string;
+}
+
 export interface RpcNotificationMessage {
     id: number;
     type: string;

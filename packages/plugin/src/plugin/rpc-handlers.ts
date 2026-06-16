@@ -4,6 +4,7 @@
  */
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
 import {
     type ContextDatabase as Database,
     openDatabase,
@@ -15,10 +16,12 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/magic-context/work-metrics";
+import { getEmbedDrainUiStatus } from "../hooks/magic-context/embed-session-state";
 import {
     resolveContextLimit,
     resolveExecuteThresholdDetail,
 } from "../hooks/magic-context/event-resolvers";
+import { formatEmbedStatusText } from "../hooks/magic-context/format-embed-status";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
 import { computeM0BlockTokens } from "../hooks/magic-context/m0-token-breakdown";
@@ -42,7 +45,7 @@ import {
 import { log } from "../shared/logger";
 import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
-import type { SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
+import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
 
 // Per-process incremental work-metrics state, keyed by session. The RPC server
@@ -661,6 +664,32 @@ export function buildStatusDetail(
     return detail;
 }
 
+function buildEmbedDetail(
+    db: Database,
+    sessionId: string,
+    dir: string,
+    liveSessionState: LiveSessionState,
+): EmbedDetail {
+    const projectIdentity = resolveProjectIdentity(dir);
+    const coverage = getEmbeddingCoverageStatus(db, projectIdentity, sessionId);
+    const progress = liveSessionState.recompProgressBySession.get(sessionId);
+    const drainUi = getEmbedDrainUiStatus(sessionId, progress);
+    const statusText = formatEmbedStatusText(coverage, {
+        status: drainUi.status,
+        embedded: progress?.processedMessages,
+        total: progress?.totalMessages,
+    });
+    return {
+        enabled: coverage.enabled,
+        model: coverage.model,
+        provider: coverage.provider,
+        session: coverage.session,
+        memories: coverage.memories,
+        commits: coverage.commits,
+        statusText,
+    };
+}
+
 /**
  * Register all RPC handlers on the server.
  */
@@ -717,6 +746,22 @@ export function registerRpcHandlers(
             liveSessionState,
             injectionBudgetTokens,
         ) as unknown as Record<string, unknown>;
+    });
+
+    rpcServer.handle("embed-detail", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        const dir = String(params.directory ?? directory);
+        const db = getDb();
+        if (!db || !sessionId) return { error: "unavailable" };
+        try {
+            return buildEmbedDetail(db, sessionId, dir, liveSessionState) as unknown as Record<
+                string,
+                unknown
+            >;
+        } catch (err) {
+            log("[rpc] embed-detail error:", err);
+            return { error: "unavailable" };
+        }
     });
 
     rpcServer.handle("compartment-count", async (params) => {

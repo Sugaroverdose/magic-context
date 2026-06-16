@@ -78,7 +78,10 @@ import {
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
-import { registerCtxEmbedHistoryCommand } from "./commands/ctx-embed-history";
+import {
+	maybeAutoEmbedPiSession,
+	registerCtxEmbedCommand,
+} from "./commands/ctx-embed";
 import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxSessionUpgradeCommand } from "./commands/ctx-session-upgrade";
@@ -622,6 +625,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		historian: hist,
 		autoSearch: auto,
 		resolveForProject: resolveContextOptionsForProject,
+		maybeAutoEmbedSession: (sessionId, dir, identity) => {
+			maybeAutoEmbedPiSession(
+				{
+					db: database,
+					projectDir: dir,
+					projectIdentity: identity,
+					memoryEnabled: cfg.memory.enabled,
+				},
+				sessionId,
+				dir,
+				identity,
+				(text) => {
+					pi.sendMessage(
+						{
+							customType: "ctx-status",
+							content: text,
+							display: true,
+						} as never,
+						{ triggerTurn: false },
+					);
+				},
+			);
+		},
 	});
 	function resolveContextOptionsForProject(
 		dir: string,
@@ -755,14 +781,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 	info("registered /ctx-dream");
 
-	registerCtxEmbedHistoryCommand(pi, {
+	registerCtxEmbedCommand(pi, {
 		db,
 		projectDir,
 		projectIdentity,
 		memoryEnabled: config.memory.enabled,
 		resolveProject: resolveCurrentProject,
 	});
-	info("registered /ctx-embed-history");
+	info("registered /ctx-embed");
 
 	// Register Pi project with the singleton dreamer timer. When dreamer is
 	// disabled in config (default) this is a no-op. When enabled, the timer

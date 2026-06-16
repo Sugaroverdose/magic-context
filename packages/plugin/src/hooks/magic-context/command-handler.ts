@@ -361,11 +361,13 @@ export function createMagicContextCommandHandler(deps: {
      *  Optional: when unavailable, /ctx-session-upgrade still upgrades compartments
      *  via recomp and skips the memory re-evaluation. */
     runUpgrade?: (sessionId: string) => Promise<string>;
-    /** Runs /ctx-embed-history: backfill all of THIS session's compartment
-     *  chunk embeddings in one pass (live progress via the recomp surface).
-     *  Returns the user-facing summary. Optional: undefined when embedding is
-     *  not configured. */
-    executeEmbedHistory?: (sessionId: string) => Promise<string>;
+    /** `/ctx-embed start` — backfill this session's compartment embeddings. */
+    executeEmbedHistory?: (
+        sessionId: string,
+        options?: { signal?: AbortSignal; silent?: boolean },
+    ) => Promise<string>;
+    pauseEmbedDrain?: (sessionId: string) => string;
+    getEmbedStatusText?: (sessionId: string) => string;
     sendNotification: (
         sessionId: string,
         text: string,
@@ -399,7 +401,7 @@ export function createMagicContextCommandHandler(deps: {
     const isAugCommand = (command: string): boolean => command === "ctx-aug";
     const isDreamCommand = (command: string): boolean => command === "ctx-dream";
     const isSessionUpgradeCommand = (command: string): boolean => command === "ctx-session-upgrade";
-    const isEmbedHistoryCommand = (command: string): boolean => command === "ctx-embed-history";
+    const isEmbedCommand = (command: string): boolean => command === "ctx-embed";
 
     return {
         "command.execute.before": async (
@@ -413,7 +415,7 @@ export function createMagicContextCommandHandler(deps: {
             const isAug = isAugCommand(input.command);
             const isDream = isDreamCommand(input.command);
             const isSessionUpgrade = isSessionUpgradeCommand(input.command);
-            const isEmbedHistory = isEmbedHistoryCommand(input.command);
+            const isEmbed = isEmbedCommand(input.command);
 
             if (
                 !isStatus &&
@@ -422,7 +424,7 @@ export function createMagicContextCommandHandler(deps: {
                 !isAug &&
                 !isDream &&
                 !isSessionUpgrade &&
-                !isEmbedHistory
+                !isEmbed
             ) {
                 return;
             }
@@ -440,18 +442,53 @@ export function createMagicContextCommandHandler(deps: {
                 return;
             }
 
-            if (isEmbedHistory) {
-                const summary = deps.executeEmbedHistory
-                    ? await deps.executeEmbedHistory(sessionId)
-                    : "Semantic embedding is not configured for this project, so there is nothing to embed.";
-                await deps.sendNotification(sessionId, summary, {});
-                throwSentinel(input.command);
+            if (isEmbed) {
+                const sub = input.arguments.trim().toLowerCase();
+                if (sub === "pause") {
+                    const summary = deps.pauseEmbedDrain
+                        ? deps.pauseEmbedDrain(sessionId)
+                        : "Embedding pause is unavailable.";
+                    await deps.sendNotification(sessionId, summary, {});
+                    throwSentinel(input.command);
+                }
+                if (sub === "start") {
+                    const summary = deps.executeEmbedHistory
+                        ? await deps.executeEmbedHistory(sessionId)
+                        : "Semantic embedding is not configured for this project, so there is nothing to embed.";
+                    await deps.sendNotification(sessionId, summary, {});
+                    throwSentinel(input.command);
+                }
+                if (sub !== "") {
+                    await deps.sendNotification(
+                        sessionId,
+                        "Usage: `/ctx-embed` (status), `/ctx-embed start`, or `/ctx-embed pause`.",
+                        {},
+                    );
+                    throwSentinel(input.command);
+                }
+                if (isTuiConnected(sessionId)) {
+                    pushNotification("action", { action: "show-embed-dialog" }, sessionId);
+                    sessionLog(sessionId, "command ctx-embed: pushed show-embed-dialog to TUI");
+                    throwSentinel(input.command);
+                }
+                result = deps.getEmbedStatusText
+                    ? `## Embedding Status\n\n${deps.getEmbedStatusText(sessionId)}`
+                    : "## Embedding Status\n\nEmbedding status is unavailable.";
             }
 
             if (isFlush) {
                 result = executeFlush(deps.db, sessionId);
                 clearCachedM0M1(deps.db, sessionId);
                 deps.onFlush?.(sessionId);
+                if (isTuiConnected(sessionId)) {
+                    pushNotification(
+                        "action",
+                        { action: "show-flush-dialog", message: result },
+                        sessionId,
+                    );
+                    sessionLog(sessionId, "command ctx-flush: pushed show-flush-dialog to TUI");
+                    throwSentinel(input.command);
+                }
             }
 
             if (isStatus) {

@@ -5,9 +5,14 @@
 import os from "node:os";
 import path from "node:path";
 import { MagicContextRpcClient } from "../../shared/rpc-client";
-import type { RpcNotificationMessage, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import type {
+    EmbedDetail,
+    RpcNotificationMessage,
+    SidebarSnapshot,
+    StatusDetail,
+} from "../../shared/rpc-types";
 
-export type { SidebarSnapshot, StatusDetail };
+export type { EmbedDetail, SidebarSnapshot, StatusDetail };
 
 let rpcClient: MagicContextRpcClient | null = null;
 let rpcGeneration = 0;
@@ -215,6 +220,33 @@ export async function loadStatusDetail(
         return result;
     } catch {
         return emptyDetail;
+    }
+}
+
+const EMPTY_EMBED_DETAIL: EmbedDetail = {
+    enabled: false,
+    model: "off",
+    provider: "off",
+    session: { embedded: 0, total: 0 },
+    memories: { embedded: 0, total: 0 },
+    commits: { embedded: 0, total: 0, gitEnabled: false },
+    statusText: "Embedding is off (no provider configured).",
+};
+
+/** Fetch embedding coverage status for `/ctx-embed` via RPC. */
+export async function loadEmbedDetail(sessionId: string, directory: string): Promise<EmbedDetail> {
+    if (!rpcClient) return EMPTY_EMBED_DETAIL;
+    try {
+        const result = await rpcClient.call<EmbedDetail>("embed-detail", {
+            sessionId,
+            directory,
+        });
+        if ((result as unknown as Record<string, unknown>).error) {
+            return EMPTY_EMBED_DETAIL;
+        }
+        return result;
+    } catch {
+        return EMPTY_EMBED_DETAIL;
     }
 }
 
