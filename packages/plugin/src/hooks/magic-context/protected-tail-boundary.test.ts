@@ -347,6 +347,51 @@ describe("protected-tail boundary integration", () => {
         }
     });
 
+    it("manual-full-recomp is not frozen by a stale (dead) open tool arc at offset", () => {
+        // The same interrupted bash call that froze the trigger path must not
+        // freeze /ctx-recomp (the user's manual escape hatch): a dead open arc
+        // older than the recent window is ignored, so recomp gets a full
+        // eligible range to rebuild.
+        useBoundaryTempDataHome("protected-tail-recomp-dead-arc-");
+        const sessionId = "ses-recomp-dead-open-arc";
+        const messages: Array<{ id: string; role: string; parts: unknown[] }> = [];
+        messages.push({
+            id: "m-dead-bash",
+            role: "assistant",
+            parts: [
+                {
+                    type: "tool",
+                    callID: "toolu_dead",
+                    tool: "bash",
+                    state: { status: "running", input: { command: "sleep 999" } },
+                },
+            ],
+        });
+        for (let i = 1; i <= 8; i++) {
+            messages.push({
+                id: `m-conv-${i}`,
+                role: i % 2 === 1 ? "user" : "assistant",
+                parts: [{ type: "text", text: `conversation turn ${i} `.repeat(800) }],
+            });
+        }
+        const opencodeDb = createBoundaryOpenCodeDb(sessionId, messages);
+        const db = createContextDb();
+        try {
+            const snapshot = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "manual-full-recomp",
+                contextLimit: 64_000,
+                executeThresholdPercentage: 65,
+                usageSource: "manual-none",
+            });
+            expect(snapshot.eligibleEndOrdinal).toBeGreaterThan(snapshot.offset);
+        } finally {
+            closeQuietly(db);
+            closeQuietly(opencodeDb);
+        }
+    });
+
     it("bails out when a boundary snapshot's eligible raw range changes", () => {
         useBoundaryTempDataHome("protected-tail-stale-");
         const sessionId = "ses-stale-boundary";

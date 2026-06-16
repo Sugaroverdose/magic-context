@@ -373,8 +373,23 @@ export function resolveProtectedTailBoundary(
 
     if (ctx.mode === "manual-full-recomp") {
         const arcs = buildToolArcs(messages);
+        // Staleness gate (mirrors the trigger path): only the current in-flight
+        // call — an open arc within the live recent window — may hold back a full
+        // recomp. A stale/interrupted open arc (its result will never arrive)
+        // must NOT block /ctx-recomp; otherwise the same dead invocation that
+        // froze the historian also freezes the user's manual escape hatch.
+        const recompTarget = deriveProtectedTailTokenTarget({
+            contextLimit: ctx.contextLimit,
+            executeThresholdPercentage: ctx.executeThresholdPercentage,
+            usagePercentage: 0,
+            triggerBudget: ctx.triggerBudget,
+        });
+        const recentOpenArcCutoff = index.findSuffixStartForTokens(recompTarget.N);
         const firstOpenArc = arcs.find(
-            (arc) => arc.resOrdinal === null && arc.invOrdinal >= offset,
+            (arc) =>
+                arc.resOrdinal === null &&
+                arc.invOrdinal >= offset &&
+                arc.invOrdinal >= recentOpenArcCutoff,
         );
         const protectedTailStart = firstOpenArc?.invOrdinal ?? rawMessageCount + 1;
         const rawRangeFingerprint = computeRawRangeFingerprint(
