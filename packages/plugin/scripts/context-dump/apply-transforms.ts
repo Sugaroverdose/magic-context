@@ -206,7 +206,7 @@ export function applyTransforms(
 
 	for (const [callId, tagNumber] of toolTagByCallId) {
 		const thinkingParts = toolThinkingByCallId.get(callId) ?? []
-		targets.set(tagNumber, createToolDropTarget(callId, thinkingParts, toolCallIndex, batch))
+		targets.set(tagNumber, createToolDropTarget(callId, thinkingParts, toolCallIndex, batch, tagNumber))
 	}
 
 	const missingDroppedTags = tags.filter(
