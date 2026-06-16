@@ -448,14 +448,32 @@ export function createMagicContextCommandHandler(deps: {
                     const summary = deps.pauseEmbedDrain
                         ? deps.pauseEmbedDrain(sessionId)
                         : "Embedding pause is unavailable.";
-                    await deps.sendNotification(sessionId, summary, {});
+                    if (isTuiConnected(sessionId)) {
+                        // Dialog (not a scrollback message) so the sentinel-throw
+                        // stderr leak repaints away, mirroring /ctx-status & /ctx-flush.
+                        pushNotification(
+                            "action",
+                            { action: "show-result-dialog", title: "Embed", message: summary },
+                            sessionId,
+                        );
+                    } else {
+                        await deps.sendNotification(sessionId, summary, {});
+                    }
                     throwSentinel(input.command);
                 }
                 if (sub === "start") {
                     const summary = deps.executeEmbedHistory
                         ? await deps.executeEmbedHistory(sessionId)
                         : "Semantic embedding is not configured for this project, so there is nothing to embed.";
-                    await deps.sendNotification(sessionId, summary, {});
+                    if (isTuiConnected(sessionId)) {
+                        pushNotification(
+                            "action",
+                            { action: "show-result-dialog", title: "Embed", message: summary },
+                            sessionId,
+                        );
+                    } else {
+                        await deps.sendNotification(sessionId, summary, {});
+                    }
                     throwSentinel(input.command);
                 }
                 if (sub !== "") {

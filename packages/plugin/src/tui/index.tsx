@@ -615,10 +615,10 @@ async function showEmbedDialog(api: TuiPluginApi, targetSessionId = getSessionId
     return true
 }
 
-function showFlushDialog(api: TuiPluginApi, message: string): boolean {
+function showResultDialog(api: TuiPluginApi, title: string, message: string): boolean {
     api.ui.dialog.replace(() => (
         <api.ui.DialogAlert
-            title="Flush"
+            title={title}
             message={message}
             onConfirm={() => {}}
         />
@@ -887,7 +887,13 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                         }
                     } else if (action === "show-flush-dialog") {
                         const flushMsg = String(msg.payload?.message ?? "Flushed.")
-                        if (showFlushDialog(api, flushMsg)) {
+                        if (showResultDialog(api, "Flush", flushMsg)) {
+                            handledMessageIds.add(msg.id)
+                        }
+                    } else if (action === "show-result-dialog") {
+                        const title = String(msg.payload?.title ?? "Magic Context")
+                        const body = String(msg.payload?.message ?? "")
+                        if (showResultDialog(api, title, body)) {
                             handledMessageIds.add(msg.id)
                         }
                     }

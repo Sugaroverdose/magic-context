@@ -433,9 +433,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     "Embedding is already running for this project. Try again shortly.",
                 );
             case "aborted": {
+                // A drain only aborts via user pause (or session teardown). Render
+                // it as the neutral "skipped" terminal — NOT "done", which the
+                // sidebar shows as a green "✓ Embed complete" that wrongly reads as
+                // finished.
                 const cov = getEmbeddingCoverageStatus(db, sessionProjectIdentity, sessionId);
                 const msg = `Paused at ${cov.session.embedded}/${cov.session.total} compartments embedded.`;
-                return terminal("done", msg);
+                return terminal("skipped", msg);
             }
             case "stalled":
                 return terminal(
