@@ -276,6 +276,7 @@ ${modeIntro}
 4. **Write or update** using the Write tool. Always write to project root, NOT to .planning/.
 
 ### Rules
+- **NEVER touch protected regions**: any content between \`<!-- mc:protected START ... -->\` and \`<!-- mc:protected END -->\` is hand-authored and cache-critical. Reproduce it BYTE-FOR-BYTE in your rewrite — do not edit, reword, reorder, summarize, trim, or drop a single line of it, and keep the marker comments themselves. Only a human edits that region.
 - **Be prescriptive**: "Use X pattern" not "X pattern is used"
 - **Always include file paths** in backticks
 - **Write current state only**: no temporal language, no history
