@@ -591,9 +591,14 @@ export function checkCompartmentTrigger(
     }
 
     if (!tailInfo.hasProtectedEligibleHead || !tailInfo.isMeaningful) {
+        const b = tailInfo.boundarySnapshot;
         sessionLog(
             sessionId,
-            `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% because unsummarized tail from ${tailInfo.nextStartOrdinal} is too small`,
+            `compartment trigger: not firing at ${usage.percentage.toFixed(1)}% because unsummarized tail from ${tailInfo.nextStartOrdinal} is too small` +
+                ` [diag hasHead=${tailInfo.hasProtectedEligibleHead} meaningful=${tailInfo.isMeaningful}` +
+                ` offset=${b?.offset} protStart=${b?.protectedTailStart} N=${b?.N}` +
+                ` trueRawEligible=${b?.trueRawEligibleTokens} rawMsgCount=${b?.rawMessageCountAtTrigger}` +
+                ` reason=${b?.boundaryReason} tokEst=${tailInfo.tokenEstimate} chunkMore=${tailInfo.chunkHasMore}]`,
         );
         return { shouldFire: false };
     }
