@@ -452,8 +452,26 @@ export function resolveProtectedTailBoundary(
     // sparse #132 session (one user turn, huge assistant tail) must expose a
     // runnable head on the force path's FIRST attempt, not only after the
     // emergency-scaled retry.
+    const preFloorProtStart = protectedTailStart;
+    let diagLastMeaningfulUserOrdinal = -1;
+    let diagUserSamples = "";
     if (!ctx.emergencyTailScale && usagePercentage < 80) {
         let lastMeaningfulUserOrdinal = 0;
+        // TEMP DIAG: sample the newest user-role messages + meaningfulness.
+        const samples: string[] = [];
+        for (let i = messages.length - 1; i >= 0 && samples.length < 6; i--) {
+            const message = messages[i];
+            if (message.role !== "user") continue;
+            const meaningful = hasMeaningfulUserText(message.parts);
+            const firstText = (message.parts as Array<Record<string, unknown>>).find(
+                (p) => p && typeof p === "object" && (p as { type?: unknown }).type === "text",
+            );
+            const snip = firstText
+                ? String((firstText as { text?: unknown }).text ?? "").replace(/\s+/g, " ").slice(0, 50)
+                : "(no-text-part)";
+            samples.push(`ord${message.ordinal}:${meaningful ? "Y" : "N"}:"${snip}"`);
+        }
+        diagUserSamples = samples.join(" | ");
         for (let i = messages.length - 1; i >= 0; i--) {
             const message = messages[i];
             if (message.role !== "user") continue;
@@ -461,6 +479,7 @@ export function resolveProtectedTailBoundary(
             lastMeaningfulUserOrdinal = message.ordinal;
             break;
         }
+        diagLastMeaningfulUserOrdinal = lastMeaningfulUserOrdinal;
         if (lastMeaningfulUserOrdinal >= offset) {
             protectedTailStart = Math.min(protectedTailStart, lastMeaningfulUserOrdinal);
         }
@@ -527,7 +546,8 @@ export function resolveProtectedTailBoundary(
                 ` storedHit=${storedHit}(${storedTok}tok) fallback=${fbCount}(${fbTok}tok) indexTotal=${indexTotal}` +
                 ` N=${scaledN} offset=${offset} protStart=${protectedTailStart} eligEnd=${head.eligibleEndOrdinal}` +
                 ` roles=${JSON.stringify(roleCount)} partsArr=${partsArrayCount} emptyParts=${emptyPartsCount}` +
-                ` sampleIds=${messages.slice(0, 3).map((m) => m.id).join(",")}`,
+                ` preFloorProtStart=${preFloorProtStart} lastMeaningfulUser=${diagLastMeaningfulUserOrdinal}` +
+                ` userSamples=[${diagUserSamples}]`,
         );
     } catch (e) {
         sessionLog(ctx.sessionId, "[boundary-diag] failed:", e);
