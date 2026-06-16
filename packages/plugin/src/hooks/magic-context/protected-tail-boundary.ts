@@ -492,6 +492,46 @@ export function resolveProtectedTailBoundary(
         offset,
         head.eligibleEndOrdinal,
     );
+    // TEMP DIAG: pin where the eligible-tail token sum collapses. Logs the
+    // in-memory tail size, stored-map hit/fallback split, role distribution, and
+    // the index's total token sum vs the protected target N.
+    try {
+        let storedHit = 0;
+        let storedTok = 0;
+        let fbCount = 0;
+        let fbTok = 0;
+        const roleCount: Record<string, number> = {};
+        let partsArrayCount = 0;
+        let emptyPartsCount = 0;
+        for (const m of messages) {
+            roleCount[m.role] = (roleCount[m.role] ?? 0) + 1;
+            const parts = (m as { parts?: unknown }).parts;
+            if (Array.isArray(parts)) {
+                partsArrayCount += 1;
+                if (parts.length === 0) emptyPartsCount += 1;
+            }
+            const sv = storedTotals?.get(m.id);
+            const tokHere = index.tokenForOrdinal(m.ordinal);
+            if (sv !== undefined && sv !== null) {
+                storedHit += 1;
+                storedTok += sv;
+            } else {
+                fbCount += 1;
+                fbTok += tokHere;
+            }
+        }
+        const indexTotal = index.rangeTokens(1, rawMessageCount + 1);
+        sessionLog(
+            ctx.sessionId,
+            `[boundary-diag] inMemMsgs=${messages.length} rawMsgCount=${rawMessageCount} storedMapSize=${storedTotals?.size ?? "none"}` +
+                ` storedHit=${storedHit}(${storedTok}tok) fallback=${fbCount}(${fbTok}tok) indexTotal=${indexTotal}` +
+                ` N=${scaledN} offset=${offset} protStart=${protectedTailStart} eligEnd=${head.eligibleEndOrdinal}` +
+                ` roles=${JSON.stringify(roleCount)} partsArr=${partsArrayCount} emptyParts=${emptyPartsCount}` +
+                ` sampleIds=${messages.slice(0, 3).map((m) => m.id).join(",")}`,
+        );
+    } catch (e) {
+        sessionLog(ctx.sessionId, "[boundary-diag] failed:", e);
+    }
     return {
         sessionId: ctx.sessionId,
         mode: ctx.mode,
