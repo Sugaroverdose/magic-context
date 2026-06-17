@@ -164,6 +164,23 @@ stamps on send.
 
 ---
 
+## 8a. Transform-decision attribution binds one prompt later
+
+**OpenCode:** `message.updated` carries the finalized assistant `messageID`, so
+Magic Context can bind the in-memory transform decision to that id as soon as the
+terminal token update arrives.
+
+**Pi:** the context event's `AgentMessage` has no stable id, and at `message_end`
+the assistant `SessionEntry` wrapper has not been appended yet. Pi therefore
+records the transform decision in memory with a snapshot of the newest assistant
+entry id seen at pass start, then resolves it at the start of the next context
+pass by finding the newest assistant `SessionEntry.id` different from that
+snapshot. The dashboard keys Pi cache rows on that wrapper id, so this delayed
+bind is the first point where the correct durable key exists. The final turn's
+decision is written on the next prompt; that is accepted telemetry behavior.
+
+---
+
 ## 9. ctx_reduce nudges — same effect, different delivery mechanism
 
 The ctx_reduce nudge system (Channels 1 & 2) shares ALL metric math with OpenCode

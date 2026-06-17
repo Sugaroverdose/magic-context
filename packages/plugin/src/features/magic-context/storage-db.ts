@@ -19,6 +19,7 @@ import { runToolOwnerBackfill } from "./tool-owner-backfill";
 const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
+const pathByDatabase = new WeakMap<Database, string>();
 
 // Last schema-fence rejection, recorded so startup can surface a user-facing
 // message (not just a log line). When OpenCode and Pi share context.db and one
@@ -36,7 +37,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 37;
+export const LATEST_SUPPORTED_VERSION = 38;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -68,6 +69,10 @@ function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; dbPath: 
     }
     const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
+}
+
+export function getDatabasePath(db: Database): string | null {
+    return pathByDatabase.get(db) ?? null;
 }
 
 /**
@@ -738,6 +743,23 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_historian_runs_status
       ON historian_runs(status, created_at DESC);
 
+    CREATE TABLE IF NOT EXISTS transform_decisions (
+      session_id         TEXT    NOT NULL,
+      harness            TEXT    NOT NULL DEFAULT 'opencode',
+      message_id         TEXT    NOT NULL,
+      ts_ms              INTEGER NOT NULL,
+      decision           TEXT    NOT NULL,
+      materialized       INTEGER NOT NULL DEFAULT 0,
+      materialize_reason TEXT,
+      emergency          INTEGER NOT NULL DEFAULT 0,
+      dropped_tokens     INTEGER NOT NULL DEFAULT 0,
+      dropped_count      INTEGER NOT NULL DEFAULT 0,
+      input_tokens       INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (session_id, harness, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_transform_decisions_session_harness
+      ON transform_decisions(session_id, harness);
+
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
     CREATE INDEX IF NOT EXISTS idx_tags_session_message_id ON tags(session_id, message_id);
     CREATE INDEX IF NOT EXISTS idx_pending_ops_session ON pending_ops(session_id);
@@ -1063,6 +1085,22 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         failed_at INTEGER NOT NULL,
         UNIQUE(table_name, row_id)
       );
+      CREATE TABLE IF NOT EXISTS transform_decisions (
+        session_id         TEXT    NOT NULL,
+        harness            TEXT    NOT NULL DEFAULT 'opencode',
+        message_id         TEXT    NOT NULL,
+        ts_ms              INTEGER NOT NULL,
+        decision           TEXT    NOT NULL,
+        materialized       INTEGER NOT NULL DEFAULT 0,
+        materialize_reason TEXT,
+        emergency          INTEGER NOT NULL DEFAULT 0,
+        dropped_tokens     INTEGER NOT NULL DEFAULT 0,
+        dropped_count      INTEGER NOT NULL DEFAULT 0,
+        input_tokens       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (session_id, harness, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_transform_decisions_session_harness
+        ON transform_decisions(session_id, harness);
     `);
 
     // NULL-column healing runs as migration v5 (one-shot at schema upgrade).
@@ -1405,6 +1443,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         setToolDefinitionDatabase(db);
         loadToolDefinitionMeasurements(db);
         databases.set(dbPath, db);
+        pathByDatabase.set(db, dbPath);
         persistenceByDatabase.set(db, true);
         persistenceErrorByDatabase.delete(db);
         return db;

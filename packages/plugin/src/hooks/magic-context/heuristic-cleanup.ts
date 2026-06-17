@@ -59,6 +59,7 @@ export function applyHeuristicCleanup(
     droppedTools: number;
     deduplicatedTools: number;
     droppedInjections: number;
+    emergencyDroppedTools: number;
     compressedTextTags: number;
     mutatedTextTags: number;
 } {
@@ -77,6 +78,7 @@ export function applyHeuristicCleanup(
     const protectedCutoff = maxTag - config.protectedTags;
 
     let droppedTools = 0;
+    let emergencyDroppedTools = 0;
     let deduplicatedTools = 0;
     let droppedInjections = 0;
 
@@ -123,6 +125,7 @@ export function applyHeuristicCleanup(
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                         updateTagDropMode(db, sessionId, tag.tagNumber, "full");
                         droppedTools++;
+                        emergencyDroppedTools++;
                     }
                 }
                 // Latch the usage sample on any ACTING pass — even if zero tags
@@ -268,6 +271,7 @@ export function applyHeuristicCleanup(
         droppedTools,
         deduplicatedTools,
         droppedInjections,
+        emergencyDroppedTools,
         compressedTextTags,
         mutatedTextTags,
     };

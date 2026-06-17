@@ -167,6 +167,12 @@ interface RunPostTransformPhaseArgs {
 export interface PostTransformPhaseResult {
     explicitMaterializedSuccessfully: boolean;
     deferredMaterializedSuccessfully: boolean;
+    materialized: boolean;
+    materializeReason: string | null;
+    droppedTokens: number;
+    droppedCount: number;
+    emergency: boolean;
+    bustedThisPass: boolean;
 }
 
 export async function runPostTransformPhase(
@@ -391,6 +397,13 @@ export async function runPostTransformPhase(
     let pendingOpsRanSuccessfully = false;
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
+    let droppedCount = 0;
+    const droppedTokens = 0;
+    let emergency = false;
+    let m0RematerializedThisPass = false;
+    let m0MaterializeReason: string | null = null;
+    let m0M1InjectedThisPass = false;
+    let autoReclaimDidMutateThisPass = false;
     try {
         if (shouldApplyPendingOps) {
             const applyReason = isExplicitFlush
@@ -422,6 +435,9 @@ export async function runPostTransformPhase(
                 undefined,
                 pendingOps,
             );
+            if (pendingOpsDidMutate) {
+                droppedCount += pendingOps.length;
+            }
             logTransformTiming(args.sessionId, "applyPendingOperations", tApply);
         }
         if (shouldRunHeuristics) {
@@ -478,6 +494,12 @@ export async function runPostTransformPhase(
                 cleanup.deduplicatedTools +
                 cleanup.droppedInjections +
                 cleanup.mutatedTextTags;
+            droppedCount +=
+                cleanup.droppedTools +
+                cleanup.deduplicatedTools +
+                cleanup.droppedInjections +
+                cleanup.mutatedTextTags;
+            emergency ||= cleanup.emergencyDroppedTools > 0;
             const t7 = performance.now();
             const clearedReasoning = clearOldReasoning(
                 args.messages,
@@ -521,6 +543,7 @@ export async function runPostTransformPhase(
             logTransformTiming(args.sessionId, "clearOldReasoning", t7);
             heuristicOrReasoningDidMutate =
                 heuristicMutationCount + clearedReasoning + strippedInline > 0;
+            droppedCount += clearedReasoning + strippedInline;
             // ── Drain pendingMaterializationSessions ──
             // Heuristics + materialization successfully ran on this pass.
             // We've fulfilled every reason the set was added (user
@@ -565,6 +588,10 @@ export async function runPostTransformPhase(
                     [],
                     syntheticPendingOps,
                 );
+                if (autoReclaimDidMutate) {
+                    droppedCount += syntheticPendingOps.length;
+                    autoReclaimDidMutateThisPass = true;
+                }
             }
         }
         args.batch?.finalize();
@@ -680,6 +707,9 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
             });
             if (result.injected) {
+                m0M1InjectedThisPass = true;
+                m0RematerializedThisPass ||= result.m0RematerializedThisPass;
+                m0MaterializeReason = result.decision.reason ?? m0MaterializeReason;
                 sessionLog(
                     args.sessionId,
                     `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
@@ -1186,7 +1216,31 @@ export async function runPostTransformPhase(
         }
     }
 
-    return { explicitMaterializedSuccessfully, deferredMaterializedSuccessfully };
+    const materializeReason =
+        m0MaterializeReason ?? (explicitMaterializedSuccessfully ? "explicit_flush" : null);
+    const materialized =
+        m0RematerializedThisPass ||
+        explicitMaterializedSuccessfully ||
+        deferredMaterializedSuccessfully;
+    const bustedThisPass =
+        args.didMutateFromFlushedStatuses ||
+        pendingOpsDidMutate ||
+        heuristicOrReasoningDidMutate ||
+        autoReclaimDidMutateThisPass ||
+        m0RematerializedThisPass ||
+        (m0M1InjectedThisPass && historyWasConsumedThisPass) ||
+        historyWasConsumedThisPass;
+
+    return {
+        explicitMaterializedSuccessfully,
+        deferredMaterializedSuccessfully,
+        materialized,
+        materializeReason,
+        droppedTokens,
+        droppedCount,
+        emergency,
+        bustedThisPass,
+    };
 }
 
 export function checkM0MutationDriftAndSignal(args: {

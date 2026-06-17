@@ -518,10 +518,10 @@ struct RawDbCacheEvent {
 }
 
 #[derive(Debug, Clone)]
-struct LogCauseCandidate {
-    session_id: String,
-    timestamp: i64,
-    cause: String,
+struct TransformDecisionCause {
+    decision: String,
+    materialize_reason: Option<String>,
+    emergency: bool,
 }
 
 /// Estimate tokens using ~4 chars per token (CHARS_PER_TOKEN_ESTIMATE = 4)
@@ -695,124 +695,36 @@ fn format_timestamp_iso(timestamp: i64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
-fn parse_log_timestamp_millis(timestamp: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|dt| dt.timestamp_millis())
-        .ok()
+fn transform_decision_reason_label(reason: &str) -> Option<&'static str> {
+    match reason {
+        "system_hash" => Some("System prompt change"),
+        "model_change" => Some("Model change"),
+        "project_memory_epoch" => Some("Memory change"),
+        "ttl_idle" => Some("Idle cache refresh"),
+        "explicit_flush" => Some("Manual flush"),
+        "max_mutation_id" => Some("History edit"),
+        "first_render" => Some("First render"),
+        "pressure_refold" => Some("Compaction pressure"),
+        "upgrade_state" => Some("Session upgrade"),
+        "cached_m1_missing" => Some("Cache rebuild"),
+        _ => None,
+    }
 }
 
-/// Classify a single plugin-log line into a human cause, matching the CURRENT
-/// log format. The reason-bearing lines carry no cache tokens, so candidates are
-/// built from these directly (not from token-carrying lines):
-///   - "transform scheduler: ... decision=execute" → an execute pass (tool reclaim)
-///   - "injected m[0]/m[1] (rematerialized=true, reason=X)" → a hard m[0] fold
-///   - "compartmentInProgress flag set, starting agent"     → historian comparting
-fn cause_from_log_message(msg: &str) -> Option<String> {
-    if msg.contains("decision=execute") {
-        return Some("Execute pass (reclaimed tool output)".to_string());
+fn transform_decision_cause(decision: Option<&TransformDecisionCause>) -> Option<String> {
+    let decision = decision?;
+    if decision.emergency {
+        return Some("Compaction pressure".to_string());
     }
-    if msg.contains("compartmentInProgress flag set") {
-        return Some("Comparting history".to_string());
-    }
-    if msg.contains("rematerialized=true") {
-        // Pull reason=<token> and map to a friendly label.
-        let reason = msg
-            .split("reason=")
-            .nth(1)
-            .map(|rest| {
-                rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or("")
-            })
-            .unwrap_or("");
-        let label = match reason {
-            "first_render" => "First render",
-            "ttl_idle" => "Idle cache refresh",
-            "system_hash" => "System prompt change",
-            "model_key" => "Model change",
-            "project_memory_epoch" => "Memory change",
-            "max_mutation_id" => "History edit",
-            "explicit_flush" => "Manual flush",
-            "cached_m1_missing" | "pressure" => "Compaction pressure",
-            "cache_hit" => return None,
-            _ => "History rematerialized",
-        };
-        return Some(label.to_string());
-    }
-    None
-}
-
-fn build_log_cause_candidates() -> Vec<LogCauseCandidate> {
-    // Read both harness logs, keeping ONLY cause-bearing lines. A fixed line-count
-    // tail covers far too little wall-time of these very large, very verbose logs
-    // (cause lines are ~1-per-1000), so timeline drops that are hours old never
-    // correlate. Scan the whole file for the sparse cause lines instead.
-    let mut entries = crate::log_parser::read_log_cause_lines(
-        &crate::log_parser::resolve_log_path_for(crate::log_parser::Harness::Opencode),
-    );
-    entries.extend(crate::log_parser::read_log_cause_lines(
-        &crate::log_parser::resolve_log_path_for(crate::log_parser::Harness::Pi),
-    ));
-
-    entries
-        .iter()
-        .filter_map(|entry| {
-            if entry.session_id.is_empty() {
-                return None;
-            }
-            let timestamp = parse_log_timestamp_millis(&entry.timestamp)?;
-            let cause = cause_from_log_message(&entry.message)?;
-            Some(LogCauseCandidate {
-                session_id: entry.session_id.clone(),
-                timestamp,
-                cause,
-            })
-        })
-        .collect()
-}
-
-fn match_log_cause(
-    candidates: &[LogCauseCandidate],
-    session_id: &str,
-    timestamp: i64,
-) -> Option<String> {
-    // The cause log line is written when the transform runs (start of the
-    // request), while the cache event's timestamp is the assistant message's
-    // creation time (end of the request) — so the cause PRECEDES the event by
-    // the generation latency, which can be tens of seconds on long turns.
-    // Execute passes / folds are sparse, so a wide nearest-wins window that
-    // favors causes at-or-before the event is reliable.
-    const MATCH_WINDOW_MS: i64 = 120_000;
-    let mut matches: Vec<(i64, &str)> = candidates
-        .iter()
-        .filter(|candidate| candidate.session_id == session_id)
-        .filter_map(|candidate| {
-            let signed = timestamp - candidate.timestamp; // >0 when cause precedes event
-            let distance = signed.abs();
-            // Allow the full window before the event, but only a small slack
-            // after it (clock jitter) since the cause should precede the event.
-            if signed >= -5_000 && distance <= MATCH_WINDOW_MS {
-                Some((distance, candidate.cause.as_str()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    matches.sort_by_key(|(distance, _)| *distance);
-
-    let mut deduped = Vec::new();
-    for (_, cause) in matches {
-        if !deduped.iter().any(|existing: &String| existing == cause) {
-            deduped.push(cause.to_string());
+    if let Some(reason) = decision.materialize_reason.as_deref() {
+        if let Some(label) = transform_decision_reason_label(reason) {
+            return Some(label.to_string());
         }
     }
-
-    if deduped.is_empty() {
-        None
-    } else {
-        Some(deduped.join(", "))
+    if decision.decision == "execute" {
+        return Some("Execute pass (reclaimed tool output)".to_string());
     }
+    None
 }
 
 fn load_raw_db_cache_events(
@@ -1020,13 +932,87 @@ fn resolve_session_context_limits(
     out
 }
 
-fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
-    let log_cause_candidates = if enrich_causes {
-        build_log_cause_candidates()
-    } else {
-        Vec::new()
+fn load_transform_decision_causes(
+    keys: &HashSet<(Harness, String)>,
+) -> HashMap<(Harness, String, String), TransformDecisionCause> {
+    if keys.is_empty() {
+        return HashMap::new();
+    }
+    let Some(db_path) = resolve_db_path() else {
+        return HashMap::new();
     };
+    let Ok(conn) = open_readonly(&db_path) else {
+        return HashMap::new();
+    };
+    load_transform_decision_causes_from_conn(&conn, keys)
+}
 
+fn load_transform_decision_causes_from_conn(
+    conn: &Connection,
+    keys: &HashSet<(Harness, String)>,
+) -> HashMap<(Harness, String, String), TransformDecisionCause> {
+    let mut out: HashMap<(Harness, String, String), TransformDecisionCause> = HashMap::new();
+    if keys.is_empty() {
+        return out;
+    }
+    let session_ids: HashSet<String> = keys.iter().map(|(_, sid)| sid.clone()).collect();
+    if session_ids.is_empty() {
+        return out;
+    }
+    let placeholders = vec!["?"; session_ids.len()].join(",");
+    let sql = format!(
+        "SELECT session_id, harness, message_id, decision, materialize_reason, emergency
+         FROM transform_decisions
+         WHERE session_id IN ({})",
+        placeholders
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return out;
+    };
+    let rows = stmt.query_map(params_from_iter(session_ids.iter()), |row| {
+        let session_id: String = row.get(0)?;
+        let harness_str: String = row.get(1)?;
+        let message_id: String = row.get(2)?;
+        let decision: String = row.get(3)?;
+        let materialize_reason: Option<String> = row.get(4)?;
+        let emergency: i64 = row.get(5)?;
+        Ok((
+            session_id,
+            harness_str,
+            message_id,
+            TransformDecisionCause {
+                decision,
+                materialize_reason,
+                emergency: emergency != 0,
+            },
+        ))
+    });
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            let harness = match row.1.as_str() {
+                "pi" => Harness::Pi,
+                _ => Harness::Opencode,
+            };
+            let session_key = (harness, row.0.clone());
+            if keys.contains(&session_key) {
+                out.insert((harness, row.0, row.2), row.3);
+            }
+        }
+    }
+    out
+}
+
+fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
+    build_db_cache_events_with_decisions(rows, enrich_causes, None)
+}
+
+fn build_db_cache_events_with_decisions(
+    rows: Vec<RawDbCacheEvent>,
+    enrich_causes: bool,
+    transform_decisions_override: Option<
+        HashMap<(Harness, String, String), TransformDecisionCause>,
+    >,
+) -> Vec<DbCacheEvent> {
     // Build a map of earliest timestamp per session in our window so we can
     // detect whether an event is truly the session's first message vs just
     // the oldest event in the current 200-event window. Keyed by
@@ -1209,6 +1195,17 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             *entry = true;
         }
     }
+    let session_keys: HashSet<(Harness, String)> = chronological
+        .iter()
+        .map(|e| (e.harness, e.session_id.clone()))
+        .collect();
+    let transform_decisions = transform_decisions_override.unwrap_or_else(|| {
+        if enrich_causes {
+            load_transform_decision_causes(&session_keys)
+        } else {
+            HashMap::new()
+        }
+    });
 
     // ── Pass 2: turn grouping + cross-step retention severity ──
     // Expected next cache_read = prev.cache_read + growth, where growth is the
@@ -1255,87 +1252,111 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
 
         // Severity.
         let is_first_in_window = seen_sessions.insert(session_key.clone());
-        let no_cache_session = !session_has_cache.get(&session_key).copied().unwrap_or(false);
+        let no_cache_session = !session_has_cache
+            .get(&session_key)
+            .copied()
+            .unwrap_or(false);
         let cur_read = chronological[i].cache_read;
         let cur_session = chronological[i].session_id.clone();
-        let cur_ts = chronological[i].timestamp;
-
-        let (severity, cause, retention): (String, Option<String>, Option<f64>) = if no_cache_session
-        {
-            ("unknown".to_string(), None, None)
-        } else if is_first_in_window {
-            if true_first_sessions.contains(&session_key) {
-                (
-                    "info".to_string(),
-                    Some("First message (new session)".to_string()),
-                    None,
-                )
-            } else {
-                // No previous step in the loaded window → no baseline to compare
-                // against. Default benign rather than risk a false bust on the
-                // single edge row at the top of the window.
-                ("stable".to_string(), None, None)
-            }
-        } else if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
-            // Snapshot prev values out before mutating chronological[i].
-            let (prev_read, prev_write, prev_input, prev_total) = {
-                let prev = &chronological[prev_idx];
-                (
-                    prev.cache_read,
-                    prev.cache_write,
-                    prev.input_tokens,
-                    prev.total_tokens,
-                )
-            };
-            if prev_read == 0 {
-                // No cache was established on the prior step (cold / still
-                // warming up), so a low/zero cache_read now isn't a LOSS.
-                ("stable".to_string(), None, None)
-            } else {
-                let prev_output =
-                    (prev_total - prev_input - prev_read - prev_write).max(0);
-                let growth = if prev_write > 0 {
-                    prev_write
+        let decision_key = (
+            chronological[i].harness,
+            cur_session.clone(),
+            chronological[i].message_id.clone(),
+        );
+        let decision_row = transform_decisions.get(&decision_key);
+        let cause_from_decision = || {
+            transform_decision_cause(decision_row).or_else(|| {
+                if decision_row.is_none() {
+                    Some("Provider-side (not Magic Context)".to_string())
                 } else {
-                    prev_input + prev_output
-                };
-                let expected = prev_read + growth; // > 0 since prev_read > 0
-                if cur_read == 0 {
+                    None
+                }
+            })
+        };
+
+        let (severity, cause, retention): (String, Option<String>, Option<f64>) =
+            if no_cache_session {
+                ("unknown".to_string(), None, None)
+            } else if is_first_in_window {
+                if true_first_sessions.contains(&session_key) {
                     (
-                        "full_bust".to_string(),
-                        match_log_cause(&log_cause_candidates, &cur_session, cur_ts),
-                        Some(0.0),
+                        "info".to_string(),
+                        Some("First message (new session)".to_string()),
+                        None,
                     )
                 } else {
-                    let ret = cur_read as f64 / expected as f64;
-                    if ret >= 0.95 {
-                        ("stable".to_string(), None, Some(ret))
-                    } else if ret >= 0.80 {
+                    // No previous step in the loaded window → no baseline to compare
+                    // against. Default benign rather than risk a false bust on the
+                    // single edge row at the top of the window.
+                    ("stable".to_string(), None, None)
+                }
+            } else if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
+                // Snapshot prev values out before mutating chronological[i].
+                let (prev_read, prev_write, prev_input, prev_total) = {
+                    let prev = &chronological[prev_idx];
+                    (
+                        prev.cache_read,
+                        prev.cache_write,
+                        prev.input_tokens,
+                        prev.total_tokens,
+                    )
+                };
+                if prev_read == 0 {
+                    // No cache was established on the prior step (cold / still
+                    // warming up), so a low/zero cache_read now isn't a LOSS.
+                    ("stable".to_string(), None, None)
+                } else {
+                    let prev_output = (prev_total - prev_input - prev_read - prev_write).max(0);
+                    let growth = if prev_write > 0 {
+                        prev_write
+                    } else {
+                        prev_input + prev_output
+                    };
+                    let expected = prev_read + growth; // > 0 since prev_read > 0
+                    if cur_read == 0 {
                         (
-                            "warning".to_string(),
+                            "full_bust".to_string(),
                             if enrich_causes {
-                                match_log_cause(&log_cause_candidates, &cur_session, cur_ts)
+                                cause_from_decision()
                             } else {
                                 None
                             },
-                            Some(ret),
+                            Some(0.0),
                         )
                     } else {
-                        (
-                            "bust".to_string(),
-                            match_log_cause(&log_cause_candidates, &cur_session, cur_ts),
-                            Some(ret),
-                        )
+                        let ret = cur_read as f64 / expected as f64;
+                        if ret >= 0.95 {
+                            ("stable".to_string(), None, Some(ret))
+                        } else if ret >= 0.80 {
+                            (
+                                "warning".to_string(),
+                                if enrich_causes {
+                                    transform_decision_cause(decision_row)
+                                } else {
+                                    None
+                                },
+                                Some(ret),
+                            )
+                        } else {
+                            (
+                                "bust".to_string(),
+                                if enrich_causes {
+                                    cause_from_decision()
+                                } else {
+                                    None
+                                },
+                                Some(ret),
+                            )
+                        }
                     }
                 }
-            }
-        } else {
-            ("stable".to_string(), None, None)
-        };
+            } else {
+                ("stable".to_string(), None, None)
+            };
 
         // Drop detection: a meaningful prompt shrink vs the previous step means
         // MC reclaimed context this step. Mark it and (if not already) attach the
-        // log cause so the timeline can show a marker explaining WHY it dropped.
+        // DB-recorded transform decision so the timeline explains WHY it dropped.
         let mut is_drop = false;
         let mut cause = cause;
         if let Some(&prev_idx) = prev_event_idx_by_session.get(&session_key) {
@@ -1343,12 +1364,13 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
                 let prev = &chronological[prev_idx];
                 prev.input_tokens + prev.cache_read + prev.cache_write
             };
-            let cur_prompt =
-                chronological[i].input_tokens + chronological[i].cache_read + chronological[i].cache_write;
+            let cur_prompt = chronological[i].input_tokens
+                + chronological[i].cache_read
+                + chronological[i].cache_write;
             if prev_prompt - cur_prompt >= DROP_MARKER_MIN_TOKENS {
                 is_drop = true;
                 if cause.is_none() && enrich_causes {
-                    cause = match_log_cause(&log_cause_candidates, &cur_session, cur_ts);
+                    cause = cause_from_decision();
                 }
             }
         }
@@ -1374,10 +1396,6 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
     // Prefer the plugin's recorded limit; fall back to the session's own max
     // prompt so the timeline still shows the sawtooth shape (it just loses the
     // absolute "% of window" meaning for sessions the plugin never sized).
-    let session_keys: HashSet<(Harness, String)> = chronological
-        .iter()
-        .map(|e| (e.harness, e.session_id.clone()))
-        .collect();
     let recorded_limits = resolve_session_context_limits(&session_keys);
     let mut max_prompt_by_session: HashMap<(Harness, String), i64> = HashMap::new();
     for e in &chronological {
@@ -1930,8 +1948,7 @@ fn resolve_paths_for_table_filter(
     // `table` is a fixed internal literal (never user input), so interpolating
     // it into the DISTINCT query is safe. The set is small (one row per project
     // that ever wrote to the table), bounded by project count, not row count.
-    let mut stmt =
-        conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
+    let mut stmt = conn.prepare(&format!("SELECT DISTINCT project_path FROM {table}"))?;
     // Read as Option<String>: some tables (smart_notes, project_key_files) can
     // hold legacy rows with a NULL project_path. A non-Option get() throws
     // "Invalid column type Null" and crashes the whole session-detail view. A
@@ -4103,17 +4120,13 @@ pub fn get_dream_run_memory_changes(
         c2 = paths.len() + 2,
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut params: Vec<&dyn rusqlite::ToSql> = paths
-        .iter()
-        .map(|p| p as &dyn rusqlite::ToSql)
-        .collect();
+    let mut params: Vec<&dyn rusqlite::ToSql> =
+        paths.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
     params.push(&started_at);
     params.push(&finished_at);
 
     let mut detail = DreamRunMemoryDetail::default();
-    let mut rows = stmt
-        .query(params.as_slice())
-        .map_err(|e| e.to_string())?;
+    let mut rows = stmt.query(params.as_slice()).map_err(|e| e.to_string())?;
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
         let id: i64 = row.get(0).map_err(|e| e.to_string())?;
         let category: String = row.get(1).map_err(|e| e.to_string())?;
@@ -4176,9 +4189,7 @@ pub fn get_dream_runs(
             params.push(p);
         }
         params.push(&normalized_limit);
-        let mut rows = stmt
-            .query(params.as_slice())
-            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query(params.as_slice()).map_err(|e| e.to_string())?;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let mapped = map_dream_run_row(row).map_err(|e| e.to_string())?;
             runs.push(mapped);
@@ -4226,7 +4237,10 @@ pub fn enqueue_dream(
 /// dequeues it). Returns the number of rows removed (0 if the id was already
 /// gone — e.g. a runner picked it up between the list read and this call).
 pub fn delete_dream_queue_entry(conn: &Connection, id: i64) -> Result<usize, rusqlite::Error> {
-    conn.execute("DELETE FROM dream_queue WHERE id = ?1", rusqlite::params![id])
+    conn.execute(
+        "DELETE FROM dream_queue WHERE id = ?1",
+        rusqlite::params![id],
+    )
 }
 
 // ── User Memory types ───────────────────────────────────────
@@ -5174,44 +5188,127 @@ mod cache_turn_tests {
     }
 
     #[test]
-    fn cause_mapping_matches_current_log_format() {
-        // Execute pass (the common drop cause).
+    fn transform_decision_cause_mapping_uses_canonical_reasons() {
         assert_eq!(
-            cause_from_log_message(
-                "transform scheduler: percentage=66.0% inputTokens=600000 decision=execute"
-            )
+            transform_decision_cause(Some(&TransformDecisionCause {
+                decision: "execute".to_string(),
+                materialize_reason: None,
+                emergency: false,
+            }))
             .as_deref(),
             Some("Execute pass (reclaimed tool output)")
         );
-        // Hard fold reasons.
         assert_eq!(
-            cause_from_log_message(
-                "transform: injected m[0]/m[1] (rematerialized=true, reason=system_hash)"
-            )
+            transform_decision_cause(Some(&TransformDecisionCause {
+                decision: "defer".to_string(),
+                materialize_reason: Some("system_hash".to_string()),
+                emergency: false,
+            }))
             .as_deref(),
             Some("System prompt change")
         );
         assert_eq!(
-            cause_from_log_message(
-                "transform: injected m[0]/m[1] (rematerialized=true, reason=ttl_idle)"
-            )
+            transform_decision_cause(Some(&TransformDecisionCause {
+                decision: "execute".to_string(),
+                materialize_reason: Some("pressure_refold".to_string()),
+                emergency: false,
+            }))
             .as_deref(),
-            Some("Idle cache refresh")
+            Some("Compaction pressure")
         );
-        // Comparting.
         assert_eq!(
-            cause_from_log_message("transform: compartmentInProgress flag set, starting agent")
-                .as_deref(),
-            Some("Comparting history")
+            transform_decision_cause(Some(&TransformDecisionCause {
+                decision: "defer".to_string(),
+                materialize_reason: None,
+                emergency: true,
+            }))
+            .as_deref(),
+            Some("Compaction pressure")
         );
-        // Routine cache-hit injects and unrelated lines yield no cause.
-        assert_eq!(
-            cause_from_log_message(
-                "transform: injected m[0]/m[1] (rematerialized=false, reason=cache_hit)"
+        assert_eq!(transform_decision_cause(None), None);
+    }
+
+    #[test]
+    fn message_id_join_picks_matching_transform_decision_cause() {
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2,
+                200_000,
+                1_000,
+                201_102,
+                Some("tool-calls"),
             ),
-            None
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                205_000,
+                0,
+                0,
+                205_500,
+                Some("stop"),
+            ),
+        ];
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            (Harness::Opencode, "s1".to_string(), "m2".to_string()),
+            TransformDecisionCause {
+                decision: "defer".to_string(),
+                materialize_reason: Some("explicit_flush".to_string()),
+                emergency: false,
+            },
         );
-        assert_eq!(cause_from_log_message("transform stage: stage=tagMessages"), None);
+
+        let events = build_db_cache_events_with_decisions(rows, true, Some(decisions));
+        assert_eq!(events[1].severity, "full_bust");
+        assert_eq!(events[1].cause.as_deref(), Some("Manual flush"));
+    }
+
+    #[test]
+    fn bust_without_transform_decision_is_provider_side() {
+        let rows = vec![
+            raw(
+                Harness::Opencode,
+                "m1",
+                "s1",
+                100,
+                2,
+                200_000,
+                1_000,
+                201_102,
+                Some("tool-calls"),
+            ),
+            raw(
+                Harness::Opencode,
+                "m2",
+                "s1",
+                200,
+                205_000,
+                0,
+                0,
+                205_500,
+                Some("stop"),
+            ),
+        ];
+        let events = build_db_cache_events_with_decisions(rows, true, Some(HashMap::new()));
+        assert_eq!(events[1].severity, "full_bust");
+        assert_eq!(
+            events[1].cause.as_deref(),
+            Some("Provider-side (not Magic Context)")
+        );
+    }
+
+    #[test]
+    fn missing_transform_decisions_table_is_graceful() {
+        let conn = Connection::open_in_memory().unwrap();
+        let keys = HashSet::from([(Harness::Opencode, "s1".to_string())]);
+        let decisions = load_transform_decision_causes_from_conn(&conn, &keys);
+        assert!(decisions.is_empty());
     }
 
     #[test]
@@ -5254,7 +5351,10 @@ mod cache_turn_tests {
             ),
         ];
         let events = build_db_cache_events(rows, false);
-        assert!(!events[0].is_drop, "first step has no previous to drop from");
+        assert!(
+            !events[0].is_drop,
+            "first step has no previous to drop from"
+        );
         assert!(events[1].is_drop, "prompt shrank ~100k → drop");
         assert!(!events[2].is_drop, "prompt grew → not a drop");
     }

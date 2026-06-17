@@ -29,6 +29,13 @@ import {
     getNoteNudgeAnchors,
     getPersistedNoteNudge,
 } from "../../features/magic-context/storage-meta-persisted";
+import {
+    normalizeMaterializeReason,
+    recordPendingPiTransformDecision,
+    recordPendingTransformDecision,
+    schedulePiTransformDecisionResolve,
+    __test as transformDecisionLogTest,
+} from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { createEventHandler } from "./event-handler";
@@ -44,6 +51,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
     __resetMessageIndexAsyncForTests();
+    transformDecisionLogTest.reset();
     closeDatabase();
     clearModelsDevCache();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
@@ -100,6 +108,10 @@ function countMessageIndexRows(sessionId: string): number {
     return typeof row?.count === "number" ? row.count : 0;
 }
 
+function waitForTimers(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function createDeps(contextUsageMap: Map<string, ContextUsageCacheEntry>) {
     return {
         contextUsageMap,
@@ -144,6 +156,228 @@ function providersClient(limit: number, prompt?: ReturnType<typeof mock>) {
 }
 
 describe("createEventHandler", () => {
+    it("normalizes transform decision reasons across harnesses", () => {
+        expect(normalizeMaterializeReason("opencode", "system_hash", true)).toBe("system_hash");
+        expect(normalizeMaterializeReason("opencode", null, true)).toBe("pressure_refold");
+        expect(normalizeMaterializeReason("pi", "project_memory_change", true)).toBe(
+            "project_memory_epoch",
+        );
+        expect(normalizeMaterializeReason("pi", "pending_mutations", true)).toBe("max_mutation_id");
+        expect(normalizeMaterializeReason("pi", "renderer_upgrade", true)).toBe("upgrade_state");
+        expect(normalizeMaterializeReason("pi", "cache_invalid", true)).toBe("cached_m1_missing");
+        expect(normalizeMaterializeReason("pi", "drift", true)).toBe("pressure_refold");
+        expect(normalizeMaterializeReason("opencode", "comparting", true)).toBeNull();
+    });
+
+    it("records pending transform decisions only for busted passes", () => {
+        recordPendingTransformDecision("ses-decision", {
+            tsMs: 1,
+            decision: "defer",
+            materialized: false,
+            materializeReason: null,
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 0,
+            bustedThisPass: false,
+        });
+        expect(transformDecisionLogTest.getPending("ses-decision")).toBeUndefined();
+
+        recordPendingTransformDecision("ses-decision", {
+            tsMs: 2,
+            decision: "execute",
+            materialized: true,
+            materializeReason: "ttl_idle",
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 1,
+            inputTokens: 100,
+            bustedThisPass: true,
+        });
+        expect(transformDecisionLogTest.getPending("ses-decision")?.materializeReason).toBe(
+            "ttl_idle",
+        );
+
+        recordPendingTransformDecision("ses-decision", {
+            tsMs: 3,
+            decision: "defer",
+            materialized: false,
+            materializeReason: null,
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 0,
+            bustedThisPass: false,
+        });
+        expect(transformDecisionLogTest.getPending("ses-decision")).toBeUndefined();
+    });
+
+    it("writes a terminal assistant transform decision under the message id", async () => {
+        useTempDataHome("context-event-transform-decision-write-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+        recordPendingTransformDecision("ses-decision-write", {
+            tsMs: 123,
+            decision: "execute",
+            materialized: true,
+            materializeReason: "explicit_flush",
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 2,
+            inputTokens: 1,
+            bustedThisPass: true,
+        });
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "msg-decision-write",
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-decision-write",
+                        tokens: { input: 100, cache: { read: 10, write: 5 } },
+                    },
+                },
+            },
+        });
+        await waitForTimers();
+
+        const row = openDatabase()
+            .prepare(
+                "SELECT session_id, harness, message_id, decision, materialize_reason, dropped_count, input_tokens FROM transform_decisions WHERE session_id = ?",
+            )
+            .get("ses-decision-write");
+        expect(row).toEqual({
+            session_id: "ses-decision-write",
+            harness: "opencode",
+            message_id: "msg-decision-write",
+            decision: "execute",
+            materialize_reason: "explicit_flush",
+            dropped_count: 2,
+            input_tokens: 115,
+        });
+    });
+
+    it("does not write a transform decision for a defer/cache-hit pass", async () => {
+        useTempDataHome("context-event-transform-decision-defer-");
+        const handler = createEventHandler(createDeps(new Map()));
+        recordPendingTransformDecision("ses-decision-defer", {
+            tsMs: 1,
+            decision: "defer",
+            materialized: false,
+            materializeReason: null,
+            emergency: false,
+            droppedTokens: 0,
+            droppedCount: 0,
+            inputTokens: 0,
+            bustedThisPass: false,
+        });
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "msg-decision-defer",
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-decision-defer",
+                        tokens: { input: 100, cache: { read: 10, write: 0 } },
+                    },
+                },
+            },
+        });
+        await waitForTimers();
+
+        const row = openDatabase()
+            .prepare("SELECT COUNT(*) AS count FROM transform_decisions WHERE session_id = ?")
+            .get("ses-decision-defer") as { count: number };
+        expect(row.count).toBe(0);
+    });
+
+    it("swallows transform decision insert errors", async () => {
+        useTempDataHome("context-event-transform-decision-error-");
+        const handler = createEventHandler(createDeps(new Map()));
+        transformDecisionLogTest.setWriterForTests(() => {
+            throw new Error("forced insert failure");
+        });
+        recordPendingTransformDecision("ses-decision-error", {
+            tsMs: 1,
+            decision: "execute",
+            materialized: false,
+            materializeReason: null,
+            emergency: true,
+            droppedTokens: 0,
+            droppedCount: 1,
+            inputTokens: 0,
+            bustedThisPass: true,
+        });
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "msg-decision-error",
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-decision-error",
+                        tokens: { input: 1, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await waitForTimers();
+
+        expect(transformDecisionLogTest.getPending("ses-decision-error")).toBeUndefined();
+    });
+
+    it("resolves a Pi transform decision on the next pass using SessionEntry ids", async () => {
+        useTempDataHome("context-event-transform-decision-pi-");
+        const db = openDatabase();
+        recordPendingPiTransformDecision(
+            "ses-pi-decision",
+            {
+                tsMs: 1,
+                decision: "execute",
+                materialized: true,
+                materializeReason: "pressure_refold",
+                emergency: false,
+                droppedTokens: 0,
+                droppedCount: 3,
+                inputTokens: 456,
+                bustedThisPass: true,
+            },
+            "entry-before",
+        );
+
+        schedulePiTransformDecisionResolve({
+            db,
+            sessionId: "ses-pi-decision",
+            branchEntries: [
+                { id: "entry-user", type: "message", message: { role: "user" } },
+                { id: "entry-before", type: "message", message: { role: "assistant" } },
+                { id: "entry-after", type: "message", message: { role: "assistant" } },
+            ],
+        });
+        await waitForTimers();
+
+        const row = db
+            .prepare(
+                "SELECT harness, message_id, materialize_reason, dropped_count, input_tokens FROM transform_decisions WHERE session_id = ?",
+            )
+            .get("ses-pi-decision");
+        expect(row).toEqual({
+            harness: "pi",
+            message_id: "entry-after",
+            materialize_reason: "pressure_refold",
+            dropped_count: 3,
+            input_tokens: 456,
+        });
+    });
+
     it("keeps root sessions out of reduced mode", async () => {
         useTempDataHome("context-event-root-session-");
         const handler = createEventHandler(createDeps(new Map()));

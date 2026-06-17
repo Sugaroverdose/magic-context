@@ -24,6 +24,10 @@ import {
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import type { Tagger } from "../../features/magic-context/tagger";
+import {
+    clearTransformDecisionSession,
+    scheduleOpenCodeTransformDecisionWrite,
+} from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
 import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -417,6 +421,21 @@ export function createEventHandler(deps: EventHandlerDeps) {
             const hasUsageTokens = usageTokens.some(
                 (value) => typeof value === "number" && value > 0,
             );
+            const terminalAssistantUpdate =
+                info.messageID !== undefined &&
+                hasUsageTokens &&
+                (typeof info.finish === "string" || typeof info.completedAt === "number");
+            if (terminalAssistantUpdate && info.messageID) {
+                scheduleOpenCodeTransformDecisionWrite({
+                    db: deps.db,
+                    sessionId: info.sessionID,
+                    messageId: info.messageID,
+                    inputTokens:
+                        (info.tokens?.input ?? 0) +
+                        (info.tokens?.cache?.read ?? 0) +
+                        (info.tokens?.cache?.write ?? 0),
+                });
+            }
 
             sessionLog(
                 info.sessionID,
@@ -704,6 +723,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             deps.onSessionDeleted?.(sessionId);
             deps.contextUsageMap.delete(sessionId);
             deps.tagger.cleanup(sessionId);
+            clearTransformDecisionSession(sessionId);
             clearMessageTokensCache(sessionId);
             invalidateTrueRawTokenCache({ sessionId, reason: "session.deleted" });
             return;

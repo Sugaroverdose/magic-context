@@ -90,6 +90,12 @@ import {
 	createTagger,
 	type Tagger,
 } from "@magic-context/core/features/magic-context/tagger";
+import {
+	findNewestPiAssistantEntryId,
+	normalizeMaterializeReason,
+	recordPendingPiTransformDecision,
+	schedulePiTransformDecisionResolve,
+} from "@magic-context/core/features/magic-context/transform-decision-log";
 import { computePiWorkMetrics } from "@magic-context/core/features/magic-context/work-metrics";
 import {
 	applyFlushedStatuses,
@@ -1412,6 +1418,11 @@ export function registerPiContextHandler(
 			);
 
 			const branchEntries = readPiBranchEntriesForContext(ctx, sessionId);
+			schedulePiTransformDecisionResolve({
+				db: options.db,
+				sessionId,
+				branchEntries,
+			});
 			const rawMessageProvider = {
 				readMessages: () =>
 					branchEntries !== null
@@ -2062,6 +2073,34 @@ export function registerPiContextHandler(
 				appendCompaction: resolvePiAppendCompaction(ctx),
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 			});
+			const piDecisionSnapshotNewestAssistant =
+				branchEntries === null
+					? undefined
+					: findNewestPiAssistantEntryId(branchEntries);
+			if (
+				result.bustedThisPass &&
+				piDecisionSnapshotNewestAssistant !== undefined
+			) {
+				recordPendingPiTransformDecision(
+					sessionId,
+					{
+						tsMs: Date.now(),
+						decision: schedulerDecision,
+						materialized: result.materialized,
+						materializeReason: normalizeMaterializeReason(
+							"pi",
+							result.materializeReason,
+							result.materialized,
+						),
+						emergency: result.emergency,
+						droppedTokens: result.droppedTokens,
+						droppedCount: result.droppedCount,
+						inputTokens: usageInputTokens,
+						bustedThisPass: true,
+					},
+					piDecisionSnapshotNewestAssistant,
+				);
+			}
 
 			// After tagging+drops have committed, check whether historian
 			// should fire. Historian config is optional — tagging-only
@@ -3233,6 +3272,12 @@ interface RunPipelineResult {
 	/** Aggregate counts for log parity with OpenCode. */
 	heuristicsResult: PiHeuristicCleanupResult | null;
 	injectionResult: PiInjectionResult | null;
+	materialized: boolean;
+	materializeReason: string | null;
+	droppedTokens: number;
+	droppedCount: number;
+	emergency: boolean;
+	bustedThisPass: boolean;
 	targetCount: number;
 	reasoningWatermark: number;
 	activeTags: ReturnType<typeof getActiveTagsBySession>;
@@ -3255,6 +3300,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let pendingOpsAppliedThisPass = false;
 	let pendingOpsDidMutate = false;
 	let heuristicOrReasoningDidMutate = false;
+	let didMutateFromFlushedStatuses = false;
+	let droppedCount = 0;
+	const droppedTokens = 0;
+	let emergency = false;
+	let autoReclaimDidMutateThisPass = false;
 	let suppressDeferredHistoryDrain = false;
 	let casLost = false;
 	const deferredHistoryWasPendingAtPassStart =
@@ -3551,6 +3601,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				undefined,
 				pendingOps,
 			);
+			if (pendingOpsDidMutate) {
+				droppedCount += pendingOps.length;
+			}
 			logTransformTiming(
 				args.sessionId,
 				"applyPendingOperations",
@@ -3615,7 +3668,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		`targets=${targetTagNumbers.length} fetched=${flushedSliceTags.length}`,
 	);
 	const tFlushed = performance.now();
-	applyFlushedStatuses(args.sessionId, args.db, targets, flushedSliceTags);
+	didMutateFromFlushedStatuses = applyFlushedStatuses(
+		args.sessionId,
+		args.db,
+		targets,
+		flushedSliceTags,
+	);
 	logTransformTiming(args.sessionId, "applyFlushedStatuses", tFlushed);
 	logTransformTiming(args.sessionId, "batchFinalize:flushed", tFlushed);
 
@@ -3793,6 +3851,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				heuristicsResult.droppedInjections +
 				heuristicsResult.droppedStaleReduceCalls +
 				heuristicsResult.mutatedTextTags;
+			droppedCount +=
+				heuristicsResult.droppedTools +
+				heuristicsResult.deduplicatedTools +
+				heuristicsResult.droppedInjections +
+				heuristicsResult.droppedStaleReduceCalls +
+				heuristicsResult.mutatedTextTags;
+			emergency ||= heuristicsResult.emergencyDroppedTools > 0;
 			if (heuristicMutationCount > 0) heuristicOrReasoningDidMutate = true;
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
@@ -3885,6 +3950,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			logTransformTiming(args.sessionId, "watermarkCleanup", tClearReasoning);
 			if (clearOutcome.cleared > 0 || stripOutcome.stripped > 0) {
 				heuristicOrReasoningDidMutate = true;
+				droppedCount += clearOutcome.cleared + stripOutcome.stripped;
 			}
 			if (
 				combinedWatermark > prevWatermark ||
@@ -3933,6 +3999,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				[],
 				syntheticPendingOps,
 			);
+			if (autoReclaimDidMutate) {
+				droppedCount += syntheticPendingOps.length;
+				autoReclaimDidMutateThisPass = true;
+			}
 		}
 	}
 
@@ -4202,6 +4272,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 
+	const materialized = injectionResult?.m0Materialized === true;
+	const materializeReason = injectionResult?.m0Reason ?? null;
+	const bustedThisPass =
+		didMutateFromFlushedStatuses ||
+		pendingOpsDidMutate ||
+		heuristicOrReasoningDidMutate ||
+		autoReclaimDidMutateThisPass ||
+		materialized ||
+		historyWasConsumedThisPass;
+
 	return {
 		messages: outputMessages,
 		heuristicsExecuted,
@@ -4210,6 +4290,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		syntheticLeadingCount: injectionResult?.syntheticLeadingCount ?? 0,
 		heuristicsResult,
 		injectionResult,
+		materialized,
+		materializeReason,
+		droppedTokens,
+		droppedCount,
+		emergency,
+		bustedThisPass,
 		targetCount: targets.size,
 		reasoningWatermark:
 			getOrCreateSessionMeta(args.db, args.sessionId)

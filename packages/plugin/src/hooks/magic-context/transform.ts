@@ -32,6 +32,11 @@ import {
     setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { Tagger } from "../../features/magic-context/tagger";
+import {
+    clearOpenCodePendingTransformDecision,
+    normalizeMaterializeReason,
+    recordPendingTransformDecision,
+} from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -315,6 +320,7 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         const resolvedSessionId = sessionId;
+        clearOpenCodePendingTransformDecision(sessionId);
         logTransformTiming(sessionId, "findSessionId", startTime, `messages=${messages.length}`);
 
         const db = deps.db;
@@ -1478,7 +1484,7 @@ export function createTransform(deps: TransformDeps) {
             : rebuiltHistoryFromInitialPrepare || compartmentPhase.rebuiltHistoryThisPass;
 
         const tPostProcess = performance.now();
-        await runPostTransformPhase({
+        const postTransformResult = await runPostTransformPhase({
             sessionId,
             db,
             messages,
@@ -1571,6 +1577,23 @@ export function createTransform(deps: TransformDeps) {
                 hardSignals: m0HardSignals,
             },
         });
+        if (postTransformResult.bustedThisPass) {
+            recordPendingTransformDecision(sessionId, {
+                tsMs: Date.now(),
+                decision: schedulerDecision,
+                materialized: postTransformResult.materialized,
+                materializeReason: normalizeMaterializeReason(
+                    "opencode",
+                    postTransformResult.materializeReason,
+                    postTransformResult.materialized,
+                ),
+                emergency: postTransformResult.emergency,
+                droppedTokens: postTransformResult.droppedTokens,
+                droppedCount: postTransformResult.droppedCount,
+                inputTokens: contextUsage.inputTokens,
+                bustedThisPass: true,
+            });
+        }
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
 
         // Estimate the total token size of the transformed messages array so

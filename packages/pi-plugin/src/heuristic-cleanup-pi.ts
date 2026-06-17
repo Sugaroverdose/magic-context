@@ -103,6 +103,7 @@ export interface PiHeuristicCleanupResult {
 	deduplicatedTools: number;
 	droppedInjections: number;
 	droppedStaleReduceCalls: number;
+	emergencyDroppedTools: number;
 	compressedTextTags: number;
 	mutatedTextTags: number;
 }
@@ -290,6 +291,7 @@ export function applyPiHeuristicCleanup(
 	const toolAgeCutoff = protectedCutoff;
 
 	let droppedTools = 0;
+	let emergencyDroppedTools = 0;
 	let deduplicatedTools = 0;
 	let droppedInjections = 0;
 	let droppedStaleReduceCalls = 0;
@@ -337,6 +339,7 @@ export function applyPiHeuristicCleanup(
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						updateTagDropMode(db, sessionId, tag.tagNumber, "full");
 						droppedTools++;
+						emergencyDroppedTools++;
 					}
 				}
 				// Latch the usage sample on any ACTING pass (even zero real drops)
@@ -505,6 +508,7 @@ export function applyPiHeuristicCleanup(
 		deduplicatedTools,
 		droppedInjections,
 		droppedStaleReduceCalls,
+		emergencyDroppedTools,
 		compressedTextTags,
 		mutatedTextTags,
 	};

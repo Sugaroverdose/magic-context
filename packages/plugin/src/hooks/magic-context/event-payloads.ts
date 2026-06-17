@@ -34,6 +34,7 @@ export interface MessageUpdatedAssistantInfo {
     /** OpenCode assistant message id. Undefined only when the event payload
      *  doesn't include one (older SDK versions or malformed events). */
     messageID?: string;
+    completedAt?: number;
     providerID?: string;
     modelID?: string;
     tokens?: {
@@ -115,12 +116,14 @@ export function getMessageUpdatedAssistantInfo(
 
     const tokens = isRecord(info.tokens) ? info.tokens : undefined;
     const cache = tokens && isRecord(tokens.cache) ? tokens.cache : undefined;
+    const time = isRecord(info.time) ? info.time : undefined;
 
     return {
         role: "assistant",
         finish: typeof info.finish === "string" ? info.finish : undefined,
         sessionID: info.sessionID,
         messageID: typeof info.id === "string" ? info.id : undefined,
+        completedAt: typeof time?.completed === "number" ? time.completed : undefined,
         providerID: typeof info.providerID === "string" ? info.providerID : undefined,
         modelID: typeof info.modelID === "string" ? info.modelID : undefined,
         tokens: {

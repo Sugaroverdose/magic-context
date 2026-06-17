@@ -83,10 +83,10 @@ describe("storage-meta", () => {
             //#then
             // 2 transactions: outer clearSession + nested clearIndexedMessages
             expect(db.transaction).toHaveBeenCalledTimes(2);
-            // 21 prepares: includes session_projects, compartment_chunk_embeddings,
+            // 22 prepares: includes session_projects, compartment_chunk_embeddings,
             // v2 m0_mutation_log + compartment_events, subagent_invocations,
-            // historian_runs, and legacy plugin_messages cleanup.
-            expect(db.prepare).toHaveBeenCalledTimes(21);
+            // historian_runs, legacy plugin_messages, and transform_decisions cleanup.
+            expect(db.prepare).toHaveBeenCalledTimes(22);
         });
     });
 });

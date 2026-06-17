@@ -1468,6 +1468,30 @@ const MIGRATIONS: Migration[] = [
             );
         },
     },
+    {
+        version: 38,
+        description: "durable transform decisions for cache-event cause attribution",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS transform_decisions (
+                    session_id         TEXT    NOT NULL,
+                    harness            TEXT    NOT NULL DEFAULT 'opencode',
+                    message_id         TEXT    NOT NULL,
+                    ts_ms              INTEGER NOT NULL,
+                    decision           TEXT    NOT NULL,
+                    materialized       INTEGER NOT NULL DEFAULT 0,
+                    materialize_reason TEXT,
+                    emergency          INTEGER NOT NULL DEFAULT 0,
+                    dropped_tokens     INTEGER NOT NULL DEFAULT 0,
+                    dropped_count      INTEGER NOT NULL DEFAULT 0,
+                    input_tokens       INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (session_id, harness, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_transform_decisions_session_harness
+                    ON transform_decisions(session_id, harness);
+            `);
+        },
+    },
 ];
 
 /**

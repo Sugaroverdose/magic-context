@@ -185,6 +185,7 @@ export function clearSession(db: Database, sessionId: string): void {
         db.prepare("DELETE FROM subagent_invocations WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM historian_runs WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM plugin_messages WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM transform_decisions WHERE session_id = ?").run(sessionId);
         clearIndexedMessages(db, sessionId);
     })();
 }

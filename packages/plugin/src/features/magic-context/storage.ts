@@ -36,6 +36,7 @@ export {
     type ContextDatabase,
     closeDatabase,
     enforceSchemaFence,
+    getDatabasePath,
     getDatabasePersistenceError,
     getPersistedSchemaVersion,
     initializeDatabase,
