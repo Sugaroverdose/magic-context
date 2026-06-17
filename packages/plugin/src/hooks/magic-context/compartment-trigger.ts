@@ -29,6 +29,7 @@ import {
     type InMemoryMessageView,
     type RawMessage,
 } from "./read-session-raw";
+import { estimateTrueRawMessageTokens } from "./read-session-true-raw-tokens";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
@@ -39,6 +40,7 @@ const TAIL_SIZE_TRIGGER_MULTIPLIER = 3;
 const FORCE_COMPARTMENT_PERCENTAGE = 80;
 const BLOCK_UNTIL_DONE_PERCENTAGE = 95;
 const FORCE_MATERIALIZE_PERCENTAGE = 85;
+const CONTENT_TAG_OWNER_SUFFIX = /:(?:p|file)\d+$/;
 
 export {
     BLOCK_UNTIL_DONE_PERCENTAGE,
@@ -72,6 +74,53 @@ export interface CompartmentTriggerResult {
 export interface InMemoryTailSource {
     messages: RawMessage[];
     absoluteMessageCount: number;
+}
+
+function tagOwnerMessageId(row: {
+    type: string;
+    message_id: string;
+    tool_owner_message_id: string | null;
+}): string {
+    if (row.type === "tool") return row.tool_owner_message_id ?? row.message_id;
+    return row.message_id.replace(CONTENT_TAG_OWNER_SUFFIX, "");
+}
+
+function getActiveOrDroppedTagOwnerMessageIds(db: Database, sessionId: string): Set<string> {
+    const rows = db
+        .prepare(
+            `SELECT type, message_id, tool_owner_message_id
+             FROM tags
+             WHERE session_id = ? AND status IN ('active', 'dropped')`,
+        )
+        .all(sessionId) as Array<{
+        type: string;
+        message_id: string;
+        tool_owner_message_id: string | null;
+    }>;
+    const owners = new Set<string>();
+    for (const row of rows) owners.add(tagOwnerMessageId(row));
+    return owners;
+}
+
+function estimateUntaggedInMemoryTailUpperBound(
+    db: Database,
+    sessionId: string,
+    inMemoryTail: InMemoryTailSource,
+): number {
+    const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
+    const coveredOwnerMessageIds = getActiveOrDroppedTagOwnerMessageIds(db, sessionId);
+    let total = 0;
+    for (const message of inMemoryTail.messages) {
+        // The anchored in-memory tail includes the last compartment boundary row
+        // itself; it is not eligible for a new compartment and the persisted bound
+        // deliberately excludes compacted tags, so do not charge it here.
+        if (message.ordinal <= lastCompartmentEnd) continue;
+        if (coveredOwnerMessageIds.has(message.id)) continue;
+        total += estimateTrueRawMessageTokens(message, {
+            providerShapeVersion: "opencode-v1",
+        }).total;
+    }
+    return total;
 }
 
 /**
@@ -359,49 +408,50 @@ export function checkCompartmentTrigger(
         }
     }
 
-    // Cheap pre-gate (avoids the full-session raw read on every message.updated).
+    // Cheap pre-gate (avoids the full raw tail inspection on every message.updated).
     //
-    // getUnsummarizedTailInfo's very first step reads + parses the ENTIRE raw
-    // session (getRawHistoryEligibility → readRawSessionMessages) to resolve the
-    // protected-tail boundary — ~3s of synchronous SQLite on a 50k-message
-    // session, which freezes the whole JS event loop and is what makes every
-    // parallel `tool.definition` hook measure multi-second durations. But below
-    // the proactive floor, the ONLY triggers that can fire are the size-based
-    // ones (commit_clusters needs eligible TC-tokens ≥ triggerBudget; tail_size
-    // needs true-raw eligible ≥ triggerBudget×MULT). The active-tag token sum is
-    // a cheap, conservative UPPER BOUND on the eligible-tail tokens (eligible ⊆
-    // the post-compaction live tail covered by active tags; any pre-boundary
-    // still-active tag only inflates it), so if even that bound is below the
-    // smallest size-trigger floor, neither size trigger can possibly fire and we
-    // can skip the expensive read entirely. Only trust the bound when the tag
-    // store is fully backfilled (nullCount === 0); a cold/partial store
-    // undercounts and could wrongly bail, so we fall through to the
-    // authoritative path until the next pass backfills it.
+    // getUnsummarizedTailInfo resolves the protected-tail boundary and runs the
+    // TC chunk scan / true-raw token walk. Below the proactive floor, the ONLY
+    // triggers that can fire are the size-based ones (commit_clusters needs
+    // eligible TC-tokens ≥ triggerBudget; tail_size needs true-raw eligible ≥
+    // triggerBudget×MULT). The active+dropped tag token sum is a cheap,
+    // conservative UPPER BOUND on already-tagged eligible-tail tokens (eligible
+    // ⊆ the post-compaction live tail covered by active/dropped tags; any
+    // pre-boundary still-active tag only inflates it). When the transform passes
+    // an in-memory tail, it may include newest messages that run BEFORE tagging,
+    // so add a real per-message true-raw estimate for exactly those uncovered
+    // in-memory messages. Only trust the persisted bound when the tag store is
+    // fully backfilled (nullCount === 0); a cold/partial store undercounts and
+    // falls through to the authoritative path.
     const proactiveFloorForGate = getProactiveCompartmentTriggerPercentage(
         executeThresholdPercentage,
     );
-    // The pre-gate exists ONLY to avoid the expensive DB read; with an
-    // in-memory tail the inspection is cheap, and the tag-aggregate bound can
-    // under-count the newest not-yet-tagged messages (the transform trigger
-    // runs BEFORE tagging) — skipping it here avoids wrongly suppressing a
-    // size trigger at the budget edge.
-    if (!inMemoryTail && usage.percentage < proactiveFloorForGate) {
+    if (usage.percentage < proactiveFloorForGate) {
         try {
             // Bound must include DROPPED tags: ctx_reduce/emergency drops
             // remove tool output from the wire but the raw content still
             // counts toward the historian's true-raw chunk size — an
             // active-only bound undercounts after drops and suppresses real
             // tail-size triggers.
-            const { bound, nullCount } = getTriggerTagTokenUpperBound(db, sessionId);
+            const { bound: persistedBound, nullCount } = getTriggerTagTokenUpperBound(
+                db,
+                sessionId,
+            );
             if (nullCount === 0) {
-                const eligibleUpperBound = bound;
+                const untaggedUpperBound = inMemoryTail
+                    ? estimateUntaggedInMemoryTailUpperBound(db, sessionId, inMemoryTail)
+                    : 0;
+                const eligibleUpperBound = persistedBound + untaggedUpperBound;
                 // Smallest token floor any size trigger needs is triggerBudget
-                // (commit_clusters). tail_size needs even more. If the upper
-                // bound is under it, neither can fire.
+                // (commit_clusters). tail_size needs even more. Equality falls
+                // through to preserve the existing conservative < semantics.
                 if (eligibleUpperBound < triggerBudget) {
+                    const memorySuffix = inMemoryTail
+                        ? ` (persisted=${persistedBound}, untagged-memory≤${untaggedUpperBound})`
+                        : "";
                     sessionLog(
                         sessionId,
-                        `compartment trigger: cheap-skip at ${usage.percentage.toFixed(1)}% (below proactive floor ${proactiveFloorForGate}%) — live-tail upper bound ${eligibleUpperBound} < triggerBudget ${triggerBudget}; no size trigger possible, skipped full raw read`,
+                        `compartment trigger: cheap-skip at ${usage.percentage.toFixed(1)}% (below proactive floor ${proactiveFloorForGate}%) — live-tail upper bound ${eligibleUpperBound}${memorySuffix} < triggerBudget ${triggerBudget}; no size trigger possible, skipped full raw read`,
                     );
                     return { shouldFire: false };
                 }

@@ -7,13 +7,15 @@ import { dirname, join } from "node:path";
 import {
     closeDatabase,
     insertTag,
+    markProtectedTailPolicyV3Seeded,
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
 import type { SessionMeta } from "../../features/magic-context/types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { checkCompartmentTrigger } from "./compartment-trigger";
+import { checkCompartmentTrigger, type InMemoryTailSource } from "./compartment-trigger";
+import type { RawMessage } from "./read-session-raw";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -119,7 +121,242 @@ function makeSessionMeta(sessionId: string, lastContextPercentage: number): Sess
     };
 }
 
+function rawTextMessage(ordinal: number, id: string, role: string, text: string): RawMessage {
+    return {
+        ordinal,
+        id,
+        role,
+        parts: [{ type: "text", text }],
+        version: null,
+    };
+}
+
+function observedRawTextMessage(
+    ordinal: number,
+    id: string,
+    role: string,
+    text: string,
+): { message: RawMessage; partReads: () => number } {
+    let reads = 0;
+    const message = {
+        ordinal,
+        id,
+        role,
+        get parts() {
+            reads += 1;
+            return [{ type: "text", text }];
+        },
+        version: null,
+    } as RawMessage;
+    return { message, partReads: () => reads };
+}
+
+function inMemoryTail(messages: RawMessage[], absoluteMessageCount?: number): InMemoryTailSource {
+    return {
+        messages,
+        absoluteMessageCount:
+            absoluteMessageCount ?? Math.max(0, ...messages.map((message) => message.ordinal)),
+    };
+}
+
+function seedTriggerPolicy(db: Database, sessionId: string): void {
+    markProtectedTailPolicyV3Seeded(db, sessionId, 1);
+}
+
+function insertCoveredMessageTag(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    tagNumber: number,
+    tokenCount: number | null,
+): void {
+    insertTag(
+        db,
+        sessionId,
+        messageId,
+        "message",
+        Math.max(1, tokenCount ?? 1),
+        tagNumber,
+        0,
+        null,
+        0,
+        null,
+        null,
+        {
+            tokenCount,
+            inputTokenCount: 0,
+            reasoningTokenCount: 0,
+        },
+    );
+}
+
 describe("checkCompartmentTrigger", () => {
+    it("cheap-skips the in-memory tail below the proactive floor when persisted plus untagged tokens are under budget", () => {
+        useTempDataHome("compartment-trigger-memory-skip-");
+        const db = openDatabase();
+        const triggerBudget = 1_000;
+
+        const fullSessionId = "ses-memory-under-full";
+        seedTriggerPolicy(db, fullSessionId);
+        insertCoveredMessageTag(db, fullSessionId, "m-full-1", 1, null);
+        const fullResult = checkCompartmentTrigger(
+            db,
+            fullSessionId,
+            makeSessionMeta(fullSessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            triggerBudget,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([
+                rawTextMessage(1, "m-full-1", "user", "small tail"),
+                rawTextMessage(2, "m-full-2", "assistant", "small response"),
+            ]),
+        );
+        expect(fullResult).toEqual({ shouldFire: false });
+
+        const skippedSessionId = "ses-memory-under-skip";
+        seedTriggerPolicy(db, skippedSessionId);
+        const first = observedRawTextMessage(1, "m-skip-1", "user", "small tail");
+        const second = observedRawTextMessage(2, "m-skip-2", "assistant", "small response");
+        insertCoveredMessageTag(db, skippedSessionId, "m-skip-1", 1, 100);
+        insertCoveredMessageTag(db, skippedSessionId, "m-skip-2", 2, 50);
+
+        const result = checkCompartmentTrigger(
+            db,
+            skippedSessionId,
+            makeSessionMeta(skippedSessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            triggerBudget,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([first.message, second.message], 50_000),
+        );
+
+        expect(result).toEqual(fullResult);
+        expect(first.partReads()).toBe(0);
+        expect(second.partReads()).toBe(0);
+    });
+
+    it("falls through when a large untagged in-memory message pushes the upper bound over budget", () => {
+        useTempDataHome("compartment-trigger-memory-large-untagged-");
+        const db = openDatabase();
+        const sessionId = "ses-memory-large-untagged";
+        const triggerBudget = 1_000;
+        seedTriggerPolicy(db, sessionId);
+        const covered = observedRawTextMessage(1, "m-covered", "user", "covered prefix");
+        insertCoveredMessageTag(db, sessionId, "m-covered", 1, 100);
+
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            triggerBudget,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([
+                covered.message,
+                rawTextMessage(2, "m-new-large", "assistant", "large paste ".repeat(8_000)),
+            ]),
+        );
+
+        expect(result.shouldFire).toBe(false);
+        expect(covered.partReads()).toBeGreaterThan(0);
+    });
+
+    it("falls through when the in-memory upper bound equals the trigger budget", () => {
+        useTempDataHome("compartment-trigger-memory-equality-");
+        const db = openDatabase();
+        const sessionId = "ses-memory-equality";
+        const triggerBudget = 1_000;
+        seedTriggerPolicy(db, sessionId);
+        const covered = observedRawTextMessage(1, "m-equal", "user", "covered exact bound");
+        insertCoveredMessageTag(db, sessionId, "m-equal", 1, triggerBudget);
+
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            triggerBudget,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([covered.message]),
+        );
+
+        expect(result.shouldFire).toBe(false);
+        expect(covered.partReads()).toBeGreaterThan(0);
+    });
+
+    it("falls through for an in-memory tail when the persisted token bound has null counts", () => {
+        useTempDataHome("compartment-trigger-memory-null-count-");
+        const db = openDatabase();
+        const sessionId = "ses-memory-null-count";
+        seedTriggerPolicy(db, sessionId);
+        const covered = observedRawTextMessage(1, "m-null", "user", "covered null count");
+        insertCoveredMessageTag(db, sessionId, "m-null", 1, null);
+
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            1_000,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([covered.message]),
+        );
+
+        expect(result.shouldFire).toBe(false);
+        expect(covered.partReads()).toBeGreaterThan(0);
+    });
+
+    it("keeps above-proactive-floor in-memory behavior unchanged by always running the full inspection", () => {
+        useTempDataHome("compartment-trigger-memory-above-floor-");
+        const db = openDatabase();
+        const sessionId = "ses-memory-above-floor";
+        seedTriggerPolicy(db, sessionId);
+        const covered = observedRawTextMessage(1, "m-above", "user", "covered tiny tail");
+        insertCoveredMessageTag(db, sessionId, "m-above", 1, 10);
+
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 64),
+            { percentage: 64, inputTokens: 128_000 },
+            64,
+            65,
+            1_000,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([covered.message]),
+        );
+
+        expect(result.shouldFire).toBe(false);
+        expect(covered.partReads()).toBeGreaterThan(0);
+    });
     it("fires proactively near the execute threshold when pending drops are insufficient and the unsummarized tail is meaningful", () => {
         useTempDataHome("compartment-trigger-proactive-");
         createOpenCodeDb("ses-proactive", [
