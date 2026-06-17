@@ -30,6 +30,74 @@ import {
 } from "./tool-drop-target";
 import { logTransformTiming } from "./transform-stage-logger";
 
+interface ToolOwnerDerivationCache {
+    candidateOwnersByCallId: Map<string, string[]>;
+    messageTimesById: Map<string, number | null>;
+}
+
+type ToolOwnerFallbackLookup =
+    | { kind: "candidates"; callId: string }
+    | { kind: "messageTimes"; messageIds: readonly string[] };
+
+const TOOL_OWNER_CACHE_KEY_SEP = "\x00";
+
+function makeToolOwnerCacheKey(sessionId: string, callId: string): string {
+    return `${sessionId}${TOOL_OWNER_CACHE_KEY_SEP}${callId}`;
+}
+
+function getCachedCandidateToolOwners(
+    db: ContextDatabase,
+    sessionId: string,
+    callId: string,
+    cache: ToolOwnerDerivationCache,
+    onLookup?: (lookup: ToolOwnerFallbackLookup) => void,
+): string[] {
+    const key = makeToolOwnerCacheKey(sessionId, callId);
+    const cached = cache.candidateOwnersByCallId.get(key);
+    if (cached !== undefined) return cached;
+
+    onLookup?.({ kind: "candidates", callId });
+    const candidates = getCandidateToolOwners(db, sessionId, callId);
+    cache.candidateOwnersByCallId.set(key, candidates);
+    return candidates;
+}
+
+function getCachedMessageTimesFromOpenCodeDb(
+    sessionId: string,
+    messageIds: readonly string[],
+    cache: ToolOwnerDerivationCache,
+    onLookup?: (lookup: ToolOwnerFallbackLookup) => void,
+): Map<string, number> {
+    const uncached = [...new Set(messageIds)].filter((id) => !cache.messageTimesById.has(id));
+    if (uncached.length > 0) {
+        onLookup?.({ kind: "messageTimes", messageIds: uncached });
+        const resolved = getMessageTimesFromOpenCodeDb(sessionId, uncached);
+        for (const id of uncached) {
+            cache.messageTimesById.set(id, resolved.get(id) ?? null);
+        }
+    }
+
+    const times = new Map<string, number>();
+    for (const id of messageIds) {
+        const time = cache.messageTimesById.get(id);
+        if (typeof time === "number") times.set(id, time);
+    }
+    return times;
+}
+
+function invalidateCachedCandidateToolOwnersIfNewOwner(
+    cache: ToolOwnerDerivationCache,
+    sessionId: string,
+    callId: string,
+    ownerMsgId: string,
+): void {
+    const key = makeToolOwnerCacheKey(sessionId, callId);
+    const cached = cache.candidateOwnersByCallId.get(key);
+    if (cached !== undefined && !cached.includes(ownerMsgId)) {
+        cache.candidateOwnersByCallId.delete(key);
+    }
+}
+
 /**
  * v3.3.1 Layer C: derive `tool_owner_message_id` for a tool observation.
  *
@@ -51,6 +119,8 @@ function deriveToolOwnerMessageId(
     message: MessageLike,
     obs: { callId: string; kind: "invocation" | "result" },
     unpaired: Map<string, string[]>,
+    cache: ToolOwnerDerivationCache,
+    onFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void,
 ): string {
     const messageId = typeof message.info.id === "string" ? message.info.id : "";
 
@@ -95,10 +165,21 @@ function deriveToolOwnerMessageId(
     // collapses to the `messageId` fallback below, which keeps the
     // composite key stable even when the OC DB is unavailable.
     if (messageId) {
-        const candidates = getCandidateToolOwners(db, sessionId, obs.callId);
+        const candidates = getCachedCandidateToolOwners(
+            db,
+            sessionId,
+            obs.callId,
+            cache,
+            onFallbackLookup,
+        );
         if (candidates.length > 0) {
             const ids = [...candidates, messageId];
-            const times = getMessageTimesFromOpenCodeDb(sessionId, ids);
+            const times = getCachedMessageTimesFromOpenCodeDb(
+                sessionId,
+                ids,
+                cache,
+                onFallbackLookup,
+            );
             const persisted = pickNearestPriorOwner(candidates, messageId, times);
             if (persisted !== null) return persisted;
         }
@@ -258,6 +339,8 @@ export interface TagMessagesOptions {
      * passes, so message shape stays stable.
      */
     skipPrefixInjection?: boolean;
+    /** @internal diagnostic hook used by cache-stability/perf tests. */
+    onToolOwnerFallbackLookup?: (lookup: ToolOwnerFallbackLookup) => void;
 }
 
 export function tagMessages(
@@ -268,6 +351,7 @@ export function tagMessages(
     options: TagMessagesOptions = {},
 ): TagMessagesResult {
     const skipPrefixInjection = options.skipPrefixInjection === true;
+    const onToolOwnerFallbackLookup = options.onToolOwnerFallbackLookup;
     const targets = new Map<number, TagTarget>();
     const reasoningByMessage = new Map<MessageLike, ThinkingLikePart[]>();
     const messageTagNumbers = new Map<MessageLike, number>();
@@ -281,6 +365,10 @@ export function tagMessages(
     // from this to find their invocation owner. Cleared at the end of
     // each pass (function-scoped).
     const unpairedInvocations = new Map<string, string[]>();
+    const ownerDerivationCache: ToolOwnerDerivationCache = {
+        candidateOwnersByCallId: new Map(),
+        messageTimesById: new Map(),
+    };
     // Memo: for each part observed, what owner did we derive? Used by
     // the second tool-block (isToolPartWithOutput) so it doesn't re-run
     // FIFO logic and double-pop the queue. Parts are object references
@@ -362,6 +450,8 @@ export function tagMessages(
                     message,
                     toolObservation,
                     unpairedInvocations,
+                    ownerDerivationCache,
+                    onToolOwnerFallbackLookup,
                 );
                 accDerive += performance.now() - _tDerive;
                 const compositeKey = makeToolCompositeKey(ownerMsgId, toolObservation.callId);
@@ -398,6 +488,12 @@ export function tagMessages(
                     if (orphan !== null) {
                         const claimed = adoptNullOwnerToolTag(db, orphan.id, ownerMsgId);
                         if (claimed) {
+                            invalidateCachedCandidateToolOwnersIfNewOwner(
+                                ownerDerivationCache,
+                                sessionId,
+                                toolObservation.callId,
+                                ownerMsgId,
+                            );
                             tagger.bindToolTag(
                                 sessionId,
                                 toolObservation.callId,
@@ -554,6 +650,12 @@ export function tagMessages(
                         inputTokenCount,
                         reasoningTokenCount: reasoningTokens,
                     }),
+                );
+                invalidateCachedCandidateToolOwnersIfNewOwner(
+                    ownerDerivationCache,
+                    sessionId,
+                    toolPart.callID,
+                    ownerMsgId,
                 );
                 accAssignToolTag += performance.now() - _tAssignTool;
                 messageTagNumbers.set(
