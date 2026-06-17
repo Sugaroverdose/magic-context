@@ -2804,6 +2804,80 @@ pub fn update_memory_content(
     Ok(())
 }
 
+pub fn update_memory_category(
+    conn: &mut Connection,
+    memory_id: i64,
+    new_category: &str,
+) -> Result<(), rusqlite::Error> {
+    const VALID_CATEGORIES: [&str; 5] = [
+        "PROJECT_RULES",
+        "ARCHITECTURE",
+        "CONSTRAINTS",
+        "CONFIG_VALUES",
+        "NAMING",
+    ];
+
+    if !VALID_CATEGORIES.contains(&new_category) {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!(
+                "Invalid category: {new_category}. Must be one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING."
+            )),
+        ));
+    }
+
+    // Phase A: resolve the target row before opening a write transaction.
+    let target = lookup_memory_mutation_target(conn, memory_id)?;
+
+    // Phase B: re-check the target row, mutate, and queue once.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    verify_memory_project_path_unchanged(&tx, memory_id, &target.project_path)?;
+
+    let (content, normalized_hash): (String, String) = tx.query_row(
+        "SELECT content, normalized_hash FROM memories WHERE id = ?1",
+        params![memory_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    // Pre-check the UNIQUE(project_path, category, normalized_hash) constraint
+    let collision_id: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM memories
+             WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3 AND id != ?4
+             LIMIT 1",
+            params![target.project_path, new_category, normalized_hash, memory_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(existing_id) = collision_id {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!(
+                "Memory already exists as ID {existing_id} in {new_category}; merge or archive the duplicate first."
+            )),
+        ));
+    }
+
+    tx.execute(
+        "UPDATE memories SET category = ?1, updated_at = ?2 WHERE id = ?3",
+        params![new_category, now_millis(), memory_id],
+    )?;
+
+    queue_memory_mutation(
+        &tx,
+        &target.project_path,
+        "update",
+        memory_id,
+        None,
+        Some(new_category),
+        Some(&content),
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn delete_memory(conn: &mut Connection, memory_id: i64) -> Result<(), rusqlite::Error> {
     // Phase A: resolve the target row before opening a write transaction.
     let target = lookup_memory_mutation_target(conn, memory_id)?;

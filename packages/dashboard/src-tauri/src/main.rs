@@ -33,6 +33,7 @@ fn main() {
             commands::get_memory_stats,
             commands::update_memory_status,
             commands::update_memory_content,
+            commands::update_memory_category,
             commands::delete_memory,
             commands::bulk_update_memory_status,
             commands::bulk_delete_memory,

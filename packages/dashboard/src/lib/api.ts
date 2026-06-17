@@ -124,6 +124,10 @@ export async function updateMemoryContent(memoryId: number, content: string): Pr
   return invoke("update_memory_content", { memoryId, content });
 }
 
+export async function updateMemoryCategory(memoryId: number, category: string): Promise<void> {
+  return invoke("update_memory_category", { memoryId, category });
+}
+
 export async function deleteMemory(memoryId: number): Promise<void> {
   return invoke("delete_memory", { memoryId });
 }

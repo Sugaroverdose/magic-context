@@ -10,10 +10,11 @@ import {
   getMemoryStats,
   listWorkspaceSummaries,
   truncate,
+  updateMemoryCategory,
   updateMemoryContent,
   updateMemoryStatus,
 } from "../../lib/api";
-import type { Memory } from "../../lib/types";
+import type { Memory, MemoryCategory } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
 import MemoryDetail from "./MemoryDetail";
@@ -126,8 +127,23 @@ export default function MemoryBrowser() {
       setError(null);
       await updateMemoryContent(memoryId, content);
       refetchMemories();
+      setSelectedMemory((prev) => (prev && prev.id === memoryId ? { ...prev, content } : prev));
     } catch (e: unknown) {
       setError(`Failed to update content: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleCategoryChange = async (memoryId: number, category: string) => {
+    try {
+      setError(null);
+      await updateMemoryCategory(memoryId, category);
+      refetchMemories();
+      refetchStats();
+      setSelectedMemory((prev) =>
+        prev && prev.id === memoryId ? { ...prev, category: category as MemoryCategory } : prev,
+      );
+    } catch (e: unknown) {
+      setError(`Failed to update category: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -598,6 +614,7 @@ export default function MemoryBrowser() {
             onClose={() => setSelectedMemory(null)}
             onStatusChange={handleStatusChange}
             onContentChange={handleContentChange}
+            onCategoryChange={handleCategoryChange}
             onDelete={handleDelete}
           />
         )}

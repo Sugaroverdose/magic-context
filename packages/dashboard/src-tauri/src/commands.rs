@@ -158,6 +158,17 @@ pub fn update_memory_content(
 }
 
 #[tauri::command(async)]
+pub fn update_memory_category(
+    state: State<'_, AppState>,
+    memory_id: i64,
+    category: String,
+) -> Result<(), String> {
+    let path = state.get_db_path()?;
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::update_memory_category(&mut conn, memory_id, &category).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
 pub fn delete_memory(state: State<'_, AppState>, memory_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;

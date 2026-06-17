@@ -2,12 +2,14 @@ import { createEffect, createSignal, Show } from "solid-js";
 import { formatTimestamp } from "../../lib/api";
 import type { Memory } from "../../lib/types";
 import FilterSelect from "../shared/FilterSelect";
+import { SHARE_CATEGORY_OPTIONS } from "../WorkspacesPanel/workspace-staging";
 
 interface Props {
   memory: Memory;
   onClose: () => void;
   onStatusChange: (id: number, status: string) => Promise<void>;
   onContentChange: (id: number, content: string) => Promise<void>;
+  onCategoryChange: (id: number, category: string) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
 }
 
@@ -80,7 +82,14 @@ export default function MemoryDetail(props: Props) {
           <tbody>
             <tr>
               <td>Category</td>
-              <td>{props.memory.category}</td>
+              <td>
+                <FilterSelect
+                  compact
+                  value={props.memory.category}
+                  onChange={(v) => props.onCategoryChange(props.memory.id, v)}
+                  options={SHARE_CATEGORY_OPTIONS}
+                />
+              </td>
             </tr>
             <tr>
               <td>Status</td>

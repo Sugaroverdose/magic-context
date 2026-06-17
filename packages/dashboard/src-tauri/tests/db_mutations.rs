@@ -683,3 +683,93 @@ fn get_smart_notes_tolerates_null_project_path_rows() {
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].content, "smart note");
 }
+
+#[test]
+fn test_update_memory_category_success() {
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+    seed_project_state(&conn, "git:project-a", 11, 0);
+
+    db::update_memory_category(&mut conn, id, "NAMING").expect("update category");
+
+    // Verify category is updated
+    let category: String = conn
+        .query_row(
+            "SELECT category FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("get category");
+    assert_eq!(category, "NAMING");
+
+    // Verify mutation log row is written
+    assert_eq!(
+        mutation_log_rows(&conn),
+        vec![(
+            "git:project-a".to_string(),
+            "update".to_string(),
+            id,
+            Some("NAMING".to_string()),
+            Some("memory for git:project-a".to_string()),
+        )]
+    );
+}
+
+#[test]
+fn test_update_memory_category_collision() {
+    let mut conn = make_db();
+    // Insert two memories in project-a:
+    // Memory 1: category CONSTRAINTS, content "same content", hash "hash-1"
+    // Memory 2: category NAMING, content "same content", hash "hash-1"
+    conn.execute(
+        "INSERT INTO memories (project_path, category, content, normalized_hash, status)
+         VALUES ('git:project-a', 'CONSTRAINTS', 'same content', 'hash-1', 'active')",
+        [],
+    ).unwrap();
+    let id1 = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO memories (project_path, category, content, normalized_hash, status)
+         VALUES ('git:project-a', 'NAMING', 'same content', 'hash-1', 'active')",
+        [],
+    ).unwrap();
+    let id2 = conn.last_insert_rowid();
+
+    // Try to update Memory 1's category to NAMING. This should collide with Memory 2.
+    let res = db::update_memory_category(&mut conn, id1, "NAMING");
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("Memory already exists as ID"));
+    assert!(err_msg.contains("in NAMING"));
+
+    // Verify Memory 1's category was NOT changed
+    let category: String = conn
+        .query_row(
+            "SELECT category FROM memories WHERE id = ?1",
+            params![id1],
+            |row| row.get(0),
+        )
+        .expect("get category");
+    assert_eq!(category, "CONSTRAINTS");
+}
+
+#[test]
+fn test_update_memory_category_invalid() {
+    let mut conn = make_db();
+    let id = insert_memory(&conn, "git:project-a", "active");
+
+    let res = db::update_memory_category(&mut conn, id, "INVALID_CATEGORY");
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err().to_string();
+    assert!(err_msg.contains("Invalid category: INVALID_CATEGORY"));
+
+    // Verify category was NOT changed
+    let category: String = conn
+        .query_row(
+            "SELECT category FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("get category");
+    assert_eq!(category, "CONSTRAINTS");
+}
