@@ -1770,6 +1770,26 @@ pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, r
             }
         }
     }
+    for identity in &picker_identities {
+        if !known.contains(identity) {
+            let display_name = if identity.starts_with("git:") {
+                let short = &identity[4..std::cmp::min(identity.len(), 14)];
+                format!("git:{short}…")
+            } else if identity.starts_with("dir:") {
+                let short = &identity[4..std::cmp::min(identity.len(), 14)];
+                format!("dir:{short}…")
+            } else {
+                basename(identity)
+            };
+            all.push(ProjectRow {
+                identity: identity.clone(),
+                display_name,
+                primary_path: "".to_string(),
+                harnesses: vec![],
+                session_count: 0,
+            });
+        }
+    }
     all.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     Ok(all
         .into_iter()
@@ -5860,10 +5880,7 @@ mod memory_project_filter_tests {
     #[test]
     fn enumerate_memory_projects_with_identity_memories_does_not_leak_identity_as_name() {
         // Simulate the post-#87 plugin storing the resolved identity directly
-        // as project_path. Pre-fix this produced ProjectRow rows with
-        // `display_name = "git:abc123…"`. Post-fix the list is empty because
-        // no real OpenCode/Pi DB is attached in the test sandbox — that's
-        // the correct safe state; the previous behavior was an active bug.
+        // as project_path.
         let conn = make_memory_db();
         insert_memory(&conn, "git:abc1234567890abcdef", "CONSTRAINTS", "active");
         insert_memory(
@@ -5880,14 +5897,11 @@ mod memory_project_filter_tests {
         );
 
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
-        for row in &rows {
-            assert!(
-                !row.display_name.starts_with("git:") && !row.display_name.starts_with("dir:"),
-                "display_name leaked identity: {} (identity={})",
-                row.display_name,
-                row.identity,
-            );
-        }
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].identity, "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321");
+        assert_eq!(rows[0].display_name, "dir:fedcba0987…");
+        assert_eq!(rows[1].identity, "git:abc1234567890abcdef");
+        assert_eq!(rows[1].display_name, "git:abc1234567…");
     }
 
     #[test]

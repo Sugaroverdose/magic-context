@@ -571,3 +571,23 @@ fn workspace_member_identities_union_helper() {
     let u = workspaces::workspace_member_identities_union(&old, &new);
     assert_eq!(u.len(), 3);
 }
+
+#[test]
+fn enumerate_memory_projects_includes_non_git_dir_project() {
+    let _g = env_lock();
+    let conn = make_db_v35();
+    conn.execute(
+        "INSERT INTO memories (project_path, category, content, normalized_hash, status, created_at, updated_at, first_seen_at, last_seen_at)
+         VALUES ('dir:1234567890ab', 'CONSTRAINTS', 'some memory', 'h1', 'active', 1, 1, 1, 1)",
+        [],
+    )
+    .unwrap();
+
+    let rows = db::enumerate_memory_projects(&conn).expect("enum");
+    let matched = rows.iter().find(|r| r.identity == "dir:1234567890ab");
+    assert!(matched.is_some(), "should find the dir: project");
+    let row = matched.unwrap();
+    assert_eq!(row.display_name, "dir:1234567890…");
+    assert_eq!(row.primary_path, "");
+    assert_eq!(row.session_count, 0);
+}

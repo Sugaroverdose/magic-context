@@ -612,6 +612,36 @@ async fn run_via_login_shell(_command: String) -> Option<String> {
     None
 }
 
+fn pick_first_line(stdout: &str) -> Option<String> {
+    let first_line = stdout.lines().next()?.trim().to_string();
+    if !first_line.is_empty() {
+        Some(first_line)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+async fn resolve_via_where(tool: &str) -> Option<String> {
+    let fut = tokio::process::Command::new("where.exe")
+        .arg(tool)
+        .no_window()
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            pick_first_line(&stdout)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+async fn resolve_via_where(_tool: &str) -> Option<String> {
+    None
+}
+
 #[tauri::command]
 pub async fn get_available_models() -> Vec<String> {
     // GUI apps on macOS don't inherit shell PATH; try common locations.
@@ -629,11 +659,29 @@ pub async fn get_available_models() -> Vec<String> {
     // Homebrew on Intel + ARM, and shell-PATH discovery for users who
     // launched OpenCode from a terminal.
     let candidates = if cfg!(target_os = "windows") {
-        let home = std::env::var("USERPROFILE").unwrap_or_default();
-        vec![
-            format!("{}\\.opencode\\bin\\opencode.exe", home),
-            "opencode".to_string(),
-        ]
+        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let mut list = Vec::new();
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\.opencode\\bin\\opencode.exe", userprofile));
+        }
+        if !appdata.is_empty() {
+            list.push(format!("{}\\npm\\opencode.cmd", appdata));
+            list.push(format!("{}\\npm\\opencode.exe", appdata));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!("{}\\Microsoft\\WinGet\\Links\\opencode.exe", localappdata));
+        }
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\scoop\\shims\\opencode.exe", userprofile));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!("{}\\opencode\\bin\\opencode.exe", localappdata));
+        }
+        list.push("opencode".to_string());
+        list.push("opencode.exe".to_string());
+        list
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         vec![
@@ -660,6 +708,17 @@ pub async fn get_available_models() -> Vec<String> {
             let models = parse(&text);
             if !models.is_empty() {
                 return models;
+            }
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Some(bin) = resolve_via_where("opencode").await {
+            if let Some(text) = run_bounded_binary(&bin, &["models"]).await {
+                let models = parse(&text);
+                if !models.is_empty() {
+                    return models;
+                }
             }
         }
     }
@@ -742,8 +801,29 @@ pub async fn get_available_pi_models() -> Vec<String> {
     // installs, custom installs, Homebrew on Intel + ARM, and shell-PATH
     // discovery for users who launched from a terminal.
     let candidates = if cfg!(target_os = "windows") {
-        let home = std::env::var("USERPROFILE").unwrap_or_default();
-        vec![format!("{}\\.pi\\bin\\pi.exe", home), "pi.exe".to_string()]
+        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let mut list = Vec::new();
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\.pi\\bin\\pi.exe", userprofile));
+        }
+        if !appdata.is_empty() {
+            list.push(format!("{}\\npm\\pi.cmd", appdata));
+            list.push(format!("{}\\npm\\pi.exe", appdata));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!("{}\\Microsoft\\WinGet\\Links\\pi.exe", localappdata));
+        }
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\scoop\\shims\\pi.exe", userprofile));
+        }
+        if !localappdata.is_empty() {
+            list.push(format!("{}\\pi\\bin\\pi.exe", localappdata));
+        }
+        list.push("pi".to_string());
+        list.push("pi.exe".to_string());
+        list
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         vec![
@@ -765,6 +845,17 @@ pub async fn get_available_pi_models() -> Vec<String> {
             let models = parse_pi_models_output(&text);
             if !models.is_empty() {
                 return models;
+            }
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Some(bin) = resolve_via_where("pi").await {
+            if let Some(text) = run_bounded_binary(&bin, &["--list-models"]).await {
+                let models = parse_pi_models_output(&text);
+                if !models.is_empty() {
+                    return models;
+                }
             }
         }
     }
@@ -950,7 +1041,7 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pi_models_output, run_bounded_binary};
+    use super::{parse_pi_models_output, pick_first_line, run_bounded_binary};
     use std::time::Instant;
 
     #[tokio::test]
@@ -1019,5 +1110,13 @@ mod tests {
         let input = "\x1b[32manthropic\x1b[0m  claude-sonnet-4-5";
         let result = parse_pi_models_output(input);
         assert_eq!(result, vec!["anthropic/claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn test_pick_first_line() {
+        assert_eq!(pick_first_line(""), None);
+        assert_eq!(pick_first_line("   \n"), None);
+        assert_eq!(pick_first_line("C:\\bin\\opencode.exe\nC:\\other\\opencode.exe"), Some("C:\\bin\\opencode.exe".to_string()));
+        assert_eq!(pick_first_line("  C:\\bin\\opencode.exe  \n"), Some("C:\\bin\\opencode.exe".to_string()));
     }
 }
