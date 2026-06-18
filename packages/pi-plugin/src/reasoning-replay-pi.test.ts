@@ -148,6 +148,43 @@ describe("clearOldReasoningPi", () => {
 		expect(result.cleared).toBe(0);
 		expect(result.newWatermark).toBe(0);
 	});
+
+	it("leaves REDACTED thinking blocks untouched (signature + data preserved)", () => {
+		// A redacted block bypasses the empty-thinking drop in Pi's serializers
+		// (transform-messages.ts / anthropic.ts serialize `redacted` before the
+		// empty check), so emptying it + dropping the signature would leave a
+		// malformed redacted block on the wire. It must be preserved verbatim.
+		const messages = [
+			{
+				role: "assistant",
+				timestamp: 1,
+				content: [
+					{
+						type: "thinking",
+						thinking: "opaque-redacted-payload",
+						thinkingSignature: "sig-abc",
+						redacted: true,
+					},
+				],
+			},
+		];
+		const id0 = piMessageStableId(messages[0], 0);
+		if (!id0) throw new Error("piMessageStableId returned undefined");
+		const messageIdToMaxTag = new Map<string, number>([[id0, 1]]);
+		const result = clearOldReasoningPi({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 1,
+			piMessageStableId,
+		});
+		expect(result.cleared).toBe(0);
+		expect(messages[0].content[0]).toMatchObject({
+			type: "thinking",
+			thinking: "opaque-redacted-payload",
+			thinkingSignature: "sig-abc",
+			redacted: true,
+		});
+	});
 });
 
 describe("replayClearedReasoningPi", () => {

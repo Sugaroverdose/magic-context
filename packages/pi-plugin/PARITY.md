@@ -280,13 +280,19 @@ deliberate and source-justified.
   signature) on the wire. (#162 D2.)
 
 - **Pi** (`reasoning-replay-pi.ts`): EMPTIES the thinking text (`thinking = ""`)
-  and **drops the now-stale `thinkingSignature`**, UNCONDITIONALLY (no
-  per-provider gate). Every Pi serializer drops an empty thinking block before the
-  wire — `anthropic.ts` (empty thinking skipped), `openai-completions.ts`
-  (filtered out of `nonEmptyThinkingBlocks`, with `reasoning_content=""`
-  auto-filled for providers that require it), `amazon-bedrock.ts` (empty thinking
-  skipped). So no block and no signature reach ANY provider, which structurally
-  eliminates the stale-signature mismatch and needs no gate.
+  and **drops the now-stale `thinkingSignature`**, with NO per-provider gate —
+  EXCEPT it leaves `redacted` thinking blocks **untouched**. Every Pi serializer
+  drops an *empty non-redacted* thinking block before the wire — `anthropic.ts`
+  (empty thinking skipped), `openai-completions.ts` (filtered out of
+  `nonEmptyThinkingBlocks`, with `reasoning_content=""` auto-filled for providers
+  that require it), `amazon-bedrock.ts`/`google-shared.ts`/`mistral.ts` (empty
+  thinking skipped). So no normal block and no signature reach ANY provider, which
+  structurally eliminates the stale-signature mismatch and needs no gate.
+  **Redacted blocks are the exception**: they serialize `redacted` BEFORE the
+  empty-thinking check (`transform-messages.ts`, `anthropic.ts`), so emptying one
+  + dropping its signature would put a malformed redacted block (no data, no sig)
+  on the wire. They carry no plaintext to save, so Pi keeps them verbatim — safe
+  and byte-stable.
 
 Why the OLD "keep the signature" note was wrong: a `thinkingSignature` is a
 cryptographic signature over the ORIGINAL thinking text, so `[cleared]` (or any

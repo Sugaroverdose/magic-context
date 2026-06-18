@@ -13,7 +13,7 @@
  *     OpenCode's reasoning-clearing replay was added to fix.
  *
  * Behavior:
-  *   - On execute passes (cache-busting): walk Pi assistant messages
+ *   - On execute passes (cache-busting): walk Pi assistant messages
  *     whose tag number is older than `clear_reasoning_age` from the
  *     newest tag, EMPTY each `PiThinkingContent.thinking` (and drop its
  *     stale signature), persist watermark = max-tag-cleared in
@@ -153,6 +153,14 @@ export function clearOldReasoningPi(args: {
 				(part as { type?: unknown }).type === "thinking"
 			) {
 				const tp = part as PiThinkingContent;
+				// Leave REDACTED thinking blocks untouched. Unlike normal thinking,
+				// redacted blocks bypass the empty-drop in Pi's serializers
+				// (transform-messages.ts and anthropic.ts serialize `redacted`
+				// before the empty-thinking check), so emptying one + dropping its
+				// signature would leave a malformed redacted block (no data, no sig)
+				// on the wire. A redacted block carries no plaintext to save anyway;
+				// keeping it verbatim is both safe and byte-stable across passes.
+				if (tp.redacted) continue;
 				// Empty the thinking AND drop its now-stale signature (a signature
 				// over the original text would mismatch the emptied content). The
 				// empty block is dropped by every Pi serializer, so neither reaches
@@ -271,6 +279,10 @@ export function replayClearedReasoningPi(args: {
 				(part as { type?: unknown }).type === "thinking"
 			) {
 				const tp = part as PiThinkingContent;
+				// Mirror clearOldReasoningPi exactly: redacted blocks are left
+				// untouched (they bypass the serializers' empty-drop, so emptying
+				// one would put a malformed redacted block on the wire).
+				if (tp.redacted) continue;
 				// Replay the exact clear shape from clearOldReasoningPi: empty
 				// thinking + dropped signature, so defer passes are byte-identical
 				// to the cache-busting pass that set the watermark.

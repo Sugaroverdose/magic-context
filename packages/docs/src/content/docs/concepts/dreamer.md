@@ -52,7 +52,7 @@ When `dreamer.inject_docs` is true (the default), these files inject into the co
 
 ## Cost and model selection
 
-The dreamer uses your configured dreamer model (or fallback chain) and reads your codebase during verification and doc maintenance. Each task spawns a child session with its own context window. Budget accordingly — a full dream run with all five tasks can be several API calls.
+The dreamer uses your configured dreamer model (and any `fallback_models` you set, then your session model as a last resort) and reads your codebase during verification and doc maintenance. Each task spawns a child session with its own context window. Budget accordingly — a full dream run with all five tasks can be several API calls.
 
 Because it runs during idle time, the dreamer is a good fit for local models, even slow ones. Configure the model in `magic-context.jsonc` under `dreamer.model`.
 
