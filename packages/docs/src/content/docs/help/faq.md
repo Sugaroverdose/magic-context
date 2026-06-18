@@ -15,7 +15,7 @@ Semantic embeddings use the `embedding.provider` setting. The default is `"local
 
 Magic Context is prompt-cache-aware — all context mutations are timed to not invalidate your provider's cached prefix. In practice this means less re-billing of your cached history across turns.
 
-The historian and dreamer agents make their own model calls using whichever models you configure. GitHub Copilot models are preferred in the default fallback chain because they use request-based pricing — ideal for single-prompt background work where you don't want per-token charges stacking up.
+The historian and dreamer agents make their own model calls using whichever models you configure. They have no per-token cost when idle — the historian only runs on a compression event, not every turn. For background work that bills per request rather than per token (e.g. a GitHub Copilot subscription), pointing these agents at such a model keeps their cost flat.
 
 For most sessions, historian costs are modest: it processes a batch of messages once per compression event, not on every turn.
 

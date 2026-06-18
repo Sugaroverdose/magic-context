@@ -103,7 +103,7 @@ Add `--force` to automatically fix what doctor can — it clears stale plugin ca
 
 ## Model configuration
 
-The historian and dreamer agents use sensible defaults (GitHub Copilot models are preferred when available, because they use request-based pricing — ideal for background work). You can override model choice in your config. See the [configuration reference](/reference/configuration/) for the full list of options, including fallback chains.
+The setup wizard helps you pick a model for the historian and dreamer agents — they don't need a top-tier model, and a model that bills per request (e.g. GitHub Copilot) keeps background-work cost flat. There's no hidden fallback to models you didn't configure; see the [configuration reference](/reference/configuration/) for `model` and optional `fallback_models`.
 
 ## Dashboard
 

@@ -245,15 +245,14 @@ An absolute-tokens alternative to `execute_threshold_percentage`. Useful when yo
 
 ## Model Resolution
 
-Each agent has a built-in fallback chain tried in order when no model is explicitly configured. If you have a GitHub Copilot subscription, Copilot-routed models are preferred for historian and dreamer since they use request-based pricing — ideal for single-prompt background work.
+Each hidden agent (historian, dreamer, sidekick) uses the `model` you configure for it. There is **no built-in fallback chain** — Magic Context never silently tries models you haven't configured (a hardcoded chain inevitably names providers you don't have, producing confusing `Model not found` errors).
 
-| Agent | Fallback Chain (first available wins) |
-|-------|---------------------------------------|
-| **Historian** | `github-copilot/claude-sonnet-4-6` → `anthropic/claude-sonnet-4-6` → `opencode-go/minimax-m2.7` → `zai-coding-plan/glm-5` → `openai/gpt-5.4` → `google/gemini-3.1-pro` |
-| **Dreamer** | `github-copilot/claude-sonnet-4-6` → `anthropic/claude-sonnet-4-6` → `google/gemini-3-flash` → `zai-coding-plan/glm-5` → `opencode-go/minimax-m2.7` → `openai/gpt-5.4-mini` |
-| **Sidekick** | `cerebras/qwen-3-235b-a22b-instruct-2507` → `opencode/gpt-5-nano` → `google/gemini-3-flash` → `openai/gpt-5.4-mini` |
+If the configured primary fails (auth, transient, or returns unusable output), the fallback order is:
 
-Setting `model` in any agent config overrides the fallback chain entirely. Setting `fallback_models` replaces the built-in chain with your custom list.
+1. Your explicit `fallback_models` for that agent, in order.
+2. Your active session model, as a last resort (a model you're already using).
+
+If you set no `fallback_models`, a failing primary simply retries — it never jumps to an unconfigured model. Set `fallback_models` to add alternates of your own (each `"provider/model-id"`).
 
 > **Tip — Dreamer with local models:** Since the dreamer runs during idle time (typically overnight), it works well with local models. Even slower ones like `ollama/mlx-qwen3.5-27b-claude-4.6-opus-reasoning-distilled` are fine — there's no user waiting.
 
