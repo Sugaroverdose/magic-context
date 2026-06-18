@@ -318,6 +318,44 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
         expect(tags).toHaveLength(1);
     });
 
+    it("scoped load: invocation whose tool tag is below the floor self-heals to the exact persisted number", () => {
+        //#given — a tool tag persisted at a LOW number (2), and the tagger
+        // loaded with a high scoping floor so that tag is NOT preloaded into
+        // the in-memory map (simulating a straddling tool whose invocation sits
+        // below the live-wire boundary). This is the Oracle #2 case: the
+        // invocation-only observation path used to only try NULL-owner adoption
+        // and would MISS an existing composite-keyed tag, leaving it unbound
+        // (a queued drop could then be mis-detected). The #2 fix adds a
+        // composite DB lookup so it rebinds the EXACT persisted number.
+        useTempDataHome("scoped-straddle-");
+        const db = openDatabase();
+        db.prepare(
+            "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number, harness, tool_owner_message_id) VALUES (?, ?, 'tool', 100, 2, 'opencode', ?)",
+        ).run("ses-1", "read:50", "m-asst-old");
+
+        const tagger = createTagger();
+        tagger.initFromDb("ses-1", db, 100); // floor=100 excludes tag 2
+        // precondition: below-floor tag is NOT preloaded.
+        expect(tagger.getToolTag("ses-1", "read:50", "m-asst-old")).toBeUndefined();
+
+        const messages: MessageLike[] = [
+            {
+                info: { id: "m-asst-old", role: "assistant", sessionID: "ses-1" },
+                parts: [{ type: "tool-invocation", callID: "read:50" }],
+            },
+        ];
+
+        //#when
+        tagMessages("ses-1", messages, tagger, db);
+
+        //#then — the #2 fix rebound the EXACT persisted number (byte-identical
+        // §N§), and created no duplicate row.
+        expect(tagger.getToolTag("ses-1", "read:50", "m-asst-old")).toBe(2);
+        const toolTags = getTagsBySession(db, "ses-1").filter((t) => t.type === "tool");
+        expect(toolTags).toHaveLength(1);
+        expect(toolTags[0]?.tagNumber).toBe(2);
+    });
+
     describe("F2 tool-owner derivation fallback memoization", () => {
         it("keeps in-window FIFO result owners and tag numbers unchanged without DB fallback", () => {
             useTempDataHome("f2-steady-fifo-");

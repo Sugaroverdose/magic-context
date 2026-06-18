@@ -29,6 +29,44 @@ import { extractToolCallObservation } from "./tool-drop-target";
 
 export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
 
+/**
+ * Block-tokenization memo.
+ *
+ * `readSessionChunk` re-tokenizes the TC-chunked eligible tail on every
+ * compartment-trigger pass (every `message.updated`). The eligible window is
+ * anchored at `lastCompartmentEnd + 1` and built forward, so every block BEHIND
+ * the growing tail produces a byte-identical `formatBlock` string pass after
+ * pass — re-running the BPE tokenizer on them is pure waste (≈100ms on a large
+ * tool-heavy session). This memo is CONTENT-ADDRESSED on the exact block text,
+ * so the token count is identical to a fresh `estimateTokens` call (no
+ * semantic/threshold change) — only NEW or changed blocks (the tail edge) reach
+ * the tokenizer. The cached value cannot substitute the per-tag token store:
+ * that store counts FULL content, this counts the TC-chunked form (tool outputs
+ * collapsed to one-line summaries), a deliberately different quantity.
+ *
+ * Bounded LRU so it can't grow without limit across sessions; full-string keys
+ * (no hashing) keep it exact with zero collision risk. A budget-capped chunk is
+ * a few dozen blocks, so a few active sessions sit far under the cap.
+ */
+const BLOCK_TOKEN_MEMO_MAX = 2048;
+const blockTokenMemo = new Map<string, number>();
+function estimateBlockTokens(blockText: string): number {
+    const cached = blockTokenMemo.get(blockText);
+    if (cached !== undefined) {
+        // Refresh recency (Map preserves insertion order → re-insert = most-recent).
+        blockTokenMemo.delete(blockText);
+        blockTokenMemo.set(blockText, cached);
+        return cached;
+    }
+    const count = estimateTokens(blockText);
+    if (blockTokenMemo.size >= BLOCK_TOKEN_MEMO_MAX) {
+        const oldest = blockTokenMemo.keys().next().value;
+        if (oldest !== undefined) blockTokenMemo.delete(oldest);
+    }
+    blockTokenMemo.set(blockText, count);
+    return count;
+}
+
 let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
 // Parallel to activeRawMessageCache, lifecycle-bound to the same scope. Holds the
 // ABSOLUTE session message count when the cached array is a TAIL-ONLY slice (so
@@ -435,7 +473,7 @@ export function readSessionChunk(
     function flushCurrentBlock(): boolean {
         if (!currentBlock) return true;
         const blockText = formatBlock(currentBlock);
-        const blockTokens = estimateTokens(blockText);
+        const blockTokens = estimateBlockTokens(blockText);
         if (totalTokens + blockTokens > tokenBudget && totalTokens > 0) {
             return false;
         }

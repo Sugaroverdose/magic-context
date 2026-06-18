@@ -253,16 +253,31 @@ export function getOldestActiveUnprotectedToolTags(
 export function getTriggerTagTokenUpperBound(
     db: Database,
     sessionId: string,
+    floor = 0,
 ): { bound: number; nullCount: number } {
-    const row = db
-        .prepare(
-            `SELECT
+    // floor > 0 (OpenCode) restricts to the live-wire range (tag_number >= floor).
+    // The bound is an UPPER BOUND on the historian's eligible-tail tokens; the
+    // eligible tail ⊆ the live wire, so the scoped sum is still a valid (tighter,
+    // more accurate) upper bound. Critically it also fixes nullCount: pre-floor
+    // legacy tags are never backfilled (the tagger only backfills the scoped
+    // tail), so a whole-session nullCount stays ~95k forever and the cheap-skip
+    // can NEVER trust the bound — scoping drops nullCount to ~0 so the gate finally
+    // works. floor=0 (Pi / no-floor fallback) keeps the full-session scan.
+    const sql =
+        floor > 0
+            ? `SELECT
                 COALESCE(SUM(COALESCE(token_count, 0) + COALESCE(input_token_count, 0) + COALESCE(reasoning_token_count, 0)), 0) AS bound,
                 COALESCE(SUM(CASE WHEN token_count IS NULL THEN 1 ELSE 0 END), 0) AS null_count
              FROM tags
-             WHERE session_id = ? AND status IN ('active', 'dropped')`,
-        )
-        .get(sessionId) as { bound: number; null_count: number } | undefined;
+             WHERE session_id = ? AND status IN ('active', 'dropped') AND tag_number >= ?`
+            : `SELECT
+                COALESCE(SUM(COALESCE(token_count, 0) + COALESCE(input_token_count, 0) + COALESCE(reasoning_token_count, 0)), 0) AS bound,
+                COALESCE(SUM(CASE WHEN token_count IS NULL THEN 1 ELSE 0 END), 0) AS null_count
+             FROM tags
+             WHERE session_id = ? AND status IN ('active', 'dropped')`;
+    const row = (
+        floor > 0 ? db.prepare(sql).get(sessionId, floor) : db.prepare(sql).get(sessionId)
+    ) as { bound: number; null_count: number } | undefined;
     return { bound: row?.bound ?? 0, nullCount: row?.null_count ?? 0 };
 }
 
@@ -379,14 +394,32 @@ export function updateTagTokenCount(
 export function getAllStatusTagTokenTotalsFlat(
     db: Database,
     sessionId: string,
+    floor = 0,
 ): { totals: Map<string, number>; nullMessageIds: Set<string> } {
-    const rows = db
-        .prepare(
-            `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
-             FROM tags
-             WHERE session_id = ?`,
-        )
-        .all(sessionId) as Array<{
+    // floor > 0 (OpenCode) loads only the live-wire range (tag_number >= floor):
+    // tag_number is monotonic with message order, so every tag below the first
+    // wire message is compacted-away history the boundary never indexes. The
+    // boundary only looks up totals for messages in the live slice (all >= floor
+    // by construction), and any excluded slice message degrades to live
+    // tokenization of the same content — byte-identical total. floor=0 (Pi, and
+    // the OpenCode no-floor fallback) keeps the full-session scan unchanged.
+    const rows = (
+        floor > 0
+            ? db
+                  .prepare(
+                      `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+                       FROM tags
+                       WHERE session_id = ? AND tag_number >= ?`,
+                  )
+                  .all(sessionId, floor)
+            : db
+                  .prepare(
+                      `SELECT type, message_id, tool_owner_message_id, token_count, input_token_count, reasoning_token_count
+                       FROM tags
+                       WHERE session_id = ?`,
+                  )
+                  .all(sessionId)
+    ) as Array<{
         type: string;
         message_id: string;
         tool_owner_message_id: string | null;
@@ -850,6 +883,82 @@ export function getTagNumberByMessageId(
 ): number | null {
     const row = getTagNumberByMessageIdStatement(db).get(sessionId, messageId);
     return isTagNumberRow(row) ? row.tag_number : null;
+}
+
+const getMinMessageTagNumberForRawIdStatements = new WeakMap<Database, PreparedStatement>();
+interface MinTagNumberRow {
+    m: number | null;
+}
+function isMinTagNumberRow(row: unknown): row is MinTagNumberRow {
+    return row !== null && typeof row === "object" && "m" in row;
+}
+/**
+ * Lowest `tag_number` among the message/file content-ids of a single raw
+ * message id, used to derive the tagger load-scoping floor from the first
+ * message(s) in the live wire.
+ *
+ * message/file tags key on the synthetic content-id `${rawId}:p${n}` /
+ * `${rawId}:file${n}`. The half-open range `[rawId+':', rawId+';')` captures
+ * exactly one rawId's content-ids: ':' (0x3A) is the field separator and ';'
+ * (0x3B) is its immediate successor, so a different rawId (even a prefix like
+ * `msg_abc` vs `msg_abcd`) diverges before the ':' and sorts outside the
+ * range. This is a sargable index range scan on idx_tags_session_message_id
+ * (no LIKE, no wildcard escaping). Tool tags are NOT matched (their message_id
+ * is the callId, not `${rawId}:…`) — intentional: the floor bounds message/file
+ * tags; tool straddle is handled separately.
+ *
+ * Returns null when the rawId has no message/file tag yet (untagged synthetic
+ * leader) or, defensively, when the rawId itself contains ':' (which would
+ * break the delimiter proof — never true for OpenCode `msg_*` ids).
+ */
+export function getMinMessageTagNumberForRawId(
+    db: Database,
+    sessionId: string,
+    rawId: string,
+): number | null {
+    if (rawId.includes(":")) return null;
+    let stmt = getMinMessageTagNumberForRawIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT MIN(tag_number) AS m FROM tags WHERE session_id = ? AND message_id >= ? AND message_id < ?",
+        );
+        getMinMessageTagNumberForRawIdStatements.set(db, stmt);
+    }
+    const row = stmt.get(sessionId, `${rawId}:`, `${rawId};`);
+    return isMinTagNumberRow(row) && typeof row.m === "number" ? row.m : null;
+}
+
+// Number of leading wire messages probed to derive the load-scoping floor, and
+// the margin subtracted from the resulting min tag number. A LOWER floor only
+// ever loads MORE tags (strictly safe — it can never exclude an in-wire tag);
+// the margin absorbs a tagged leading compaction-summary, near-boundary tool
+// straddles, and minor reordering at the wire head.
+export const TAGGER_FLOOR_SCAN_MESSAGES = 8;
+export const TAGGER_FLOOR_SAFETY_MARGIN = 256;
+
+/**
+ * Derive the tagger/scan load-scoping floor from the leading wire message ids:
+ * the minimum message/file tag number across the first
+ * `TAGGER_FLOOR_SCAN_MESSAGES` id-bearing ids, minus `TAGGER_FLOOR_SAFETY_MARGIN`
+ * (clamped to 0). Shared by the tagger's `initFromDb` and the compartment
+ * trigger's tag scans so both scope to the same live-wire range. Returns 0 when
+ * nothing is tagged yet → callers fall back to the full-session scan.
+ */
+export function deriveTagLoadFloor(
+    db: Database,
+    sessionId: string,
+    rawIds: Iterable<string | null | undefined>,
+): number {
+    let min = Number.POSITIVE_INFINITY;
+    let scanned = 0;
+    for (const rawId of rawIds) {
+        if (typeof rawId !== "string" || rawId.length === 0) continue;
+        const m = getMinMessageTagNumberForRawId(db, sessionId, rawId);
+        if (m !== null && m < min) min = m;
+        if (++scanned >= TAGGER_FLOOR_SCAN_MESSAGES) break;
+    }
+    if (!Number.isFinite(min)) return 0;
+    return Math.max(0, min - TAGGER_FLOOR_SAFETY_MARGIN);
 }
 
 // Single source-of-truth column list for SELECTs that produce TagEntry.

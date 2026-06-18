@@ -130,7 +130,7 @@ export interface Tagger {
     getAssignments(sessionId: string): ReadonlyMap<string, number>;
     resetCounter(sessionId: string, db: Database): void;
     getCounter(sessionId: string): number;
-    initFromDb(sessionId: string, db: Database): void;
+    initFromDb(sessionId: string, db: Database, floor?: number): void;
     cleanup(sessionId: string): void;
 }
 
@@ -141,6 +141,12 @@ const GET_COUNTER_SQL = `SELECT counter FROM session_meta WHERE session_id = ?`;
 // at the next lookup.
 const GET_ASSIGNMENTS_SQL =
     "SELECT message_id, tag_number, type, tool_owner_message_id FROM tags WHERE session_id = ? ORDER BY tag_number ASC";
+// Scoped variant: load only tags at/above the live-wire floor (tag_number is
+// monotonic with message order, so everything below the first wire message's
+// tag is compacted-away history not in the wire). floor=0 callers use the
+// unscoped SQL above and get today's full-session load unchanged.
+const GET_ASSIGNMENTS_SCOPED_SQL =
+    "SELECT message_id, tag_number, type, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number >= ? ORDER BY tag_number ASC";
 
 /**
  * SQLite change-detection signal for the `initFromDb` cache.
@@ -184,6 +190,12 @@ interface AssignmentRow {
 interface LoadSignature {
     db: Database;
     dataVersion: number;
+    /**
+     * Live-wire load-scoping floor in effect for the cached map. A floor change
+     * (compaction boundary advanced, or a revert lowered it) must force exactly
+     * one reload into the new range, so it is part of the cache identity.
+     */
+    floor: number;
 }
 
 function isAssignmentRow(row: unknown): row is AssignmentRow {
@@ -672,10 +684,15 @@ export function createTagger(): Tagger {
      * thrown query never leaves fresh signature metadata pointing at stale
      * in-memory state.
      */
-    function initFromDb(sessionId: string, db: Database): void {
+    function initFromDb(sessionId: string, db: Database, floor = 0): void {
         const probe = probeSignature(db);
         const cached = loadSignatures.get(sessionId);
-        if (cached !== undefined && cached.db === db && cached.dataVersion === probe.dataVersion) {
+        if (
+            cached !== undefined &&
+            cached.db === db &&
+            cached.dataVersion === probe.dataVersion &&
+            cached.floor === floor
+        ) {
             return;
         }
 
@@ -683,10 +700,17 @@ export function createTagger(): Tagger {
             | { counter: number }
             | null
             | undefined;
-        const assignmentRows = db
-            .prepare(GET_ASSIGNMENTS_SQL)
-            .all(sessionId)
-            .filter(isAssignmentRow);
+        // floor > 0: load only the live-wire range (tag_number >= floor). floor=0
+        // (Pi, and the OpenCode fallback when no floor could be derived) keeps the
+        // full-session load unchanged. Self-heal (dbExistingLookup in allocateTag)
+        // rebinds any below-floor in-wire tag to its exact persisted number, so a
+        // scoped load is byte-identical on the wire — it only changes how many
+        // point lookups happen this pass.
+        const assignmentRows = (
+            floor > 0
+                ? db.prepare(GET_ASSIGNMENTS_SCOPED_SQL).all(sessionId, floor)
+                : db.prepare(GET_ASSIGNMENTS_SQL).all(sessionId)
+        ).filter(isAssignmentRow);
         const sessionAssignments = getSessionAssignments(sessionId);
         sessionAssignments.clear();
 
@@ -734,6 +758,7 @@ export function createTagger(): Tagger {
         loadSignatures.set(sessionId, {
             db,
             dataVersion: probe.dataVersion,
+            floor,
         });
     }
 

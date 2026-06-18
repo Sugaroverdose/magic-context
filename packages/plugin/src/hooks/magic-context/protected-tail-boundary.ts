@@ -577,6 +577,16 @@ export function resolveBoundaryContext(args: {
     emergencyTailScale?: 0.5 | 0.25;
     providerShapeVersion?: "opencode-v1" | "pi-folded-v1";
     cacheNamespace?: string;
+    /**
+     * Tagger load-scoping floor (OpenCode only). When > 0, the stored-token map
+     * is loaded only for tags at/above this floor (the live wire) instead of
+     * scanning the whole session's tags (~100k rows → ~50ms every pass). The
+     * boundary only indexes the live slice (all >= floor), and any slice message
+     * the scoped map misses degrades to live tokenization of the same content,
+     * so the cut point is byte-identical. Omit / 0 = full scan (Pi, recomp,
+     * tests) — unchanged.
+     */
+    taggerFloor?: number;
 }): ResolvedBoundaryContext {
     const lastCompartmentEndOrdinal = getLastCompartmentEndMessage(args.db, args.sessionId);
     const triggerBudget = deriveTriggerBudget(args.contextLimit, args.executeThresholdPercentage);
@@ -607,7 +617,11 @@ export function resolveBoundaryContext(args: {
     // to all-live tokenization.
     let storedTokenTotals: Map<string, number> | undefined;
     try {
-        storedTokenTotals = getAllStatusTagTokenTotalsFlat(args.db, args.sessionId).totals;
+        storedTokenTotals = getAllStatusTagTokenTotalsFlat(
+            args.db,
+            args.sessionId,
+            args.taggerFloor ?? 0,
+        ).totals;
     } catch (error) {
         sessionLog(
             args.sessionId,

@@ -3,6 +3,7 @@ import {
     getLastCompartmentEndMessageId,
 } from "../../features/magic-context/compartment-storage";
 import {
+    deriveTagLoadFloor,
     getActiveTagsBySession,
     getPendingOps,
     getTriggerTagTokenUpperBound,
@@ -269,6 +270,7 @@ function getUnsummarizedTailInfo(
     executeThresholdPercentage: number,
     contextLimit?: number,
     inMemoryTail?: InMemoryTailSource,
+    taggerFloor = 0,
 ): TailInfo {
     return withRawSessionMessageCache(() => {
         try {
@@ -324,6 +326,7 @@ function getUnsummarizedTailInfo(
                           executeThresholdPercentage,
                           usage,
                           usageSource: "live",
+                          taggerFloor,
                       });
             const hasProtectedEligibleHead = boundary.offset < boundary.protectedTailStart;
 
@@ -383,6 +386,7 @@ export function checkCompartmentTrigger(
     preloadedActiveTags?: readonly TagEntry[],
     contextLimit?: number,
     inMemoryTail?: InMemoryTailSource,
+    taggerFloorOverride?: number,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         sessionLog(
@@ -408,6 +412,31 @@ export function checkCompartmentTrigger(
         }
     }
 
+    // Tag load-scoping floor (OpenCode only). Both tag scans below — the pre-gate
+    // upper-bound sum and the boundary's stored-token map — used to scan the
+    // whole session's tags (~100k rows → ~90ms combined every pass) to read data
+    // about only the live wire. Scope both reads to `tag_number >= floor`.
+    //
+    // The caller (transform) passes `taggerFloorOverride` derived directly from
+    // the raw wire ids — that path is NOT gated on the compaction-marker anchor,
+    // so the floor stays live even on passes where `inMemoryTail` is undefined
+    // (post-restart / marker-drain lag, when `buildTriggerInMemoryTail` bails).
+    // Those were exactly the passes that regressed to the full ~90ms scan. Fall
+    // back to deriving from `inMemoryTail` (its leading ids) when no override is
+    // given, then to 0 (Pi / un-seeded migration path) → unchanged full scan.
+    // The floor only ever UNDER-estimates (lower = loads more), so the boundary
+    // cut stays byte-identical and the pre-gate bound stays a valid upper bound.
+    const taggerFloor =
+        taggerFloorOverride !== undefined && taggerFloorOverride > 0
+            ? taggerFloorOverride
+            : inMemoryTail
+              ? deriveTagLoadFloor(
+                    db,
+                    sessionId,
+                    inMemoryTail.messages.map((m) => m.id),
+                )
+              : 0;
+
     // Cheap pre-gate (avoids the full raw tail inspection on every message.updated).
     //
     // getUnsummarizedTailInfo resolves the protected-tail boundary and runs the
@@ -432,10 +461,14 @@ export function checkCompartmentTrigger(
             // remove tool output from the wire but the raw content still
             // counts toward the historian's true-raw chunk size — an
             // active-only bound undercounts after drops and suppresses real
-            // tail-size triggers.
+            // tail-size triggers. Scoped to the live-wire floor: a whole-session
+            // sum is a uselessly-loose bound AND leaves nullCount stuck at the
+            // legacy-row count forever (never backfilled), so the skip could never
+            // trigger; scoping makes it a tight valid upper bound with nullCount≈0.
             const { bound: persistedBound, nullCount } = getTriggerTagTokenUpperBound(
                 db,
                 sessionId,
+                taggerFloor,
             );
             if (nullCount === 0) {
                 const untaggedUpperBound = inMemoryTail
@@ -474,6 +507,7 @@ export function checkCompartmentTrigger(
         executeThresholdPercentage,
         contextLimit,
         inMemoryTail,
+        taggerFloor,
     );
     if (!tailInfo.hasNewRawHistory) {
         // Diagnostic data collection is best-effort. The helpers can throw if

@@ -4,6 +4,7 @@ import {
     adoptNullOwnerToolTag,
     getCandidateToolOwners,
     getNullOwnerToolTag,
+    getToolTagNumberByOwner,
     pickNearestPriorOwner,
 } from "../../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
@@ -509,6 +510,35 @@ export function tagMessages(
                                 ownerMsgId,
                             );
                         }
+                    }
+                }
+
+                // Scoped-load self-heal for the invocation-only path: a tool tag
+                // can exist in the DB under its exact composite (owner, callId)
+                // key yet be absent from the in-memory map when the tagger load
+                // was scoped to the live-wire floor and this tag's number is below
+                // it (a tool RESULT in the wire whose invocation was compacted away
+                // resolves to a persisted owner below the floor — tag-messages
+                // pickNearestPriorOwner). The output-bearing path (assignToolTag)
+                // already does this composite DB lookup; the invocation/native
+                // tool_result observation path did not. Without it, the existing
+                // tag would be missed and a queued drop mis-detected. Rebind the
+                // EXACT persisted number so §N§ stays byte-identical.
+                if (existingTagId === undefined) {
+                    const persisted = getToolTagNumberByOwner(
+                        db,
+                        sessionId,
+                        toolObservation.callId,
+                        ownerMsgId,
+                    );
+                    if (persisted !== null) {
+                        tagger.bindToolTag(
+                            sessionId,
+                            toolObservation.callId,
+                            ownerMsgId,
+                            persisted,
+                        );
+                        existingTagId = persisted;
                     }
                 }
 

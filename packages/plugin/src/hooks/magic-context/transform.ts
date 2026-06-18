@@ -7,6 +7,7 @@ import { recordSessionProjectIdentity } from "../../features/magic-context/sessi
 
 import {
     type ContextDatabase,
+    deriveTagLoadFloor,
     getActiveTagsBySession,
     getActiveTagTokenAggregate,
     getActiveTagTokenTotalsByMessage,
@@ -139,6 +140,39 @@ export function clearMessageTokensCache(sessionId: string, messageId?: string): 
 // appears (or changes) for a session in this process — not on every transform
 // pass. Bounded so crashed/abandoned sessions can't leak the guard forever.
 const recordedSessionProjectIdentity = new BoundedSessionMap<string>(MESSAGE_TOKENS_CACHE_MAX);
+
+// Tagger / trigger load-scoping floor (OpenCode only). Several hot-path reads
+// preload an in-memory map or aggregate over a session's tags; on a large/old
+// session that is the full tag history (100K+ rows): the tagger's content-key
+// map (~32ms), the boundary's stored-token map (~52ms), the trigger pre-gate's
+// upper-bound sum (~37ms). The wire passed to the transform is the
+// post-compaction-boundary tail (m[0]/m[1] are prepended LATER, in postprocess),
+// and tag_number is monotonic with message order, so the front of the wire holds
+// the lowest tags — everything below is compacted-away history not in the wire.
+// We derive one floor per pass and scope every such read to `tag_number >= floor`.
+//
+// `deriveTagLoadFloor` takes the MIN over the first K id-bearing messages, NOT
+// the first one's tag: a tagged leading compaction-summary has a RECENTLY-assigned
+// (high) tag despite sitting at the front, so the first message's tag could wrongly
+// exclude the genuinely-oldest message behind it. A small margin is subtracted —
+// a LOWER floor only ever loads MORE (strictly safe; never excludes an in-wire
+// tag) and absorbs near-boundary tool-result straddles and minor id reordering.
+// Deriving live every pass (not memoized) is ~K×2.8µs and is inherently
+// revert-safe: it tracks the actual post-cleanup wire with no stored state to go
+// stale. Returns 0 (today's full load) when nothing is tagged yet.
+function deriveTaggerLoadFloor(
+    messages: MessageLike[],
+    sessionId: string,
+    db: ContextDatabase,
+): number {
+    return deriveTagLoadFloor(
+        db,
+        sessionId,
+        (function* () {
+            for (const message of messages) yield message.info?.id;
+        })(),
+    );
+}
 
 /**
  * Test-only accessor that returns (and lazily creates) the per-session token
@@ -1020,6 +1054,16 @@ export function createTransform(deps: TransformDeps) {
         // pass it would have started under the event-handler flow). The
         // resolved boundary snapshot is handed through so the phase doesn't
         // re-resolve it.
+        // Tag load-scoping floor: derived once per pass from the raw wire ids and
+        // reused by the trigger's tag scans (below) AND the tagger initFromDb
+        // (later). Computed here — NOT inside the trigger from inMemoryTail —
+        // because the trigger's in-memory tail is gated on the compaction-marker
+        // anchor and bails (undefined) post-restart / during marker-drain lag;
+        // the floor only needs the leading wire ids, which are always present, so
+        // deriving it here keeps both tag scans scoped on every pass (those
+        // anchor-miss passes were the residual ~90ms full-scan regression).
+        const taggerFloor = deriveTaggerLoadFloor(messages, sessionId, db);
+
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
         if (fullFeatureMode && historianRunnable && !sessionMeta.compartmentInProgress) {
             const tTrigger = performance.now();
@@ -1042,6 +1086,7 @@ export function createTransform(deps: TransformDeps) {
                     undefined,
                     boundaryContextLimit,
                     inMemoryTail,
+                    taggerFloor,
                 );
                 if (triggerResult.shouldFire) {
                     sessionLog(
@@ -1147,7 +1192,10 @@ export function createTransform(deps: TransformDeps) {
         try {
             const t0 = performance.now();
             const tInitFromDb = performance.now();
-            deps.tagger.initFromDb(sessionId, db);
+            // taggerFloor was derived once above (before the trigger block) and is
+            // reused here so the tagger map and the trigger's tag scans scope to
+            // the identical live-wire floor.
+            deps.tagger.initFromDb(sessionId, db, taggerFloor);
             logTransformTiming(sessionId, "tag.initFromDb", tInitFromDb);
             // Skip §N§ prefix injection only when ctx_reduce is disabled (agents
             // have no tool to act on tags). Subagents DO get prefixes now — they
