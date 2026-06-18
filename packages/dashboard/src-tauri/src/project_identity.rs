@@ -16,6 +16,13 @@ fn cache() -> &'static RwLock<HashMap<PathBuf, String>> {
     IDENTITY_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Whether a `.git` exists at `canonical` (worktree dir or a gitdir file/dir).
+/// Used to invalidate a cached `dir:` fallback once a repo appears — mirrors the
+/// TS resolver's `hasGitDir` re-resolve gate.
+fn has_git_dir(canonical: &Path) -> bool {
+    canonical.join(".git").exists()
+}
+
 /// Lexically resolve `input` against `cwd`, matching Node's `path.resolve` semantics.
 ///
 /// This intentionally does not touch the filesystem: no symlink resolution, no
@@ -98,9 +105,20 @@ pub fn resolve_project_identity_strict(directory: &Path) -> Result<String, Ident
     let canonical = logical_absolute(directory, &cwd);
 
     // If the cwd itself is missing, the git spawn would also return NotFound; distinguish
-    // that from a missing git binary before classifying the spawn error.
-    if !canonical.exists() {
-        return Err(IdentityErrorClass::PathInaccessible);
+    // that from a missing git binary before classifying the spawn error. Use
+    // metadata() (not exists(), which collapses ALL errors to false): a genuine
+    // NotFound is DETERMINISTIC (cacheable dir: fallback), but a PermissionDenied/
+    // other stat error is TRANSIENT and must NOT be cached (a retry could resolve
+    // the real git: identity once access is restored).
+    match std::fs::metadata(&canonical) {
+        Ok(_) => {}
+        Err(error) => {
+            return Err(match error.kind() {
+                std::io::ErrorKind::NotFound => IdentityErrorClass::PathInaccessible,
+                std::io::ErrorKind::PermissionDenied => IdentityErrorClass::PermissionDenied,
+                _ => IdentityErrorClass::Unknown,
+            });
+        }
     }
 
     let mut child = Command::new("git")
@@ -168,7 +186,24 @@ pub fn resolve_project_identity<P: AsRef<Path>>(directory: P) -> String {
 
     if let Ok(cache) = cache().read() {
         if let Some(identity) = cache.get(&canonical) {
-            return identity.clone();
+            // Serve a cached `git:` identity directly (stable once a repo exists).
+            // A cached `dir:` FALLBACK, however, must be dropped the moment a `.git`
+            // appears, so the identity can flip to the stable `git:<root>` — the
+            // common "scratch dir later `git init` + first commit" case. Without
+            // this re-resolve gate the dashboard pins the wrong `dir:` identity for
+            // the whole process and mis-groups the project (P0: it then reads/
+            // mutates the wrong project's memories). Mirrors TS resolveProjectIdentity.
+            if identity.starts_with("git:") || !has_git_dir(&canonical) {
+                return identity.clone();
+            }
+        }
+    }
+    // Cached fallback is stale (a repo appeared) — evict before re-resolving.
+    if let Ok(mut cache) = cache().write() {
+        if let Some(identity) = cache.get(&canonical) {
+            if identity.starts_with("dir:") && has_git_dir(&canonical) {
+                cache.remove(&canonical);
+            }
         }
     }
 

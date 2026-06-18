@@ -306,3 +306,79 @@ fn cross_language_identity_parity_fixture_matches_ts_contract() {
         assert_eq!(resolve_project_identity(&case.input), case.identity);
     }
 }
+
+#[test]
+fn cached_dir_fallback_flips_to_git_after_init_and_commit() {
+    // Regression (P0): a scratch dir resolves to dir:<md5> and that fallback is
+    // cached. After `git init` + first commit, resolve_project_identity must DROP
+    // the cached fallback and re-resolve to git:<root> — not pin the stale dir:
+    // for the whole process (which would make the dashboard read/mutate the wrong
+    // project). Mirrors the TS resolver's hasGitDir re-resolve gate.
+    let _guard = env_lock().lock().expect("env lock");
+    if !git_available() {
+        return;
+    }
+    clear_cache_for_tests();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // 1. No repo yet → dir: fallback, now cached.
+    assert_eq!(
+        resolve_project_identity(dir.path()),
+        expected_dir_identity(dir.path())
+    );
+
+    // 2. git init + first commit.
+    assert!(Command::new("git")
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .expect("git init")
+        .status
+        .success());
+    std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
+    assert!(Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git add")
+        .status
+        .success());
+    assert!(Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Magic Context Test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("git commit")
+        .status
+        .success());
+
+    let expected_root = String::from_utf8(
+        Command::new("git")
+            .args(["rev-list", "--max-parents=0", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git rev-list")
+            .stdout,
+    )
+    .expect("utf8")
+    .lines()
+    .next()
+    .expect("root hash")
+    .trim()
+    .to_string();
+
+    // 3. WITHOUT clearing the cache: the stale dir: fallback must be dropped and
+    //    the real git: identity returned.
+    assert_eq!(
+        resolve_project_identity(dir.path()),
+        format!("git:{expected_root}")
+    );
+}

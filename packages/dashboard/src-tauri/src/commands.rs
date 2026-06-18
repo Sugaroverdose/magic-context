@@ -465,15 +465,15 @@ pub fn enqueue_dream(
     reason: String,
 ) -> Result<i64, String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::enqueue_dream(&conn, &project_path, &reason).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::enqueue_dream(&mut conn, &project_path, &reason).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
 pub fn delete_dream_queue_entry(state: State<'_, AppState>, id: i64) -> Result<usize, String> {
     let path = state.get_db_path()?;
-    let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
-    db::delete_dream_queue_entry(&conn, id).map_err(|e| e.to_string())
+    let mut conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
+    db::delete_dream_queue_entry(&mut conn, id).map_err(|e| e.to_string())
 }
 
 // ── Log commands ────────────────────────────────────────────
@@ -683,7 +683,10 @@ pub async fn get_available_models() -> Vec<String> {
             list.push(format!("{}\\npm\\opencode.exe", appdata));
         }
         if !localappdata.is_empty() {
-            list.push(format!("{}\\Microsoft\\WinGet\\Links\\opencode.exe", localappdata));
+            list.push(format!(
+                "{}\\Microsoft\\WinGet\\Links\\opencode.exe",
+                localappdata
+            ));
         }
         if !userprofile.is_empty() {
             list.push(format!("{}\\scoop\\shims\\opencode.exe", userprofile));
@@ -777,7 +780,10 @@ pub fn parse_pi_models_output(text: &str) -> Vec<String> {
     for raw_line in strip_ansi_pi_output(text).lines() {
         let mut line = raw_line.trim().to_string();
         if line.starts_with('•') || line.starts_with('*') || line.starts_with('-') {
-            line = line.trim_start_matches(['•', '*', '-']).trim_start().to_string();
+            line = line
+                .trim_start_matches(['•', '*', '-'])
+                .trim_start()
+                .to_string();
         }
         if line.is_empty() || line.to_ascii_lowercase().contains("usage:") {
             continue;
@@ -825,7 +831,10 @@ pub async fn get_available_pi_models() -> Vec<String> {
             list.push(format!("{}\\npm\\pi.exe", appdata));
         }
         if !localappdata.is_empty() {
-            list.push(format!("{}\\Microsoft\\WinGet\\Links\\pi.exe", localappdata));
+            list.push(format!(
+                "{}\\Microsoft\\WinGet\\Links\\pi.exe",
+                localappdata
+            ));
         }
         if !userprofile.is_empty() {
             list.push(format!("{}\\scoop\\shims\\pi.exe", userprofile));
@@ -1128,7 +1137,13 @@ mod tests {
     fn test_pick_first_line() {
         assert_eq!(pick_first_line(""), None);
         assert_eq!(pick_first_line("   \n"), None);
-        assert_eq!(pick_first_line("C:\\bin\\opencode.exe\nC:\\other\\opencode.exe"), Some("C:\\bin\\opencode.exe".to_string()));
-        assert_eq!(pick_first_line("  C:\\bin\\opencode.exe  \n"), Some("C:\\bin\\opencode.exe".to_string()));
+        assert_eq!(
+            pick_first_line("C:\\bin\\opencode.exe\nC:\\other\\opencode.exe"),
+            Some("C:\\bin\\opencode.exe".to_string())
+        );
+        assert_eq!(
+            pick_first_line("  C:\\bin\\opencode.exe  \n"),
+            Some("C:\\bin\\opencode.exe".to_string())
+        );
     }
 }

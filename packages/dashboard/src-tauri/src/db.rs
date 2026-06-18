@@ -120,7 +120,14 @@ pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
 
 /// Opens a read-write connection for write operations (memory edits, queue entries).
 pub fn open_readwrite(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
-    let conn = Connection::open(path)?;
+    // READ_WRITE WITHOUT CREATE: if the DB file vanished after startup,
+    // Connection::open would CREATE an empty SQLite file — violating the
+    // "dashboard never owns the schema" boundary. The plugin owns DB lifecycle;
+    // a missing file should error, not silently spawn a blank DB.
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     // busy_timeout MUST come before journal_mode=WAL: setting WAL can itself need
     // the file lock, and with the timeout installed last a cold-open under
     // contention fails immediately with SQLITE_BUSY instead of waiting.
@@ -2728,6 +2735,18 @@ pub fn update_memory_status(
     memory_id: i64,
     new_status: &str,
 ) -> Result<(), rusqlite::Error> {
+    // Reject any status outside the canonical set before touching the DB. A
+    // malformed call setting status="archive" (vs "archived") or any free string
+    // would make the memory vanish from active/permanent/archived logic with no
+    // valid epoch/delta interpretation.
+    if !matches!(new_status, "active" | "permanent" | "archived") {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+            Some(format!(
+                "Invalid memory status '{new_status}' (expected active, permanent, or archived)."
+            )),
+        ));
+    }
     // Phase A: resolve the target row before opening a write transaction.
     let target = lookup_memory_mutation_target(conn, memory_id)?;
     // Any transition that CHANGES which memories enter or how they rank in the
@@ -2893,7 +2912,12 @@ pub fn update_memory_category(
             "SELECT id FROM memories
              WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3 AND id != ?4
              LIMIT 1",
-            params![target.project_path, new_category, normalized_hash, memory_id],
+            params![
+                target.project_path,
+                new_category,
+                normalized_hash,
+                memory_id
+            ],
             |row| row.get(0),
         )
         .optional()?;
@@ -3198,7 +3222,11 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         let last_activity_ms: i64 = row.get(5)?;
         // Prefer the session's real directory; fall back to the project worktree
         // only when the session row has no directory (legacy rows).
-        let effective_dir = if directory.is_empty() { &worktree } else { &directory };
+        let effective_dir = if directory.is_empty() {
+            &worktree
+        } else {
+            &directory
+        };
         let identity = resolve_project_identity(effective_dir);
         let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false);
         // Friendly label: the named project wins; otherwise the directory's
@@ -3459,6 +3487,7 @@ pub fn get_opencode_session_detail(
     let oc_conn = open_readonly(&opencode_db_path)?;
     let row = oc_conn.query_row(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
+                COALESCE(s.directory, ''),
                 COALESCE(json_object('id', s.id, 'title', s.title, 'directory', s.directory), '{}')
          FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
         [session_id],
@@ -3469,11 +3498,21 @@ pub fn get_opencode_session_detail(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         },
     );
-    let Ok((session_id, title, project_name, worktree, data_json)) = row else {
+    let Ok((session_id, title, project_name, worktree, directory, data_json)) = row else {
         return Ok(None);
+    };
+    // Prefer s.directory over p.worktree for identity/display: OpenCode buckets
+    // git-repo sessions that had no remote/commit at creation under the `global`
+    // project (worktree "/"), and the plugin keys identity off session.directory —
+    // using worktree here would mis-resolve and show "/". Worktree is the fallback.
+    let effective_dir = if directory.is_empty() {
+        worktree.clone()
+    } else {
+        directory
     };
 
     // Cheap row counts for badge rendering. Both are O(rows-in-session) at
@@ -3522,13 +3561,13 @@ pub fn get_opencode_session_detail(
         harness: Harness::Opencode,
         session_id,
         title,
-        project_identity: resolve_project_identity(&worktree),
+        project_identity: resolve_project_identity(&effective_dir),
         project_display: if project_name.is_empty() {
-            basename(&worktree)
+            basename(&effective_dir)
         } else {
             project_name
         },
-        project_path: (!worktree.is_empty()).then_some(worktree),
+        project_path: (!effective_dir.is_empty()).then_some(effective_dir),
         opencode_session_json: serde_json::from_str(&data_json).ok(),
         pi_jsonl_path: None,
         messages_count,
@@ -4377,7 +4416,7 @@ pub fn get_dream_runs(
 }
 
 pub fn enqueue_dream(
-    conn: &Connection,
+    conn: &mut Connection,
     project_path: &str,
     reason: &str,
 ) -> Result<i64, rusqlite::Error> {
@@ -4386,8 +4425,13 @@ pub fn enqueue_dream(
     // clicks pile up duplicate rows that a single identity-filtered host drains one
     // at a time. project_path is the resolved identity (the UI passes git:/dir:),
     // matching how hosts dequeue — a raw path would never be drained.
+    //
+    // The check + insert run under BEGIN IMMEDIATE: dream_queue has no UNIQUE on
+    // project_path, so a DEFERRED check-then-insert lets two concurrent clicks both
+    // pass the SELECT and insert duplicates. The writer lock serializes them.
     let identity = normalize_stored_project_path(project_path);
-    let existing: Option<i64> = conn
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing: Option<i64> = tx
         .query_row(
             "SELECT id FROM dream_queue WHERE project_path = ?1 LIMIT 1",
             rusqlite::params![identity],
@@ -4395,14 +4439,17 @@ pub fn enqueue_dream(
         )
         .optional()?;
     if let Some(id) = existing {
+        tx.commit()?;
         return Ok(id);
     }
     let now = chrono::Utc::now().timestamp_millis();
-    conn.execute(
+    tx.execute(
         "INSERT INTO dream_queue (project_path, reason, enqueued_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![identity, reason, now],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    tx.commit()?;
+    Ok(id)
 }
 
 /// Delete a single dream-queue entry by id. Used to clear stale entries for
@@ -4410,11 +4457,14 @@ pub fn enqueue_dream(
 /// that is not currently loaded by any OpenCode/Pi host, so nothing ever
 /// dequeues it). Returns the number of rows removed (0 if the id was already
 /// gone — e.g. a runner picked it up between the list read and this call).
-pub fn delete_dream_queue_entry(conn: &Connection, id: i64) -> Result<usize, rusqlite::Error> {
-    conn.execute(
+pub fn delete_dream_queue_entry(conn: &mut Connection, id: i64) -> Result<usize, rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let removed = tx.execute(
         "DELETE FROM dream_queue WHERE id = ?1",
         rusqlite::params![id],
-    )
+    )?;
+    tx.commit()?;
+    Ok(removed)
 }
 
 // ── User Memory types ───────────────────────────────────────
@@ -6052,7 +6102,10 @@ mod memory_project_filter_tests {
 
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].identity, "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321");
+        assert_eq!(
+            rows[0].identity,
+            "dir:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+        );
         assert_eq!(rows[0].display_name, "dir:fedcba0987…");
         assert_eq!(rows[1].identity, "git:abc1234567890abcdef");
         assert_eq!(rows[1].display_name, "git:abc1234567…");
