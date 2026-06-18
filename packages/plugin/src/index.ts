@@ -542,6 +542,10 @@ const plugin: Plugin = async (ctx) => {
 
             config.command = commandConfig;
             // Extract only agent-override fields (not scheduling fields) for agent registration
+            // thinking_level is stripped from every hidden agent's overrides: it
+            // is Pi-only (passed as --thinking to the Pi subprocess) and is not a
+            // valid OpenCode agent config field, so leaking it puts an unknown key
+            // on the OpenCode agent config.
             const dreamerAgentOverrides = pluginConfig.dreamer
                 ? (() => {
                       const {
@@ -549,6 +553,7 @@ const plugin: Plugin = async (ctx) => {
                           max_runtime_minutes: _max,
                           tasks: _tasks,
                           task_timeout_minutes: _tto,
+                          thinking_level: _thinkingLevel,
                           ...agentOverrides
                       } = pluginConfig.dreamer;
                       return agentOverrides;
@@ -559,21 +564,25 @@ const plugin: Plugin = async (ctx) => {
                       const {
                           timeout_ms: _timeoutMs,
                           system_prompt: _systemPrompt,
+                          thinking_level: _thinkingLevel,
                           ...agentOverrides
                       } = pluginConfig.sidekick;
                       return agentOverrides;
                   })()
                 : undefined;
-            // Strip two_pass + disallowed_tools from historian overrides —
-            // two_pass is consumed by the runner, disallowed_tools is consumed
-            // below to build the permission map. Neither is a valid OpenCode
-            // agent config field. Both historian and historian-editor agents use
+            // Strip two_pass + disallowed_tools + thinking_level from historian
+            // overrides — two_pass is consumed by the runner, disallowed_tools is
+            // consumed below to build the permission map, thinking_level is Pi-only
+            // (passed as --thinking to the Pi subprocess). None is a valid OpenCode
+            // agent config field, so leaking them in would put unknown keys on the
+            // OpenCode agent config. Both historian and historian-editor agents use
             // the remaining overrides (same model, fallbacks, etc.).
             const historianAgentOverrides = pluginConfig.historian
                 ? (() => {
                       const {
                           two_pass: _twoPass,
                           disallowed_tools: _disallowedTools,
+                          thinking_level: _thinkingLevel,
                           ...agentOverrides
                       } = pluginConfig.historian;
                       return agentOverrides;
