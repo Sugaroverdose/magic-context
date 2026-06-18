@@ -214,6 +214,43 @@ describe("deriveTagLoadFloor", () => {
         expect(deriveTagLoadFloor(db, s, [null, undefined, "", "msg_a"])).toBe(0);
         expect(deriveTagLoadFloor(db, s, ["msg_untagged"])).toBe(0);
     });
+
+    it("scans PAST tagless leaders (ghost/tool-only) to the first real :p tag", () => {
+        // Reproduces the live regression: after a compaction marker the wire head
+        // is a run of tool-only / tagless ghost messages with NO :p/:file tag, so
+        // the old 8-id-probe MIN exhausted on NULLs → floor 0 → full scan.
+        const s = "ses-1";
+        // 3 tagless leaders (no message/file tag), then the first real one at 9000.
+        insertMessageTag(db, s, "msg_real:p0", 9000);
+        const floor = deriveTagLoadFloor(db, s, [
+            "msg_ghost1",
+            "msg_tool2",
+            "msg_tool3",
+            "msg_real",
+        ]);
+        // Resolves (not 0). Base margin 256 + 3 skipped * 64 = 448 → 9000 - 448.
+        expect(floor).toBe(9000 - (256 + 3 * 64));
+    });
+
+    it("widens the margin per skipped leader so skipped tool tags stay included", () => {
+        const s = "ses-1";
+        // One skipped leader → margin 256 + 64 = 320.
+        insertMessageTag(db, s, "msg_real:p0", 1000);
+        expect(deriveTagLoadFloor(db, s, ["msg_ghost", "msg_real"])).toBe(1000 - 320);
+        // Zero skipped (first id resolves) → base margin only.
+        expect(deriveTagLoadFloor(db, s, ["msg_real"])).toBe(1000 - 256);
+    });
+
+    it("stops at MAX_PROBES on a fully-tagless head → floor 0 (full-scan fallback)", () => {
+        const s = "ses-1";
+        // A real tag exists but only PAST the probe cap; 100 tagless leaders first.
+        insertMessageTag(db, s, "msg_real:p0", 5000);
+        const head: string[] = [];
+        for (let i = 0; i < 100; i++) head.push(`msg_ghost${i}`);
+        head.push("msg_real");
+        // The first 64 probes are all NULL → break before reaching msg_real → 0.
+        expect(deriveTagLoadFloor(db, s, head)).toBe(0);
+    });
 });
 
 describe("scoped tag-token scans (boundary + trigger pre-gate)", () => {

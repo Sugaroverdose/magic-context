@@ -928,21 +928,41 @@ export function getMinMessageTagNumberForRawId(
     return isMinTagNumberRow(row) && typeof row.m === "number" ? row.m : null;
 }
 
-// Number of leading wire messages probed to derive the load-scoping floor, and
-// the margin subtracted from the resulting min tag number. A LOWER floor only
-// ever loads MORE tags (strictly safe — it can never exclude an in-wire tag);
-// the margin absorbs a tagged leading compaction-summary, near-boundary tool
-// straddles, and minor reordering at the wire head.
-export const TAGGER_FLOOR_SCAN_MESSAGES = 8;
+// Floor derivation tunables. A LOWER floor only ever loads MORE tags (strictly
+// safe — it can never exclude an in-wire tag); the margin absorbs a tagged
+// leading compaction-summary, near-boundary tool straddles, and reordering at
+// the wire head.
+//   SCAN_HITS    — stop once this many leading messages RESOLVE to a real tag
+//                  (we MIN across them to absorb head reordering).
+//   MAX_PROBES   — hard cap on probes so a fully-ghost/tool-only head can't make
+//                  us scan the whole wire; exhausting it → floor 0 (full scan).
+//   SAFETY_MARGIN     — base margin subtracted from the resolved min.
+//   PER_SKIP_MARGIN   — extra margin per LEADER SKIPPED before the first hit.
+export const TAGGER_FLOOR_SCAN_MESSAGES = 8; // SCAN_HITS
+export const TAGGER_FLOOR_MAX_PROBES = 64;
 export const TAGGER_FLOOR_SAFETY_MARGIN = 256;
+export const TAGGER_FLOOR_PER_SKIP_MARGIN = 64;
 
 /**
  * Derive the tagger/scan load-scoping floor from the leading wire message ids:
- * the minimum message/file tag number across the first
- * `TAGGER_FLOOR_SCAN_MESSAGES` id-bearing ids, minus `TAGGER_FLOOR_SAFETY_MARGIN`
- * (clamped to 0). Shared by the tagger's `initFromDb` and the compartment
- * trigger's tag scans so both scope to the same live-wire range. Returns 0 when
- * nothing is tagged yet → callers fall back to the full-session scan.
+ * roughly the minimum message/file tag number across the leading messages,
+ * minus a safety margin (clamped to 0). Shared by the tagger's `initFromDb` and
+ * the compartment trigger's tag scans so both scope to the same live-wire range.
+ * Returns 0 when nothing resolves → callers fall back to the full-session scan.
+ *
+ * `getMinMessageTagNumberForRawId` matches ONLY a message's `:p`/`:file` tags,
+ * never its tool tags (those key on the callId). So the wire head — which after
+ * a compaction marker is frequently a run of tool-only assistant turns and/or
+ * tagless ghost/synthetic leaders — returns all-NULL. The old code capped at the
+ * first 8 ID-BEARING probes and took their MIN, so such a head exhausted the
+ * budget on NULLs → Infinity → floor 0 → the full ~100k-tag scan we are trying
+ * to avoid (the live ~66ms compartmentTrigger oscillation).
+ *
+ * Fix: keep probing PAST NULL leaders until SCAN_HITS messages resolve (bounded
+ * by MAX_PROBES). A skipped tool-only leader's tool tags sit just BELOW the
+ * first `:p` tag we land on, so we widen the margin by PER_SKIP_MARGIN for every
+ * leader skipped before the first hit — the floor still only ever errs LOWER
+ * (loads a few extra tags), never higher (never drops a live-wire tag).
  */
 export function deriveTagLoadFloor(
     db: Database,
@@ -950,15 +970,25 @@ export function deriveTagLoadFloor(
     rawIds: Iterable<string | null | undefined>,
 ): number {
     let min = Number.POSITIVE_INFINITY;
-    let scanned = 0;
+    let probes = 0;
+    let hits = 0;
+    let skippedBeforeFirstHit = 0;
     for (const rawId of rawIds) {
         if (typeof rawId !== "string" || rawId.length === 0) continue;
+        if (probes >= TAGGER_FLOOR_MAX_PROBES) break;
+        probes++;
         const m = getMinMessageTagNumberForRawId(db, sessionId, rawId);
-        if (m !== null && m < min) min = m;
-        if (++scanned >= TAGGER_FLOOR_SCAN_MESSAGES) break;
+        if (m === null) {
+            if (hits === 0) skippedBeforeFirstHit++;
+            continue;
+        }
+        if (m < min) min = m;
+        if (++hits >= TAGGER_FLOOR_SCAN_MESSAGES) break;
     }
     if (!Number.isFinite(min)) return 0;
-    return Math.max(0, min - TAGGER_FLOOR_SAFETY_MARGIN);
+    const margin =
+        TAGGER_FLOOR_SAFETY_MARGIN + skippedBeforeFirstHit * TAGGER_FLOOR_PER_SKIP_MARGIN;
+    return Math.max(0, min - margin);
 }
 
 // Single source-of-truth column list for SELECTs that produce TagEntry.

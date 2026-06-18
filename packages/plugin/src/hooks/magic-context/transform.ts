@@ -1063,6 +1063,17 @@ export function createTransform(deps: TransformDeps) {
         // deriving it here keeps both tag scans scoped on every pass (those
         // anchor-miss passes were the residual ~90ms full-scan regression).
         const taggerFloor = deriveTaggerLoadFloor(messages, sessionId, db);
+        // floor 0 = no leading wire message resolved to a tag → BOTH tag scans
+        // (tagger initFromDb + the trigger's token scans) fall back to the full
+        // ~O(session) load. On a large session that's the ~70ms compartmentTrigger
+        // we are trying to avoid, so surface it as a one-line health signal rather
+        // than letting it hide as silent latency.
+        if (taggerFloor === 0 && messages.length > 0) {
+            sessionLog(
+                sessionId,
+                `tag floor: 0 (full-scan fallback) — no leading wire message resolved a tag across ${messages.length} msgs`,
+            );
+        }
 
         let triggerBoundarySnapshot: ProtectedTailBoundarySnapshot | undefined;
         if (fullFeatureMode && historianRunnable && !sessionMeta.compartmentInProgress) {
