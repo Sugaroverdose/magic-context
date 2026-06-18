@@ -32,9 +32,32 @@ describe("pruneNestedConfigLeaf", () => {
         expect(block.git_commit_indexing).toEqual({ enabled: false, since_days: 99999 });
     });
 
-    it("returns null when an intermediate path segment is not an object", () => {
-        const block = { git_commit_indexing: true };
-        expect(pruneNestedConfigLeaf(block, ["git_commit_indexing", "since_days"])).toBeNull();
+    it("prunes the owning field when an intermediate segment is not an object", () => {
+        // The path descends into a non-object (here `git_commit_indexing` is a
+        // bare bool, not a block). We can't reach `since_days`, but we prune the
+        // owning field so it falls back to its default — NOT collapse to all
+        // defaults (which dropping to null upstream would cause).
+        const block = { git_commit_indexing: true, keep_me: { enabled: false } };
+        const result = pruneNestedConfigLeaf(block, ["git_commit_indexing", "since_days"]);
+        expect(result).not.toBeNull();
+        expect(result?.removed).toBe("git_commit_indexing");
+        expect(result?.block).toEqual({ keep_me: { enabled: false } });
+    });
+
+    it("prunes an invalid array-element leaf to its owning field", () => {
+        // system_prompt_injection.skip_signatures[0] invalid → Zod path descends
+        // into the array. Prune skip_signatures (→ default), keep siblings.
+        const block = {
+            system_prompt_injection: { enabled: true, skip_signatures: [123] },
+        };
+        const result = pruneNestedConfigLeaf(block, [
+            "system_prompt_injection",
+            "skip_signatures",
+            0,
+        ]);
+        expect(result).not.toBeNull();
+        expect(result?.removed).toBe("system_prompt_injection.skip_signatures");
+        expect(result?.block).toEqual({ system_prompt_injection: { enabled: true } });
     });
 
     it("returns null when the leaf is absent", () => {

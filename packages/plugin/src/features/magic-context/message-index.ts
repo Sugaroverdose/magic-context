@@ -188,9 +188,29 @@ function indexSingleMessageInTransaction(
 }
 
 export function indexSingleMessage(db: Database, sessionId: string, message: RawMessage): boolean {
-    return db.transaction(() =>
-        indexSingleMessageInTransaction(db, sessionId, message, Date.now()),
-    )();
+    // BEGIN IMMEDIATE (not a deferred db.transaction): message_history_fts is a
+    // plain FTS5 table with NO UNIQUE constraint, and the dedup is the
+    // isMessageAlreadyIndexed SELECT inside the body. Under a DEFERRED transaction
+    // two processes handling the same terminal message.updated can both pass that
+    // SELECT before either inserts → duplicate FTS rows. Taking the writer lock up
+    // front serializes them, so the second's in-lock re-check sees the first's
+    // insert and skips. Mirrors indexMessagesAfterOrdinal.
+    db.exec("BEGIN IMMEDIATE");
+    let committed = false;
+    try {
+        const result = indexSingleMessageInTransaction(db, sessionId, message, Date.now());
+        db.exec("COMMIT");
+        committed = true;
+        return result;
+    } finally {
+        if (!committed) {
+            try {
+                db.exec("ROLLBACK");
+            } catch {
+                // already closed by an earlier failure
+            }
+        }
+    }
 }
 
 export function indexMessagesAfterOrdinal(

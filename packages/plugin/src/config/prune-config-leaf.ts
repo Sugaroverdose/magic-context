@@ -39,7 +39,23 @@ export function pruneNestedConfigLeaf(
     for (let i = 0; i < relativePath.length - 1; i++) {
         const seg = String(relativePath[i]);
         const child = cursor[seg];
-        if (!isPlainObject(child)) return null;
+        if (!isPlainObject(child)) {
+            // The path descends into a non-object (e.g. an ARRAY element, like an
+            // invalid `system_prompt_injection.skip_signatures[0]`). We can't reach
+            // the deeper leaf — but we CAN prune the nearest OWNING field (the
+            // array/primitive at `seg`) so it falls back to its schema default,
+            // preserving valid siblings. Without this we'd return null → the whole
+            // config collapses to all-defaults, dropping unrelated user settings.
+            if (!(seg in cursor)) return null;
+            delete cursor[seg];
+            return {
+                block: result,
+                removed: relativePath
+                    .slice(0, i + 1)
+                    .map(String)
+                    .join("."),
+            };
+        }
         const clonedChild: Record<string, unknown> = { ...child };
         cursor[seg] = clonedChild;
         cursor = clonedChild;

@@ -55,6 +55,7 @@ interface MessageSearchRow {
 }
 
 const messageSearchStatements = new WeakMap<Database, PreparedStatement>();
+const messageSearchStatementsWithCutoff = new WeakMap<Database, PreparedStatement>();
 
 export type SearchSource = "memory" | "message" | "git_commit";
 
@@ -247,6 +248,25 @@ function getMessageSearchStatement(db: Database): PreparedStatement {
             "SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE session_id = ? AND message_history_fts MATCH ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?",
         );
         messageSearchStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+/**
+ * Cutoff-aware variant: filters `message_ordinal <= cutoff` IN SQL, BEFORE the
+ * LIMIT. The JS-side post-filter in runMessageFtsQuery applies the cutoff AFTER
+ * fetching `LIMIT` rows, so when the top-ranked rows are all live-tail (above the
+ * cutoff) they're fetched-then-discarded and older eligible hits below the limit
+ * are never seen — explicit ctx_search could then return nothing. Pushing the
+ * predicate into SQL makes LIMIT count only already-eligible rows.
+ */
+function getMessageSearchStatementWithCutoff(db: Database): PreparedStatement {
+    let stmt = messageSearchStatementsWithCutoff.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT message_ordinal AS messageOrdinal, message_id AS messageId, role, content FROM message_history_fts WHERE session_id = ? AND message_history_fts MATCH ? AND CAST(message_ordinal AS INTEGER) <= ? ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC LIMIT ?",
+        );
+        messageSearchStatementsWithCutoff.set(db, stmt);
     }
     return stmt;
 }
@@ -614,9 +634,13 @@ function runMessageFtsQuery(
     cutoff: number | null,
 ): NormalizedMessageRow[] {
     if (ftsQuery.length === 0) return [];
-    const rows = getMessageSearchStatement(db)
-        .all(sessionId, ftsQuery, fetchLimit)
-        .map((row) => row as MessageSearchRow);
+    // Apply the ordinal cutoff IN SQL (before LIMIT) so live-tail matches can't
+    // crowd out older eligible hits; null cutoff keeps the original statement.
+    const rows = (
+        cutoff !== null
+            ? getMessageSearchStatementWithCutoff(db).all(sessionId, ftsQuery, cutoff, fetchLimit)
+            : getMessageSearchStatement(db).all(sessionId, ftsQuery, fetchLimit)
+    ).map((row) => row as MessageSearchRow);
 
     const result: NormalizedMessageRow[] = [];
     for (const row of rows) {
@@ -629,7 +653,8 @@ function runMessageFtsQuery(
         ) {
             continue;
         }
-        // Skip messages still in the live context (not yet compartmentalized).
+        // Defense-in-depth: the SQL cutoff above already excluded these, but keep
+        // the guard so a future caller that skips the cutoff statement stays safe.
         if (cutoff !== null && messageOrdinal > cutoff) {
             continue;
         }

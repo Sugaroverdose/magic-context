@@ -24,6 +24,7 @@ import {
     hasPiMagicContextPackage,
     isPiMagicContextPackageEntry,
 } from "./pi-package-entry";
+import { redactSecretText } from "./redaction";
 
 export interface PiConfigDiagnostic {
     path: string;
@@ -162,7 +163,13 @@ function currentUserHash(): string {
 }
 
 function redactSecretString(value: string): string {
-    return value
+    // Apply the shared comprehensive redactor (OpenCode parity: adds
+    // github_pat_/ghp_/hf_/AKIA/Slack/Google/JWT and generic key=value forms that
+    // the bespoke version leaked) AND then the original looser patterns as a
+    // SUPERSET — the shared `sk-` pattern requires 32+ chars (real key length),
+    // so keep the looser `sk-{12,}` here too so short/synthetic sk- tokens are
+    // still caught. Redaction is safer over-broad than under.
+    return redactSecretText(value)
         .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
         .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
         .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")

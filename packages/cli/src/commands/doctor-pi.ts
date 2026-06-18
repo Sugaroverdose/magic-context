@@ -11,7 +11,10 @@ import {
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-
+import {
+    dropInheritedEmbeddingKeyOnRedirect,
+    stripUnsafeProjectConfigFields,
+} from "@magic-context/core/config/project-security";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import {
@@ -48,6 +51,7 @@ import {
     isPiMagicContextPackageEntry,
 } from "../lib/pi-package-entry";
 import { type PromptIO, promptIO } from "../lib/prompts";
+import { sanitizeDiagnosticText } from "../lib/redaction";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import { writePiSettingsPackage } from "./setup-pi";
 
@@ -264,13 +268,21 @@ function projectConfigPath(cwd: string): string {
     return join(cwd, ".pi", "magic-context.jsonc");
 }
 
-function readConfigForEmbedding(path: string): Record<string, unknown> | null {
+function readConfigForEmbedding(
+    path: string,
+    isProjectConfig: boolean,
+): Record<string, unknown> | null {
     if (!existsSync(path)) return null;
     try {
         const rawText = readFileSync(path, "utf-8");
+        // SECURITY: project-level config must NOT expand {env:}/{file:} tokens —
+        // a malicious repo could otherwise resolve {env:ANTHROPIC_API_KEY} into a
+        // field we then send to a repo-chosen endpoint. Mirror the runtime loader
+        // (isProjectConfig leaves tokens literal for project config).
         const substituted = substituteConfigVariables({
             text: rawText,
             configPath: path,
+            isProjectConfig,
         });
         return parseJsonc(substituted.text) as Record<string, unknown>;
     } catch {
@@ -579,15 +591,32 @@ async function runHealthChecks(options: {
         options.deps.closeDatabase();
     }
 
-    const embeddingConfigs = [userConfigPath, projectPath]
-        .map(readConfigForEmbedding)
-        .filter((config): config is Record<string, unknown> => config !== null);
+    // Read user config (tokens expand) and project config (tokens stay literal —
+    // secret boundary) separately so we can apply the same redirect-drop the
+    // runtime loader does: if the PROJECT redirects embedding.endpoint without its
+    // own api_key, the inherited USER api_key must NOT be merged in (it would be
+    // sent to the repo-chosen endpoint — exfiltration).
+    const userRaw = readConfigForEmbedding(userConfigPath, false);
+    const projectRaw = readConfigForEmbedding(projectPath, true);
+    if (projectRaw) {
+        // Strip project-config fields that must never come from a repo (agent
+        // prompts, sqlite.*, etc.) before they can influence the probe.
+        stripUnsafeProjectConfigFields(projectRaw);
+    }
     const mergedEmbedding: Record<string, unknown> = {};
-    for (const config of embeddingConfigs) {
-        const embedding = config.embedding;
+    for (const config of [userRaw, projectRaw]) {
+        const embedding = config?.embedding;
         if (embedding && typeof embedding === "object" && !Array.isArray(embedding)) {
             Object.assign(mergedEmbedding, embedding);
         }
+    }
+    // Drop the inherited user api_key if the project redirected the endpoint.
+    if (projectRaw) {
+        dropInheritedEmbeddingKeyOnRedirect(
+            projectRaw,
+            { embedding: mergedEmbedding },
+            userRaw ?? undefined,
+        );
     }
     if (mergedEmbedding.provider === "openai-compatible") {
         const endpoint =
@@ -715,7 +744,14 @@ async function runHealthChecks(options: {
             .map((line) => line.trim())
             .filter(Boolean);
         add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
-        add(results, "info", `Last plugin log line: ${lines.at(-1) ?? "<empty log>"}`);
+        // Sanitize before printing — a raw log line can carry a secret/path the
+        // user then pastes into a public issue.
+        const lastLine = lines.at(-1);
+        add(
+            results,
+            "info",
+            `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
+        );
     } else {
         add(results, "info", `No plugin log file yet at ${logPath}`);
     }
