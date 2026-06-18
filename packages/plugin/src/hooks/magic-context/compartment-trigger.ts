@@ -86,14 +86,37 @@ function tagOwnerMessageId(row: {
     return row.message_id.replace(CONTENT_TAG_OWNER_SUFFIX, "");
 }
 
-function getActiveOrDroppedTagOwnerMessageIds(db: Database, sessionId: string): Set<string> {
-    const rows = db
-        .prepare(
-            `SELECT type, message_id, tool_owner_message_id
-             FROM tags
-             WHERE session_id = ? AND status IN ('active', 'dropped')`,
-        )
-        .all(sessionId) as Array<{
+function getActiveOrDroppedTagOwnerMessageIds(
+    db: Database,
+    sessionId: string,
+    floor = 0,
+): Set<string> {
+    // floor > 0 (OpenCode) scopes to the live-wire range (tag_number >= floor) —
+    // the same scoping the other two cheap-gate tag scans use. This set is only
+    // consumed to mark which IN-MEMORY TAIL messages are already tag-covered (so
+    // the cheap-gate's per-message estimate charges only uncovered ones). Every
+    // in-memory tail message is at/after the floor by construction, so a tag
+    // below the floor could never cover a tail message anyway — scoping shrinks
+    // the set to the live wire with an identical loop result, while avoiding the
+    // full-session tag scan (~64-72ms on a 100k-tag session, the residual
+    // compartmentTrigger cost). floor=0 (Pi / no-floor) keeps the full scan.
+    const rows = (
+        floor > 0
+            ? db
+                  .prepare(
+                      `SELECT type, message_id, tool_owner_message_id
+                       FROM tags
+                       WHERE session_id = ? AND status IN ('active', 'dropped') AND tag_number >= ?`,
+                  )
+                  .all(sessionId, floor)
+            : db
+                  .prepare(
+                      `SELECT type, message_id, tool_owner_message_id
+                       FROM tags
+                       WHERE session_id = ? AND status IN ('active', 'dropped')`,
+                  )
+                  .all(sessionId)
+    ) as Array<{
         type: string;
         message_id: string;
         tool_owner_message_id: string | null;
@@ -107,9 +130,14 @@ function estimateUntaggedInMemoryTailUpperBound(
     db: Database,
     sessionId: string,
     inMemoryTail: InMemoryTailSource,
+    taggerFloor = 0,
 ): number {
     const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-    const coveredOwnerMessageIds = getActiveOrDroppedTagOwnerMessageIds(db, sessionId);
+    const coveredOwnerMessageIds = getActiveOrDroppedTagOwnerMessageIds(
+        db,
+        sessionId,
+        taggerFloor,
+    );
     let total = 0;
     for (const message of inMemoryTail.messages) {
         // The anchored in-memory tail includes the last compartment boundary row
@@ -472,7 +500,12 @@ export function checkCompartmentTrigger(
             );
             if (nullCount === 0) {
                 const untaggedUpperBound = inMemoryTail
-                    ? estimateUntaggedInMemoryTailUpperBound(db, sessionId, inMemoryTail)
+                    ? estimateUntaggedInMemoryTailUpperBound(
+                          db,
+                          sessionId,
+                          inMemoryTail,
+                          taggerFloor,
+                      )
                     : 0;
                 const eligibleUpperBound = persistedBound + untaggedUpperBound;
                 // Smallest token floor any size trigger needs is triggerBudget
