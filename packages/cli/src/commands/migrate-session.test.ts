@@ -409,4 +409,47 @@ describe("applyMigrateSession — memory actions", () => {
             ).c,
         ).toBe(1);
     });
+
+    it("move collision: source embedding is preserved on the surviving target (no silent loss)", () => {
+        const { oc, ctx } = setup();
+        // FROM row HAS an embedding; the equivalent TO row does NOT.
+        insertMemory(ctx, FROM, SID, { category: "NAMING", content: "dup", withEmbedding: true });
+        const targetId = Number(
+            (
+                ctx
+                    .prepare(
+                        `INSERT INTO memories (project_path, category, content, normalized_hash, importance, source_session_id, seen_count, status, created_at)
+                         VALUES (?, 'NAMING', 'dup', ?, 50, NULL, 1, 'active', 0) RETURNING id`,
+                    )
+                    .get(TO, `hash-${hashCounter}`) as { id: number }
+            ).id,
+        );
+        const plan = planMigrateSession(SID, "/home/u/benchmarks", makeDeps(oc, ctx));
+        const res = applyMigrateSession(plan, "move-originated", makeDeps(oc, ctx));
+        expect(res.memoriesMerged).toBe(1);
+        // The surviving target row must now carry an embedding adopted from the
+        // deleted source — without the transfer the FK-cascade would lose it.
+        expect(
+            (
+                ctx
+                    .prepare("SELECT COUNT(*) AS c FROM memory_embeddings WHERE memory_id = ?")
+                    .get(targetId) as { c: number }
+            ).c,
+        ).toBe(1);
+    });
+
+    it("compensates the OpenCode move when the context.db transaction fails (no split-brain)", () => {
+        const { oc, ctx } = setup();
+        // Force the context.db transaction to throw AFTER the OpenCode commit by
+        // dropping a table its transaction writes to.
+        ctx.exec("DROP TABLE compartment_chunk_embeddings");
+        const plan = planMigrateSession(SID, "/home/u/benchmarks", makeDeps(oc, ctx));
+        expect(() => applyMigrateSession(plan, "leave", makeDeps(oc, ctx))).toThrow();
+        // OpenCode must be restored to its pre-migration values.
+        const session = oc
+            .prepare("SELECT directory, project_id FROM session WHERE id = ?")
+            .get(SID) as { directory: string; project_id: string };
+        expect(session.directory).toBe("/old/dir");
+        expect(session.project_id).toBe("global");
+    });
 });

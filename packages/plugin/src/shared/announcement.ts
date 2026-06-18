@@ -23,18 +23,18 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.25.0";
+export const ANNOUNCEMENT_VERSION = "0.26.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Old tool output is now reclaimed automatically: once a file read / search / command output has gone a full execute cycle unused, it's dropped on the next one — no need to call ctx_reduce for stale results.",
-    "Recover anything that was dropped: ctx_expand({ message: N }) returns a dropped message's full content (every tool call's input + output) from storage. ctx_expand({ start, end, verbose: true }) lists a range message-by-message to find it.",
-    "Searchable history made reliable: /ctx-embed shows embedding coverage and runs a resilient backfill (retries transient failures, no longer bails on the first hiccup); the active session now auto-embeds in the background. ctx_reduce guidance also reframed as deferred + recoverable so models trim spent output earlier.",
-    "Pi: fixed /ctx-dream (was failing with 'Unknown named parameter') and local-embedding load failures on Windows/Desktop (#151, #128).",
-    "Runaway background agents on weak/local models are now capped and force-stopped (#154, #152). Plus several prompt-cache busts removed.",
+    "Faster on large sessions: per-message transform overhead is at least 2x lower on typical passes and up to ~10x lower when history summarization fires (no more multi-second pause on big sessions).",
+    "No more surprise models: the built-in fallback chain is gone. Hidden agents only use the model (and fallback_models) you configure — no confusing 'model not found' for providers you never set up. `doctor` now records every historian run so real failures are visible.",
+    "Anthropic thinking-block fix: clearing old reasoning no longer risks a stale-signature rejection on Claude / Bedrock / proxied-Claude routes. Plus fewer prompt-cache busts.",
+    "Community fixes: TUI crash on the upgrade progress panel (#168), historian.disallowed_tools for weak models that loop on tool calls (#166), and a Pi-only config key leak (#167).",
+    "New: doctor migrate-session re-homes a session (and optionally its memories) to another project, with a dry-run preview.",
 ];
 
 /**

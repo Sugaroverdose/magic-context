@@ -231,6 +231,16 @@ export function applyMigrateSession(
         sets.push("workspace_id = ?");
         params.push(null);
     }
+    // The two databases are separate files, so a single ACID transaction across
+    // them is impossible. To avoid a split-brain (OpenCode moved, context.db not),
+    // capture the session's PRIOR column values now; if the (larger, second)
+    // context.db transaction fails, we compensate by restoring OpenCode to these
+    // values so the user is never left half-migrated.
+    const restoreCols = ["directory", ...sets.map((s) => s.split(" = ")[0]).slice(1)];
+    const priorRow = deps.opencodeDb
+        .prepare(`SELECT ${restoreCols.join(", ")} FROM session WHERE id = ?`)
+        .get(plan.sessionId) as Record<string, string | null> | undefined;
+
     deps.opencodeDb.exec("BEGIN IMMEDIATE");
     try {
         deps.opencodeDb
@@ -241,6 +251,27 @@ export function applyMigrateSession(
         deps.opencodeDb.exec("ROLLBACK");
         throw error;
     }
+
+    const compensateOpenCode = (): void => {
+        if (!priorRow) return;
+        try {
+            const restoreSets = restoreCols.map((c) => `${c} = ?`).join(", ");
+            const restoreParams = restoreCols.map((c) => priorRow[c] ?? null);
+            deps.opencodeDb.exec("BEGIN IMMEDIATE");
+            deps.opencodeDb
+                .prepare(`UPDATE session SET ${restoreSets} WHERE id = ?`)
+                .run(...restoreParams, plan.sessionId);
+            deps.opencodeDb.exec("COMMIT");
+        } catch {
+            // Best-effort: the original error is what we rethrow. If even the
+            // compensation fails the user still has their pre-run backup.
+            try {
+                deps.opencodeDb.exec("ROLLBACK");
+            } catch {
+                // ignore
+            }
+        }
+    };
 
     // 2. Magic Context side — re-stamp + memory action in one transaction.
     let memoriesRelocated = 0;
@@ -321,6 +352,9 @@ export function applyMigrateSession(
         deps.contextDb.exec("COMMIT");
     } catch (error) {
         deps.contextDb.exec("ROLLBACK");
+        // Context.db rolled back atomically; now undo the already-committed
+        // OpenCode move so the two databases stay consistent (no split-brain).
+        compensateOpenCode();
         throw error;
     }
 

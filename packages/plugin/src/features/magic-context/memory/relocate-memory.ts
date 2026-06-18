@@ -84,6 +84,16 @@ export function rekeyMemoryRowWithCollisionMerge(
                 collision.id,
             );
         }
+        // Preserve an embedding on the surviving target BEFORE the source row's
+        // embedding FK-cascades away on DELETE (memory_embeddings.memory_id
+        // REFERENCES memories(id) ON DELETE CASCADE). INSERT OR IGNORE keeps the
+        // target's existing embedding when it has one; otherwise it adopts the
+        // source's — so a merged memory never ends up with NO vector (the two are
+        // equivalent: same category + normalized_hash, so either vector is valid).
+        db.prepare(
+            `INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding, model_id)
+             SELECT ?, embedding, model_id FROM memory_embeddings WHERE memory_id = ?`,
+        ).run(collision.id, rowId);
         db.prepare("DELETE FROM memories WHERE id = ?").run(rowId);
         return true;
     }

@@ -250,7 +250,7 @@ Each hidden agent (historian, dreamer, sidekick) uses the `model` you configure 
 If the configured primary fails (auth, transient, or returns unusable output), the fallback order is:
 
 1. Your explicit `fallback_models` for that agent, in order.
-2. Your active session model, as a last resort (a model you're already using).
+2. **Historian only:** your active session model, as a last resort (a model you're already using). The dreamer and sidekick use only their configured `fallback_models`.
 
 If you set no `fallback_models`, a failing primary simply retries — it never jumps to an unconfigured model. Set `fallback_models` to add alternates of your own (each `"provider/model-id"`).
 
