@@ -1,3 +1,7 @@
+import {
+    getLastCompartmentEndMessage,
+    getLastCompartmentEndMessageId,
+} from "../../features/magic-context/compartment-storage";
 import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
@@ -18,6 +22,7 @@ import {
     type ProtectedTailBoundarySnapshot,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
 import { sendIgnoredMessage } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
 
@@ -76,7 +81,82 @@ interface RunCompartmentPhaseArgs {
     preResolvedBoundarySnapshot?: ProtectedTailBoundarySnapshot;
 }
 
-export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promise<{
+/**
+ * Prime the raw-message cache for the WHOLE compartment phase, then run it.
+ *
+ * The phase's boundary resolution (`getRawHistoryEligibility` +
+ * `resolveOpenCodeProtectedTailBoundary`) AND the historian runner's
+ * `readSessionChunk` all read raw OpenCode history. On a large session an
+ * un-primed read is O(session) (multi-second each) and runs on the transform
+ * thread — OpenCode awaits `messages.transform` before the LLM call, so a
+ * historian-FIRE pass froze ~9.6s at "Thinking". The compartment TRIGGER primes
+ * its own scope (`withRawSessionMessageCache` inside `getUnsummarizedTailInfo`),
+ * but that scope ends when the trigger returns, so the phase read un-primed.
+ *
+ * Prime from the TAIL-ONLY DB read (`primeTailRawMessageCache`), NOT the
+ * in-memory `args.messages` tail: `extractInMemoryMessageViews` aliases the live
+ * `parts` objects, which the transform MUTATES between the trigger and this phase
+ * (§N§ prefixes, `[dropped]` sentinels, stripped reasoning). The historian must
+ * read RAW content; the DB read is unmutated and O(tail).
+ *
+ * Scope/await correctness: every raw read happens in the phase's SYNCHRONOUS
+ * prefix — `runCompartmentPhaseImpl` is `async` but reaches its first `await`
+ * only on the ≥95% blocking path (`awaitCompartmentRun`), and the runner's
+ * `readSessionChunk` runs in the runner's own synchronous prefix (before its
+ * first `await` at `client.session.get`). `withRawSessionMessageCache`'s
+ * try/finally clears the cache the moment the wrapped fn RETURNS its promise
+ * (i.e. after the synchronous body suspends at the first await), so the cache
+ * covers all raw reads; the only post-await work (`prepareCompartmentInjection`)
+ * reads context.db, never raw history. Priming once under `resolvedSessionId`
+ * covers the runner too — it reads under `args.sessionId`, which equals
+ * `resolvedSessionId` (transform.ts).
+ */
+export function runCompartmentPhase(
+    args: RunCompartmentPhaseArgs,
+): ReturnType<typeof runCompartmentPhaseImpl> {
+    // Only prime (and pay its tail DB read) on a pass that will ACTUALLY read raw
+    // history — i.e. one that starts or blocks on a historian run. On a normal
+    // defer pass the impl does ZERO raw reads (both its start-block and its ≥95%
+    // block are gated off), so priming there would add a useless ~100ms tail read
+    // to EVERY pass on a large session (the regression this gate fixes). The impl
+    // reads raw history in exactly two cases, mirrored here:
+    //   - compartmentInProgress is set (the trigger fired) AND no run is active
+    //     yet → this pass resolves the boundary + the runner reads the chunk, OR
+    //   - usage ≥ 95% with await allowed → the emergency block force-starts.
+    // The active-run guard matters: compartmentInProgress STAYS true for the whole
+    // background run, but while a run is active the impl no-ops (the run owns it),
+    // so without this guard we'd re-prime every pass for the run's full duration.
+    const historianRunnable = args.historianRunnable !== false;
+    const willReadRawHistory =
+        historianRunnable &&
+        args.canRunCompartments &&
+        getActiveCompartmentRun(args.sessionId) === undefined &&
+        (args.sessionMeta.compartmentInProgress ||
+            (!args.skipAwaitForThisPass &&
+                args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE));
+
+    if (!willReadRawHistory) {
+        // No raw reads this pass — skip the prime and its cache scope entirely.
+        return runCompartmentPhaseImpl(args);
+    }
+
+    return withRawSessionMessageCache(() => {
+        try {
+            primeTailRawMessageCache({
+                sessionId: args.resolvedSessionId,
+                lastCompartmentEnd: getLastCompartmentEndMessage(args.db, args.resolvedSessionId),
+                anchorMessageId: getLastCompartmentEndMessageId(args.db, args.resolvedSessionId),
+            });
+        } catch (error) {
+            // Priming is a pure optimization — on any failure the phase falls
+            // back to the full read (its prior behavior). Never block the phase.
+            sessionLog(args.sessionId, "compartment phase: tail prime failed (non-fatal):", error);
+        }
+        return runCompartmentPhaseImpl(args);
+    });
+}
+
+async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     awaitedCompartmentRun: boolean;
     compartmentInProgress: boolean;
