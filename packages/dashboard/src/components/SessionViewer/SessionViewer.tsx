@@ -74,6 +74,27 @@ function importanceInfo(importance: number): {
 }
 
 /**
+ * Importance band → the same CSS color the row pills use, so the timeline strip
+ * encodes importance (red=critical, amber=high, blue=medium, gray=low) instead
+ * of a meaningless per-sequence rainbow. `dim` recedes low-importance segments.
+ */
+function importanceBarColor(importance: number, expanded: boolean): string {
+  const { pillColor } = importanceInfo(importance);
+  const base =
+    pillColor === "red"
+      ? "var(--red)"
+      : pillColor === "amber"
+        ? "var(--amber)"
+        : pillColor === "blue"
+          ? "var(--accent)"
+          : "var(--text-muted)";
+  // Slightly mute unexpanded segments so the expanded one (and high-importance
+  // warm colors) read as the focal points; gray bands recede the most.
+  const mix = expanded ? 100 : pillColor === "gray" ? 55 : 78;
+  return `color-mix(in srgb, ${base} ${mix}%, var(--bg-card))`;
+}
+
+/**
  * Split a v2 `episode_type` (possibly comma-joined, e.g. "design,bug,refactor")
  * into trimmed non-empty tags for badge rendering.
  */
@@ -995,13 +1016,11 @@ export default function SessionViewer() {
                 {(comp) => {
                   const range = comp.end_message - comp.start_message;
                   const width = () => Math.max(0.5, (range / totalRange()) * 100);
-                  // Saturation tracks v2 importance: high-importance (sticky,
-                  // slow-decay) compartments stay vivid; low-importance ones
-                  // recede toward gray. Clamped so every segment stays visible.
+                  // Color encodes v2 IMPORTANCE (decay rate), not sequence:
+                  // critical→red, high→amber, medium→blue, low/minimal→gray, so
+                  // the strip reads as a heat-map of which compartments matter.
                   const isExpanded = () => expandedCompartment() === comp.id;
                   const imp = Number.isFinite(comp.importance) ? comp.importance : 50;
-                  const sat = Math.max(15, (isExpanded() ? 40 : 20) + (imp / 100) * 45);
-                  const light = Math.max(28, (isExpanded() ? 55 : 45) - (imp / 100) * 12);
                   const info = importanceInfo(imp);
                   const titleSuffix = ` · imp ${imp} ${info.label}${comp.legacy ? " · legacy" : ""}`;
                   return (
@@ -1010,7 +1029,7 @@ export default function SessionViewer() {
                       class="timeline-segment"
                       style={{
                         width: `${width()}%`,
-                        background: `hsl(${(comp.sequence * 37) % 360}, ${sat}%, ${light}%)`,
+                        background: importanceBarColor(imp, isExpanded()),
                         outline: isExpanded() ? "2px solid var(--accent)" : "none",
                         border: "none",
                         padding: 0,

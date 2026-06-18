@@ -3156,9 +3156,15 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     // joining/grouping the 300k+ row `message` table per call was the dominant
     // cost (a multi-hundred-ms scan that froze the UI on every History entry).
     // `session.time_updated` is the session's own last-activity timestamp.
+    // Select the session's OWN directory, not just the joined project's
+    // worktree: OpenCode buckets git sessions that had no remote/commit at
+    // creation under the `global` project (worktree "/", empty name), so
+    // `p.worktree` is "/" and basename("/") renders as "/". `s.directory` always
+    // holds the real cwd. We resolve identity from it too — which also matches
+    // what the plugin keys memories under (plugin identity = session.directory).
     let Ok(mut stmt) = conn.prepare(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
-                s.time_updated AS last_activity
+                COALESCE(s.directory, ''), s.time_updated AS last_activity
          FROM session s
          LEFT JOIN project p ON p.id = s.project_id",
     ) else {
@@ -3177,19 +3183,27 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         let title: String = row.get(1)?;
         let project_name: String = row.get(2)?;
         let worktree: String = row.get(3)?;
-        let last_activity_ms: i64 = row.get(4)?;
-        let identity = resolve_project_identity(&worktree);
+        let directory: String = row.get(4)?;
+        let last_activity_ms: i64 = row.get(5)?;
+        // Prefer the session's real directory; fall back to the project worktree
+        // only when the session row has no directory (legacy rows).
+        let effective_dir = if directory.is_empty() { &worktree } else { &directory };
+        let identity = resolve_project_identity(effective_dir);
         let is_subagent = subagent_map.get(&session_id).copied().unwrap_or(false);
+        // Friendly label: the named project wins; otherwise the directory's
+        // basename. Never show a bare "/" (the global-project worktree) when the
+        // session actually ran in a real directory.
+        let project_display = if !project_name.is_empty() {
+            project_name
+        } else {
+            basename(effective_dir)
+        };
         Ok(SessionRow {
             harness: Harness::Opencode,
             session_id,
             title,
             project_identity: identity,
-            project_display: if project_name.is_empty() {
-                basename(&worktree)
-            } else {
-                project_name
-            },
+            project_display,
             last_activity_ms,
             is_subagent,
         })
