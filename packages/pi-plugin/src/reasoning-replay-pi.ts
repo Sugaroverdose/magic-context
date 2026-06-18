@@ -13,11 +13,13 @@
  *     OpenCode's reasoning-clearing replay was added to fix.
  *
  * Behavior:
- *   - On execute passes (cache-busting): walk Pi assistant messages
+  *   - On execute passes (cache-busting): walk Pi assistant messages
  *     whose tag number is older than `clear_reasoning_age` from the
- *     newest tag, replace each `PiThinkingContent.thinking` with
- *     `[cleared]`, persist watermark = max-tag-cleared in
- *     `session_meta.cleared_reasoning_through_tag`.
+ *     newest tag, EMPTY each `PiThinkingContent.thinking` (and drop its
+ *     stale signature), persist watermark = max-tag-cleared in
+ *     `session_meta.cleared_reasoning_through_tag`. Pi serializers drop
+ *     empty thinking before the wire, so nothing (and no stale signature)
+ *     reaches any provider.
  *   - On EVERY pass (including defer): replay the cleared state from
  *     the watermark so the message array stays byte-stable — same
  *     contract as OpenCode's `replayClearedReasoning`.
@@ -61,7 +63,18 @@ const INLINE_THINKING_PATTERNS = [
 	/<think>[\s\S]*?<\/think>\s*/gi,
 ] as const;
 
-const CLEARED = "[cleared]";
+// Pi clears old reasoning to an EMPTY thinking block (not "[cleared]"). Every Pi
+// serializer drops empty thinking before the wire — anthropic.ts (empty thinking
+// skipped), openai-completions.ts (filtered out of nonEmptyThinkingBlocks, with
+// reasoning_content="" auto-filled for providers that require it), and
+// amazon-bedrock.ts (empty thinking skipped). So an emptied block reaches NO
+// provider, which structurally eliminates the stale-signature hazard that
+// "[cleared]" + the original signature created on canonical Claude/Bedrock (a
+// content/signature mismatch). The signature is dropped too since the block is
+// discarded everywhere. This is intentionally DIFFERENT from OpenCode, whose
+// non-Anthropic adapters forward empty parts, so OpenCode must keep "[cleared]"
+// for canonical-anthropic-only and gate the write off elsewhere (see PARITY.md).
+const CLEARED = "";
 
 function stripInlineThinkingMarkup(text: string): string {
 	let cleaned = text;
@@ -140,8 +153,14 @@ export function clearOldReasoningPi(args: {
 				(part as { type?: unknown }).type === "thinking"
 			) {
 				const tp = part as PiThinkingContent;
-				if (tp.thinking !== CLEARED) {
+				// Empty the thinking AND drop its now-stale signature (a signature
+				// over the original text would mismatch the emptied content). The
+				// empty block is dropped by every Pi serializer, so neither reaches
+				// the wire; dropping the sig keeps clear/replay producing identical
+				// working-array state.
+				if (tp.thinking !== CLEARED || tp.thinkingSignature !== undefined) {
 					tp.thinking = CLEARED;
+					tp.thinkingSignature = undefined;
 					cleared++;
 				}
 			}
@@ -252,8 +271,12 @@ export function replayClearedReasoningPi(args: {
 				(part as { type?: unknown }).type === "thinking"
 			) {
 				const tp = part as PiThinkingContent;
-				if (tp.thinking !== CLEARED) {
+				// Replay the exact clear shape from clearOldReasoningPi: empty
+				// thinking + dropped signature, so defer passes are byte-identical
+				// to the cache-busting pass that set the watermark.
+				if (tp.thinking !== CLEARED || tp.thinkingSignature !== undefined) {
 					tp.thinking = CLEARED;
+					tp.thinkingSignature = undefined;
 					cleared++;
 				}
 			}

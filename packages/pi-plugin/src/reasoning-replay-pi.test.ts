@@ -115,9 +115,11 @@ describe("clearOldReasoningPi", () => {
 		});
 		expect(result.cleared).toBe(1);
 		expect(result.newWatermark).toBe(1);
+		// Old reasoning is emptied (not "[cleared]"); every Pi serializer drops an
+		// empty thinking block before the wire.
 		expect(messages[0].content[0]).toMatchObject({
 			type: "thinking",
-			thinking: "[cleared]",
+			thinking: "",
 		});
 		// Recent message untouched.
 		expect(messages[1].content[0]).toMatchObject({
@@ -149,7 +151,7 @@ describe("clearOldReasoningPi", () => {
 });
 
 describe("replayClearedReasoningPi", () => {
-	it("replays [cleared] for assistant thinking parts below the watermark", () => {
+	it("replays emptied thinking for assistant parts below the watermark", () => {
 		const db = makeDb();
 		const sessionId = "ses_replay_pi_1";
 		// First make the session_meta row exist.
@@ -180,7 +182,7 @@ describe("replayClearedReasoningPi", () => {
 			piMessageStableId,
 		});
 		expect(cleared).toBe(1);
-		expect(messages[0].content[0]).toMatchObject({ thinking: "[cleared]" });
+		expect(messages[0].content[0]).toMatchObject({ thinking: "" });
 		expect(messages[1].content[0]).toMatchObject({ thinking: "still visible" });
 	});
 });

@@ -264,23 +264,39 @@ bytes unchanged.
 
 ---
 
-## 10. Cleared reasoning keeps its original signature (matches OpenCode)
+## 10. Cleared reasoning: Pi EMPTIES (drops signature); OpenCode writes `[cleared]`→sentinel, gated
 
-When Magic Context clears an aged reasoning/thinking block, it rewrites the
-thinking text to a `[cleared]` placeholder but **preserves the original
-`thinkingSignature`/`thoughtSignature`**. This is INTENTIONAL and byte-for-byte
-matches OpenCode's shipped `clearOldReasoning` (`strip-content.ts`), which runs
-in production against Anthropic.
+When Magic Context clears an aged reasoning/thinking block, the two harnesses use
+DIFFERENT mechanisms because their serializers differ. The divergence is
+deliberate and source-justified.
 
-- Pi: `reasoning-replay-pi.ts` `setPiThinkingCleared` keeps the signature.
-- OpenCode: `clearOldReasoning` keeps the signature.
+- **OpenCode** (`clearOldReasoning` + `stripClearedReasoning`, `strip-content.ts`):
+  rewrites the thinking text to `[cleared]`, then — **only for canonical Anthropic**
+  (`canUseEmptySentinels === providerID==="anthropic"`) — replaces the whole part
+  with an empty *text* sentinel that `@ai-sdk/anthropic` drops before the wire
+  (signature gone). For NON-canonical providers OpenCode now **gates the clear OFF
+  entirely** (reasoning left intact), because OpenCode's non-Anthropic adapters
+  forward empty parts and would otherwise leave a literal `[cleared]` (or a stale
+  signature) on the wire. (#162 D2.)
 
-Why it does NOT cause provider rejection: the cleared block is replayed only to
-the SAME provider that produced the signature, and the signature still matches
-the (now-placeholder) block's position in the assistant turn. Stripping the
-signature would be MORE likely to trigger a rejection, not less. Do not "fix"
-this by nulling the signature — that diverges from the shipped OpenCode behavior
-and removes the provider's own integrity token.
+- **Pi** (`reasoning-replay-pi.ts`): EMPTIES the thinking text (`thinking = ""`)
+  and **drops the now-stale `thinkingSignature`**, UNCONDITIONALLY (no
+  per-provider gate). Every Pi serializer drops an empty thinking block before the
+  wire — `anthropic.ts` (empty thinking skipped), `openai-completions.ts`
+  (filtered out of `nonEmptyThinkingBlocks`, with `reasoning_content=""`
+  auto-filled for providers that require it), `amazon-bedrock.ts` (empty thinking
+  skipped). So no block and no signature reach ANY provider, which structurally
+  eliminates the stale-signature mismatch and needs no gate.
+
+Why the OLD "keep the signature" note was wrong: a `thinkingSignature` is a
+cryptographic signature over the ORIGINAL thinking text, so `[cleared]` (or any
+rewrite) + the original signature is a content/signature MISMATCH on canonical
+Claude/Bedrock — a real 400 hazard, not a safe no-op. Both harnesses now ensure
+no rewritten-with-stale-signature thinking block reaches the wire: OpenCode by
+dropping the empty sentinel (canonical only) / not clearing (otherwise), Pi by
+emptying so its serializers drop the block. `clearOldReasoning` only touches OLD
+assistants (≥ `clear_reasoning_age` tags back); the latest assistant keeps its
+real reasoning on both harnesses.
 
 ---
 
