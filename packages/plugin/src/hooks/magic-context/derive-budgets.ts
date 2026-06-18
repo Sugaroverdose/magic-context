@@ -17,8 +17,6 @@
  *     by its own context, not the main session's pressure math.
  */
 
-import { HISTORIAN_AGENT } from "../../agents/historian";
-import { AGENT_MODEL_REQUIREMENTS, expandFallbackChain } from "../../shared/model-requirements";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 
 // 5% of (main_context × execute_threshold) is the "working usable × 5%" basis.
@@ -81,15 +79,11 @@ export function deriveHistorianChunkTokens(historianContextLimit: number): numbe
  * Behavior:
  *   - If `historianModelOverride` is a full `provider/model-id` → use that model's
  *     context directly. This honors explicit user intent.
- *   - If the override is set but lacks `/` (e.g. `"llama3-32k"`) → warn and fall
- *     through to the fallback chain, since we can't look up models without a
- *     provider and silently ignoring would produce incorrect chunk sizes.
- *   - If no override → scan the expanded fallback chain (all `provider/model`
- *     combinations OpenCode might try) and use the MINIMUM resolved context.
- *     This is defensive: if the first-choice model is unavailable and OpenCode
- *     falls back to a smaller-context entry, the chunk budget is still safe.
- *   - If neither models.dev nor opencode.json custom providers know the model,
- *     fall back to 128K as a conservative default.
+ *   - If the override is set but lacks `/` (e.g. `"llama3-32k"`) → warn and use
+ *     the conservative default, since we can't look up a model without a
+ *     provider and silently guessing would produce an incorrect chunk size.
+ *   - If no override (or the model is unknown to models.dev / opencode.json
+ *     custom providers) → 128K conservative default.
  *
  * Context limits are resolved through `getSdkContextLimit`, which reads
  * OpenCode's SDK-resolved provider config (models.dev + snapshot + opencode.json
@@ -107,31 +101,14 @@ export function resolveHistorianContextLimit(historianModelOverride?: string): n
         return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
     }
 
-    // Warn-and-fall-through for malformed overrides (Finding #4 sub-fix).
+    // Malformed override (no provider prefix): surface at log level, not a crash,
+    // and use the conservative default for chunk-budget derivation.
     if (typeof historianModelOverride === "string" && historianModelOverride.trim() !== "") {
-        // Intentional: this is a config error we surface at log level, not a crash,
-        // because the fallback chain still produces a workable budget.
         // eslint-disable-next-line no-console
         console.warn(
-            `[magic-context] historian.model "${historianModelOverride}" lacks provider prefix ("provider/model-id"); using fallback chain for chunk-budget derivation.`,
+            `[magic-context] historian.model "${historianModelOverride}" lacks provider prefix ("provider/model-id"); using the default context limit for chunk-budget derivation.`,
         );
     }
 
-    // Defensive minimum across the full expanded chain. This protects against
-    // the first-choice model being unavailable and OpenCode falling back to a
-    // smaller-context entry that would overflow with the larger chunk budget.
-    const chain = AGENT_MODEL_REQUIREMENTS[HISTORIAN_AGENT]?.fallbackChain;
-    if (!chain || chain.length === 0) return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
-    const expanded = expandFallbackChain(chain);
-
-    let minLimit: number | undefined;
-    for (const key of expanded) {
-        const [providerID, ...rest] = key.split("/");
-        const modelID = rest.join("/");
-        if (!providerID || !modelID) continue;
-        const limit = getSdkContextLimit(providerID, modelID);
-        if (typeof limit !== "number" || limit <= 0) continue;
-        if (minLimit === undefined || limit < minLimit) minLimit = limit;
-    }
-    return minLimit ?? DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
+    return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
 }

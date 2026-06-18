@@ -1,4 +1,3 @@
-import { DREAMER_AGENT } from "@magic-context/core/agents/dreamer";
 import type {
 	DreamerConfig,
 	EmbeddingConfig,
@@ -261,15 +260,9 @@ export async function awaitInFlightDreamers(): Promise<void> {
 function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 	const runner = piSubagentRunnerFactory();
 	const model = opts.config.model;
-	// Resolve through the SHARED chain so Pi inherits the builtin DREAMER_AGENT
-	// fallback models when the user set no explicit `dreamer.fallback_models` —
-	// parity with OpenCode (dream-timer.ts). Previously Pi only used the explicit
-	// list, so a Pi dreamer run with no configured fallbacks stopped at the
-	// primary on a model/auth/rate-limit/not-found failure while OpenCode iterated.
-	const fallbackModels = resolveFallbackChain(
-		DREAMER_AGENT,
-		opts.config.fallback_models,
-	);
+	// User-configured fallback_models only (shared policy with OpenCode) — no
+	// builtin chain. With none configured, the dreamer just retries its primary.
+	const fallbackModels = resolveFallbackChain(opts.config.fallback_models);
 
 	const session = {
 		create: async (args: SessionCreateArgs) => {

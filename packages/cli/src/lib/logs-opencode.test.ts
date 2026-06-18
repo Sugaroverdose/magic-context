@@ -375,6 +375,7 @@ describe("bundleIssueReport secret redaction", () => {
                         lastFailureAt: "2026-05-11T12:00:00.000Z",
                     },
                 ],
+                historianRuns: [],
             };
 
             const bundled = await bundleIssueReport(report, "description", "title");

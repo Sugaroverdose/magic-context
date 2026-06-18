@@ -1,4 +1,3 @@
-import { DREAMER_AGENT } from "../agents/dreamer";
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { checkScheduleAndEnqueue, processDreamQueue } from "../features/magic-context/dreamer";
 import {
@@ -252,7 +251,7 @@ async function sweepProject(
             // Run in the checkout THIS registration owns, not whatever sibling
             // worktree last registered the shared git:<sha> identity.
             sessionDirectoryOverride: reg.directory,
-            fallbackModels: resolveFallbackChain(DREAMER_AGENT, reg.dreamerConfig.fallback_models),
+            fallbackModels: resolveFallbackChain(reg.dreamerConfig.fallback_models),
         });
     } catch (error) {
         log(`[dreamer] timer-triggered queue processing failed for ${reg.projectIdentity}:`, error);

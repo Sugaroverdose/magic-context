@@ -1,5 +1,3 @@
-import { DREAMER_AGENT } from "../../agents/dreamer";
-import { HISTORIAN_AGENT } from "../../agents/historian";
 import {
     isDreamerRunnable,
     isHistorianRunnable,
@@ -215,10 +213,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // restart, and so all trigger sources produce consistent chunk sizes.
     const getHistorianChunkTokens = (): number =>
         deriveHistorianChunkTokens(resolveHistorianContextLimit(deps.config.historian?.model));
-    const historianFallbackModels = resolveFallbackChain(
-        HISTORIAN_AGENT,
-        deps.config.historian?.fallback_models,
-    );
+    const historianFallbackModels = resolveFallbackChain(deps.config.historian?.fallback_models);
 
     // Three independent cache-busting signal sets, sourced from the
     // process-scoped LiveSessionState so RPC handlers (TUI recomp) can
@@ -693,7 +688,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       min_reads: dreaming.pin_key_files.min_reads,
                   }
                 : undefined,
-            fallbackModels: resolveFallbackChain(DREAMER_AGENT, dreaming.fallback_models),
+            fallbackModels: resolveFallbackChain(dreaming.fallback_models),
             projectIdentity: projectPath,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled queue processing failed:", error);
@@ -787,10 +782,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                             min_reads: dreamerConfig.pin_key_files.min_reads,
                         }
                       : undefined,
-                  fallbackModels: resolveFallbackChain(
-                      DREAMER_AGENT,
-                      dreamerConfig.fallback_models,
-                  ),
+                  fallbackModels: resolveFallbackChain(dreamerConfig.fallback_models),
               }
             : undefined,
     });

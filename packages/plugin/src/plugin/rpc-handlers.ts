@@ -796,7 +796,6 @@ export function registerRpcHandlers(
             "../hooks/magic-context/derive-budgets"
         );
         const { resolveFallbackChain } = await import("../shared/resolve-fallbacks");
-        const { HISTORIAN_AGENT } = await import("../agents/historian");
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
         return {
             client: args.client as ManagedRecompContext["client"],
@@ -809,10 +808,7 @@ export function registerRpcHandlers(
             historianTimeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             memoryEnabled: config.memory?.enabled ?? true,
             autoPromote: config.memory?.auto_promote ?? true,
-            fallbackModels: resolveFallbackChain(
-                HISTORIAN_AGENT,
-                config.historian?.fallback_models,
-            ),
+            fallbackModels: resolveFallbackChain(config.historian?.fallback_models),
             runMigration: config.memory?.enabled !== false && !!config.historian?.model,
             userMemoriesEnabled: config.dreamer?.user_memories?.enabled === true,
             historianTwoPass: config.historian?.two_pass === true,

@@ -40,7 +40,6 @@ import { type ConflictResult, detectConflicts } from "./shared/conflict-detector
 import { getMagicContextStorageDir } from "./shared/data-path";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
-import { getAgentFallbackModels } from "./shared/model-requirements";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
@@ -490,7 +489,6 @@ const plugin: Plugin = async (ctx) => {
              *      user-config-level agent overrides win last.
              */
             const buildHiddenAgentConfig = (
-                agentId: string,
                 prompt: string,
                 allowedTools: readonly string[],
                 // Hard tool-iteration cap for this hidden agent. WITHOUT it
@@ -517,9 +515,10 @@ const plugin: Plugin = async (ctx) => {
                     prompt,
                     steps: maxSteps,
                     maxSteps,
-                    ...(getAgentFallbackModels(agentId)
-                        ? { fallback_models: getAgentFallbackModels(agentId) }
-                        : {}),
+                    // No builtin fallback chain: the user's `fallback_models` (if
+                    // any) flow through `restOverrides`. A hardcoded chain names
+                    // providers the user may not have, producing `Model not found`
+                    // retry storms.
                     ...restOverrides,
                     // Permission baseline goes after `restOverrides` so that
                     // accidental `permission` keys in user overrides we DIDN'T
@@ -577,7 +576,6 @@ const plugin: Plugin = async (ctx) => {
             config.agent = {
                 ...(config.agent ?? {}),
                 [DREAMER_AGENT]: buildHiddenAgentConfig(
-                    DREAMER_AGENT,
                     DREAMER_SYSTEM_PROMPT,
                     DREAMER_ALLOWED_TOOLS,
                     // The dreamer is a genuine multi-step maintenance loop
@@ -589,7 +587,6 @@ const plugin: Plugin = async (ctx) => {
                     dreamerAgentOverrides,
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
-                    HISTORIAN_AGENT,
                     // v2: the v8.7.3 historian prompt always describes the
                     // <user_observations> output; observations are simply not
                     // promoted to user-profile when user_memories is disabled
@@ -604,14 +601,12 @@ const plugin: Plugin = async (ctx) => {
                     historianAgentOverrides,
                 ),
                 [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
-                    HISTORIAN_EDITOR_AGENT,
                     HISTORIAN_EDITOR_SYSTEM_PROMPT,
                     HISTORIAN_ALLOWED_TOOLS,
                     HISTORIAN_MAX_STEPS,
                     historianAgentOverrides,
                 ),
                 [SIDEKICK_AGENT]: buildHiddenAgentConfig(
-                    SIDEKICK_AGENT,
                     SIDEKICK_SYSTEM_PROMPT,
                     SIDEKICK_ALLOWED_TOOLS,
                     SIDEKICK_MAX_STEPS,

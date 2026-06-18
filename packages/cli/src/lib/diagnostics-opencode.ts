@@ -91,6 +91,11 @@ export interface DiagnosticReport {
     historianDumps: HistorianDumpsReport;
     /** Most recent historian-failure rows from session_meta across all sessions. */
     historianFailures: HistorianFailureSummary[];
+    /**
+     * Per-session rollup of the durable `historian_runs` telemetry. Surfaces the
+     * fail/success/noop history that the self-clearing session_meta counter hides.
+     */
+    historianRuns: HistorianRunSummary[];
 }
 
 /**
@@ -174,6 +179,27 @@ export interface HistorianFailureSummary {
     lastError: string;
     /** ISO timestamp of last failure, or empty if never failed. */
     lastFailureAt: string;
+}
+
+/**
+ * Per-session rollup of the durable `historian_runs` telemetry table (migration
+ * v24). Unlike `session_meta.historian_failure_count` — which is RESET to 0 on
+ * every successful run — these rows are never cleared, so a "fails N times then
+ * succeeds once" pattern (e.g. a flaky historian model that keeps returning
+ * empty/invalid output) stays visible. This is what surfaces the failure history
+ * the session_meta counter hides.
+ */
+export interface HistorianRunSummary {
+    sessionId: string;
+    /** Counts over the recent window (most-recent runs for this session). */
+    total: number;
+    success: number;
+    failed: number;
+    noop: number;
+    /** Sanitized last failure reason in the window, or empty if none. */
+    lastFailureReason: string;
+    /** ISO timestamp of the most recent run in the window. */
+    lastRunAt: string;
 }
 
 // ── Version + path helpers ──────────────────────────────────────────
@@ -581,6 +607,114 @@ async function collectHistorianFailures(
     }
 }
 
+/**
+ * Per-session rollup of the durable `historian_runs` telemetry (migration v24).
+ * Unlike `collectHistorianFailures` (which reads the self-clearing session_meta
+ * counter), these rows persist across successes — so a flaky historian that
+ * fails repeatedly then occasionally succeeds is still visible here. Best-effort
+ * + Bun-gated, mirroring `collectHistorianFailures`.
+ */
+async function collectHistorianRuns(storageDirPath: string): Promise<HistorianRunSummary[]> {
+    const contextDbPath = join(storageDirPath, "context.db");
+    if (!existsSync(contextDbPath)) return [];
+    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") return [];
+
+    type DatabaseCtor = new (
+        path: string,
+        opts?: { readonly?: boolean },
+    ) => {
+        prepare: (sql: string) => { all: (...params: unknown[]) => unknown[] };
+        close: () => void;
+    };
+
+    let DatabaseClass: DatabaseCtor;
+    try {
+        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
+            Database: DatabaseCtor;
+        };
+        DatabaseClass = mod.Database;
+    } catch {
+        return [];
+    }
+
+    let db: { prepare: (sql: string) => { all: (...p: unknown[]) => unknown[] }; close: () => void } | null =
+        null;
+    try {
+        db = new DatabaseClass(contextDbPath, { readonly: true });
+        // Defensive: the table only exists at schema v24+. A pre-v24 DB throws
+        // "no such table" → caught below → empty section (best-effort).
+        const aggRows = db
+            .prepare(
+                `SELECT session_id,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status='noop' THEN 1 ELSE 0 END) AS noop,
+                    MAX(created_at) AS last_run_at
+                 FROM historian_runs
+                 GROUP BY session_id
+                 ORDER BY last_run_at DESC
+                 LIMIT 10`,
+            )
+            .all() as Array<{
+            session_id: unknown;
+            total: unknown;
+            success: unknown;
+            failed: unknown;
+            noop: unknown;
+            last_run_at: unknown;
+        }>;
+        if (aggRows.length === 0) return [];
+
+        // Most-recent failure reason per session (only for sessions with failures).
+        const reasonRows = db
+            .prepare(
+                `SELECT session_id, failure_reason, created_at
+                 FROM historian_runs
+                 WHERE status='failed' AND failure_reason IS NOT NULL
+                 ORDER BY created_at DESC
+                 LIMIT 200`,
+            )
+            .all() as Array<{ session_id: unknown; failure_reason: unknown }>;
+        const latestReasonBySession = new Map<string, string>();
+        for (const row of reasonRows) {
+            const sid = typeof row.session_id === "string" ? row.session_id : "";
+            if (!sid || latestReasonBySession.has(sid)) continue;
+            if (typeof row.failure_reason === "string") {
+                latestReasonBySession.set(sid, row.failure_reason);
+            }
+        }
+
+        const asNum = (v: unknown): number => (typeof v === "number" ? v : 0);
+        return aggRows.map((row) => {
+            const sessionId = typeof row.session_id === "string" ? row.session_id : "<unknown>";
+            const rawReason = latestReasonBySession.get(sessionId) ?? "";
+            return {
+                sessionId,
+                total: asNum(row.total),
+                success: asNum(row.success),
+                failed: asNum(row.failed),
+                noop: asNum(row.noop),
+                lastFailureReason: sanitizeDiagnosticText(
+                    rawReason.replace(/\s+/g, " ").trim().slice(0, 400),
+                ),
+                lastRunAt:
+                    typeof row.last_run_at === "number"
+                        ? new Date(row.last_run_at).toISOString()
+                        : "",
+            };
+        });
+    } catch {
+        return [];
+    } finally {
+        try {
+            db?.close();
+        } catch {
+            // ignore close errors
+        }
+    }
+}
+
 // ── Main entry ─────────────────────────────────────────────────────
 
 export async function collectDiagnostics(): Promise<DiagnosticReport> {
@@ -633,6 +767,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         recentSessions,
         historianDumps: collectHistorianDumps(recentSessions),
         historianFailures: await collectHistorianFailures(storageDirPath),
+        historianRuns: await collectHistorianRuns(storageDirPath),
     };
 }
 
@@ -735,11 +870,22 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "```",
         "",
         "### Historian failures (session_meta)",
+        "_Note: this counter RESETS to 0 on every successful run — see 'Historian runs' below for the durable history._",
         report.historianFailures.length === 0
             ? "_No sessions with historian failures._"
             : [
                   "```json",
                   JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2),
+                  "```",
+              ].join("\n"),
+        "",
+        "### Historian runs (durable telemetry)",
+        "Per-session success/failure/no-op counts from `historian_runs` (never reset).",
+        report.historianRuns.length === 0
+            ? "_No historian runs recorded (or schema predates v24)._"
+            : [
+                  "```json",
+                  JSON.stringify(sanitizeConfigValue(report.historianRuns), null, 2),
                   "```",
               ].join("\n"),
         "",

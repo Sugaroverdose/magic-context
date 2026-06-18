@@ -23,7 +23,7 @@ export async function runSidekick(deps: {
     config: SidekickConfig;
     sessionDirectory?: string;
 }): Promise<string | null> {
-    const fallbackModels = resolveFallbackChain(SIDEKICK_AGENT, deps.config.fallback_models);
+    const fallbackModels = resolveFallbackChain(deps.config.fallback_models);
     let agentSessionId: string | null = null;
     const startedAt = Date.now();
     let invocationRecorded = false;

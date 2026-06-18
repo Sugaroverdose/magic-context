@@ -1,37 +1,27 @@
-import { getAgentFallbackModels } from "./model-requirements";
-
 /**
- * Resolve the final fallback model list to attempt for an OpenCode subagent
- * call.
+ * Resolve the fallback model list to attempt for a hidden-agent (historian /
+ * dreamer / sidekick) call when its configured primary fails.
  *
- * Policy (decided 2026-05-10):
- *   - If user configured explicit `fallback_models` in their magic-context.jsonc
- *     for this agent: use ONLY those. Respects user intent, no surprise
- *     providers.
- *   - If user did NOT configure any: fall back to the plugin's builtin
- *     provider-agnostic chain (`AGENT_MODEL_REQUIREMENTS`).
+ * Policy: ONLY the user's explicitly-configured `fallback_models` for this
+ * agent. There is NO builtin provider-agnostic chain — a hardcoded chain
+ * inevitably names providers the user doesn't have (e.g. a metapi-only user got
+ * a chain of google/github-copilot/opencode entries, every one a
+ * `Model not found` retry), which produced confusing errors and wasted
+ * attempts. If the user configured nothing, this returns an empty list and the
+ * runner's session-model last resort (the model the user is actually using) is
+ * the only fallback.
  *
- * The returned list does NOT include the primary model — it's the ordered
- * list of *alternates* to try after the primary fails. Each entry is
- * "provider/modelID" form.
- *
- * Duplicates and empty strings are filtered. Entries that don't match the
- * "provider/modelID" shape (must contain a "/" with non-empty parts) are
- * also dropped — defensive guard against malformed user config.
+ * The returned list does NOT include the primary model — it's the ordered list
+ * of *alternates* to try after the primary fails. Each entry is
+ * "provider/modelID" form. Duplicates and empty strings are filtered; entries
+ * that don't match the "provider/modelID" shape (a "/" with non-empty parts) are
+ * dropped as a defensive guard against malformed user config.
  */
 export function resolveFallbackChain(
-    agentName: string,
     userFallbacks: readonly string[] | string | undefined,
 ): string[] {
     const userList = normalizeUserFallbacks(userFallbacks);
-
-    if (userList.length > 0) {
-        return dedupe(userList.filter(isValidModelSpec));
-    }
-
-    const builtin = getAgentFallbackModels(agentName);
-    if (!builtin || builtin.length === 0) return [];
-    return dedupe(builtin.filter(isValidModelSpec));
+    return dedupe(userList.filter(isValidModelSpec));
 }
 
 function normalizeUserFallbacks(userFallbacks: readonly string[] | string | undefined): string[] {

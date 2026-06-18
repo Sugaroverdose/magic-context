@@ -340,7 +340,7 @@ export function resolveSidekickFromConfig(
 		systemPrompt: sidekick.system_prompt,
 		timeoutMs: sidekick.timeout_ms,
 		thinking_level: sidekick.thinking_level,
-		fallbackModels: resolveFallbackChain("sidekick", sidekick.fallback_models),
+		fallbackModels: resolveFallbackChain(sidekick.fallback_models),
 	};
 }
 
@@ -364,10 +364,7 @@ export function resolveHistorianFromConfig(
 		historianContextLimit,
 	);
 
-	const fallbackModels = resolveFallbackChain(
-		"historian",
-		historian?.fallback_models,
-	);
+	const fallbackModels = resolveFallbackChain(historian?.fallback_models);
 
 	return {
 		runner: new PiSubagentRunner(),
