@@ -390,7 +390,7 @@ describe("loadPluginConfig — legacy agent enabled migration", () => {
             }),
         );
 
-        expect(result.historian).toEqual({ two_pass: false });
+        expect(result.historian).toEqual({ two_pass: false, disallowed_tools: [] });
         expect(result.dreamer?.disable).toBe(true);
         expect(result.sidekick?.disable).toBe(true);
         expect(result.configWarnings?.join("\n")).toContain(
