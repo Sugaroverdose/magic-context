@@ -501,12 +501,27 @@ export async function runPostTransformPhase(
                 cleanup.mutatedTextTags;
             emergency ||= cleanup.emergencyDroppedTools > 0;
             const t7 = performance.now();
-            const clearedReasoning = clearOldReasoning(
-                args.messages,
-                args.reasoningByMessage,
-                args.messageTagNumbers,
-                args.clearReasoningAge,
-            );
+            // Typed reasoning clearing is canonical-Anthropic-only. clearOldReasoning
+            // rewrites a reasoning part's `thinking`/`text` to "[cleared]"; only
+            // stripClearedReasoning (gated on canUseEmptySentinels) then converts
+            // those shells to empty sentinels that OpenCode drops before the
+            // Anthropic wire. For any provider that is NOT canonical Anthropic the
+            // "[cleared]" string would remain inside the reasoning block on the
+            // wire — wrong, and a real hazard for non-canonical Claude proxies
+            // (github-copilot/bedrock-claude under a non-"anthropic" providerID),
+            // which validate thinking blocks. So gate the WRITE on the same
+            // canonical-Anthropic predicate as the converter; non-Anthropic
+            // providers keep their reasoning intact. Inline-thinking stripping
+            // below stays provider-independent (it removes literal <thinking> tags
+            // from text, never touches typed reasoning parts).
+            const clearedReasoning = canUseEmptySentinels
+                ? clearOldReasoning(
+                      args.messages,
+                      args.reasoningByMessage,
+                      args.messageTagNumbers,
+                      args.clearReasoningAge,
+                  )
+                : 0;
             if (canUseEmptySentinels) {
                 stripClearedReasoning(args.messages);
             }

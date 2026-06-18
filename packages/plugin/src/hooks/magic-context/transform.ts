@@ -1336,12 +1336,21 @@ export function createTransform(deps: TransformDeps) {
         const persistedReasoningWatermark = sessionMeta?.clearedReasoningThroughTag ?? 0;
         if (persistedReasoningWatermark > 0) {
             const tReplay = performance.now();
-            const replayed = replayClearedReasoning(
-                messages,
-                reasoningByMessage,
-                messageTagNumbers,
-                persistedReasoningWatermark,
-            );
+            // Typed reasoning replay is canonical-Anthropic-only, matching the
+            // clearOldReasoning WRITE gate (transform-postprocess-phase.ts). The
+            // watermark can outlive a provider switch (anthropic → proxy), so
+            // gating the replay on the CURRENT provider prevents re-applying
+            // "[cleared]" reasoning text onto a non-canonical Claude proxy wire.
+            // Inline-thinking replay stays provider-independent — it strips
+            // literal <thinking> tags from text, never typed reasoning parts.
+            const replayed = canUseEmptySentinels
+                ? replayClearedReasoning(
+                      messages,
+                      reasoningByMessage,
+                      messageTagNumbers,
+                      persistedReasoningWatermark,
+                  )
+                : 0;
             const replayedInline = replayStrippedInlineThinking(
                 messages,
                 messageTagNumbers,

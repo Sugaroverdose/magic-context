@@ -585,6 +585,76 @@ describe("postprocess empty-sentinel provider gate", () => {
         expect(messages[0].parts).toEqual([{ type: "thinking", thinking: "[cleared]" }]);
     });
 
+    it("does not WRITE [cleared] into old reasoning on github-copilot (clearOldReasoning gated)", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-copilot-clear-write";
+        const oldThinking = { type: "thinking", thinking: "real reasoning content" };
+        const oldMsg = {
+            info: { id: "m-old", role: "assistant" },
+            parts: [oldThinking],
+        } as unknown as MessageLike;
+        const recentMsg = {
+            info: { id: "m-recent", role: "assistant" },
+            parts: [{ type: "text", text: "hi" }],
+        } as unknown as MessageLike;
+        const messages: MessageLike[] = [oldMsg, recentMsg];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                contextUsage: { percentage: 60, inputTokens: 6000 },
+                currentTurnId: "turn-clear-write",
+                resolvedProviderID: "github-copilot",
+                clearReasoningAge: 1,
+                reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
+                messageTagNumbers: new Map([
+                    [oldMsg, 1],
+                    [recentMsg, 3],
+                ]),
+            }),
+        );
+
+        // Non-canonical provider: reasoning must stay intact (no "[cleared]"
+        // string reaching a wire that won't sentinelize it).
+        expect(oldThinking.thinking).toBe("real reasoning content");
+    });
+
+    it("still clears + sentinelizes old reasoning on anthropic execute passes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-anthropic-clear-write";
+        const oldThinking = { type: "thinking", thinking: "real reasoning content" };
+        const oldMsg = {
+            info: { id: "m-old", role: "assistant" },
+            parts: [oldThinking],
+        } as unknown as MessageLike;
+        const recentMsg = {
+            info: { id: "m-recent", role: "assistant" },
+            parts: [{ type: "text", text: "hi" }],
+        } as unknown as MessageLike;
+        const messages: MessageLike[] = [oldMsg, recentMsg];
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                contextUsage: { percentage: 60, inputTokens: 6000 },
+                currentTurnId: "turn-clear-write-anthropic",
+                resolvedProviderID: "anthropic",
+                clearReasoningAge: 1,
+                reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
+                messageTagNumbers: new Map([
+                    [oldMsg, 1],
+                    [recentMsg, 3],
+                ]),
+            }),
+        );
+
+        // Canonical anthropic: cleared to "[cleared]" then sentinelized to empty
+        // text (OpenCode drops empty text before the wire).
+        expect(oldMsg.parts).toEqual([{ type: "text", text: "" }]);
+    });
+
     it("leaves processed image file parts native for github-copilot", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
