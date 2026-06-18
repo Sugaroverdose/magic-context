@@ -762,8 +762,13 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         // Store user behavior observations as candidates ONLY when the user-memory
         // feature is enabled. Without this gate we'd persist behavioral candidates
         // for users who opted out of user memories entirely (privacy).
+        // discard-last: skip observation candidates for the discarded provisional
+        // compartment for the SAME reason facts are skipped above — observations
+        // are unanchored, so a reworded re-emission next run would double-store.
+        // (`discardedLast` computed above for the fact-promotion gate.)
         if (
             deps.experimentalUserMemories === true &&
+            !discardedLast &&
             validatedPass.userObservations &&
             validatedPass.userObservations.length > 0
         ) {

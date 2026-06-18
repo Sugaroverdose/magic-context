@@ -940,12 +940,19 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// rendered m[0]/m[1] bytes.
 			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
 
+			// discard-last: when the provisional last compartment was dropped, its
+			// facts AND observations are not durable yet — skip both this run
+			// (unanchored; re-derived next run). Computed before the observations
+			// block so we can gate it too (parity with OpenCode).
+			const discardedLast = newCompartments.length < emittedCompartments.length;
+
 			// user observations are inserted POST-COMMIT,
 			// best-effort, so an auxiliary failure never rolls back the publish.
 			// Gated on the user-memory feature so opted-out users never have
 			// behavioral candidates persisted (privacy parity with OpenCode).
 			if (
 				userMemoriesEnabled === true &&
+				!discardedLast &&
 				validatedPass.userObservations?.length
 			) {
 				try {
@@ -970,11 +977,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					);
 				}
 			}
-
-			// discard-last: when the provisional last
-			// compartment was dropped, its facts are not durable yet — skip fact
-			// promotion this run (facts are unanchored; re-derived next run).
-			const discardedLast = newCompartments.length < emittedCompartments.length;
 
 			// register the project for embeddings against the
 			// LIVE directory ONCE up front (not inside the promotion block), so a

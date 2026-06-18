@@ -193,13 +193,15 @@ export async function runPiMemoryMigration(
 		routed = parsed.userObservations.length;
 	}
 
-	const { removed, inserted } = applyMemoryMigration(
-		deps.db,
-		projectPath,
-		parsed,
-	);
-
-	markMemoryMigrationDone(deps.db, projectPath);
+	// Apply the destructive rewrite AND set the done-guard atomically (parity with
+	// OpenCode). Separate, a crash between them leaves the project migrated-to-v2
+	// but UNGUARDED, so a retry re-migrates v2 rows. A nested db.transaction() runs
+	// as a savepoint, so applyMemoryMigration's inner transaction still works.
+	const { removed, inserted } = deps.db.transaction(() => {
+		const counts = applyMemoryMigration(deps.db, projectPath, parsed);
+		markMemoryMigrationDone(deps.db, projectPath);
+		return counts;
+	})();
 	return {
 		ran: true,
 		summary: `Re-evaluated ${removed} memor${removed === 1 ? "y" : "ies"} into ${inserted} v2-taxonomy memor${inserted === 1 ? "y" : "ies"}${routed > 0 ? `, routed ${routed} user trait${routed === 1 ? "" : "s"} to your profile` : ""}.`,

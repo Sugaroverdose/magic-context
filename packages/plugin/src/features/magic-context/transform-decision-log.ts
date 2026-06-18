@@ -5,6 +5,14 @@ import { getDatabasePath } from "./storage-db";
 export type TransformDecisionHarness = "opencode" | "pi";
 export type TransformSchedulerDecision = "execute" | "defer";
 
+/**
+ * Max transform_decisions rows kept per (session_id, harness). Pruned newest-first
+ * after every insert so a long session's cache-affecting passes never grow this
+ * telemetry table without bound (the dashboard loads all matching rows for cause
+ * attribution).
+ */
+export const TRANSFORM_DECISIONS_RETENTION = 2000;
+
 export type CanonicalMaterializeReason =
     | "system_hash"
     | "model_change"
@@ -247,14 +255,39 @@ function findNewestPiAssistantEntryIdAfter(
     snapshotNewestAssistantEntryId: string | null,
 ): string | null {
     if (!Array.isArray(entries)) return null;
-    for (let i = entries.length - 1; i >= 0; i--) {
+
+    // Bind only to an assistant entry positioned AFTER the snapshot. A pure
+    // value-skip backward scan misattributes when NO new assistant has arrived
+    // yet (the branch still ends at the snapshot): it would skip the snapshot by
+    // value and fall back to an OLDER assistant, recording THIS pass's cache
+    // decision against the wrong message. Resolve the snapshot's INDEX first, then
+    // return the first assistant after it. If the snapshot id is absent (compacted
+    // away / reordered), refuse to bind (return null) — the pending row stays for
+    // a later pass (at most one per session; overwritten by the next bust), never
+    // attaching to an older entry.
+    let startIndex = 0;
+    if (snapshotNewestAssistantEntryId !== null) {
+        let snapshotIndex = -1;
+        for (let i = entries.length - 1; i >= 0; i--) {
+            const entry = entries[i];
+            if (
+                entry &&
+                typeof entry === "object" &&
+                (entry as { id?: unknown }).id === snapshotNewestAssistantEntryId
+            ) {
+                snapshotIndex = i;
+                break;
+            }
+        }
+        if (snapshotIndex === -1) return null;
+        startIndex = snapshotIndex + 1;
+    }
+
+    for (let i = startIndex; i < entries.length; i++) {
         const entry = entries[i];
         if (!entry || typeof entry !== "object") continue;
         const row = entry as { id?: unknown; type?: unknown; message?: unknown };
         if (row.type !== "message" || typeof row.id !== "string" || row.id.length === 0) {
-            continue;
-        }
-        if (snapshotNewestAssistantEntryId !== null && row.id === snapshotNewestAssistantEntryId) {
             continue;
         }
         const message = row.message;
@@ -301,6 +334,27 @@ function writeTransformDecisionRow(dbPath: string, row: TransformDecisionRow): v
             Math.max(0, Math.floor(row.droppedCount)),
             Math.max(0, Math.floor(row.inputTokens)),
         );
+        // Enforce the per-(session,harness) retention cap so a long session's
+        // cache-affecting passes can't grow this telemetry table unbounded (the
+        // dashboard loads all matching rows for cause attribution). Keep the
+        // newest TRANSFORM_DECISIONS_RETENTION rows by (ts_ms, rowid). Best-effort
+        // on the same non-blocking handle; a failure just defers the prune.
+        db.prepare(
+            `DELETE FROM transform_decisions
+             WHERE session_id = ? AND harness = ?
+               AND rowid NOT IN (
+                 SELECT rowid FROM transform_decisions
+                 WHERE session_id = ? AND harness = ?
+                 ORDER BY ts_ms DESC, rowid DESC
+                 LIMIT ?
+               )`,
+        ).run(
+            row.sessionId,
+            row.harness,
+            row.sessionId,
+            row.harness,
+            TRANSFORM_DECISIONS_RETENTION,
+        );
     } finally {
         closeQuietly(db);
     }
@@ -323,4 +377,8 @@ export const __test = {
     setWriterForTests(writer: TransformDecisionWriter | null): void {
         writerOverrideForTests = writer;
     },
+    writeRow(dbPath: string, row: TransformDecisionRow): void {
+        writeTransformDecisionRow(dbPath, row);
+    },
+    findNewestPiAssistantEntryIdAfter,
 };

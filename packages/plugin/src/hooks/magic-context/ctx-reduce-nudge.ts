@@ -4,10 +4,13 @@
 // later transform, so this is "free sticky" — no anchor store, no CAS, no
 // replay machinery (unlike the deleted assistant/user-anchored nudges).
 //
-// The metric is `severity = (undropped / historyBudget) × pressure`:
+// The metric is `severity = (undropped / workingWindow) × pressure`:
 //   - `undropped` = approximate tokens of NON-dropped tool output in the live
-//     tail (dropped outputs are `[dropped …]` / `[truncated]` sentinels, so a
-//     simple tail walk excludes them — no agent-vs-heuristic attribution).
+//     tail (dropped outputs are `[dropped …]` sentinels, so a simple tail walk
+//     excludes them — no agent-vs-heuristic attribution).
+//   - `workingWindow` = the execute-threshold token budget (the range the agent
+//     actually moves in), NOT the tiny historyBudget — using historyBudget here
+//     saturated severity and nagged constantly (the prior denominator bug).
 //   - `pressure`  = current usage% / execute-threshold%.
 // Either factor low ⇒ quiet, so a disciplined agent and an early-exploring
 // agent are both spared; only "lots of reclaimable space AND near compaction"

@@ -131,6 +131,13 @@ async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: strin
         // self-gates on the live-server probe (channel2-delivery.ts), so plain
         // TUI still 404s out; it no-ops unless a `pending` intent exists.
         const baseline = deps.channel1StateBySession?.get(sessionId);
+        // If the agent already called ctx_reduce since the last transform refreshed
+        // the baseline, the tailToolTokens/turnToolTokens here are STALE-HIGH (they
+        // predate the reduction) — delivering now would nudge the agent to drop
+        // output it just dropped. Skip until the next transform recomputes a fresh
+        // baseline. Parity with Pi's maybeDeliverChannel2Pi (reducedSinceRefresh
+        // guard). The pending intent stays armed for that fresh re-evaluation.
+        if (baseline?.reducedSinceRefresh) return;
         await maybeDeliverChannel2(sessionId, {
             db: deps.db,
             serverUrl: deps.serverUrl,

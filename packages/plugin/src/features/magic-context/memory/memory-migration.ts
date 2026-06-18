@@ -510,9 +510,17 @@ export async function runMemoryMigration(
             routed = result.userObservations.length;
         }
 
-        const { removed, inserted } = applyMemoryMigration(db, projectPath, result);
-
-        markMemoryMigrationDone(db, projectPath);
+        // Apply the destructive rewrite AND set the done-guard atomically. If they
+        // were separate and a crash landed between them, the project would be left
+        // already-migrated-to-v2 but UNGUARDED — a retry would re-migrate v2 rows
+        // (new ids/stats/embeddings, possible duplicate observation candidates).
+        // A nested db.transaction() runs as a savepoint, so applyMemoryMigration's
+        // own inner transaction still works.
+        const { removed, inserted } = db.transaction(() => {
+            const counts = applyMemoryMigration(db, projectPath, result);
+            markMemoryMigrationDone(db, projectPath);
+            return counts;
+        })();
         return {
             ran: true,
             removed,
