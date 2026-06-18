@@ -203,10 +203,20 @@ export async function getSessionCacheEvents(
   // for the whole session — but be aware that a hot OpenCode session can emit
   // 30k+ events (≈8MB of JSON across the Tauri IPC boundary), so chart-bound
   // callers should always pass a small bound. The dashboard's Cache page uses
-  // 200 to match the per-session window of the global cache-events query.
+  // the window picker (200–1000) for the initial/full load.
   limit?: number,
+  // Incremental mode: when set, return this session's events with
+  // `time_created >= sinceTimestamp` in chronological order (the `>=` overlaps
+  // the caller's last-seen event by one row so cross-step severity is computed
+  // correctly; dedupe by message_id). `limit` is ignored when this is set.
+  sinceTimestamp?: number | null,
 ): Promise<DbCacheEvent[]> {
-  return invoke("get_session_cache_events", { harness, sessionId, limit });
+  return invoke("get_session_cache_events", {
+    harness,
+    sessionId,
+    limit,
+    sinceTimestamp: sinceTimestamp ?? null,
+  });
 }
 
 /**

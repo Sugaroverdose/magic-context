@@ -1,11 +1,5 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import {
-  formatDateTime,
-  getCacheEventsFromDb,
-  getSessionCacheEventsByTurns,
-  listSessions,
-  truncate,
-} from "../../lib/api";
+import { formatDateTime, getSessionCacheEvents, listSessions, truncate } from "../../lib/api";
 import { severityColorClass } from "../../lib/cache-format";
 import type { DbCacheEvent, Harness, SessionCacheStats, SessionRow } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
@@ -16,32 +10,37 @@ type HarnessFilter = "all" | Harness;
 type CacheSessionStats = SessionCacheStats & { harness: Harness };
 type SelectedSession = { harness: Harness; sessionId: string };
 
-// Module-level state — survives component unmount/remount (page navigation).
-// We persist EVERYTHING needed to skip work on remount, not just events,
-// because the previous implementation lost session_stats / session_names /
-// subagent_ids on remount and the picker disappeared.
-let cachedEvents: DbCacheEvent[] = [];
-let cachedWatermark: number | null = null;
-let cachedSessions: SessionRow[] = [];
+// Per-session event WINDOW: the most-recent ≤N events for one session, kept in
+// memory and grown incrementally. Cards derive their stats (ratio / busts /
+// count) from this session's OWN window — never a shared global pool — so the
+// numbers are per-session-correct and don't shift with other sessions' activity.
+interface SessionWindow {
+  harness: Harness;
+  sessionId: string;
+  events: DbCacheEvent[]; // chronological, trimmed to the window size
+  lastSeen: number; // max event timestamp held (0 = empty); incremental anchor
+  lastActivityMs: number; // session.last_activity_ms at last fetch (change gate)
+}
+
+// Module-level state — survives component unmount/remount so a return to the
+// page rehydrates instantly. Keyed by `${harness}:${sessionId}`.
+const cachedWindows = new Map<string, SessionWindow>();
+let cachedSessions: SessionRow[] = []; // titles + subagent flags + recency
 let cachedSelectedSession: SelectedSession | null = null;
-// Top-N session keys we've lazy-loaded for the Recent Sessions strip. Tracked
-// separately from `cachedHasGlobal` because the top-N mode covers just the
-// 5 most-recent non-subagent sessions, not the full corpus — the polling
-// tick refreshes only these instead of doing the 3s global query.
-let cachedLoadedSessionKeys: SelectedSession[] = [];
-// True once the user has opted into the cross-session global view ("Show all"
-// or harness/session change requiring the full corpus). Defaults to false so
-// the expensive global query never runs implicitly.
-let cachedHasGlobal = false;
-// Cap for the Recent Sessions strip. Matches the existing client-side
-// `filteredStats().slice(0, 5)` so we don't fetch sessions we'd never render.
-const RECENT_SESSIONS_LIMIT = 5;
+// How many recent sessions to surface as cards. 10 (not 5) fills wide screens.
+const RECENT_SESSIONS_LIMIT = 10;
+
+const windowKey = (harness: Harness, sessionId: string) => `${harness}:${sessionId}`;
 
 export default function CacheDiagnostics() {
-  const [events, setEvents] = createSignal<DbCacheEvent[]>(cachedEvents);
-  const [sessionStats, setSessionStats] = createSignal<CacheSessionStats[]>([]);
+  // The session windows live in a module-level Map (mutated in place during
+  // incremental polls); `windowsVersion` is bumped on every change so the
+  // derived memos (cards + chart) re-run. This avoids re-allocating the whole
+  // window array each tick just to trip reactivity.
+  const [windowsVersion, setWindowsVersion] = createSignal(0);
+  const bumpWindows = () => setWindowsVersion((v) => v + 1);
   const [sessionNames, setSessionNames] = createSignal<Record<string, string>>({});
-  const [loading, setLoading] = createSignal(cachedEvents.length === 0);
+  const [loading, setLoading] = createSignal(cachedWindows.size === 0);
   const [paused, setPaused] = createSignal(false);
   const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(
     cachedSelectedSession,
@@ -50,12 +49,35 @@ export default function CacheDiagnostics() {
   const [hideSubagents, setHideSubagents] = createSignal(true);
   const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
   const [expandedTurns, setExpandedTurns] = createSignal<Set<string>>(new Set());
-  // Cap the timeline to the most-recent N steps so long sessions (1000+ steps)
-  // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
+  // Window size = how many recent events to keep per session (the picker). Drives
+  // both the per-session card stats and the selected session's chart/list.
   const [timelineLimit, setTimelineLimit] = createSignal(200);
   // The step message_id selected by clicking a timeline bar — used to outline
   // the bar and briefly highlight the matching list row after scrolling to it.
   const [selectedStepId, setSelectedStepId] = createSignal<string | null>(null);
+
+  // The Recent Sessions strip is a single non-wrapping row of equal-width cards.
+  // How many cards fit is measured from the row's width against a min card width,
+  // capped at the number of windows we keep — so the strip never wraps and never
+  // shows a card narrower than CARD_MIN_WIDTH.
+  const CARD_MIN_WIDTH = 150;
+  const CARD_GAP = 8;
+  const [cardRowWidth, setCardRowWidth] = createSignal(0);
+  const visibleCardCount = createMemo(() => {
+    const w = cardRowWidth();
+    if (w <= 0) return RECENT_SESSIONS_LIMIT; // pre-measure: assume all fit
+    const fit = Math.floor((w + CARD_GAP) / (CARD_MIN_WIDTH + CARD_GAP));
+    return Math.max(1, Math.min(RECENT_SESSIONS_LIMIT, fit));
+  });
+  const measureCardRow = (el: HTMLDivElement) => {
+    setCardRowWidth(el.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? el.clientWidth;
+      setCardRowWidth(width);
+    });
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  };
 
   // Click a timeline bar → expand its turn (if multi-step) and scroll the
   // matching list row into view. Expansion mutates the DOM, so scroll on the
@@ -91,279 +113,240 @@ export default function CacheDiagnostics() {
     agent: string | null;
   }
 
-  // The Rust backend windows by session: each session_id gets up to PER_SESSION
-  // recent events, capped globally at PER_SESSION × 10. With this client-side
-  // cap matching the global ceiling, every visible session keeps a full bar
-  // chart even when many sessions are active in parallel.
-  const PER_SESSION = 200;
-  const TOTAL_CAP = PER_SESSION * 10;
-  // For the per-session timeline we ask the backend for a turn count, not an
-  // event count, so multi-step tool-use turns don't collapse the bar chart.
-  const TARGET_TURNS_PER_SESSION = 200;
+  // The per-session window size (the picker). Each session keeps its most-recent
+  // ≤N events; cards aggregate over that window and the chart shows the selected
+  // session's window.
+  const windowSize = () => timelineLimit();
 
-  // Synchronously rebuild every derived signal from a (events, sessions) pair.
-  // Used both for fresh data from a fetch and for cache rehydration on remount.
-  // `bumpWatermark` is only meaningful when `events` represents a global view
-  // (covers all active sessions); pass false when `events` was scoped to a
-  // single session so the watermark doesn't filter out other sessions later.
-  const applyState = (allEvents: DbCacheEvent[], sessions: SessionRow[], bumpWatermark = true) => {
-    setEvents(allEvents);
-    cachedEvents = allEvents;
-    if (bumpWatermark && allEvents.length > 0) {
-      cachedWatermark = Math.max(...allEvents.map((e) => e.timestamp));
-    }
-
-    const statsMap = new Map<
-      string,
-      {
-        count: number;
-        harness: Harness;
-        read: number;
-        write: number;
-        input: number;
-        lastTs: number;
-        busts: number;
-      }
-    >();
-    for (const e of allEvents) {
-      if (!e.session_id) continue;
-      const key = `${e.harness}:${e.session_id}`;
-      const s = statsMap.get(key) ?? {
-        count: 0,
-        harness: e.harness,
-        read: 0,
-        write: 0,
-        input: 0,
-        lastTs: 0,
-        busts: 0,
-      };
-      s.count++;
-      s.read += e.cache_read;
-      s.write += e.cache_write;
-      s.input += e.input_tokens;
-      if (e.timestamp > s.lastTs) s.lastTs = e.timestamp;
-      if (e.severity === "bust" || e.severity === "full_bust") s.busts++;
-      statsMap.set(key, s);
-    }
-    const stats = [...statsMap.entries()]
-      .map(([key, s]) => {
-        const sid = key.slice(key.indexOf(":") + 1);
-        const total = s.read + s.write + s.input;
-        return {
-          harness: s.harness,
-          session_id: sid,
-          event_count: s.count,
-          total_cache_read: s.read,
-          total_cache_write: s.write,
-          total_input: s.input,
-          hit_ratio: total > 0 ? s.read / total : 0,
-          last_timestamp: new Date(s.lastTs).toISOString(),
-          bust_count: s.busts,
-        };
-      })
-      .sort((a, b) => b.last_timestamp.localeCompare(a.last_timestamp));
-    setSessionStats(stats);
-
+  const applySessionMeta = (sessions: SessionRow[]) => {
+    cachedSessions = sessions;
     const names: Record<string, string> = {};
     const subs = new Set<string>();
     for (const s of sessions) {
-      const key = `${s.harness}:${s.session_id}`;
+      const key = windowKey(s.harness, s.session_id);
       if (s.title) names[key] = s.title;
       if (s.is_subagent) subs.add(key);
     }
     setSessionNames(names);
     setSubagentIds(subs);
-    cachedSessions = sessions;
   };
 
-  // Refresh events for a given set of session keys in parallel and apply the
-  // combined result. Used for top-N mode (initial lazy load + live polling).
-  // We keep `bumpWatermark=false` because the combined set still covers only
-  // a subset of all sessions; advancing the watermark would silently mask
-  // pre-cutoff events for any session outside the top-N window when the user
-  // later clicks "Show all" and triggers `fetchGlobal()` with that watermark
-  // as a `since` filter.
-  const refreshSessions = async (keys: SelectedSession[]) => {
-    if (keys.length === 0) return;
-    const results = await Promise.all(
-      keys.map((k) =>
-        getSessionCacheEventsByTurns(k.harness, k.sessionId, TARGET_TURNS_PER_SESSION),
-      ),
-    );
-    const merged = results.flat();
-    applyState(merged, cachedSessions, false);
-  };
-
-  // Lazy global fetch. Only called when the user opts in (Show all, harness
-  // filter, or a card click for a session not yet in the loaded events).
-  // After this runs the live polling tick switches to incremental global
-  // refreshes so newly-arriving events across all sessions stay visible.
-  const fetchGlobal = async () => {
-    try {
-      const [newEvents, sessions] = await Promise.all([
-        getCacheEventsFromDb(PER_SESSION, cachedWatermark),
-        listSessions(),
-      ]);
-      if (cachedWatermark === null) {
-        applyState(newEvents, sessions);
-      } else if (newEvents.length > 0) {
-        const merged = [...events(), ...newEvents].slice(-TOTAL_CAP);
-        applyState(merged, sessions);
-      } else {
-        // No new events; still refresh session metadata so newly-created
-        // sessions show their titles without waiting for an eventful tick.
-        cachedSessions = sessions;
-        const names: Record<string, string> = {};
-        const subs = new Set<string>();
-        for (const s of sessions) {
-          const key = `${s.harness}:${s.session_id}`;
-          if (s.title) names[key] = s.title;
-          if (s.is_subagent) subs.add(key);
-        }
-        setSessionNames(names);
-        setSubagentIds(subs);
-      }
-      cachedHasGlobal = true;
-    } finally {
-      setLoading(false);
+  // The recent sessions we keep windows for: top-N by activity, non-subagent
+  // (unless the user toggled them on), plus the selected session even if it has
+  // aged out of the top-N so its chart stays live.
+  const recentSessionRows = (sessions: SessionRow[]): SessionRow[] => {
+    const want = hideSubagents() ? sessions.filter((s) => !s.is_subagent) : sessions;
+    const top = want.slice(0, RECENT_SESSIONS_LIMIT);
+    const sel = cachedSelectedSession;
+    if (sel && !top.some((s) => s.harness === sel.harness && s.session_id === sel.sessionId)) {
+      const selRow = sessions.find(
+        (s) => s.harness === sel.harness && s.session_id === sel.sessionId,
+      );
+      if (selRow) top.push(selRow);
     }
+    return top;
   };
 
-  // Ensure global data is loaded (idempotent — no-ops if already fetched).
-  const ensureGlobal = async () => {
-    if (cachedHasGlobal) return;
-    await fetchGlobal();
+  // Full window load for one session: the most-recent N events, replacing any
+  // prior window. Used on initial load, for a newly-surfaced session, and after
+  // a window-size change.
+  const loadFullWindow = async (row: SessionRow) => {
+    const events = await getSessionCacheEvents(row.harness, row.session_id, windowSize());
+    const key = windowKey(row.harness, row.session_id);
+    cachedWindows.set(key, {
+      harness: row.harness,
+      sessionId: row.session_id,
+      events,
+      lastSeen: events.length > 0 ? events[events.length - 1].timestamp : 0,
+      lastActivityMs: row.last_activity_ms,
+    });
+  };
+
+  // Incremental update for an already-windowed session: fetch only events at/
+  // after the window's anchor (>= lastSeen, a 1-event overlap so the first new
+  // event's cross-step severity is computed correctly), dedupe the overlap by
+  // message_id, append, and trim to the last N. No-op when nothing is new.
+  const updateWindowIncremental = async (win: SessionWindow, row: SessionRow) => {
+    const fresh = await getSessionCacheEvents(
+      win.harness,
+      win.sessionId,
+      undefined,
+      win.lastSeen || null,
+    );
+    const have = new Set(win.events.map((e) => e.message_id));
+    const added = fresh.filter((e) => !have.has(e.message_id));
+    win.lastActivityMs = row.last_activity_ms;
+    if (added.length === 0) return false;
+    const n = windowSize();
+    const merged = [...win.events, ...added];
+    win.events = merged.length > n ? merged.slice(-n) : merged;
+    win.lastSeen = win.events[win.events.length - 1].timestamp;
+    return true;
+  };
+
+  // One reconciliation pass: re-list sessions, ensure a window exists for each
+  // recent session (full load if new, incremental if its activity advanced,
+  // skip if unchanged), and evict windows that fell out of the recent set.
+  const reconcile = async () => {
+    const sessions = await listSessions();
+    applySessionMeta(sessions);
+    const recent = recentSessionRows(sessions);
+    const recentKeys = new Set(recent.map((s) => windowKey(s.harness, s.session_id)));
+
+    let changed = false;
+    for (const row of recent) {
+      const key = windowKey(row.harness, row.session_id);
+      const win = cachedWindows.get(key);
+      if (!win) {
+        await loadFullWindow(row);
+        changed = true;
+      } else if (row.last_activity_ms > win.lastActivityMs) {
+        if (await updateWindowIncremental(win, row)) changed = true;
+      }
+    }
+    // Evict windows no longer in the recent set (keep memory bounded).
+    for (const key of [...cachedWindows.keys()]) {
+      if (!recentKeys.has(key)) cachedWindows.delete(key);
+    }
+    if (changed) bumpWindows();
+  };
+
+  // Reload every window fresh at the current size — used after a window-size
+  // change (no backward-fill: just re-fetch the larger/smaller window).
+  const reloadAllWindows = async () => {
+    const rows = recentSessionRows(cachedSessions);
+    await Promise.all(rows.map((row) => loadFullWindow(row)));
+    bumpWindows();
   };
 
   const resolveTitle = (harness: Harness, sessionId: string) =>
     sessionNames()[`${harness}:${sessionId}`] || truncate(sessionId, 16);
 
   onMount(async () => {
-    // Remount fast path: if we have cached state from a prior mount, rebuild
-    // every derived signal synchronously and return — no DB work, no IPC,
-    // no main-thread JSON-parse stall, no blank picker. The live polling
-    // tick takes over from here.
-    if (cachedEvents.length > 0) {
-      applyState(cachedEvents, cachedSessions, false);
-      // Restore the user's prior selection so a previously-deselected
-      // ("Show all") view stays as-is across navigation.
+    // Remount fast path: rehydrate from the module-level windows synchronously.
+    if (cachedWindows.size > 0) {
+      applySessionMeta(cachedSessions);
       setSelectedSession(cachedSelectedSession);
+      bumpWindows();
       setLoading(false);
       return;
     }
-
-    // Cold start, two-stage load:
-    //   Stage 1 (blocking, ~300-500ms): list sessions + fetch the most-recent
-    //   non-subagent session's events. As soon as this finishes the chart and
-    //   one card render — the user sees a useful page immediately.
-    //
-    //   Stage 2 (deferred, ~100-150ms parallel): fetch up to N-1 more sessions
-    //   so the Recent Sessions strip fills out to 5 cards. We deliberately do
-    //   not run the 3s global query here — that's gated behind "Show all" so
-    //   the cold start stays cheap on dev DBs with 30k+ events on one session.
+    // Cold start: list sessions, load each recent session's full window, and
+    // default the selection to the most-recent non-subagent session.
     try {
       const sessions = await listSessions();
-      const topN = sessions.filter((s) => !s.is_subagent).slice(0, RECENT_SESSIONS_LIMIT);
-      if (topN.length === 0) {
-        // Empty environment — still store sessions so we don't refetch later.
-        applyState([], sessions, false);
-        return;
+      applySessionMeta(sessions);
+      const recent = recentSessionRows(sessions);
+      if (!cachedSelectedSession) {
+        const top = recent.find((s) => !s.is_subagent) ?? recent[0];
+        if (top) {
+          const key: SelectedSession = { harness: top.harness, sessionId: top.session_id };
+          setSelectedSession(key);
+          cachedSelectedSession = key;
+        }
       }
-
-      const first = topN[0];
-      const firstKey: SelectedSession = { harness: first.harness, sessionId: first.session_id };
-      const firstEvents = await getSessionCacheEventsByTurns(
-        first.harness,
-        first.session_id,
-        TARGET_TURNS_PER_SESSION,
-      );
-      applyState(firstEvents, sessions, false);
-      setSelectedSession(firstKey);
-      cachedSelectedSession = firstKey;
-      cachedLoadedSessionKeys = [firstKey];
-      setLoading(false);
-
-      // Stage 2: fan out to the rest of top-N in the background. Using
-      // queueMicrotask so the Stage 1 render commits to the DOM before we
-      // start the next batch — that's the difference between a noticeable
-      // initial-paint jank and a smooth fill-in afterward.
-      const rest = topN.slice(1);
-      if (rest.length > 0) {
-        queueMicrotask(() => {
-          const restKeys: SelectedSession[] = rest.map((s) => ({
-            harness: s.harness,
-            sessionId: s.session_id,
-          }));
-          // Refresh ALL loaded sessions (first + rest) in parallel so the
-          // combined events list passed to `applyState` covers every card.
-          // If we only fetched `rest` we'd then have to merge against
-          // `firstEvents` which is fine — but a single refresh is simpler
-          // and the cost difference is one extra ~70ms parallel fetch.
-          const allKeys = [firstKey, ...restKeys];
-          void refreshSessions(allKeys)
-            .then(() => {
-              cachedLoadedSessionKeys = allKeys;
-            })
-            .catch(() => {
-              // Stage 2 failure leaves us with the Stage 1 single-card view —
-              // still functional; user can click "Show all" to retry via the
-              // global fetch path.
-            });
-        });
-      }
+      await Promise.all(recent.map((row) => loadFullWindow(row)));
+      bumpWindows();
     } catch {
-      // Swallow — leave loading state visible and let the user retry by
-      // clicking around. Throwing here would crash the whole page.
+      // Transient; the poll retries.
     } finally {
       setLoading(false);
     }
   });
 
-  // Live polling. Scope follows the active view:
-  //   - global mode (hasGlobal=true): incremental global fetch (cheap because
-  //     of the `since` watermark filter).
-  //   - top-N mode: re-fetch every loaded session in parallel so the cards
-  //     and the chart for the selected session stay live without paying for
-  //     the global scan.
-  const refreshInterval = setInterval(() => {
-    if (paused()) return;
-    if (cachedHasGlobal) {
-      void fetchGlobal();
-    } else if (cachedLoadedSessionKeys.length > 0) {
-      void refreshSessions(cachedLoadedSessionKeys).catch(() => {
-        // Ignore transient errors; the next tick will retry.
-      });
+  // Single 1s reconciliation loop: cheap session-table re-list + incremental
+  // per-session fetches (only for sessions whose activity advanced). In-flight
+  // latched so a slow pass can't stack.
+  let reconcileInFlight = false;
+  const tick = async () => {
+    if (paused() || reconcileInFlight) return;
+    reconcileInFlight = true;
+    try {
+      await reconcile();
+    } catch {
+      // Transient (DB lock / IPC); next tick retries.
+    } finally {
+      reconcileInFlight = false;
     }
-  }, 15000);
-  onCleanup(() => clearInterval(refreshInterval));
+  };
+  const tickInterval = setInterval(() => void tick(), 1000);
+  onCleanup(() => clearInterval(tickInterval));
 
-  // Selection helper used by card clicks and Show-all. Mirrors module-level
-  // cache so a remount restores the same view.
+  // Selection helper. Ensures the newly-selected session has a window (loads it
+  // immediately if not already held) so its chart appears without a poll lag.
   const selectSession = (next: SelectedSession | null) => {
     setSelectedSession(next);
     cachedSelectedSession = next;
+    if (next && !cachedWindows.has(windowKey(next.harness, next.sessionId))) {
+      const row = cachedSessions.find(
+        (s) => s.harness === next.harness && s.session_id === next.sessionId,
+      );
+      if (row) void loadFullWindow(row).then(bumpWindows);
+    }
   };
 
   const isSubagent = (harness: Harness, sessionId: string) =>
     subagentIds().has(`${harness}:${sessionId}`);
 
-  const filteredStats = () => {
+  // Cards: per-session stats aggregated over each session's OWN window (never a
+  // shared global pool), ordered by the session table's recency. Reading
+  // windowsVersion() makes this re-run when any window changes.
+  const filteredStats = (): CacheSessionStats[] => {
+    windowsVersion();
     const harness = harnessFilter();
-    let filtered = sessionStats();
-    if (harness !== "all") filtered = filtered.filter((s) => s.harness === harness);
-    if (hideSubagents()) filtered = filtered.filter((s) => !isSubagent(s.harness, s.session_id));
-    return filtered.slice(0, 5);
+    const rows: CacheSessionStats[] = [];
+    for (const s of cachedSessions) {
+      if (harness !== "all" && s.harness !== harness) continue;
+      if (hideSubagents() && s.is_subagent) continue;
+      const win = cachedWindows.get(windowKey(s.harness, s.session_id));
+      if (!win) continue;
+      let read = 0;
+      let write = 0;
+      let input = 0;
+      let busts = 0;
+      let lastTs = 0;
+      for (const e of win.events) {
+        read += e.cache_read;
+        write += e.cache_write;
+        input += e.input_tokens;
+        if (e.severity === "bust" || e.severity === "full_bust") busts++;
+        if (e.timestamp > lastTs) lastTs = e.timestamp;
+      }
+      const total = read + write + input;
+      rows.push({
+        harness: s.harness,
+        session_id: s.session_id,
+        event_count: win.events.length,
+        total_cache_read: read,
+        total_cache_write: write,
+        total_input: input,
+        hit_ratio: total > 0 ? read / total : 0,
+        last_timestamp: new Date(lastTs).toISOString(),
+        bust_count: busts,
+      });
+    }
+    // Render only as many cards as fit one non-wrapping row at CARD_MIN_WIDTH.
+    return rows.slice(0, visibleCardCount());
   };
 
+  // Chart/list events: the selected session's window, or — when nothing is
+  // selected ("Show all") — every recent window merged (filtered). Reading
+  // windowsVersion() ties the downstream memos to window mutations.
   const filteredEvents = () => {
+    windowsVersion();
     const selected = selectedSession();
+    if (selected) {
+      const win = cachedWindows.get(windowKey(selected.harness, selected.sessionId));
+      return win ? win.events : [];
+    }
     const harness = harnessFilter();
-    let all = events();
-    if (harness !== "all") all = all.filter((e) => e.harness === harness);
-    if (hideSubagents()) all = all.filter((e) => !isSubagent(e.harness, e.session_id));
-    return selected
-      ? all.filter((e) => e.session_id === selected.sessionId && e.harness === selected.harness)
-      : all;
+    const all: DbCacheEvent[] = [];
+    for (const win of cachedWindows.values()) {
+      if (harness !== "all" && win.harness !== harness) continue;
+      if (hideSubagents() && isSubagent(win.harness, win.sessionId)) continue;
+      all.push(...win.events);
+    }
+    return all;
   };
 
   // Ordering used for worst-severity promotion across multi-step turns.
@@ -491,13 +474,29 @@ export default function CacheDiagnostics() {
         <h1 class="section-title">Cache Diagnostics</h1>
         <div class="section-actions" style={{ "align-items": "center" }}>
           <FilterSelect
+            value={String(timelineLimit())}
+            onChange={(value) => {
+              setTimelineLimit(Number(value));
+              // Window size is the per-session event bound — reload every window
+              // fresh at the new size (no backward-fill).
+              void reloadAllWindows();
+            }}
+            placeholder="Recent"
+            options={[
+              { value: "200", label: "Recent: 200" },
+              { value: "400", label: "Recent: 400" },
+              { value: "600", label: "Recent: 600" },
+              { value: "800", label: "Recent: 800" },
+              { value: "1000", label: "Recent: 1000" },
+            ]}
+          />
+          <FilterSelect
             value={harnessFilter()}
             onChange={(value) => {
               setHarnessFilter(value as HarnessFilter);
+              // Clear the selection → Lane B switches to the global recent
+              // window (selectSession triggers the event refetch).
               selectSession(null);
-              // Switching harness implies the user wants to see across
-              // sessions; ensure we have the global corpus loaded.
-              void ensureGlobal();
             }}
             placeholder="Harness"
             options={[
@@ -506,16 +505,20 @@ export default function CacheDiagnostics() {
               { value: "pi", label: "Pi" },
             ]}
           />
+          {/* padding matches .fsel-trigger (6px 10px) so the buttons and the two
+              pickers render at identical heights in this toolbar. */}
           <button
             type="button"
-            class={`btn sm ${!hideSubagents() ? "primary" : ""}`}
+            class={`btn ${!hideSubagents() ? "primary" : ""}`}
+            style={{ padding: "6px 10px" }}
             onClick={() => setHideSubagents(!hideSubagents())}
           >
             {hideSubagents() ? "Show subagents" : "Hide subagents"}
           </button>
           <button
             type="button"
-            class={`btn sm ${paused() ? "primary" : ""}`}
+            class={`btn ${paused() ? "primary" : ""}`}
+            style={{ padding: "6px 10px" }}
             onClick={() => setPaused(!paused())}
           >
             {paused() ? "▶ Resume" : "⏸ Pause"}
@@ -550,17 +553,18 @@ export default function CacheDiagnostics() {
                 class="btn sm"
                 style={{ padding: "1px 6px", "font-size": "10px", "margin-left": "4px" }}
                 onClick={() => {
+                  // Clear the selection → Lane B shows the global recent window.
                   selectSession(null);
-                  // First Show-all click triggers the global fetch so
-                  // "all sessions" actually means all sessions.
-                  void ensureGlobal();
                 }}
               >
                 Show all
               </button>
             </Show>
           </div>
-          <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
+          <div
+            ref={measureCardRow}
+            style={{ display: "flex", gap: `${CARD_GAP}px`, "flex-wrap": "nowrap" }}
+          >
             <For each={filteredStats()}>
               {(stat) => {
                 const isActive = () => {
@@ -575,26 +579,22 @@ export default function CacheDiagnostics() {
                     class="card"
                     style={{
                       cursor: "pointer",
+                      // Equal width: every card flexes from a 0 basis so they
+                      // share the row evenly; min-width gates how many fit (the
+                      // count is computed from the row width, so they never wrap).
                       flex: "1 1 0",
-                      "min-width": "140px",
-                      "max-width": "220px",
+                      "min-width": "0",
                       "border-color": isActive() ? "var(--accent)" : undefined,
                       "text-align": "left",
                     }}
                     onClick={() => {
+                      // Toggle selection. selectSession refetches Lane B for the
+                      // new scope (the selected session, or the global recent
+                      // window when cleared) — no separate global-load path.
                       const next = isActive()
                         ? null
                         : { harness: stat.harness, sessionId: stat.session_id };
                       selectSession(next);
-                      // Clearing selection means "show all" — load the
-                      // global corpus on demand. Selecting a card just
-                      // re-filters the already-loaded top-N events (set
-                      // by Stage 2 of the cold start), so no fetch needed
-                      // here; the next polling tick will refresh the
-                      // top-N set including this one.
-                      if (next === null) {
-                        void ensureGlobal();
-                      }
                     }}
                   >
                     <div
@@ -650,29 +650,11 @@ export default function CacheDiagnostics() {
               }}
             >
               <span>Cache Hit Timeline</span>
-              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
-                <span>
-                  {totalTimelineSteps() > timelineEvents().length
-                    ? `last ${timelineEvents().length} of ${totalTimelineSteps()} steps`
-                    : `${timelineEvents().length} steps`}
-                </span>
-                <select
-                  value={String(timelineLimit())}
-                  onChange={(e) => setTimelineLimit(Number(e.currentTarget.value))}
-                  style={{
-                    "font-size": "11px",
-                    background: "var(--bg-secondary)",
-                    color: "var(--text-secondary)",
-                    border: "1px solid var(--border)",
-                    "border-radius": "4px",
-                    padding: "1px 4px",
-                    cursor: "pointer",
-                  }}
-                  title="Number of most-recent steps to show"
-                >
-                  <For each={[200, 400, 600]}>{(n) => <option value={String(n)}>{n}</option>}</For>
-                </select>
-              </div>
+              <span>
+                {totalTimelineSteps() > timelineEvents().length
+                  ? `last ${timelineEvents().length} of ${totalTimelineSteps()} steps`
+                  : `${timelineEvents().length} steps`}
+              </span>
             </div>
             <CacheTimeline
               events={timelineEvents()}

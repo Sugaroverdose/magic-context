@@ -969,6 +969,40 @@ body {
   align-items: stretch;
   gap: 6px;
   height: 120px;
+  position: relative;
+}
+/* Custom drop-line tooltip — immediate on hover, anchored in .ctx-chart so it
+   isn't clipped by .ctx-bars-wrap (overflow:hidden). Positioned via inline
+   left:%, centered on its own width, sitting just above the bars. */
+.ctx-drop-tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  z-index: 20;
+  pointer-events: none;
+  background: var(--bg-active);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 6px 9px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ctx-drop-tip-title {
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.ctx-drop-tip-row {
+  color: var(--text-secondary);
+  font-family: var(--mono-font);
+  font-size: 10px;
+}
+.ctx-drop-tip-hint {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-top: 2px;
 }
 .ctx-axis {
   display: flex;
@@ -1023,14 +1057,17 @@ body {
   left: 50%;
   transform: translateX(-50%);
   width: 2px;
+  padding: 0;
+  border: 0;
   background: var(--accent);
   opacity: 0.55;
   pointer-events: auto;
-  cursor: help;
+  cursor: pointer;
   z-index: 1;
 }
 .ctx-drop-line:hover {
-  opacity: 0.9;
+  opacity: 1;
+  width: 3px;
 }
 .ctx-bar {
   width: 100%;

@@ -377,6 +377,7 @@ export interface DbCacheEvent {
 }
 
 export interface SessionCacheStats {
+  harness: Harness;
   session_id: string;
   event_count: number;
   total_cache_read: number;

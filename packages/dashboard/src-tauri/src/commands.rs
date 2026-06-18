@@ -236,9 +236,10 @@ pub fn get_session_cache_events(
     harness: String,
     session_id: String,
     limit: Option<usize>,
+    since_timestamp: Option<i64>,
 ) -> Vec<db::DbCacheEvent> {
     match harness.parse::<db::Harness>() {
-        Ok(harness) => db::get_session_cache_events(harness, &session_id, limit),
+        Ok(harness) => db::get_session_cache_events(harness, &session_id, limit, since_timestamp),
         Err(_) => Vec::new(),
     }
 }

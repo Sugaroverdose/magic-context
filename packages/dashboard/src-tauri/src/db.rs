@@ -1511,14 +1511,23 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
 // the dashboard's PER_SESSION = 200 budget in mind on call sites that go
 // straight into a chart, because every event is ~250 bytes of JSON across
 // the Tauri IPC boundary and a hot session can produce 30k+ events.
+/// `since_timestamp`: when Some, return that session's events with
+/// `time_created >= since` in chronological order (used by the dashboard's
+/// incremental 1s poll — fetch only what's new). The `>=` (not `>`) is
+/// deliberate: it re-includes the caller's last-seen event as a 1-event overlap
+/// so `build_db_cache_events` can compute the first NEW event's cross-step
+/// severity against a real predecessor; the frontend dedupes the overlap by
+/// `message_id`. When None, return the most-recent `limit` events (initial /
+/// full-window load).
 pub fn get_session_cache_events(
     harness: Harness,
     session_id: &str,
     limit: Option<usize>,
+    since_timestamp: Option<i64>,
 ) -> Vec<DbCacheEvent> {
     match harness {
-        Harness::Opencode => get_opencode_session_cache_events(session_id, limit),
-        Harness::Pi => get_pi_session_cache_events(session_id, limit),
+        Harness::Opencode => get_opencode_session_cache_events(session_id, limit, since_timestamp),
+        Harness::Pi => get_pi_session_cache_events(session_id, limit, since_timestamp),
     }
 }
 
@@ -1556,13 +1565,17 @@ pub fn get_session_cache_events_by_turn_count(
 ) -> Vec<DbCacheEvent> {
     let max_events = (target_turns * 50).max(200); // floor to existing limit
     let raw = match harness {
-        Harness::Opencode => get_opencode_session_cache_events(session_id, Some(max_events)),
-        Harness::Pi => get_pi_session_cache_events(session_id, Some(max_events)),
+        Harness::Opencode => get_opencode_session_cache_events(session_id, Some(max_events), None),
+        Harness::Pi => get_pi_session_cache_events(session_id, Some(max_events), None),
     };
     trim_events_to_turns(raw, target_turns)
 }
 
-fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<DbCacheEvent> {
+fn get_opencode_session_cache_events(
+    session_id: &str,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> Vec<DbCacheEvent> {
     let Some(opencode_db_path) = resolve_opencode_db_path() else {
         return Vec::new();
     };
@@ -1570,17 +1583,7 @@ fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> 
         return Vec::new();
     };
 
-    // Bound `limit` to something sane. The SQL window is small enough that
-    // rusqlite can bind it as i64 directly; we then reverse to chronological
-    // in build_db_cache_events / by sort below.
-    let lim: i64 = match limit {
-        Some(n) if n > 0 => n as i64,
-        // None == no cap; SQLite treats negative LIMIT as "no limit".
-        _ => -1,
-    };
-
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT CAST(id AS TEXT), session_id, time_created,
+    const COLS: &str = "SELECT CAST(id AS TEXT), session_id, time_created,
                 COALESCE(CAST(json_extract(data, '$.tokens.input') AS INTEGER), 0),
                 COALESCE(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER), 0),
                 COALESCE(CAST(json_extract(data, '$.tokens.cache.write') AS INTEGER), 0),
@@ -1590,13 +1593,40 @@ fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> 
          FROM message
          WHERE session_id = ?1
            AND json_extract(data, '$.role') = 'assistant'
-           AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
-         ORDER BY time_created DESC
-         LIMIT ?2",
-    ) else {
+           AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0";
+
+    // Incremental (since): everything at/after the anchor, chronological. No
+    // LIMIT — a 1s poll's delta is tiny, and the >= overlap is a single row.
+    // Full (no since): the most-recent `limit`, DESC + LIMIT; build_db_cache_events
+    // re-sorts ASC to chronological.
+    let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match since_timestamp {
+        Some(since) => (
+            format!("{COLS} AND time_created >= ?2 ORDER BY time_created ASC"),
+            vec![
+                Box::new(session_id.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                Box::new(since),
+            ],
+        ),
+        None => {
+            let lim: i64 = match limit {
+                Some(n) if n > 0 => n as i64,
+                _ => -1, // SQLite: negative LIMIT == no limit.
+            };
+            (
+                format!("{COLS} ORDER BY time_created DESC LIMIT ?2"),
+                vec![
+                    Box::new(session_id.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                    Box::new(lim),
+                ],
+            )
+        }
+    };
+
+    let Ok(mut stmt) = conn.prepare(&sql) else {
         return Vec::new();
     };
-    let Ok(rows) = stmt.query_map(rusqlite::params![session_id, lim], |row| {
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(RawDbCacheEvent {
             harness: Harness::Opencode,
             message_id: row.get(0)?,
@@ -1612,12 +1642,14 @@ fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> 
     }) else {
         return Vec::new();
     };
-    // build_db_cache_events sorts by timestamp ASC, so DESC LIMIT then ASC
-    // sort yields the most-recent N in chronological order.
     build_db_cache_events(rows.flatten().collect(), true)
 }
 
-fn get_pi_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<DbCacheEvent> {
+fn get_pi_session_cache_events(
+    session_id: &str,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> Vec<DbCacheEvent> {
     let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
         return Vec::new();
     };
@@ -1644,12 +1676,19 @@ fn get_pi_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<Db
             })
         })
         .collect();
-    // Tail-truncate to the most-recent N entries (Pi JSONL is naturally
-    // chronological, so the last N are the freshest).
-    if let Some(n) = limit {
-        if n > 0 && rows.len() > n {
-            let start = rows.len() - n;
-            rows.drain(..start);
+    match since_timestamp {
+        // Incremental: keep events at/after the anchor (>= for the 1-event
+        // severity overlap), already chronological from the JSONL order.
+        Some(since) => rows.retain(|r| r.timestamp >= since),
+        // Full: tail-truncate to the most-recent N (JSONL is chronological, so
+        // the last N are the freshest).
+        None => {
+            if let Some(n) = limit {
+                if n > 0 && rows.len() > n {
+                    let start = rows.len() - n;
+                    rows.drain(..start);
+                }
+            }
         }
     }
     build_db_cache_events(rows, false)

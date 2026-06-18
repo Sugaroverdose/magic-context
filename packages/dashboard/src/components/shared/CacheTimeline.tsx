@@ -1,4 +1,4 @@
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import { formatDateTime } from "../../lib/api";
 import { ctxBarGeom, formatTokensShort, severityColorClass } from "../../lib/cache-format";
 import type { DbCacheEvent } from "../../lib/types";
@@ -19,6 +19,23 @@ export default function CacheTimeline(props: {
   selectedStepId: string | null;
   onBarClick: (event: DbCacheEvent) => void;
 }) {
+  // Custom drop-line tooltip. The native `title` attribute has a ~1s OS delay
+  // and tiny system styling; instead we render our own immediate tooltip on
+  // hover. It must live OUTSIDE `.ctx-bars-wrap` (which is overflow:hidden), so
+  // we anchor it in `.ctx-chart` at the hovered line's x (captured relative to
+  // the chart) and clamp it horizontally so edge lines don't clip.
+  const [hoveredDrop, setHoveredDrop] = createSignal<{ event: DbCacheEvent; xPct: number } | null>(
+    null,
+  );
+  let chartRef: HTMLDivElement | undefined;
+  const showDropTip = (event: DbCacheEvent, lineEl: HTMLElement) => {
+    if (!chartRef) return;
+    const chartRect = chartRef.getBoundingClientRect();
+    const lineRect = lineEl.getBoundingClientRect();
+    if (chartRect.width <= 0) return;
+    const centerX = lineRect.left - chartRect.left + lineRect.width / 2;
+    setHoveredDrop({ event, xPct: (centerX / chartRect.width) * 100 });
+  };
   // Axis scale. If every visible bar shares one context limit, label the axis in
   // absolute tokens (0 → limit). With mixed limits (global view spanning models)
   // bars are each normalized to their own window, so label as % of window.
@@ -39,7 +56,24 @@ export default function CacheTimeline(props: {
   });
 
   return (
-    <div class="ctx-chart">
+    <div class="ctx-chart" ref={chartRef}>
+      <Show when={hoveredDrop()}>
+        {(tip) => (
+          <div
+            class="ctx-drop-tip"
+            style={{
+              left: `${Math.min(92, Math.max(8, tip().xPct))}%`,
+            }}
+          >
+            <div class="ctx-drop-tip-title">⬇ Magic Context reclaimed context</div>
+            <div class="ctx-drop-tip-row">{formatDateTime(tip().event.timestamp)}</div>
+            <div class="ctx-drop-tip-row">
+              {tip().event.cause ? `Cause: ${tip().event.cause}` : "Cause not recorded"}
+            </div>
+            <div class="ctx-drop-tip-hint">click → jump to step</div>
+          </div>
+        )}
+      </Show>
       <div
         class="ctx-axis"
         title={
@@ -91,9 +125,16 @@ export default function CacheTimeline(props: {
               return (
                 <div class="ctx-bar-slot">
                   <Show when={event.is_drop}>
-                    <div
+                    <button
+                      type="button"
                       class="ctx-drop-line"
-                      title={`⬇ Magic Context reclaimed context here${event.cause ? `\nCause: ${event.cause}` : "\n(cause not found in logs)"}`}
+                      aria-label="Magic Context reclaim — jump to step"
+                      onMouseEnter={(e) => showDropTip(event, e.currentTarget)}
+                      onMouseLeave={() => setHoveredDrop(null)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        props.onBarClick(event);
+                      }}
                     />
                   </Show>
                   <div
