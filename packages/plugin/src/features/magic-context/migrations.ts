@@ -1363,11 +1363,16 @@ const MIGRATIONS: Migration[] = [
                     share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'
                 );
             `);
-            if (!columnExists(db, "workspaces", "share_categories")) {
-                db.exec(
-                    `ALTER TABLE workspaces ADD COLUMN share_categories TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`,
-                );
-            }
+            // ensureColumn (not a guarded raw ALTER): its re-check-on-failure
+            // tolerates a concurrent sibling process adding the same column between
+            // our existence check and the ALTER (duplicate-column error → re-verify
+            // → return). The raw guarded form could throw on that race.
+            ensureColumn(
+                db,
+                "workspaces",
+                "share_categories",
+                `TEXT NOT NULL DEFAULT '["CONSTRAINTS"]'`,
+            );
             db.prepare(
                 `UPDATE workspaces
                     SET share_categories = '["CONSTRAINTS"]'
@@ -1541,14 +1546,17 @@ function getCurrentVersion(db: Database): number {
  */
 export function isSiblingMigrationConflict(db: Database, error: unknown, version: number): boolean {
     if (!(error instanceof Error)) return false;
-    const code = (error as { code?: unknown }).code;
-    if (code !== "SQLITE_CONSTRAINT_PRIMARYKEY" && code !== "SQLITE_CONSTRAINT_UNIQUE") {
-        return false;
-    }
-    // Distinguish "PRIMARY KEY conflict on schema_migrations(version)"
-    // from any other UNIQUE/PK collision the migration body could surface.
-    // SQLite's better-sqlite3 binding includes the constraint in the
-    // message, e.g. "UNIQUE constraint failed: schema_migrations.version".
+    // Identify "PRIMARY KEY conflict on schema_migrations(version)" by the SQLite
+    // ERROR MESSAGE — which originates from the C library (sqlite3_errmsg) and is
+    // identical across bun:sqlite and node:sqlite, e.g.
+    // "UNIQUE constraint failed: schema_migrations.version". We deliberately do NOT
+    // hard-gate on `error.code`: bun:sqlite reports SQLITE_CONSTRAINT_PRIMARYKEY/
+    // _UNIQUE, but node:sqlite (Pi / Desktop) can report a different or absent code
+    // for the SAME conflict, and a strict code-only gate would fail-CLOSE a
+    // legitimate concurrent-startup race there (the schema-fence incident class).
+    // The message guard below already excludes a PK/UNIQUE collision the migration
+    // BODY could raise on some other table, and the row-existence check is the
+    // authoritative confirmation that a sibling actually applied this version.
     const msg = error.message;
     if (!msg.includes("schema_migrations")) return false;
     if (!msg.toLowerCase().includes("version")) return false;

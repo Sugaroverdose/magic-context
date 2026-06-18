@@ -108,6 +108,8 @@ Return valid JSON (no markdown fencing):
 If no promotions are warranted, return empty arrays. Always consume reviewed candidates so they don't accumulate indefinitely.`;
 
     let agentSessionId: string | null = null;
+    // Keep the child session on failure (debugging), mirroring the main-task rule.
+    let phaseFailed = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -289,6 +291,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
 
         return result;
     } catch (error) {
+        phaseFailed = true;
         const errorDescription = describeError(error);
         log(
             `[dreamer] user-memories: review failed: ${errorDescription.brief}`,
@@ -297,7 +300,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         return result;
     } finally {
         clearInterval(leaseInterval);
-        if (agentSessionId && !shouldKeepSubagents()) {
+        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

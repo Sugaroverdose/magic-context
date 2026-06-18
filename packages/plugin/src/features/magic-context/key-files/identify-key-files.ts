@@ -477,6 +477,7 @@ async function runKeyFilesLlm(args: {
     });
     const agentSessionId = typeof created?.id === "string" ? created.id : null;
     if (!agentSessionId) throw new Error("Could not create key-file identification session.");
+    let succeeded = false;
     try {
         await shared.promptSyncWithModelSuggestionRetry(
             args.client,
@@ -504,9 +505,13 @@ async function runKeyFilesLlm(args: {
         });
         const text = extractLatestAssistantText(messages);
         if (!text) throw new Error("Dreamer returned no key-files output.");
+        succeeded = true;
         return { text, messages };
     } finally {
-        if (!shouldKeepSubagents()) {
+        // Keep the child session on failure (debugging) — mirrors the main-task
+        // cleanup rule; this try/finally has no catch, so a throw leaves
+        // succeeded=false and the session is retained.
+        if (succeeded && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({ path: { id: agentSessionId } })
                 .catch(() => undefined);

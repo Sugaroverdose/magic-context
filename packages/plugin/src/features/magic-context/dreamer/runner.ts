@@ -783,6 +783,11 @@ Only include notes whose conditions you could definitively evaluate against exte
 
     const taskStartedAt = Date.now();
     let agentSessionId: string | null = null;
+    // Retain the child session on failure so its prompt/output/error can be
+    // inspected — mirrors the main-task cleanup rule. Optional phases used to
+    // delete unconditionally, losing the evidence for exactly the runs worth
+    // debugging.
+    let phaseFailed = false;
     const startedAt = Date.now();
     let invocationRecorded = false;
     const recordInvocation = (params: {
@@ -927,6 +932,7 @@ Only include notes whose conditions you could definitively evaluate against exte
             result: `${surfaced} surfaced, ${pending} still pending`,
         });
     } catch (error) {
+        phaseFailed = true;
         const durationMs = Date.now() - taskStartedAt;
         const errorDescription = describeError(error);
         args.result.smartNotesSurfaced = 0;
@@ -943,7 +949,8 @@ Only include notes whose conditions you could definitively evaluate against exte
         });
     } finally {
         clearInterval(leaseInterval);
-        if (agentSessionId && !shouldKeepSubagents()) {
+        // Keep the child session on failure (debugging) or under keep_subagents.
+        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },
@@ -999,9 +1006,16 @@ export async function processDreamQueue(args: {
     // would otherwise have its own queue row deleted mid-run. Scope to this project so the
     // cross-process shared queue doesn't reap another host's still-running rows.
     const maxRuntimeMs = args.maxRuntimeMinutes * 60 * 1000;
-    if (!hasActiveDreamLease(args.db)) {
-        clearStaleEntries(args.db, maxRuntimeMs + 30 * 60 * 1000, args.projectIdentity);
+    // A live lease means another dream (this project or a sibling on the shared
+    // queue) is actively running. Don't dequeue underneath it: runDream would just
+    // fail lease acquisition, increment this entry's retry count, and after
+    // MAX_LEASE_RETRIES DELETE the queue row — silently dropping a project's
+    // pending dream that never got a fair chance to run. Skip this tick; the entry
+    // stays queued for when the lease frees.
+    if (hasActiveDreamLease(args.db)) {
+        return null;
     }
+    clearStaleEntries(args.db, maxRuntimeMs + 30 * 60 * 1000, args.projectIdentity);
     const entry = dequeueNext(args.db, args.projectIdentity);
     if (!entry) {
         return null;

@@ -417,12 +417,33 @@ export function createSystemPromptHashHandler(deps: {
 
         // Estimate system prompt tokens for dashboard visibility only when
         // the prompt hash changed; unchanged prompts keep the stored count.
+        //
+        // FAIL-OPEN (per-turn handler rule): the prompt has ALREADY been mutated
+        // in place above (guidance + sticky date). estimateTokens can throw on a
+        // pathological tokenizer input and updateSessionMeta can throw on a busy/
+        // failing DB — neither must propagate into the prompt path (a throw here
+        // would fail the LLM call instead of just losing a telemetry write). Persist
+        // the hash even if token estimation fails, so the next pass doesn't re-detect
+        // a phantom hash change and re-flush.
         if (currentHash !== previousHash) {
-            const systemPromptTokens = estimateTokens(systemContent);
-            updateSessionMeta(deps.db, sessionId, {
-                systemPromptHash: currentHash,
-                systemPromptTokens,
-            });
+            let systemPromptTokens = sessionMeta.systemPromptTokens;
+            try {
+                systemPromptTokens = estimateTokens(systemContent);
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    "system prompt token estimate failed (using prior count):",
+                    error,
+                );
+            }
+            try {
+                updateSessionMeta(deps.db, sessionId, {
+                    systemPromptHash: currentHash,
+                    systemPromptTokens,
+                });
+            } catch (error) {
+                sessionLog(sessionId, "system prompt meta persist failed (fail-open):", error);
+            }
         }
 
         // ── Step 4: Drain systemPromptRefreshSessions (one-shot semantics) ──

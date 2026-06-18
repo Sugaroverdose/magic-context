@@ -1,9 +1,11 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
+    chmodSync,
     mkdirSync,
     readdirSync,
     readFileSync,
     renameSync,
+    rmSync,
     unlinkSync,
     writeFileSync,
 } from "node:fs";
@@ -85,7 +87,22 @@ export class MagicContextRpcServer {
                     // file 0o600. renameSync preserves the tmp file's mode, so
                     // the 0o600 on the write covers the final file.
                     mkdirSync(dir, { recursive: true, mode: 0o700 });
+                    // mkdirSync's mode only applies on CREATION — a dir left by an
+                    // older build (or default 0o755 umask) keeps its loose perms, so
+                    // chmod it defensively so the bearer token isn't world-readable.
+                    try {
+                        chmodSync(dir, 0o700);
+                    } catch {
+                        // best-effort
+                    }
                     const tmpPath = `${this.portFilePath}.tmp`;
+                    // A stale tmp from a crashed write could exist with loose perms;
+                    // writeFileSync's mode only applies on create, so remove it first.
+                    try {
+                        rmSync(tmpPath, { force: true });
+                    } catch {
+                        // best-effort
+                    }
                     writeFileSync(
                         tmpPath,
                         JSON.stringify({
@@ -97,6 +114,13 @@ export class MagicContextRpcServer {
                         { encoding: "utf-8", mode: 0o600 },
                     );
                     renameSync(tmpPath, this.portFilePath);
+                    // renameSync preserves the tmp's mode, but chmod the final path
+                    // defensively in case the token file pre-existed with loose perms.
+                    try {
+                        chmodSync(this.portFilePath, 0o600);
+                    } catch {
+                        // best-effort
+                    }
                     log(`[rpc] server listening on 127.0.0.1:${this.port}`);
                 } catch (err) {
                     log(`[rpc] failed to write port file: ${err}`);

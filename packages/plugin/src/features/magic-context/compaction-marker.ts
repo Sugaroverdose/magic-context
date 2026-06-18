@@ -158,9 +158,11 @@ function getWritableOpenCodeDb(): Database {
         }
     }
     const db = new Database(dbPath);
-    db.exec("PRAGMA journal_mode=WAL");
-    // Allow up to 5s wait when OpenCode holds a write lock
+    // busy_timeout BEFORE journal_mode=WAL: setting WAL can need the file lock, so
+    // with the timeout installed first a cold-open while OpenCode holds the lock
+    // waits up to 5s instead of throwing SQLITE_BUSY immediately.
     db.exec("PRAGMA busy_timeout=5000");
+    db.exec("PRAGMA journal_mode=WAL");
     cachedWriteDb = { path: dbPath, db };
     return db;
 }

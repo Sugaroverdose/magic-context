@@ -121,9 +121,12 @@ pub fn open_readonly(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
 /// Opens a read-write connection for write operations (memory edits, queue entries).
 pub fn open_readwrite(path: &PathBuf) -> Result<Connection, rusqlite::Error> {
     let conn = Connection::open(path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    // busy_timeout MUST come before journal_mode=WAL: setting WAL can itself need
+    // the file lock, and with the timeout installed last a cold-open under
+    // contention fails immediately with SQLITE_BUSY instead of waiting.
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
     warn_if_dashboard_schema_requires_upgrade(&conn);
     Ok(conn)
 }
@@ -4378,10 +4381,26 @@ pub fn enqueue_dream(
     project_path: &str,
     reason: &str,
 ) -> Result<i64, rusqlite::Error> {
+    // Mirror the plugin's enqueueDream dedup: skip if this project already has ANY
+    // queue entry (queued or running). Without this, repeated dashboard "dream now"
+    // clicks pile up duplicate rows that a single identity-filtered host drains one
+    // at a time. project_path is the resolved identity (the UI passes git:/dir:),
+    // matching how hosts dequeue — a raw path would never be drained.
+    let identity = normalize_stored_project_path(project_path);
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM dream_queue WHERE project_path = ?1 LIMIT 1",
+            rusqlite::params![identity],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
     let now = chrono::Utc::now().timestamp_millis();
     conn.execute(
         "INSERT INTO dream_queue (project_path, reason, enqueued_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![project_path, reason, now],
+        rusqlite::params![identity, reason, now],
     )?;
     Ok(conn.last_insert_rowid())
 }

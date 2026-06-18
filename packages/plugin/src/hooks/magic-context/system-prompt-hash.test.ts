@@ -224,6 +224,32 @@ describe("system-prompt-hash token estimation (council audit bg_51106601 #2)", (
     });
 });
 
+describe("system-prompt-hash fail-open (per-turn handler must never throw)", () => {
+    it("resolves and preserves the mutated prompt when the meta write fails", async () => {
+        useTempDataHome("sph-fail-open-");
+        const sessionId = "ses-fail-open";
+        const { handler } = buildHandler();
+        const db = openDatabase();
+
+        // Pass 1 primes session_meta (hash + tokens) cleanly.
+        await handler({ sessionID: sessionId }, { system: ["You are a helpful agent."] });
+
+        // Now sabotage the persistence layer so the hash-change branch's
+        // updateSessionMeta throws on pass 2. Dropping the table makes any write
+        // raise — simulating a busy/failing DB. The handler must NOT propagate it.
+        db.exec("DROP TABLE session_meta");
+
+        const system = ["You are a helpful agent.", "DIFFERENT content forces a hash change"];
+        // Must not throw — a throw here would fail the LLM call instead of just
+        // losing a telemetry write.
+        await handler({ sessionID: sessionId }, { system });
+
+        // The prompt was still mutated/injected (guidance present) — failing open
+        // means we keep what we did, not crash.
+        expect(system.join("\n")).toContain("## Magic Context");
+    });
+});
+
 describe("system-prompt-hash v2 system prompt contents", () => {
     it("keeps project docs, user profile, and key files out of the system prompt", async () => {
         useTempDataHome("sph-v2-adjuncts-out-");

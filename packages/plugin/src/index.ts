@@ -466,6 +466,14 @@ const plugin: Plugin = async (ctx) => {
             await hooks.magicContext?.["experimental.text.complete"]?.(input, output);
         },
         config: async (config) => {
+            // If the runtime is disabled (a conflicting plugin — DCP / OMO /
+            // OpenCode auto-compaction — was detected and we fail-safed at boot),
+            // do NOT register the /ctx-* commands or hidden agents. The transform/
+            // tools/RPC are already no-op'd, so surfacing command entries + hidden
+            // agents the runtime won't service is pure UX confusion.
+            if (pluginConfig.enabled !== true) {
+                return;
+            }
             /**
              * Build a hidden-agent config with a deny-everything-by-default
              * permission baseline plus an explicit allow-list of tool ids the
