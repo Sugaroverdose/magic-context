@@ -503,6 +503,10 @@ const SidebarContent = (props: {
         const directory = props.api.state.path.directory ?? ""
         void loadSidebarSnapshot(sid, directory)
             .then((data) => {
+                // Guard against a session switch while this load was in flight:
+                // painting session A's snapshot into the now-active session B shows
+                // the wrong session's numbers until B's own refresh resolves.
+                if (props.sessionID() !== sid) return
                 setSnapshot(data)
                 try {
                     props.api.renderer.requestRender()

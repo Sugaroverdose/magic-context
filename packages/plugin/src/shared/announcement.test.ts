@@ -174,4 +174,24 @@ describe("shouldShowAnnouncement gating", () => {
         markAnnouncementSeen("0.0.0-pre-historic");
         expect(shouldShowAnnouncement()).toBe(true);
     });
+
+    test("does NOT re-announce on a downgrade (stored version is newer)", async () => {
+        const mod = await import(`./announcement?t=${Date.now()}-downgrade`);
+        const {
+            ANNOUNCEMENT_VERSION,
+            ANNOUNCEMENT_FEATURES,
+            markAnnouncementSeen,
+            shouldShowAnnouncement,
+        } = mod;
+
+        if (!ANNOUNCEMENT_VERSION || ANNOUNCEMENT_FEATURES.length === 0) {
+            return;
+        }
+
+        // Stored version is far newer than the running binary (user downgraded).
+        // A bare string-inequality gate would re-show the OLD announcement; the
+        // semver gate must stay quiet (current is NOT > stored).
+        markAnnouncementSeen("999.0.0");
+        expect(shouldShowAnnouncement()).toBe(false);
+    });
 });

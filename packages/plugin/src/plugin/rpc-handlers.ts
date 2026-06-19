@@ -573,11 +573,14 @@ export function buildStatusDetail(
             // tags table might have different schema
         }
 
-        // Pending ops
+        // Pending ops. The dialog only displays pendingOpsCount (computed
+        // elsewhere); this array is unused by the UI, so cap it — without a LIMIT a
+        // large pending queue serializes thousands of {tag_id, operation} rows over
+        // RPC on every status poll for nothing.
         try {
             const ops = db
                 .prepare<[string], { tag_id: number; operation: string }>(
-                    "SELECT tag_id, operation FROM pending_ops WHERE session_id = ?",
+                    "SELECT tag_id, operation FROM pending_ops WHERE session_id = ? LIMIT 100",
                 )
                 .all(sessionId);
             detail.pendingOps = ops.map((o) => ({ tagId: o.tag_id, operation: o.operation }));

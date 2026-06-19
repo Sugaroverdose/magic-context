@@ -203,8 +203,16 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     const t = () => theme()
     const s = () => props.s
 
+    // Prefer the RPC-provided model context limit (what the sidebar shows) so the
+    // two surfaces never disagree. Fall back to deriving from usage% only when the
+    // RPC limit is absent (0) — and that derivation is itself undefined at 0%, so
+    // it stays "?" rather than showing a number inconsistent with the sidebar.
     const contextLimit = () =>
-        s().usagePercentage > 0 ? Math.round(s().inputTokens / (s().usagePercentage / 100)) : 0
+        s().contextLimit > 0
+            ? s().contextLimit
+            : s().usagePercentage > 0
+              ? Math.round(s().inputTokens / (s().usagePercentage / 100))
+              : 0
 
     const elapsed = () => (s().lastResponseTime > 0 ? Date.now() - s().lastResponseTime : 0)
 
@@ -843,6 +851,12 @@ const tui: TuiPlugin = async (api, _options, meta) => {
             const orderedMessages = [...messages].sort((a, b) => a.id - b.id)
             const handledMessageIds = new Set<number>()
             for (const msg of orderedMessages) {
+                // A dialog helper earlier in this batch may have awaited; re-check
+                // the route before EACH message so a later action/toast in the same
+                // batch can't paint into a session the user switched to mid-batch
+                // (the pre-batch + pre-ack guards alone don't cover mid-batch awaits).
+                if (getRpcGeneration() !== pollGeneration) return
+                if (getSessionId(api) !== requestedSessionId) return
                 // Drop any action/dialog whose sessionId doesn't match this TUI's
                 // active session (session-less/global notifications still apply).
                 if (
