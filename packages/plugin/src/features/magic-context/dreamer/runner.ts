@@ -19,6 +19,10 @@ import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { acquireLease, getLeaseHolder, releaseLease, renewLease } from "./lease";
 import {
+    enforceMaintainDocsProtectedRegions,
+    snapshotMaintainDocsFiles,
+} from "./maintain-docs-protected-enforcement";
+import {
     clearStaleEntries,
     dequeueNext,
     getEntryRetryCount,
@@ -323,6 +327,8 @@ export async function runDream(args: {
             try {
                 // Use sessionDirectory (filesystem path) for file checks, not projectPath (identity like "git:<sha>")
                 const docsDir = args.sessionDirectory ?? args.projectIdentity;
+                const maintainDocsSnapshot =
+                    taskName === "maintain-docs" ? snapshotMaintainDocsFiles(docsDir) : undefined;
                 const existingDocs =
                     taskName === "maintain-docs"
                         ? {
@@ -403,6 +409,23 @@ export async function runDream(args: {
                 const taskResult = extractLatestAssistantText(messages);
                 if (!taskResult) {
                     throw new Error("Dreamer returned no assistant output.");
+                }
+
+                if (
+                    taskName === "maintain-docs" &&
+                    maintainDocsSnapshot &&
+                    maintainDocsSnapshot.size > 0
+                ) {
+                    try {
+                        enforceMaintainDocsProtectedRegions({
+                            docsDir,
+                            snapshot: maintainDocsSnapshot,
+                        });
+                    } catch (error) {
+                        log(
+                            `[dreamer] maintain-docs protected-region enforcement failed: ${error}`,
+                        );
+                    }
                 }
 
                 const durationMs = Date.now() - taskStartedAt;

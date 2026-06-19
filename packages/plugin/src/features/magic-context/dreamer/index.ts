@@ -1,4 +1,5 @@
 export * from "./lease";
+export * from "./protected-regions";
 export * from "./queue";
 export * from "./runner";
 export * from "./scheduler";

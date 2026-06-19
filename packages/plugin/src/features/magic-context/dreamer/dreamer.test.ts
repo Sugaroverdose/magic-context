@@ -1,6 +1,9 @@
 /// <reference types="bun-types" />
 
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { Database } from "../../../shared/sqlite";
@@ -273,6 +276,75 @@ describe("dreamer", () => {
                     resultChars: expect.any(Number),
                 }),
             ]);
+        });
+
+        it("maintain-docs restores protected regions after dreamer mutates ARCHITECTURE.md", async () => {
+            db = createTestDb();
+            const docsDir = mkdtempSync(join(tmpdir(), "mc-maintain-docs-"));
+            const startMarker = "<!-- mc:protected START — hand-authored cache-stability core. -->";
+            const endMarker = "<!-- mc:protected END -->";
+            const protectedBody = "invariant body bytes";
+            const originalArch = [
+                "# Architecture",
+                "",
+                "outside before",
+                startMarker,
+                protectedBody,
+                endMarker,
+                "outside after",
+            ].join("\n");
+            writeFileSync(join(docsDir, "ARCHITECTURE.md"), originalArch, "utf8");
+
+            const client = createDreamClient();
+            const promptSyncSpy = spyOn(
+                shared,
+                "promptSyncWithModelSuggestionRetry",
+            ).mockImplementation(async () => {
+                const tampered = [
+                    "# Architecture",
+                    "",
+                    "outside before edited",
+                    startMarker,
+                    "TAMPERED protected bytes",
+                    endMarker,
+                    "outside after edited",
+                ].join("\n");
+                writeFileSync(join(docsDir, "ARCHITECTURE.md"), tampered, "utf8");
+            });
+
+            try {
+                const result = await runDream({
+                    db,
+                    client,
+                    projectIdentity: "/repo/project",
+                    tasks: ["maintain-docs"],
+                    taskTimeoutMinutes: 5,
+                    maxRuntimeMinutes: 10,
+                    parentSessionId: "parent-1",
+                    sessionDirectory: docsDir,
+                });
+
+                expect(result.tasks.map((t) => t.name)).toEqual(["maintain-docs"]);
+                expect(result.tasks[0]?.error).toBeUndefined();
+
+                const onDisk = readFileSync(join(docsDir, "ARCHITECTURE.md"), "utf8");
+                expect(onDisk).toContain("outside before edited");
+                expect(onDisk).toContain("outside after edited");
+                expect(onDisk).toContain(protectedBody);
+                expect(onDisk).not.toContain("TAMPERED protected bytes");
+                const origBlock = originalArch.slice(
+                    originalArch.indexOf(startMarker),
+                    originalArch.indexOf(endMarker) + endMarker.length,
+                );
+                const diskBlock = onDisk.slice(
+                    onDisk.indexOf(startMarker),
+                    onDisk.indexOf(endMarker) + endMarker.length,
+                );
+                expect(diskBlock).toBe(origBlock);
+            } finally {
+                promptSyncSpy.mockRestore();
+                rmSync(docsDir, { recursive: true, force: true });
+            }
         });
 
         it("trips circuit breaker after three consecutive identical model failures", async () => {
