@@ -1,9 +1,8 @@
 /// <reference types="bun-types" />
 
-import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, mock } from "bun:test";
 import type { SidekickConfig } from "../../../config/schema/magic-context";
 import type { PluginContext } from "../../../plugin/types";
-import * as shared from "../../../shared";
 import { runSidekick } from "./agent";
 
 const baseConfig: SidekickConfig = {
@@ -46,9 +45,6 @@ afterAll(() => {
 describe("runSidekick", () => {
     it("creates a child session, prompts the sidekick agent, and deletes the child session", async () => {
         const client = createSidekickClient();
-        const promptSyncSpy = spyOn(shared, "promptSyncWithModelSuggestionRetry").mockResolvedValue(
-            undefined,
-        );
 
         const result = await runSidekick({
             client,
@@ -64,9 +60,8 @@ describe("runSidekick", () => {
             body: { parentID: "ses-parent", title: "magic-context-sidekick" },
             query: { directory: "/repo/project" },
         });
-        expect(promptSyncSpy).toHaveBeenCalledWith(
-            client,
-            {
+        expect(client.session.prompt).toHaveBeenCalledWith(
+            expect.objectContaining({
                 path: { id: "sidekick-child" },
                 query: { directory: "/repo/project" },
                 body: {
@@ -80,12 +75,7 @@ describe("runSidekick", () => {
                         },
                     ],
                 },
-            },
-            {
-                timeoutMs: 5_000,
-                fallbackModels: expect.any(Array),
-                callContext: "sidekick",
-            },
+            }),
         );
         expect(client.session.messages).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },
@@ -105,7 +95,6 @@ describe("runSidekick", () => {
                 },
             ],
         });
-        spyOn(shared, "promptSyncWithModelSuggestionRetry").mockResolvedValue(undefined);
 
         const result = await runSidekick({
             client,
@@ -133,7 +122,7 @@ describe("runSidekick", () => {
 
     it("returns null when prompting fails and still deletes the child session", async () => {
         const client = createSidekickClient();
-        spyOn(shared, "promptSyncWithModelSuggestionRetry").mockRejectedValue(
+        (client.session.prompt as ReturnType<typeof mock>).mockRejectedValue(
             new Error("prompt timed out after 5000ms"),
         );
 
@@ -150,9 +139,6 @@ describe("runSidekick", () => {
 
     it("uses config system_prompt when provided", async () => {
         const client = createSidekickClient();
-        const promptSyncSpy = spyOn(shared, "promptSyncWithModelSuggestionRetry").mockResolvedValue(
-            undefined,
-        );
 
         await runSidekick({
             client,
@@ -164,7 +150,7 @@ describe("runSidekick", () => {
             },
         });
 
-        expect(promptSyncSpy.mock.calls[0]?.[1]).toEqual(
+        expect((client.session.prompt as ReturnType<typeof mock>).mock.calls[0]?.[0]).toEqual(
             expect.objectContaining({
                 body: expect.objectContaining({
                     system: "Custom sidekick system prompt",

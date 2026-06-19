@@ -52,6 +52,47 @@ const HISTORIAN_MAX_STEPS = 40;
 const SIDEKICK_MAX_STEPS = 40;
 const DREAMER_MAX_STEPS = 150;
 
+function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
+    return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
+}
+
+/**
+ * Build a hidden-agent config with a deny-everything-by-default permission
+ * baseline and a hard tool-iteration ceiling. User overrides may lower
+ * `steps`/`maxSteps`, but cannot raise either above the built-in cap.
+ */
+export function buildHiddenAgentConfig(
+    prompt: string,
+    allowedTools: readonly string[],
+    maxSteps: number,
+    overrides?: Record<string, unknown>,
+) {
+    const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
+        permission?: Record<string, unknown>;
+        [key: string]: unknown;
+    };
+    const basePermission = buildAllowOnlyPermission(allowedTools);
+    return {
+        prompt,
+        // No builtin fallback chain: the user's `fallback_models` (if any) flow
+        // through `restOverrides`. A hardcoded chain names providers the user may
+        // not have, producing `Model not found` retry storms.
+        ...restOverrides,
+        steps: clampHiddenAgentStepLimit(restOverrides.steps, maxSteps),
+        maxSteps: clampHiddenAgentStepLimit(restOverrides.maxSteps, maxSteps),
+        // Permission baseline goes after `restOverrides` so that accidental
+        // `permission` keys in user overrides we DIDN'T explicitly destructure
+        // can't bypass the deny. The explicit override (destructured above) is
+        // then layered on top.
+        permission: {
+            ...basePermission,
+            ...(overridePermission ?? {}),
+        },
+        mode: "subagent" as const,
+        hidden: true,
+    };
+}
+
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);
     // Apply SQLite connection tuning before the first openDatabase() below.
@@ -474,74 +515,8 @@ const plugin: Plugin = async (ctx) => {
             if (pluginConfig.enabled !== true) {
                 return;
             }
-            /**
-             * Build a hidden-agent config with a deny-everything-by-default
-             * permission baseline plus an explicit allow-list of tool ids the
-             * agent actually needs. See `agents/permissions.ts` for the
-             * rationale — without this, registered subagents inherit the full
-             * primary-agent tool surface (`task`, `bash`, `edit`, `webfetch`,
-             * etc.) because the auto-`task`-deny in
-             * `deriveSubagentSessionPermission` only applies to subagents
-             * INVOKED via the parent's `task()` tool, not to subagents spawned
-             * directly via `client.session.prompt(...)` from plugin runtime.
-             *
-             * Permission precedence:
-             *   1. `buildAllowOnlyPermission(allowedTools)` → wildcard deny +
-             *      our named allows (insertion order; `findLast` makes later
-             *      named allows defeat the wildcard deny).
-             *   2. User-supplied `overrides.permission` is merged on top via
-             *      object-spread, so users CAN extend the allow-list in
-             *      `magic-context.jsonc` if they really need to grant more
-             *      tools to a hidden agent.
-             *   3. OpenCode then merges the runtime defaults (`Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))` in
-             *      `packages/opencode/src/agent/agent.ts:306`) so OpenCode
-             *      user-config-level agent overrides win last.
-             */
-            const buildHiddenAgentConfig = (
-                prompt: string,
-                allowedTools: readonly string[],
-                // Hard tool-iteration cap for this hidden agent. WITHOUT it
-                // `agent.steps`/`maxSteps` default to Infinity, so a weak model
-                // (e.g. a local llama.cpp model with poor instruction-following)
-                // can get stuck in a tool-call loop that runs FOREVER: the child
-                // session's run loop is an independent server-side fiber, so our
-                // prompt-timeout (which only aborts our client fetch) and the
-                // user's ESC (which only aborts the MAIN session) do NOT stop it —
-                // it loops until OpenCode fully exits (issue #154). The cap forces
-                // OpenCode to terminate the run after N steps regardless. Set BOTH
-                // `steps` and `maxSteps` because the OpenCode run loop's exact
-                // field name varies across versions; both are valid agent-config
-                // keys, so setting both is a safe hedge.
-                maxSteps: number,
-                overrides?: Record<string, unknown>,
-            ) => {
-                const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
-                    permission?: Record<string, unknown>;
-                    [key: string]: unknown;
-                };
-                const basePermission = buildAllowOnlyPermission(allowedTools);
-                return {
-                    prompt,
-                    steps: maxSteps,
-                    maxSteps,
-                    // No builtin fallback chain: the user's `fallback_models` (if
-                    // any) flow through `restOverrides`. A hardcoded chain names
-                    // providers the user may not have, producing `Model not found`
-                    // retry storms.
-                    ...restOverrides,
-                    // Permission baseline goes after `restOverrides` so that
-                    // accidental `permission` keys in user overrides we DIDN'T
-                    // explicitly destructure can't bypass the deny. The explicit
-                    // override (destructured above) is then layered on top.
-                    permission: {
-                        ...basePermission,
-                        ...(overridePermission ?? {}),
-                    },
-                    mode: "subagent" as const,
-                    hidden: true,
-                };
-            };
-
+            // See top-level buildHiddenAgentConfig for permission precedence and
+            // hard `steps`/`maxSteps` cap semantics.
             const commandConfig = {
                 ...(config.command ?? {}),
                 ...getMagicContextBuiltinCommands(),

@@ -1,17 +1,25 @@
 import { describe, expect, mock, test } from "bun:test";
 
-import { promptSyncWithModelSuggestionRetry } from "./model-suggestion-retry";
+import {
+    promptSyncWithModelSuggestionRetry,
+    promptSyncWithValidatedOutputRetry,
+} from "./model-suggestion-retry";
 
 type PromptCall = {
     body: { model?: { providerID: string; modelID: string } };
     signal?: AbortSignal;
 };
 
-function createClient(prompt: ReturnType<typeof mock>, abort?: ReturnType<typeof mock>) {
+function createClient(
+    prompt: ReturnType<typeof mock>,
+    abort?: ReturnType<typeof mock>,
+    messages?: ReturnType<typeof mock>,
+) {
     return {
         session: {
             prompt,
             abort: abort ?? mock(async () => ({})),
+            messages: messages ?? mock(async () => []),
         },
     } as never;
 }
@@ -307,5 +315,74 @@ describe("promptSyncWithModelSuggestionRetry", () => {
             promptSyncWithModelSuggestionRetry(client, createArgs(), { fallbackModels: [] }),
         ).rejects.toBe(originalError);
         expect(prompt).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("promptSyncWithValidatedOutputRetry", () => {
+    test("valid first model returns without trying fallbacks", async () => {
+        const prompt = mock(async () => ({}));
+        const messages = mock(async () => "primary-output");
+        const client = createClient(prompt, undefined, messages);
+
+        const result = await promptSyncWithValidatedOutputRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            fetchOutput: async () => messages(),
+            validateOutput: (output: string) => {
+                if (output.trim().length === 0) throw new Error("empty output");
+                return output.trim();
+            },
+        });
+
+        expect(result.validated).toBe("primary-output");
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(messages).toHaveBeenCalledTimes(1);
+    });
+
+    test("empty first model tries the next fallback", async () => {
+        const prompt = mock(async () => ({}));
+        const messages = mock(async () =>
+            messages.mock.calls.length === 1 ? "" : "fallback-output",
+        );
+        const client = createClient(prompt, undefined, messages);
+
+        const result = await promptSyncWithValidatedOutputRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            fetchOutput: async () => messages(),
+            validateOutput: (output: string, attempt) => {
+                if (output.trim().length === 0)
+                    throw new Error(`empty output from ${attempt.label}`);
+                return output.trim();
+            },
+        });
+
+        expect(result.validated).toBe("fallback-output");
+        expect(prompt).toHaveBeenCalledTimes(2);
+        expect(messages).toHaveBeenCalledTimes(2);
+        expect((prompt.mock.calls[1]?.[0] as PromptCall).body.model).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+        });
+    });
+
+    test("all empty outputs surface the original validation failure", async () => {
+        const prompt = mock(async () => ({}));
+        const messages = mock(async () => "");
+        const client = createClient(prompt, undefined, messages);
+
+        await expect(
+            promptSyncWithValidatedOutputRetry(client, createArgs(), {
+                fallbackModels: ["anthropic/claude-sonnet-4-6"],
+                fetchOutput: async () => messages(),
+                validateOutput: (output: string, attempt) => {
+                    if (output.trim().length === 0) {
+                        throw new Error(`empty output from ${attempt.label}`);
+                    }
+                    return output.trim();
+                },
+            }),
+        ).rejects.toThrow("empty output from primary");
+
+        expect(prompt).toHaveBeenCalledTimes(2);
+        expect(messages).toHaveBeenCalledTimes(2);
     });
 });

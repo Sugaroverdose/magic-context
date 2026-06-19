@@ -373,11 +373,12 @@ export async function runDream(args: {
                     throw error;
                 }
                 log(`[dreamer] task ${taskName}: child session created ${agentSessionId}`);
+                const childSessionId = agentSessionId;
 
-                await shared.promptSyncWithModelSuggestionRetry(
+                const dreamTaskRun = await shared.promptSyncWithValidatedOutputRetry(
                     args.client,
                     {
-                        path: { id: agentSessionId },
+                        path: { id: childSessionId },
                         query: { directory: args.sessionDirectory ?? args.projectIdentity },
                         body: {
                             agent: DREAMER_AGENT,
@@ -392,24 +393,33 @@ export async function runDream(args: {
                         signal: taskAbortController.signal,
                         fallbackModels: args.fallbackModels,
                         callContext: `dreamer:${taskName}`,
+                        fetchOutput: async () => {
+                            const messagesResponse = await args.client.session.messages({
+                                path: { id: childSessionId },
+                                query: {
+                                    directory: args.sessionDirectory ?? args.projectIdentity,
+                                    limit: 50,
+                                },
+                            });
+                            return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                                preferResponseOnMissingData: true,
+                            });
+                        },
+                        validateOutput: (messages) => {
+                            const taskResult = extractLatestAssistantText(messages);
+                            if (!taskResult) {
+                                throw new Error("Dreamer returned no assistant output.");
+                            }
+                            return taskResult;
+                        },
                     },
                 );
                 if (lostLease) {
                     throw new Error(lostLeaseReason ?? `Dream lease lost during ${taskName}`);
                 }
 
-                const messagesResponse = await args.client.session.messages({
-                    path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory ?? args.projectIdentity, limit: 50 },
-                });
-                const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-                    preferResponseOnMissingData: true,
-                });
-                recordInvocation({ status: "completed", messages });
-                const taskResult = extractLatestAssistantText(messages);
-                if (!taskResult) {
-                    throw new Error("Dreamer returned no assistant output.");
-                }
+                const taskResult = dreamTaskRun.validated;
+                recordInvocation({ status: "completed", messages: dreamTaskRun.output });
 
                 if (
                     taskName === "maintain-docs" &&
@@ -867,12 +877,13 @@ Only include notes whose conditions you could definitively evaluate against exte
         }
 
         log(`[dreamer] smart notes: child session created ${agentSessionId}`);
+        const childSessionId = agentSessionId;
 
         const remainingMs = Math.max(0, args.deadline - Date.now());
-        await shared.promptSyncWithModelSuggestionRetry(
+        const smartNoteRun = await shared.promptSyncWithValidatedOutputRetry(
             args.client,
             {
-                path: { id: agentSessionId },
+                path: { id: childSessionId },
                 query: { directory: args.sessionDirectory ?? args.projectIdentity },
                 body: {
                     agent: DREAMER_AGENT,
@@ -887,37 +898,44 @@ Only include notes whose conditions you could definitively evaluate against exte
                 signal: abortController.signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:smart-notes",
+                fetchOutput: async () => {
+                    const messagesResponse = await args.client.session.messages({
+                        path: { id: childSessionId },
+                        query: {
+                            directory: args.sessionDirectory ?? args.projectIdentity,
+                            limit: 50,
+                        },
+                    });
+                    return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                        preferResponseOnMissingData: true,
+                    });
+                },
+                validateOutput: (messages) => {
+                    const output = extractLatestAssistantText(messages);
+                    if (!output) throw new Error("Smart note evaluation returned no output.");
+
+                    // Parse the JSON results from the LLM response — use greedy match to handle
+                    // `]` chars inside JSON string values (e.g., reasons containing brackets).
+                    const jsonMatch = output.match(/\[[\s\S]*\]/);
+                    if (!jsonMatch) {
+                        throw new Error("Smart note evaluation returned no JSON array.");
+                    }
+
+                    try {
+                        return JSON.parse(jsonMatch[0]) as Array<{
+                            id: number;
+                            met: boolean;
+                            reason?: string;
+                        }>;
+                    } catch {
+                        throw new Error("Smart note evaluation returned invalid JSON.");
+                    }
+                },
             },
         );
 
-        const messagesResponse = await args.client.session.messages({
-            path: { id: agentSessionId },
-            query: { directory: args.sessionDirectory ?? args.projectIdentity, limit: 50 },
-        });
-        const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-            preferResponseOnMissingData: true,
-        });
-        recordInvocation({ status: "completed", messages });
-        const output = extractLatestAssistantText(messages);
-        if (!output) throw new Error("Smart note evaluation returned no output.");
-
-        // Parse the JSON results from the LLM response — use greedy match to handle
-        // `]` chars inside JSON string values (e.g., reasons containing brackets).
-        const jsonMatch = output.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) {
-            log("[dreamer] smart notes: no JSON array found in output, skipping");
-            for (const note of pendingNotes) markNoteChecked(args.db, note.id);
-            throw new Error("Smart note evaluation returned no JSON array.");
-        }
-
-        let evaluations: Array<{ id: number; met: boolean; reason?: string }>;
-        try {
-            evaluations = JSON.parse(jsonMatch[0]);
-        } catch {
-            log(`[dreamer] smart notes: failed to parse JSON from LLM output, marking all checked`);
-            for (const note of pendingNotes) markNoteChecked(args.db, note.id);
-            throw new Error("Smart note evaluation returned invalid JSON.");
-        }
+        recordInvocation({ status: "completed", messages: smartNoteRun.output });
+        const evaluations = smartNoteRun.validated;
         let surfaced = 0;
         for (const evaluation of evaluations) {
             if (typeof evaluation.id !== "number") continue;
@@ -956,6 +974,19 @@ Only include notes whose conditions you could definitively evaluate against exte
         });
     } catch (error) {
         phaseFailed = true;
+        if (
+            error instanceof Error &&
+            error.message === "Smart note evaluation returned no JSON array."
+        ) {
+            log("[dreamer] smart notes: no JSON array found in output, skipping");
+            for (const note of pendingNotes) markNoteChecked(args.db, note.id);
+        } else if (
+            error instanceof Error &&
+            error.message === "Smart note evaluation returned invalid JSON."
+        ) {
+            log(`[dreamer] smart notes: failed to parse JSON from LLM output, marking all checked`);
+            for (const note of pendingNotes) markNoteChecked(args.db, note.id);
+        }
         const durationMs = Date.now() - taskStartedAt;
         const errorDescription = describeError(error);
         args.result.smartNotesSurfaced = 0;

@@ -1551,7 +1551,12 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
 			const msgRaw = event.message as unknown;
 			if (!msgRaw || typeof msgRaw !== "object") return;
-			const msg = msgRaw as { role?: string; errorMessage?: string };
+			const msg = msgRaw as {
+				role?: string;
+				errorMessage?: string;
+				provider?: string;
+				model?: string;
+			};
 			if (msg.role !== "assistant") return;
 			if (
 				typeof msg.errorMessage !== "string" ||
@@ -1561,7 +1566,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			}
 			const detection = detectOverflow(msg.errorMessage);
 			if (!detection.isOverflow) return;
-			recordOverflowDetected(db, sessionId, detection.reportedLimit);
+			const modelKey =
+				typeof msg.provider === "string" &&
+				typeof msg.model === "string" &&
+				msg.provider.length > 0 &&
+				msg.model.length > 0
+					? `${msg.provider}/${msg.model}`
+					: undefined;
+			recordOverflowDetected(db, sessionId, detection.reportedLimit, modelKey);
 			log(
 				`[magic-context][${sessionId}] overflow detected: reportedLimit=${
 					detection.reportedLimit ?? "?"

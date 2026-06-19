@@ -1530,6 +1530,14 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 41,
+        description: "key detected context limits by model",
+        up: (db: Database) => {
+            if (!tableExists(db, "session_meta")) return;
+            ensureColumn(db, "session_meta", "detected_context_limit_model_key", "TEXT");
+        },
+    },
 ];
 
 /**

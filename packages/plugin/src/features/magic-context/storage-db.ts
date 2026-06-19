@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 40;
+export const LATEST_SUPPORTED_VERSION = 41;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -991,6 +991,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // get — the model itself told us what fits. Set by overflow event handler
     // when parseReportedLimit() extracts a number; cleared on model switch.
     ensureColumn(db, "session_meta", "detected_context_limit", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "detected_context_limit_model_key", "TEXT");
     // True when the current session has hit an unrecovered context overflow
     // and needs the emergency recovery path (block at 95%, abort current
     // request, fire historian + aggressive drops) on its next transform pass.

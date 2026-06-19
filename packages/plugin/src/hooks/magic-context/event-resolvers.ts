@@ -31,10 +31,11 @@ export function resolveContextLimit(
     const fromModelsDev =
         providerID && modelID ? getSdkContextLimit(providerID, modelID) : undefined;
     const baseline = fromModelsDev ?? DEFAULT_CONTEXT_LIMIT;
+    const modelKey = resolveModelKey(providerID, modelID);
 
     if (ctx?.db && ctx.sessionID) {
         try {
-            const overflow = getOverflowState(ctx.db, ctx.sessionID);
+            const overflow = getOverflowState(ctx.db, ctx.sessionID, modelKey);
             // A detected limit only wins when it is smaller than the baseline —
             // providers never under-report their real limit. If the baseline is
             // already accurate, no need to downgrade.
@@ -69,11 +70,12 @@ export function resolveTrustedContextLimit(
 ): number | undefined {
     const fromModelsDev =
         providerID && modelID ? getSdkContextLimit(providerID, modelID) : undefined;
+    const modelKey = resolveModelKey(providerID, modelID);
 
     let detected: number | undefined;
     if (ctx?.db && ctx.sessionID) {
         try {
-            const overflow = getOverflowState(ctx.db, ctx.sessionID);
+            const overflow = getOverflowState(ctx.db, ctx.sessionID, modelKey);
             if (overflow.detectedContextLimit > 0) {
                 detected = overflow.detectedContextLimit;
             }

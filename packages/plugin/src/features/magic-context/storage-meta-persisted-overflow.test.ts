@@ -38,6 +38,7 @@ function createTestDb(): Database {
             tool_call_tokens INTEGER NOT NULL DEFAULT 0,
             cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
             detected_context_limit INTEGER NOT NULL DEFAULT 0,
+            detected_context_limit_model_key TEXT,
             needs_emergency_recovery INTEGER NOT NULL DEFAULT 0,
             harness TEXT NOT NULL DEFAULT 'opencode'
         )
@@ -89,6 +90,28 @@ describe("recordDetectedContextLimit", () => {
         const state = getOverflowState(db, "ses_mixed");
         expect(state.detectedContextLimit).toBe(80_000); // updated
         expect(state.needsEmergencyRecovery).toBe(true); // preserved
+    });
+
+    it("keys detected limits by model when a model key is known", () => {
+        ensureSessionMetaRow(db, "ses_model_keyed");
+        recordDetectedContextLimit(db, "ses_model_keyed", 80_000, "anthropic/claude-small");
+
+        const sameModel = getOverflowState(db, "ses_model_keyed", "anthropic/claude-small");
+        const otherModel = getOverflowState(db, "ses_model_keyed", "anthropic/claude-large");
+
+        expect(sameModel.detectedContextLimit).toBe(80_000);
+        expect(sameModel.detectedContextLimitModelKey).toBe("anthropic/claude-small");
+        expect(otherModel.detectedContextLimit).toBe(0);
+        expect(otherModel.detectedContextLimitModelKey).toBe("anthropic/claude-small");
+    });
+
+    it("keeps legacy unkeyed detected limits usable", () => {
+        ensureSessionMetaRow(db, "ses_legacy_limit");
+        recordDetectedContextLimit(db, "ses_legacy_limit", 64_000);
+
+        expect(getOverflowState(db, "ses_legacy_limit", "openai/gpt-4o").detectedContextLimit).toBe(
+            64_000,
+        );
     });
 
     it("clears cache-regression sentinels when a real overflow limit is recorded", () => {

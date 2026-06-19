@@ -155,9 +155,9 @@ export type SubagentProgressEvent =
  * Fields:
  * - `ok`: true iff the child produced a final assistant message.
  * - `assistantText`: concatenated text content from the final assistant
- *   message, with leading/trailing whitespace trimmed. Empty string if the
- *   child finished but produced no text (rare — usually means the model
- *   only emitted tool calls and we didn't follow up).
+ *   message, with leading/trailing whitespace trimmed. Empty assistant text is
+ *   reported as `ok: false, reason: "no_assistant"` so callers can try fallback
+ *   models instead of accepting an unusable success.
  * - `reason`: failure category, one of:
  *     - `"timeout"`: hit `timeoutMs` before the child finished
  *     - `"abort"`: caller's `signal` was triggered

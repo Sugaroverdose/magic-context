@@ -504,6 +504,31 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
+	it("returns no_assistant for empty assistant text", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "   " }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.emitClose(0);
+
+		expect(await resultPromise).toEqual({
+			ok: false,
+			reason: "no_assistant",
+			error: "pi assistant produced empty text",
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+	});
+
 	it("returns no_assistant for empty stdout and successful exit", async () => {
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
@@ -679,6 +704,55 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
 			expect.arrayContaining(["--model", "openai/fallback"]),
 		);
+	});
+
+	it("retries fallback models after empty assistant text", async () => {
+		const first = createMockChild();
+		const second = createMockChild();
+		let spawnCount = 0;
+		const spawnImpl = mock(() => {
+			spawnCount += 1;
+			return (spawnCount === 1 ? first : second) as never;
+		});
+		const runner = new PiSubagentRunner({
+			piBinary: "pi-test",
+			spawnImpl: spawnImpl as never,
+		});
+
+		const resultPromise = runner.run({
+			...baseOptions,
+			model: "anthropic/primary",
+			fallbackModels: ["openai/fallback"],
+		});
+		first.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: " " }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		first.emitClose(0);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		second.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "fallback text" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		second.emitClose(0);
+
+		expect(await resultPromise).toEqual({
+			ok: true,
+			assistantText: "fallback text",
+			durationMs: expect.any(Number),
+			meta: { stderr: undefined },
+		});
+		expect(spawnImpl).toHaveBeenCalledTimes(2);
 	});
 
 	it("returns timeout and terminates a child that never closes", async () => {

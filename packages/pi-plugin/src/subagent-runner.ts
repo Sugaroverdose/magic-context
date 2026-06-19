@@ -725,11 +725,18 @@ export class PiSubagentRunner implements SubagentRunner {
 				// of truth; a signaled close here must not turn a valid answer
 				// into a fake subprocess failure.
 				if (sawAgentEnd) {
-					if (finalAssistantText === null) {
+					const trimmedAssistantText = finalAssistantText?.trim() ?? null;
+					if (
+						trimmedAssistantText === null ||
+						trimmedAssistantText.length === 0
+					) {
 						settle({
 							ok: false,
 							reason: "no_assistant",
-							error: "pi agent_end did not include an assistant message",
+							error:
+								trimmedAssistantText === null
+									? "pi agent_end did not include an assistant message"
+									: "pi assistant produced empty text",
 							durationMs: Date.now() - startTime,
 							meta: { stderr: stderr.length > 0 ? stderr : undefined },
 						});
@@ -754,7 +761,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					}
 					settle({
 						ok: true,
-						assistantText: (finalAssistantText ?? "").trim(),
+						assistantText: trimmedAssistantText,
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});

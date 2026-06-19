@@ -69,11 +69,12 @@ export async function runSidekick(deps: {
             recordInvocation({ status: "failed", error });
             throw error;
         }
+        const childSessionId = agentSessionId;
 
-        await shared.promptSyncWithModelSuggestionRetry(
+        const sidekickRun = await shared.promptSyncWithValidatedOutputRetry(
             deps.client,
             {
-                path: { id: agentSessionId },
+                path: { id: childSessionId },
                 query: { directory: deps.sessionDirectory ?? deps.projectPath },
                 body: {
                     agent: SIDEKICK_AGENT,
@@ -86,24 +87,35 @@ export async function runSidekick(deps: {
                     parts: [{ type: "text", text: deps.userMessage, synthetic: true }],
                 },
             },
-            { timeoutMs: deps.config.timeout_ms, fallbackModels, callContext: "sidekick" },
+            {
+                timeoutMs: deps.config.timeout_ms,
+                fallbackModels,
+                callContext: "sidekick",
+                fetchOutput: async () => {
+                    const messagesResponse = await deps.client.session.messages({
+                        path: { id: childSessionId },
+                        query: { directory: deps.sessionDirectory ?? deps.projectPath, limit: 50 },
+                    });
+                    return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                        preferResponseOnMissingData: true,
+                    });
+                },
+                validateOutput: (messages) => {
+                    const taskResult = extractLatestAssistantText(messages);
+                    if (!taskResult) {
+                        throw new Error("Sidekick returned no assistant output.");
+                    }
+                    const finalText = stripThinkingBlocks(taskResult);
+                    if (finalText.length === 0) {
+                        throw new Error("Sidekick returned no assistant output.");
+                    }
+                    return finalText;
+                },
+            },
         );
 
-        const messagesResponse = await deps.client.session.messages({
-            path: { id: agentSessionId },
-            query: { directory: deps.sessionDirectory ?? deps.projectPath, limit: 50 },
-        });
-        const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-            preferResponseOnMissingData: true,
-        });
-        recordInvocation({ status: "completed", messages });
-        const taskResult = extractLatestAssistantText(messages);
-        if (!taskResult) {
-            return null;
-        }
-
-        const finalText = stripThinkingBlocks(taskResult);
-        return finalText.length > 0 ? finalText : null;
+        recordInvocation({ status: "completed", messages: sidekickRun.output });
+        return sidekickRun.validated;
     } catch (error) {
         recordInvocation({ status: "failed", error });
         if (deps.sessionId) {

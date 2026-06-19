@@ -321,9 +321,7 @@ describe("storage-db", () => {
             const savedXdg = process.env.XDG_DATA_HOME;
             const savedTestDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
             process.env.NODE_ENV = "test";
-            // biome-ignore lint/performance/noDelete: must be UNSET, not "".
             delete process.env.XDG_DATA_HOME;
-            // biome-ignore lint/performance/noDelete: must be UNSET, not "".
             delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
             try {
                 const { dbPath } = resolveDatabasePath();

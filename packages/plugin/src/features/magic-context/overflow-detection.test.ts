@@ -38,7 +38,7 @@ describe("overflow-detection / detectOverflow", () => {
     // These assertions lock in coverage across the full OpenCode pattern set so
     // future regex edits can't silently regress provider support.
     test.each<[string, string, number | undefined]>([
-        ["anthropic", "prompt is too long: 210000 tokens > 200000 maximum", undefined],
+        ["anthropic", "prompt is too long: 210000 tokens > 200000 maximum", 200000],
         ["bedrock", "Input is too long for requested model.", undefined],
         ["openai", "This model's maximum context length is 128000 tokens", 128000],
         [
@@ -110,6 +110,14 @@ describe("overflow-detection / parseReportedLimit", () => {
 
     test("extracts from 'exceeds the limit of' (Copilot)", () => {
         expect(parseReportedLimit("Prompt exceeds the limit of 64000 tokens")).toBe(64000);
+    });
+
+    test("extracts Anthropic-style '> N maximum|max|limit' caps", () => {
+        expect(parseReportedLimit("prompt is too long: 210000 tokens > 200000 maximum")).toBe(
+            200000,
+        );
+        expect(parseReportedLimit("prompt is too long: 210000 tokens > 200000 max")).toBe(200000);
+        expect(parseReportedLimit("prompt is too long: 210000 tokens > 200000 limit")).toBe(200000);
     });
 
     test("extracts from 'too large for model with' (Mistral)", () => {

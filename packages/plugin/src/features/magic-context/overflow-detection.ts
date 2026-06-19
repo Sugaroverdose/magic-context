@@ -65,6 +65,7 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<RegExp> = [
     // NOT N (the actual prompt size). Explicit pattern keeps the fallback below
     // from greedily matching N.
     /exceeds? the context length of (\d+)/i, // vLLM overflow
+    />\s*(\d+)\s*(?:tokens?\s*)?(?:maximum|max|limit)\b/i, // Anthropic: "tokens > N maximum"
     /max(?:imum)?.*context.*?(\d+)/i, // generic fallback — lowest priority
 ];
 

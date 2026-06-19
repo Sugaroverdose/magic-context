@@ -378,6 +378,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 if (detection.isOverflow) {
                     messageHadOverflowError = true;
                     try {
+                        const overflowModelKey = resolveModelKey(info.providerID, info.modelID);
                         const metaForOverflow = getOrCreateSessionMeta(deps.db, info.sessionID);
                         if (metaForOverflow.isSubagent) {
                             // Still record the detected limit (useful for
@@ -391,6 +392,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                                     deps.db,
                                     info.sessionID,
                                     detection.reportedLimit,
+                                    overflowModelKey,
                                 );
                             }
                             sessionLog(
@@ -402,6 +404,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                                 deps.db,
                                 info.sessionID,
                                 detection.reportedLimit,
+                                overflowModelKey,
                             );
                             sessionLog(
                                 info.sessionID,

@@ -1330,28 +1330,56 @@ export function clearHistorianFailureState(db: Database, sessionId: string): voi
 export interface PersistedOverflowState {
     /** Provider-reported context limit from the overflow error; 0 means none detected. */
     detectedContextLimit: number;
+    /** Model key that produced the detected limit, when known. */
+    detectedContextLimitModelKey: string | null;
     /** True while recovery is still required after an overflow. */
     needsEmergencyRecovery: boolean;
 }
 
-export function getOverflowState(db: Database, sessionId: string): PersistedOverflowState {
+function normalizeDetectedLimitModelKey(modelKey: string | null | undefined): string | null {
+    return typeof modelKey === "string" && modelKey.length > 0 ? modelKey : null;
+}
+
+export function getOverflowState(
+    db: Database,
+    sessionId: string,
+    modelKey?: string | null,
+): PersistedOverflowState {
     const result = db
         .prepare(
-            "SELECT detected_context_limit, needs_emergency_recovery FROM session_meta WHERE session_id = ?",
+            "SELECT detected_context_limit, detected_context_limit_model_key, needs_emergency_recovery FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId) as
-        | { detected_context_limit?: number; needs_emergency_recovery?: number }
+        | {
+              detected_context_limit?: number;
+              detected_context_limit_model_key?: string | null;
+              needs_emergency_recovery?: number;
+          }
         | undefined;
     if (!result) {
-        return { detectedContextLimit: 0, needsEmergencyRecovery: false };
+        return {
+            detectedContextLimit: 0,
+            detectedContextLimitModelKey: null,
+            needsEmergencyRecovery: false,
+        };
     }
+    const storedModelKey = normalizeDetectedLimitModelKey(result.detected_context_limit_model_key);
+    const requestedModelKey = normalizeDetectedLimitModelKey(modelKey);
     const limit =
         typeof result.detected_context_limit === "number" && result.detected_context_limit > 0
             ? result.detected_context_limit
             : 0;
+    const modelMatches =
+        limit > 0 && requestedModelKey && storedModelKey
+            ? requestedModelKey === storedModelKey
+            : true;
     const needs =
         typeof result.needs_emergency_recovery === "number" && result.needs_emergency_recovery > 0;
-    return { detectedContextLimit: limit, needsEmergencyRecovery: needs };
+    return {
+        detectedContextLimit: modelMatches ? limit : 0,
+        detectedContextLimitModelKey: storedModelKey,
+        needsEmergencyRecovery: needs,
+    };
 }
 
 /**
@@ -1363,13 +1391,14 @@ export function recordOverflowDetected(
     db: Database,
     sessionId: string,
     reportedLimit: number | undefined,
+    modelKey?: string | null,
 ): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         if (typeof reportedLimit === "number" && reportedLimit > 0) {
             db.prepare(
-                "UPDATE session_meta SET detected_context_limit = ?, needs_emergency_recovery = 1, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
-            ).run(reportedLimit, sessionId);
+                "UPDATE session_meta SET detected_context_limit = ?, detected_context_limit_model_key = ?, needs_emergency_recovery = 1, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
+            ).run(reportedLimit, normalizeDetectedLimitModelKey(modelKey), sessionId);
         } else {
             db.prepare(
                 "UPDATE session_meta SET needs_emergency_recovery = 1, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
@@ -1388,13 +1417,14 @@ export function recordDetectedContextLimit(
     db: Database,
     sessionId: string,
     reportedLimit: number,
+    modelKey?: string | null,
 ): void {
     if (!(reportedLimit > 0)) return;
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         db.prepare(
-            "UPDATE session_meta SET detected_context_limit = ?, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
-        ).run(reportedLimit, sessionId);
+            "UPDATE session_meta SET detected_context_limit = ?, detected_context_limit_model_key = ?, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
+        ).run(reportedLimit, normalizeDetectedLimitModelKey(modelKey), sessionId);
     })();
 }
 
@@ -1421,9 +1451,9 @@ export function clearEmergencyRecovery(db: Database, sessionId: string): void {
 export function clearDetectedContextLimit(db: Database, sessionId: string): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        db.prepare("UPDATE session_meta SET detected_context_limit = 0 WHERE session_id = ?").run(
-            sessionId,
-        );
+        db.prepare(
+            "UPDATE session_meta SET detected_context_limit = 0, detected_context_limit_model_key = NULL WHERE session_id = ?",
+        ).run(sessionId);
     })();
 }
 

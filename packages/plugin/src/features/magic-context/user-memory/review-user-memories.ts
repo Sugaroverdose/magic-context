@@ -169,12 +169,13 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         }
 
         log(`[dreamer] user-memories: child session created ${agentSessionId}`);
+        const childSessionId = agentSessionId;
 
         const remainingMs = Math.max(0, args.deadline - Date.now());
-        await shared.promptSyncWithModelSuggestionRetry(
+        const reviewRun = await shared.promptSyncWithValidatedOutputRetry(
             args.client,
             {
-                path: { id: agentSessionId },
+                path: { id: childSessionId },
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_AGENT,
@@ -189,48 +190,49 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 signal: abortController.signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:user-memories",
+                fetchOutput: async () => {
+                    const messagesResponse = await args.client.session.messages({
+                        path: { id: childSessionId },
+                        query: { directory: args.sessionDirectory, limit: 50 },
+                    });
+                    return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                        preferResponseOnMissingData: true,
+                    });
+                },
+                validateOutput: (messages) => {
+                    const responseText = extractLatestAssistantText(messages);
+                    if (!responseText) {
+                        throw new Error("User memory review returned no output.");
+                    }
+
+                    // Parse the JSON response — try to extract from possible markdown fencing
+                    const jsonMatch =
+                        responseText.match(/```(?:json)?\s*([\s\S]*?)```/) ??
+                        responseText.match(/(\{[\s\S]*\})/);
+                    if (!jsonMatch) {
+                        throw new Error("User memory review returned no JSON.");
+                    }
+
+                    try {
+                        return JSON.parse(jsonMatch[1]) as {
+                            promote?: Array<{ content: string; candidate_ids: number[] }>;
+                            update_existing?: Array<{
+                                memory_id: number;
+                                content: string;
+                                candidate_ids?: number[];
+                            }>;
+                            dismiss_existing?: Array<{ memory_id: number; reason?: string }>;
+                            consume_candidate_ids?: number[];
+                        };
+                    } catch {
+                        throw new Error("User memory review returned invalid JSON.");
+                    }
+                },
             },
         );
 
-        const messagesResponse = await args.client.session.messages({
-            path: { id: agentSessionId },
-            query: { directory: args.sessionDirectory, limit: 50 },
-        });
-        const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-            preferResponseOnMissingData: true,
-        });
-        recordInvocation({ status: "completed", messages });
-        const responseText = extractLatestAssistantText(messages);
-        if (!responseText) {
-            log("[dreamer] user-memories: no response from review agent");
-            return result;
-        }
-
-        // Parse the JSON response — try to extract from possible markdown fencing
-        const jsonMatch =
-            responseText.match(/```(?:json)?\s*([\s\S]*?)```/) ??
-            responseText.match(/(\{[\s\S]*\})/);
-        if (!jsonMatch) {
-            log("[dreamer] user-memories: could not parse JSON from response");
-            return result;
-        }
-
-        let parsed: {
-            promote?: Array<{ content: string; candidate_ids: number[] }>;
-            update_existing?: Array<{
-                memory_id: number;
-                content: string;
-                candidate_ids?: number[];
-            }>;
-            dismiss_existing?: Array<{ memory_id: number; reason?: string }>;
-            consume_candidate_ids?: number[];
-        };
-        try {
-            parsed = JSON.parse(jsonMatch[1]);
-        } catch {
-            log("[dreamer] user-memories: JSON parse failed");
-            return result;
-        }
+        recordInvocation({ status: "completed", messages: reviewRun.output });
+        const parsed = reviewRun.validated;
 
         const promotions = (parsed.promote ?? [])
             .map((p) => ({

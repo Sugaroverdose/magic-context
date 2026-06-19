@@ -267,7 +267,6 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         expect(result.dreamer?.pin_key_files?.enabled).toBe(true);
     });
 
-
     it("merges experimental.pin_key_files sub-fields when dreamer.pin_key_files is a boolean shorthand", () => {
         const config = JSON.stringify({
             experimental: {

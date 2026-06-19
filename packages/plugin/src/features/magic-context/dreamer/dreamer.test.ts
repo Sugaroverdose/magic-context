@@ -196,13 +196,23 @@ describe("dreamer", () => {
             let promptCalls = 0;
             const promptSyncSpy = spyOn(
                 shared,
-                "promptSyncWithModelSuggestionRetry",
+                "promptSyncWithValidatedOutputRetry",
             ).mockImplementation(async () => {
                 promptCalls += 1;
                 if (promptCalls === 1 && db) {
                     setDreamState(db, "dreaming_lease_holder", "stolen-holder");
                     setDreamState(db, "dreaming_lease_expiry", String(Date.now() + 120_000));
                 }
+                return {
+                    output: [],
+                    validated: "completed dream task",
+                    attempt: {
+                        label: "primary",
+                        attemptIndex: 0,
+                        isFallback: false,
+                        totalAttempts: 1,
+                    },
+                };
             });
 
             try {
@@ -298,7 +308,7 @@ describe("dreamer", () => {
             const client = createDreamClient();
             const promptSyncSpy = spyOn(
                 shared,
-                "promptSyncWithModelSuggestionRetry",
+                "promptSyncWithValidatedOutputRetry",
             ).mockImplementation(async () => {
                 const tampered = [
                     "# Architecture",
@@ -310,6 +320,16 @@ describe("dreamer", () => {
                     "outside after edited",
                 ].join("\n");
                 writeFileSync(join(docsDir, "ARCHITECTURE.md"), tampered, "utf8");
+                return {
+                    output: [],
+                    validated: "maintain-docs updated architecture",
+                    attempt: {
+                        label: "primary",
+                        attemptIndex: 0,
+                        isFallback: false,
+                        totalAttempts: 1,
+                    },
+                };
             });
 
             try {
@@ -362,7 +382,7 @@ describe("dreamer", () => {
 
             const promptSyncSpy = spyOn(
                 shared,
-                "promptSyncWithModelSuggestionRetry",
+                "promptSyncWithValidatedOutputRetry",
             ).mockRejectedValue(new ProviderModelNotFoundError());
 
             try {
