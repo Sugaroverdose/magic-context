@@ -1,12 +1,12 @@
 pub mod commands;
 pub mod config;
 pub mod db;
-pub mod workspaces;
 pub mod embedding_probe;
 pub mod log_parser;
 pub mod pi_sessions;
 pub mod process_ext;
 pub mod project_identity;
+pub mod workspaces;
 
 use std::path::PathBuf;
 use std::sync::Mutex;

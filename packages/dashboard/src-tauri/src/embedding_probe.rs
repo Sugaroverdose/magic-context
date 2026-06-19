@@ -215,14 +215,23 @@ pub async fn probe_embedding_endpoint(options: EmbeddingProbeOptions) -> Embeddi
     // Optional provider-specific fields (e.g. NVIDIA NIM requires input_type).
     // Added only when set so standard OpenAI endpoints are unaffected.
     if let Some(map) = body.as_object_mut() {
-        if let Some(input_type) = options.input_type.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        if let Some(input_type) = options
+            .input_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
             map.insert(
                 "input_type".to_string(),
                 serde_json::Value::String(input_type.to_string()),
             );
         }
-        if let Some(truncate) = options.truncate.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(truncate) = options
+            .truncate
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             map.insert(
                 "truncate".to_string(),
                 serde_json::Value::String(truncate.to_string()),

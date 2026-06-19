@@ -741,14 +741,16 @@ fn test_update_memory_category_collision() {
         "INSERT INTO memories (project_path, category, content, normalized_hash, status)
          VALUES ('git:project-a', 'CONSTRAINTS', 'same content', 'hash-1', 'active')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
     let id1 = conn.last_insert_rowid();
 
     conn.execute(
         "INSERT INTO memories (project_path, category, content, normalized_hash, status)
          VALUES ('git:project-a', 'NAMING', 'same content', 'hash-1', 'active')",
         [],
-    ).unwrap();
+    )
+    .unwrap();
     let id2 = conn.last_insert_rowid();
 
     // Try to update Memory 1's category to NAMING. This should collide with Memory 2.
