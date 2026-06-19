@@ -1,43 +1,32 @@
 /// <reference types="bun-types" />
 
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import { buildMagicContextHookConfig } from "./create-session-hooks";
 
-const createMagicContextHookMock = mock(() => ({ mocked: true }));
+describe("buildMagicContextHookConfig", () => {
+    it("threads toast_duration_ms into the per-session hook config", () => {
+        const config = buildMagicContextHookConfig({
+            enabled: true,
+            protected_tags: 10,
+            cache_ttl: "5m",
+            toast_duration_ms: 30_000,
+        } as never);
 
-mock.module("../../hooks/magic-context", () => ({
-    createMagicContextHook: createMagicContextHookMock,
-}));
-
-describe("createSessionHooks", () => {
-    beforeEach(() => {
-        createMagicContextHookMock.mockClear();
+        expect(config.toast_duration_ms).toBe(30_000);
     });
 
-    it("threads notification config into the magic-context hook", async () => {
-        const { createSessionHooks } = await import("./create-session-hooks");
+    it("passes toast_duration_ms = 0 through unchanged (disables toasts)", () => {
+        const config = buildMagicContextHookConfig({
+            enabled: true,
+            toast_duration_ms: 0,
+        } as never);
 
-        createSessionHooks({
-            ctx: {
-                client: {},
-                directory: "/tmp/project",
-            } as never,
-            liveSessionState: {
-                liveModelBySession: new Map(),
-                variantBySession: new Map(),
-                agentBySession: new Map(),
-            },
-            pluginConfig: {
-                enabled: true,
-                protected_tags: 10,
-                cache_ttl: "5m",
-                toast_duration_ms: 30_000,
-            } as never,
-        });
+        expect(config.toast_duration_ms).toBe(0);
+    });
 
-        expect(createMagicContextHookMock).toHaveBeenCalledTimes(1);
-        const args = createMagicContextHookMock.mock.calls[0]?.[0] as {
-            config?: { toast_duration_ms?: number };
-        };
-        expect(args.config?.toast_duration_ms).toBe(30_000);
+    it("leaves toast_duration_ms undefined when unset (consumer applies default)", () => {
+        const config = buildMagicContextHookConfig({ enabled: true } as never);
+
+        expect(config.toast_duration_ms).toBeUndefined();
     });
 });

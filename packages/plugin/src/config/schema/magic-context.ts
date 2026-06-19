@@ -392,11 +392,11 @@ export const MagicContextConfigSchema = z
             ),
         toast_duration_ms: z
             .number()
-            .min(1_000)
+            .min(0)
             .max(60_000)
             .default(5_000)
             .describe(
-                "TUI toast lifetime in milliseconds for Magic Context notifications (min: 1000, max: 60000, default: 5000)",
+                "TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000)",
             ),
         execute_threshold_percentage: z
             .union([

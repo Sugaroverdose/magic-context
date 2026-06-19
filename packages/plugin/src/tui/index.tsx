@@ -44,6 +44,12 @@ function showToast(
         typeof input.durationOverrideMs === "number" && Number.isFinite(input.durationOverrideMs)
             ? input.durationOverrideMs
             : getToastDurationMs()
+    // toast_duration_ms = 0 disables Magic Context toasts entirely. An explicit
+    // positive per-call override (e.g. restart-required) still shows; only a
+    // non-positive effective duration suppresses the toast.
+    if (!(duration > 0)) {
+        return
+    }
     api.ui.toast({
         message: input.message,
         variant: input.variant,

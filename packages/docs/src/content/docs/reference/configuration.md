@@ -192,3 +192,9 @@ Behavior tuning most installs never need to touch.
 | `sqlite` | object | — | SQLite connection tuning for Magic Context's own context.db. These are per-connection PRAGMAs applied at open; they do not change the schema or what is stored. |
 | `sqlite.cache_size_mb` | number (2–2048) | `64` | Page-cache size in MiB per connection (PRAGMA cache_size). Larger keeps more hot pages resident, cutting re-reads on repeated full-table scans. (min 2, max 2048, default 64) |
 | `sqlite.mmap_size_mb` | number (0–8192) | `0` | Memory-mapped I/O size in MiB (PRAGMA mmap_size). 0 disables mmap (SQLite default). Raising it can cut read overhead on large DBs at the cost of address space. (min 0, max 8192, default 0) |
+
+## Other
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `toast_duration_ms` | number (0–60000) | `5000` | TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000) |

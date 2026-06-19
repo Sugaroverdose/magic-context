@@ -26,6 +26,8 @@
   <a href="#-capture">Capture</a> ·
   <a href="#-consolidate">Consolidate</a> ·
   <a href="#-recall">Recall</a> ·
+  <a href="https://docs.cortexkit.io/magic-context">Docs</a> ·
+  <a href="./CONFIGURATION.md">Configuration</a> ·
   <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
 
@@ -239,7 +241,7 @@ It reads directly from Magic Context's SQLite database. No extra server, no API.
 
 ## Configuration
 
-Settings live in `magic-context.jsonc`. Everything has sensible defaults; project config merges on top of user-wide settings. See **[CONFIGURATION.md](./CONFIGURATION.md)** for the full reference: cache TTL tuning, per-model execute thresholds, historian and dreamer model selection, embedding providers, and memory settings.
+Settings live in `magic-context.jsonc`. Everything has sensible defaults; project config merges on top of user-wide settings. For the full reference — cache TTL tuning, per-model execute thresholds, historian and dreamer model selection, embedding providers, and memory settings — see **[CONFIGURATION.md](./CONFIGURATION.md)** or the **[configuration reference on docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
 **Config locations** (merged in order, project overrides user):
 1. `<project-root>/magic-context.jsonc`
