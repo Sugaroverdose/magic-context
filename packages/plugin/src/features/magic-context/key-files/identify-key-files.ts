@@ -464,7 +464,7 @@ async function runKeyFilesLlm(args: {
     prompt: string;
     deadline: number;
     fallbackModels?: readonly string[];
-}): Promise<{ text: string; messages: unknown[] }> {
+}): Promise<{ text: string; messages: unknown[]; agentSessionId: string }> {
     const createResponse = await args.client.session.create({
         body: {
             ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
@@ -477,46 +477,39 @@ async function runKeyFilesLlm(args: {
     });
     const agentSessionId = typeof created?.id === "string" ? created.id : null;
     if (!agentSessionId) throw new Error("Could not create key-file identification session.");
-    let succeeded = false;
-    try {
-        await shared.promptSyncWithModelSuggestionRetry(
-            args.client,
-            {
-                path: { id: agentSessionId },
-                query: { directory: args.projectPath },
-                body: {
-                    agent: DREAMER_AGENT,
-                    system: KEY_FILES_SYSTEM_PROMPT,
-                    parts: [{ type: "text", text: args.prompt, synthetic: true }],
-                },
-            },
-            {
-                timeoutMs: Math.min(Math.max(0, args.deadline - Date.now()), 5 * 60 * 1000),
-                fallbackModels: args.fallbackModels,
-                callContext: "dreamer:key-files-v6",
-            },
-        );
-        const messagesResponse = await args.client.session.messages({
+    // NOTE: child-session cleanup is OWNED BY THE CALLER (runKeyFilesTask), not
+    // here. Deleting on text-extraction success would discard the session BEFORE
+    // validateLlmOutput runs — so an LLM that returned text but failed validation
+    // (bad JSON, doc/out-of-candidate path) would lose its session, defeating
+    // retention-on-failure debugging. The caller deletes only after validation +
+    // commit succeed, and retains on any failure.
+    await shared.promptSyncWithModelSuggestionRetry(
+        args.client,
+        {
             path: { id: agentSessionId },
-            query: { directory: args.projectPath, limit: 50 },
-        });
-        const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-            preferResponseOnMissingData: true,
-        });
-        const text = extractLatestAssistantText(messages);
-        if (!text) throw new Error("Dreamer returned no key-files output.");
-        succeeded = true;
-        return { text, messages };
-    } finally {
-        // Keep the child session on failure (debugging) — mirrors the main-task
-        // cleanup rule; this try/finally has no catch, so a throw leaves
-        // succeeded=false and the session is retained.
-        if (succeeded && !shouldKeepSubagents()) {
-            await args.client.session
-                .delete({ path: { id: agentSessionId } })
-                .catch(() => undefined);
-        }
-    }
+            query: { directory: args.projectPath },
+            body: {
+                agent: DREAMER_AGENT,
+                system: KEY_FILES_SYSTEM_PROMPT,
+                parts: [{ type: "text", text: args.prompt, synthetic: true }],
+            },
+        },
+        {
+            timeoutMs: Math.min(Math.max(0, args.deadline - Date.now()), 5 * 60 * 1000),
+            fallbackModels: args.fallbackModels,
+            callContext: "dreamer:key-files-v6",
+        },
+    );
+    const messagesResponse = await args.client.session.messages({
+        path: { id: agentSessionId },
+        query: { directory: args.projectPath, limit: 50 },
+    });
+    const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+        preferResponseOnMissingData: true,
+    });
+    const text = extractLatestAssistantText(messages);
+    if (!text) throw new Error("Dreamer returned no key-files output.");
+    return { text, messages, agentSessionId };
 }
 
 export async function runKeyFilesTask(args: {
@@ -557,10 +550,18 @@ export async function runKeyFilesTask(args: {
             }
         });
     const currentPaths = new Set(currentRows.map((row) => row.path));
-    if (
-        allRowsFreshAndCurrent &&
-        candidates.every((candidate) => currentPaths.has(candidate.path))
-    ) {
+    const candidatePaths = new Set(candidates.map((candidate) => candidate.path));
+    // Short-circuit ONLY when the pinned set exactly matches the current candidate
+    // set: every candidate is already pinned AND every pinned row is still a valid
+    // candidate. The second clause is the fix — without it, a pinned file that
+    // dropped out of the candidate set (renamed, fell below min_reads, or a doc/
+    // lockfile under an older policy) would be treated as "no change" and injected
+    // forever. When a stale row exists we fall through to the LLM re-run, which
+    // validates against the candidate allow-set and drops it.
+    const pinnedMatchesCandidates =
+        candidates.every((candidate) => currentPaths.has(candidate.path)) &&
+        currentRows.every((row) => candidatePaths.has(row.path));
+    if (allRowsFreshAndCurrent && pinnedMatchesCandidates) {
         log(`key-files: no_change short-circuit (${currentRows.length} rows fresh)`);
         return { committedVersion: null, candidates: candidates.length, noChange: true };
     }
@@ -585,6 +586,11 @@ export async function runKeyFilesTask(args: {
     // pushed in the dreamer runner ("key files") so the dashboard maps tokens
     // to the right row.
     let invocationRecorded = false;
+    // Child-session cleanup is owned here (not in runKeyFilesLlm) so it happens
+    // only AFTER validation + commit succeed — a validation failure retains the
+    // session for debugging (retention-on-failure parity with the main task).
+    let childSessionId: string | null = null;
+    let taskCompleted = false;
     const llmStartedAt = Date.now();
     const recordKeyFilesInvocation = (params: {
         status: "completed" | "failed";
@@ -607,7 +613,11 @@ export async function runKeyFilesTask(args: {
     };
     try {
         try {
-            const { text: raw, messages: llmMessages } = await runKeyFilesLlm({
+            const {
+                text: raw,
+                messages: llmMessages,
+                agentSessionId,
+            } = await runKeyFilesLlm({
                 client: args.client,
                 parentSessionId: args.parentSessionId,
                 projectPath,
@@ -615,6 +625,7 @@ export async function runKeyFilesTask(args: {
                 deadline: args.deadline,
                 fallbackModels: args.fallbackModels,
             });
+            childSessionId = agentSessionId;
             // The LLM call completed (tokens spent) — record before validation,
             // which is post-processing that can fail independently.
             recordKeyFilesInvocation({ status: "completed", messages: llmMessages });
@@ -629,8 +640,10 @@ export async function runKeyFilesTask(args: {
             log(`[key-files] LLM validation failed: ${getErrorMessage(error)}`);
             throw error;
         }
-        if (validated.no_change)
+        if (validated.no_change) {
+            taskCompleted = true;
             return { committedVersion: null, candidates: candidates.length, noChange: true };
+        }
         const committedVersion = commitKeyFiles({
             db: args.db,
             projectPath,
@@ -640,8 +653,16 @@ export async function runKeyFilesTask(args: {
             leaseHolderId: args.holderId,
         });
         renewLease(args.db, args.holderId);
+        taskCompleted = true;
         return { committedVersion, candidates: candidates.length, noChange: false };
     } finally {
         clearInterval(leaseInterval);
+        // Delete the child session only on full success; retain on any failure
+        // (validation/commit) for debugging, unless keep_subagents is set.
+        if (childSessionId && taskCompleted && !shouldKeepSubagents()) {
+            await args.client.session
+                .delete({ path: { id: childSessionId } })
+                .catch(() => undefined);
+        }
     }
 }

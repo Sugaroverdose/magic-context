@@ -6,6 +6,11 @@ import { parseProviderModel } from "./resolve-fallbacks";
 
 type Client = ReturnType<typeof createOpencodeClient>;
 
+/** Max time to wait for the best-effort child-session abort HTTP call before
+ *  giving up on its response (the abort still proceeds server-side). Keeps a
+ *  wedged abort endpoint from masking the original timeout/abort error. */
+const ABORT_CALL_TIMEOUT_MS = 3000;
+
 type PromptBody = {
     model?: { providerID: string; modelID: string };
     [key: string]: unknown;
@@ -171,7 +176,15 @@ async function promptWithTimeout(
  */
 async function abortChildRun(client: Client, sessionId: string): Promise<void> {
     try {
-        await client.session.abort({ path: { id: sessionId } });
+        // Bound the abort call: it's best-effort cleanup, and if the abort
+        // endpoint itself stalls (the runner is wedged) an unbounded await here
+        // would hang the caller and MASK the original timeout/abort error that we
+        // still need to surface. Race against a short timer; the abort keeps
+        // running server-side regardless of whether we wait for its response.
+        await Promise.race([
+            client.session.abort({ path: { id: sessionId } }),
+            new Promise<void>((resolve) => setTimeout(resolve, ABORT_CALL_TIMEOUT_MS)),
+        ]);
     } catch (error) {
         log(`[model-retry] child session abort failed for ${sessionId}: ${String(error)}`);
     }

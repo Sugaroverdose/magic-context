@@ -69,7 +69,10 @@ const LIMIT_EXTRACTION_PATTERNS: ReadonlyArray<RegExp> = [
 ];
 
 /** Minimum plausible context limit. Anything smaller is probably a match
- *  against an unrelated number in the error (e.g., error code). */
+ *  against an unrelated number in the error (e.g., error code). Kept at 1024
+ *  (NOT the [20k,3M] trusted-limit band): overflow detection honors a provider
+ *  EXPLICITLY stating its limit, and real small-context models exist (4096/8192
+ *  local llama.cpp) — raising this floor would discard a legitimate signal. */
 const MIN_PLAUSIBLE_LIMIT = 1024;
 /** Maximum plausible context limit. Anything larger is very likely a false
  *  match against a token-count field rather than a limit. */
