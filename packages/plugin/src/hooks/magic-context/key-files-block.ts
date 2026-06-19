@@ -10,6 +10,7 @@ import {
     sha256,
 } from "../../features/magic-context/key-files/project-key-files";
 import type { SessionMeta } from "../../features/magic-context/types";
+import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 
@@ -21,6 +22,8 @@ export interface KeyFilesConfigForRender {
 interface CacheEntry {
     value: string | null;
     version: number;
+    projectPath: string;
+    tokenBudget: number;
 }
 
 interface StaleUpdate {
@@ -30,7 +33,9 @@ interface StaleUpdate {
     staleReason: KeyFileStaleReason;
 }
 
-export const cachedKeyFilesBySession = new Map<string, CacheEntry>();
+const KEY_FILES_CACHE_MAX = 100;
+
+export const cachedKeyFilesBySession = new BoundedSessionMap<CacheEntry>(KEY_FILES_CACHE_MAX);
 
 const staleUpdates = new Map<string, StaleUpdate>();
 
@@ -188,14 +193,25 @@ export function readVersionedKeyFiles(args: {
     const currentVersion = getKeyFilesVersion(args.db, projectPath);
     if (args.sessionId) {
         const cached = cachedKeyFilesBySession.get(args.sessionId);
-        if (cached && !args.isCacheBusting && cached.version === currentVersion) {
+        if (
+            cached &&
+            !args.isCacheBusting &&
+            cached.version === currentVersion &&
+            cached.projectPath === projectPath &&
+            cached.tokenBudget === config.tokenBudget
+        ) {
             return cached.value;
         }
     }
 
     const value = buildKeyFilesBlock(args.db, projectPath, config);
     if (args.sessionId) {
-        cachedKeyFilesBySession.set(args.sessionId, { value, version: currentVersion });
+        cachedKeyFilesBySession.set(args.sessionId, {
+            value,
+            version: currentVersion,
+            projectPath,
+            tokenBudget: config.tokenBudget,
+        });
         if (value)
             sessionLog(
                 args.sessionId,

@@ -511,4 +511,156 @@ describe("versioned key-files injection", () => {
             closeQuietly(db);
         }
     });
+
+    it("does not reuse cache across different projects at the same version", () => {
+        setAftAvailabilityOverride(true);
+        const db = makeDb();
+        const sessionId = "shared-session";
+        const sessionMeta = {
+            sessionId,
+            isSubagent: false,
+        } as import("../types").SessionMeta;
+        try {
+            const projectA = tempDir("kf-proj-a-");
+            const projectB = tempDir("kf-proj-b-");
+            writeFileSync(join(projectA, "a.ts"), "a");
+            writeFileSync(join(projectB, "b.ts"), "b");
+            replaceProjectKeyFiles(db, projectA, [
+                {
+                    path: "a.ts",
+                    content: "project-a-block",
+                    localTokenEstimate: 10,
+                    generationConfigHash: "cfg",
+                },
+            ]);
+            replaceProjectKeyFiles(db, projectB, [
+                {
+                    path: "b.ts",
+                    content: "project-b-block",
+                    localTokenEstimate: 10,
+                    generationConfigHash: "cfg",
+                },
+            ]);
+            expect(getKeyFilesVersion(db, projectA)).toBe(1);
+            expect(getKeyFilesVersion(db, projectB)).toBe(1);
+
+            const fromA = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: projectA,
+                isCacheBusting: false,
+                config: { enabled: true, tokenBudget: 2000 },
+            });
+            const fromB = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: projectB,
+                isCacheBusting: false,
+                config: { enabled: true, tokenBudget: 2000 },
+            });
+            expect(fromA).toContain("project-a-block");
+            expect(fromB).toContain("project-b-block");
+            expect(fromB).not.toContain("project-a-block");
+        } finally {
+            clearKeyFilesCacheForSession(sessionId);
+            closeQuietly(db);
+        }
+    });
+
+    it("invalidates cache when tokenBudget changes without a version bump", () => {
+        setAftAvailabilityOverride(true);
+        const db = makeDb();
+        const sessionId = "budget-session";
+        const sessionMeta = {
+            sessionId,
+            isSubagent: false,
+        } as import("../types").SessionMeta;
+        try {
+            const project = tempDir("kf-budget-");
+            writeFileSync(join(project, "big.ts"), "x");
+            writeFileSync(join(project, "small.ts"), "y");
+            replaceProjectKeyFiles(db, project, [
+                {
+                    path: "big.ts",
+                    content: "BIG-FILE-CONTENT",
+                    localTokenEstimate: 100,
+                    generationConfigHash: "cfg",
+                },
+                {
+                    path: "small.ts",
+                    content: "SMALL",
+                    localTokenEstimate: 5,
+                    generationConfigHash: "cfg",
+                },
+            ]);
+
+            const tightBudget = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: project,
+                isCacheBusting: false,
+                config: { enabled: true, tokenBudget: 10 },
+            });
+            const looseBudget = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: project,
+                isCacheBusting: false,
+                config: { enabled: true, tokenBudget: 2000 },
+            });
+            expect(tightBudget).not.toContain("BIG-FILE-CONTENT");
+            expect(looseBudget).toContain("BIG-FILE-CONTENT");
+            expect(looseBudget).not.toBe(tightBudget);
+        } finally {
+            clearKeyFilesCacheForSession(sessionId);
+            closeQuietly(db);
+        }
+    });
+
+    it("cache hit when session, project, budget, and version are unchanged", () => {
+        setAftAvailabilityOverride(true);
+        const db = makeDb();
+        const sessionId = "hit-session";
+        const sessionMeta = {
+            sessionId,
+            isSubagent: false,
+        } as import("../types").SessionMeta;
+        const config = { enabled: true, tokenBudget: 2000 };
+        try {
+            const project = tempDir("kf-hit-");
+            writeFileSync(join(project, "a.ts"), "a");
+            replaceProjectKeyFiles(db, project, [
+                {
+                    path: "a.ts",
+                    content: "stable-hit",
+                    localTokenEstimate: 10,
+                    generationConfigHash: "cfg",
+                },
+            ]);
+            const first = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: project,
+                isCacheBusting: false,
+                config,
+            });
+            const second = readVersionedKeyFiles({
+                db,
+                sessionId,
+                sessionMeta,
+                directory: project,
+                isCacheBusting: false,
+                config,
+            });
+            expect(second).toBe(first);
+        } finally {
+            clearKeyFilesCacheForSession(sessionId);
+            closeQuietly(db);
+        }
+    });
 });
