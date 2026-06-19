@@ -14,6 +14,8 @@ import {
     replaceAllCompartmentState,
     replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
+import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -1019,6 +1021,142 @@ describe("runCompartmentAgent", () => {
             query: { directory: "/tmp/parent" },
         });
         expect(promptSession.mock.calls[0]?.[0]?.body.agent).toBe("historian");
+    });
+
+    it("keeps a committed publish succeeded and signaled when post-commit project registration throws", async () => {
+        useTempDataHome("compartment-runner-post-commit-registration-throw-");
+        createOpenCodeDb("ses-post-commit-registration", [
+            { id: "m-1", role: "user", text: "First" },
+            { id: "m-2", role: "assistant", text: "Second" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        const projectDirectory = "/tmp/post-commit-registration";
+        const onPublished = mock(() => undefined);
+        const ensureProjectRegistered = mock(async () => {
+            throw new Error("embedding provider unavailable");
+        });
+
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: projectDirectory } })),
+                create: mock(async () => ({ data: { id: "ses-agent-post-commit" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: `<compartment start="1" end="2" title="Published">Summary</compartment>\n<PROJECT_RULES>\n* Durable fact survives registration outage.\n</PROJECT_RULES>`,
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-post-commit-registration",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            ensureProjectRegistered,
+            onCompartmentStatePublished: onPublished,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(getCompartments(db, "ses-post-commit-registration")).toHaveLength(1);
+        expect(loadProtectedTailMeta(db, "ses-post-commit-registration").priorBoundaryOrdinal).toBe(
+            3,
+        );
+        expect(onPublished).toHaveBeenCalledWith("ses-post-commit-registration");
+        expect(
+            getOrCreateSessionMeta(db, "ses-post-commit-registration").compartmentInProgress,
+        ).toBe(false);
+        expect(
+            getMemoriesByProject(db, resolveProjectIdentity(projectDirectory)).map(
+                (memory) => memory.content,
+            ),
+        ).toContain("Durable fact survives registration outage.");
+        expect(
+            db
+                .prepare(
+                    "SELECT status FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                )
+                .get("ses-post-commit-registration"),
+        ).toEqual({ status: "success" });
+    });
+
+    it("rolls back compartments and boundary when durable fact insertion fails inside publish tx", async () => {
+        useTempDataHome("compartment-runner-fact-insert-rollback-");
+        createOpenCodeDb("ses-fact-insert-rollback", [
+            { id: "m-1", role: "user", text: "First" },
+            { id: "m-2", role: "assistant", text: "Second" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        db.exec(
+            "CREATE TRIGGER fail_memory_insert BEFORE INSERT ON memories BEGIN SELECT RAISE(ABORT, 'memory insert fail'); END;",
+        );
+        const onPublished = mock(() => undefined);
+
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/fact-insert-rollback" } })),
+                create: mock(async () => ({ data: { id: "ses-agent-fact-insert" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: `<compartment start="1" end="2" title="Should roll back">Summary</compartment>\n<PROJECT_RULES>\n* This fact insert fails.\n</PROJECT_RULES>`,
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-fact-insert-rollback",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            onCompartmentStatePublished: onPublished,
+        });
+
+        expect(getCompartments(db, "ses-fact-insert-rollback")).toEqual([]);
+        expect(
+            getMemoriesByProject(db, resolveProjectIdentity("/tmp/fact-insert-rollback")),
+        ).toEqual([]);
+        expect(loadProtectedTailMeta(db, "ses-fact-insert-rollback").priorBoundaryOrdinal).toBe(1);
+        expect(onPublished).not.toHaveBeenCalled();
+        expect(
+            db
+                .prepare(
+                    "SELECT status FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                )
+                .get("ses-fact-insert-rollback"),
+        ).toEqual({ status: "failed" });
     });
 
     it("retries transient historian prompt failures on the same child session", async () => {

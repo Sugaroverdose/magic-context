@@ -29,7 +29,7 @@ const {
     getMemoriesByProject,
     insertMemory,
 } = await import("./storage-memory");
-const { promoteSessionFactsToMemory } = await import("./promotion");
+const { promoteSessionFactsDurable } = await import("./promotion");
 
 let db: Database | null = null;
 
@@ -114,7 +114,7 @@ describe("promotion", () => {
         it("promotes a new ARCHITECTURE_DECISIONS fact", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 {
                     category: "ARCHITECTURE_DECISIONS",
                     content: "Use SQLite for cross-session memory",
@@ -137,7 +137,7 @@ describe("promotion", () => {
         it("sets correct project path for project-scoped categories", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "CONSTRAINTS", content: "Never use npm in this repo" },
             ]);
 
@@ -154,7 +154,7 @@ describe("promotion", () => {
         it("stores USER_PREFERENCES under project path", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "USER_PREFERENCES", content: "Prefer concise answers" },
             ]);
 
@@ -171,7 +171,7 @@ describe("promotion", () => {
         it("stores USER_DIRECTIVES under project path", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "USER_DIRECTIVES", content: "Run tests before finishing" },
             ]);
 
@@ -189,7 +189,7 @@ describe("promotion", () => {
             db = makeMemoryDatabase();
             const nowSpy = spyOn(Date, "now").mockReturnValue(10_000);
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "WORKFLOW_RULES", content: "Run bun test before release" },
             ]);
 
@@ -208,7 +208,7 @@ describe("promotion", () => {
             db = makeMemoryDatabase();
             const nowSpy = spyOn(Date, "now").mockReturnValue(20_000);
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "KNOWN_ISSUES", content: "Historian can retry on malformed XML" },
             ]);
 
@@ -226,7 +226,7 @@ describe("promotion", () => {
         it("does not set expires_at for permanent categories", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 {
                     category: "ARCHITECTURE_DECISIONS",
                     content: "Keep modules under 200 LOC when possible",
@@ -253,7 +253,7 @@ describe("promotion", () => {
                 content: "Use createX naming for factories",
             });
 
-            promoteSessionFactsToMemory(db, "ses-2", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-2", "/repo/project", [
                 { category: "NAMING", content: "use createx naming for factories" },
             ]);
 
@@ -275,7 +275,7 @@ describe("promotion", () => {
                 content: "CI runs with Bun",
             });
 
-            promoteSessionFactsToMemory(db, "ses-2", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-2", "/repo/project", [
                 { category: "ENVIRONMENT", content: " ci   runs with bun " },
             ]);
 
@@ -293,7 +293,7 @@ describe("promotion", () => {
             });
             nowSpy.mockReturnValueOnce(2_000);
 
-            promoteSessionFactsToMemory(db, "ses-2", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-2", "/repo/project", [
                 { category: "CONFIG_DEFAULTS", content: "default timeout is 5s" },
             ]);
 
@@ -309,7 +309,7 @@ describe("promotion", () => {
         it("skips SESSION_NOTES category", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "SESSION_NOTES", content: "This should remain session-local" },
             ]);
 
@@ -319,7 +319,7 @@ describe("promotion", () => {
         it("skips facts with unknown categories", () => {
             db = makeMemoryDatabase();
 
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "UNKNOWN_CATEGORY", content: "Ignore me" },
             ]);
 
@@ -328,40 +328,30 @@ describe("promotion", () => {
     });
 
     describe("#given error handling", () => {
-        it("does not throw when DB write fails", () => {
+        it("propagates when a durable DB write fails", () => {
             const closedDb = makeMemoryDatabase();
             db = closedDb;
             closeQuietly(closedDb);
 
             expect(() =>
-                promoteSessionFactsToMemory(closedDb, "ses-1", "/repo/project", [
+                promoteSessionFactsDurable(closedDb, "ses-1", "/repo/project", [
                     { category: "ARCHITECTURE_DECISIONS", content: "This write will fail" },
                 ]),
-            ).not.toThrow();
+            ).toThrow();
         });
 
-        it("logs error when promotion fails", () => {
+        it("does not swallow or log durable storage failures", () => {
             const closedDb = makeMemoryDatabase();
             db = closedDb;
             closeQuietly(closedDb);
             db = null;
 
-            promoteSessionFactsToMemory(closedDb, "ses-1", "/repo/project", [
-                { category: "ARCHITECTURE_DECISIONS", content: "This write will fail" },
-            ]);
-
-            expect(mockLog).toHaveBeenCalledTimes(1);
-            const loggedMessages = mockLog.mock.calls.map((call) => call.join(" "));
-            // Note: mock receives raw sessionLog args (sessionId + message + error), without
-            // the "[magic-context][sessionId]" prefix that the real sessionLog would prepend.
-            // This test verifies the promotion code passes the right session id and message.
-            expect(
-                loggedMessages.some(
-                    (message) =>
-                        message.startsWith("ses-1 memory promotion failed for fact") &&
-                        message.includes("This write will fail"),
-                ),
-            ).toBe(true);
+            expect(() =>
+                promoteSessionFactsDurable(closedDb, "ses-1", "/repo/project", [
+                    { category: "ARCHITECTURE_DECISIONS", content: "This write will fail" },
+                ]),
+            ).toThrow();
+            expect(mockLog).not.toHaveBeenCalled();
         });
     });
 
@@ -378,7 +368,7 @@ describe("promotion", () => {
             const hash = computeNormalizedHash(content);
 
             // 1) Promote, then archive (e.g. dreamer archived it as stale).
-            promoteSessionFactsToMemory(db, "ses-1", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-1", "/repo/project", [
                 { category: "ARCHITECTURE_DECISIONS", content },
             ]);
             const original = getMemoryByHash(db, "/repo/project", "ARCHITECTURE_DECISIONS", hash);
@@ -387,7 +377,7 @@ describe("promotion", () => {
             expect(getMemoryById(db, original!.id)?.status).toBe("archived");
 
             // 2) Historian re-observes the same fact in a later session.
-            promoteSessionFactsToMemory(db, "ses-2", "/repo/project", [
+            promoteSessionFactsDurable(db, "ses-2", "/repo/project", [
                 { category: "ARCHITECTURE_DECISIONS", content },
             ]);
 

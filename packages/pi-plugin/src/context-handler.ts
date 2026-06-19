@@ -1519,13 +1519,6 @@ export function registerPiContextHandler(
 				previousModelKey !== undefined &&
 				currentModelKey !== undefined &&
 				previousModelKey !== currentModelKey;
-			if (modelChanged) {
-				clearPiM0Cache(
-					options.db,
-					sessionId,
-					`model switch ${previousModelKey} -> ${currentModelKey}`,
-				);
-			}
 			if (currentModelKey !== undefined) {
 				liveModelBySession.set(sessionId, currentModelKey);
 			}

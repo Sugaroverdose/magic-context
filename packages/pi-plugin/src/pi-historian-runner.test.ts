@@ -140,6 +140,9 @@ async function runHistorianWith(args: {
 	refreshBoundarySnapshot?: () => ProtectedTailBoundarySnapshot;
 	providerMessages?: ReturnType<typeof rawMessages>;
 	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
+	ensureProjectRegistered?: Parameters<
+		typeof runPiHistorian
+	>[0]["ensureProjectRegistered"];
 }) {
 	const db = createTestDb();
 	const runner = runnerReturning([...args.outputs]);
@@ -164,6 +167,7 @@ async function runHistorianWith(args: {
 		boundarySnapshot: args.boundarySnapshot,
 		refreshBoundarySnapshot: args.refreshBoundarySnapshot,
 		compartmentLeaseHolderId: holderId,
+		ensureProjectRegistered: args.ensureProjectRegistered,
 	});
 	return { db, runner };
 }
@@ -458,6 +462,39 @@ describe("runPiHistorian", () => {
 			expect(getPersistedNoteNudge(db, "ses-historian").triggerPending).toBe(
 				true,
 			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps publish succeeded and signaled when post-commit project registration throws", async () => {
+		const onPublished = mock(() => undefined);
+		const ensureProjectRegistered = mock(async () => {
+			throw new Error("embedding provider unavailable");
+		});
+		const { db } = await runHistorianWith({
+			outputs: [successXml("Pi durable fact survives registration outage.")],
+			onPublished,
+			ensureProjectRegistered,
+		});
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(onPublished).toHaveBeenCalledTimes(1);
+			expect(getCompartments(db, "ses-historian")).toHaveLength(1);
+			expect(
+				loadProtectedTailMeta(db, "ses-historian").priorBoundaryOrdinal,
+			).toBe(3);
+			const projectPath = resolveProjectIdentity(process.cwd());
+			expect(
+				getMemoriesByProject(db, projectPath).map((memory) => memory.content),
+			).toContain("Pi durable fact survives registration outage.");
+			expect(
+				db
+					.prepare(
+						"SELECT status FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+					)
+					.get("ses-historian"),
+			).toEqual({ status: "success" });
 		} finally {
 			closeQuietly(db);
 		}

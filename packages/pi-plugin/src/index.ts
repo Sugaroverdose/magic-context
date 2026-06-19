@@ -1094,7 +1094,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			});
 
 			if (result.hashChanged) {
-				clearPiM0Cache(db, sessionId, "system prompt hash change");
 				// Real prompt-content change. Cache prefix is already
 				// busted on this turn. Signal all three independent
 				// refresh sets so the next pi.on("context") event

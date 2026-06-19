@@ -17,7 +17,10 @@ export {
 } from "./historian-state-file";
 
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
-import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
+import {
+    embedPromotedFacts,
+    promoteSessionFactsDurable,
+} from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
@@ -543,9 +546,53 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         const lastCompartmentEnd = lastNewEnd;
         const lastNewEndMessageId = newCompartments[newCompartments.length - 1]?.endMessageId;
 
-        // Append new compartments (existing stay untouched in DB) and replace facts atomically.
-        // BEGIN IMMEDIATE ensures the lease holder check and subsequent writes share one fresh
-        // write-locked snapshot across sibling processes.
+        // Use the RESOLVED session directory for memory project identity, not
+        // raw deps.directory. deps.directory can be empty even
+        // when the session has a valid directory (resolved via session.get
+        // above); using it directly made promotion + embedding silently no-op.
+        const promotionDirectory = sessionDirectory || deps.directory;
+
+        // discard-last: when the provisional last compartment was dropped, its
+        // facts/events are NOT durable yet — they will be re-derived
+        // next run with real following context. Facts are unanchored, so we
+        // cannot distinguish persisted-range facts from discarded-tail facts;
+        // the safe choice is to SKIP fact promotion entirely on a discard-last
+        // run. (Dedup would catch exact re-emissions next run, but reworded
+        // facts could double up.) Events ARE anchored, so we filter them by
+        // persisted range below instead of skipping wholesale.
+        const discardedLast = persistedCompartments.length < emittedCompartments.length;
+
+        // Issue #44: gate promotion behind both `memory.enabled` and
+        // `memory.auto_promote`. Without this, historian unconditionally
+        // wrote project memories (with embeddings) even for users who
+        // explicitly disabled the memory feature in config.
+        // Two distinct gates:
+        //  - embeddingActive: embeddings + project registration fire whenever the
+        //    memory FEATURE is enabled. They are the substrate for ctx_search +
+        //    future dreamer cross-linking and must NOT depend on auto_promote.
+        //  - promotionActive: writing facts as project memories additionally
+        //    requires auto_promote (a user who disabled auto-promotion still wants
+        //    search/embedding, just not auto-written memories).
+        const embeddingActive = !!promotionDirectory && deps.memoryEnabled !== false;
+        const promotionActive = embeddingActive && deps.autoPromote !== false;
+        const promotionProjectIdentity = promotionDirectory
+            ? resolveProjectIdentity(promotionDirectory)
+            : "";
+
+        // discard-last: drop events anchored to the discarded provisional
+        // compartment (atCompartment is a 1-based index into the EMITTED list;
+        // anything > persistedCompartments.length pointed at the dropped tail).
+        // They re-emit next run anchored to the persisted range.
+        const publishableEvents = (validatedPass.events ?? []).filter(
+            (e) => e.atCompartment == null || e.atCompartment <= persistedCompartments.length,
+        );
+        let promotedFactRefs: Array<{ memoryId: number; content: string }> = [];
+        let persistedIds: number[] = [];
+
+        // Append new compartments (existing stay untouched in DB) and publish all
+        // synchronous durable side effects atomically. BEGIN IMMEDIATE ensures the
+        // lease holder check and subsequent writes share one fresh write-locked
+        // snapshot across sibling processes.
         const holderId = deps.compartmentLeaseHolderId;
         if (!holderId) {
             sessionLog(sessionId, "historian publish skipped: missing compartment lease holder");
@@ -565,13 +612,47 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 return;
             }
             appendCompartments(db, sessionId, persistedCompartments);
+            // v2 (E2): resolve durable ids for the compartments we just appended.
+            // They are the last `persistedCompartments.length` rows by sequence
+            // (appendCompartments inserts at the tail). Used for events anchoring +
+            // embedding. Pure DB read — cheap, no message mutation.
+            persistedIds = getCompartments(db, sessionId)
+                .slice(-persistedCompartments.length)
+                .map((c) => c.id);
             // v2 faithful fact lifecycle: facts are NOT a REPLACE-the-whole-list
             // store anymore. The historian emits only THIS chunk's facts (deduped
             // against <project-memory> in the prompt); they flow to project memory
-            // via promoteSessionFactsToMemory below. session_facts is no longer
-            // written/bumped — promoted facts reach the agent through the
-            // renderer's m[1] new-memories watermark. (No replaceSessionFacts /
-            // bumpSessionFactsVersion.)
+            // via in-transaction durable promotion. session_facts is no longer
+            // written/bumped. Promotion is in the SAME transaction as the boundary
+            // floor below so a crash cannot advance past facts that never became
+            // project memories.
+            if (promotionActive && !discardedLast) {
+                promotedFactRefs = promoteSessionFactsDurable(
+                    db,
+                    sessionId,
+                    promotionProjectIdentity,
+                    validatedPass.facts ?? [],
+                );
+            }
+
+            // v2 (E2): persist historian-extracted events (stored, NOT rendered).
+            // Independent of memory flags — events are a separate corpus for a future
+            // dreamer aggregation feature, not project memory. Best-effort and
+            // re-derivable, so an event failure logs and does NOT abort facts/boundary.
+            if (publishableEvents.length > 0) {
+                try {
+                    insertCompartmentEvents(db, sessionId, publishableEvents, persistedIds);
+                    sessionLog(
+                        sessionId,
+                        `stored ${publishableEvents.length} compartment event(s)`,
+                    );
+                } catch (error) {
+                    sessionLog(sessionId, "failed to store compartment events:", error);
+                }
+            }
+
+            queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
+
             clearHistorianFailureState(db, sessionId);
             // Healthy historian progress — clear the drain-failure backoff so the
             // emergency catch-up latch can bypass the budget freely again.
@@ -610,110 +691,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             clearInjectionCache(sessionId);
         }
 
-        // Use the RESOLVED session directory for memory project identity, not
-        // raw deps.directory. deps.directory can be empty even
-        // when the session has a valid directory (resolved via session.get
-        // above); using it directly made promotion + embedding silently no-op.
-        const promotionDirectory = sessionDirectory || deps.directory;
-
-        // discard-last: when the provisional last compartment was dropped, its
-        // facts/events are NOT durable yet — they will be re-derived
-        // next run with real following context. Facts are unanchored, so we
-        // cannot distinguish persisted-range facts from discarded-tail facts;
-        // the safe choice is to SKIP fact promotion entirely on a discard-last
-        // run. (Dedup would catch exact re-emissions next run, but reworded
-        // facts could double up.) Events ARE anchored, so we filter them by
-        // persisted range below instead of skipping wholesale.
-        const discardedLast = persistedCompartments.length < emittedCompartments.length;
-
-        // Issue #44: gate promotion behind both `memory.enabled` and
-        // `memory.auto_promote`. Without this, historian unconditionally
-        // wrote project memories (with embeddings) even for users who
-        // explicitly disabled the memory feature in config.
-        // Two distinct gates:
-        //  - embeddingActive: embeddings + project registration fire whenever the
-        //    memory FEATURE is enabled. They are the substrate for ctx_search +
-        //    future dreamer cross-linking and must NOT depend on auto_promote.
-        //  - promotionActive: writing facts as project memories additionally
-        //    requires auto_promote (a user who disabled auto-promotion still wants
-        //    search/embedding, just not auto-written memories).
-        const embeddingActive = !!promotionDirectory && deps.memoryEnabled !== false;
-        const promotionActive = embeddingActive && deps.autoPromote !== false;
-
-        // Register the project ONCE up front (not inside the promotion block):
-        // embeddings below run even on a discard-last pass that skips promotion,
-        // and embedTextForProject() silently no-ops without a registration.
-        if (embeddingActive) {
-            await deps.ensureProjectRegistered?.(promotionDirectory, db);
-        }
-
-        // discard-last: skip fact promotion for the discarded provisional
-        // compartment (it re-emits next run). Registration already happened above.
-        if (promotionActive && !discardedLast) {
-            promoteSessionFactsToMemory(
-                db,
-                sessionId,
-                resolveProjectIdentity(promotionDirectory),
-                validatedPass.facts ?? [],
-            );
-        }
-
-        // v2 (E2): resolve durable ids for the compartments we just appended.
-        // They are the last `persistedCompartments.length` rows by sequence
-        // (appendCompartments inserts at the tail). Used for events anchoring +
-        // embedding. Pure DB read — cheap, no message mutation.
-        const persistedIds = getCompartments(db, sessionId)
-            .slice(-persistedCompartments.length)
-            .map((c) => c.id);
-
-        // v2 (E2): persist historian-extracted events (stored, NOT rendered).
-        // Independent of memory flags — events are a separate corpus for a future
-        // dreamer aggregation feature, not project memory. Best-effort.
-        // discard-last: drop events anchored to the discarded provisional
-        // compartment (atCompartment is a 1-based index into the EMITTED list;
-        // anything > persistedCompartments.length pointed at the dropped tail).
-        // They re-emit next run anchored to the persisted range.
-        const publishableEvents = (validatedPass.events ?? []).filter(
-            (e) => e.atCompartment == null || e.atCompartment <= persistedCompartments.length,
-        );
-        if (publishableEvents.length > 0) {
-            try {
-                insertCompartmentEvents(db, sessionId, publishableEvents, persistedIds);
-                sessionLog(sessionId, `stored ${publishableEvents.length} compartment event(s)`);
-            } catch (error) {
-                sessionLog(sessionId, "failed to store compartment events:", error);
-            }
-        }
-
-        // v2: compute + store raw chunk embeddings (the ctx_search semantic
-        // substrate over session history). Fire-and-forget, best-effort, gated by
-        // memory flags so a memory-off user never hits the embedding endpoint.
-        if (embeddingActive) {
-            const projectIdentity = resolveProjectIdentity(promotionDirectory);
-            const chunksToEmbed = persistedCompartments
-                .map((c, i) => ({
-                    id: persistedIds[i],
-                    startMessage: c.startMessage,
-                    endMessage: c.endMessage,
-                    sourceChunkText: chunk.text,
-                }))
-                .filter((c) => typeof c.id === "number");
-            void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
-        }
-
-        queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
-
-        // Signal deferred materialization/history-refresh LAST — after fact
-        // promotion, events, embeddings AND queueDrops above. The callback arms
-        // deferredHistoryRefreshSessions + deferredMaterializationSessions, which a
-        // concurrent `messages.transform` pass can consume and CLEAR (one-shot
-        // signals). If we signalled at COMMIT (before this point), that pass could
-        // fire during the `await ensureProjectRegistered` window and rebuild m[1]
-        // WITHOUT the just-promoted memories, and materialize the pending-ops drain
-        // BEFORE queueDrops wrote the rows — leaving drops unapplied until a later
-        // execute/flush/85% pass. Signalling last makes "signal set" imply "all
-        // publish-visible state is durable" (the A6 assumption). Mirrors Pi's
-        // signal-last ordering in pi-historian-runner.ts.
+        // Signal publication immediately after COMMIT. All publish-visible durable
+        // state (compartments, boundary floor, promoted facts, event attempts, and
+        // drop queue) is already in the transaction above; embedding registration
+        // and provider calls below are post-commit best-effort and must never leave
+        // a committed publish marked failed or unsignaled.
         deps.onCompartmentStatePublished?.(sessionId);
 
         // Inject compaction marker into OpenCode's DB.
@@ -758,6 +740,47 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         }
 
         onNoteTrigger(db, sessionId, "historian_complete");
+
+        // v2: compute + store raw chunk embeddings (the ctx_search semantic
+        // substrate over session history). Fire-and-forget, best-effort, gated by
+        // memory flags so a memory-off user never hits the embedding endpoint.
+        if (embeddingActive) {
+            const chunksToEmbed = persistedCompartments
+                .map((c, i) => ({
+                    id: persistedIds[i],
+                    startMessage: c.startMessage,
+                    endMessage: c.endMessage,
+                    sourceChunkText: chunk.text,
+                }))
+                .filter((c) => typeof c.id === "number");
+            void (async () => {
+                try {
+                    await deps.ensureProjectRegistered?.(promotionDirectory, db);
+                } catch (error) {
+                    sessionLog(sessionId, "project registration after publish failed:", error);
+                }
+                try {
+                    await embedPromotedFacts(
+                        db,
+                        sessionId,
+                        promotionProjectIdentity,
+                        promotedFactRefs,
+                    );
+                } catch (error) {
+                    sessionLog(sessionId, "promoted fact embedding dispatch failed:", error);
+                }
+                try {
+                    await embedAndStoreCompartmentChunks(
+                        db,
+                        sessionId,
+                        promotionProjectIdentity,
+                        chunksToEmbed,
+                    );
+                } catch (error) {
+                    sessionLog(sessionId, "compartment embedding dispatch failed:", error);
+                }
+            })();
+        }
 
         // Store user behavior observations as candidates ONLY when the user-memory
         // feature is enabled. Without this gate we'd persist behavioral candidates

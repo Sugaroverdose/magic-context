@@ -373,7 +373,7 @@ function injectHistoryBlockIntoFirstUserMessage(
 ): boolean {
 	for (let i = 0; i < piMessages.length; i++) {
 		const msg = piMessages[i];
-		if (!msg || msg.role !== "user") continue;
+		if (msg?.role !== "user") continue;
 
 		const userMsg = msg as PiUserMessage;
 		if (typeof userMsg.content === "string") {
@@ -610,6 +610,9 @@ export interface PiM0SnapshotMarkers {
 	// Captured from PiM0HardSignals at the injection call site.
 	systemHash: string;
 	modelKey: string;
+	// Pi sessions can switch projects in-process (`/cd`). NULL on legacy cached
+	// rows means unknown/lazy-adopted and must not force a HARD fold by itself.
+	projectIdentity: string | null;
 }
 
 /**
@@ -770,6 +773,7 @@ function getCachedMarkers(
 		lastBaselineEndMessageId: cachedBoundary,
 		systemHash: meta.cachedM0SystemHash ?? "",
 		modelKey: meta.cachedM0ModelKey ?? "",
+		projectIdentity: meta.cachedM0ProjectIdentity ?? null,
 	};
 }
 
@@ -859,6 +863,7 @@ function readCurrentMarkersFromCompartments(
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 		modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
+		projectIdentity: state.projectIdentity,
 	};
 }
 
@@ -906,6 +911,15 @@ export function mustMaterializePi(
 		hard.systemHash !== (meta.cachedM0SystemHash ?? "")
 	) {
 		return { value: true, reason: "system_hash" };
+	}
+	// Pi can switch projects within the same session (`/cd`). Legacy cached rows
+	// have a NULL marker: treat that as unknown/MATCH for lazy adoption so the
+	// first post-upgrade no-switch pass does not HARD-fold existing sessions.
+	if (
+		meta.cachedM0ProjectIdentity !== null &&
+		meta.cachedM0ProjectIdentity !== state.projectIdentity
+	) {
+		return { value: true, reason: "project_change" };
 	}
 	// Idle > TTL: self-consuming guard via cachedM0MaterializedAt (parity with
 	// OpenCode). cacheExpired stays true every pass until lastResponseTime
@@ -1227,6 +1241,7 @@ function readFrozenM0InputsPi(
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 			modelKey: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
+			projectIdentity: state.projectIdentity,
 		};
 		return { docs, markers, compartments, memories, userProfile, workspace };
 	});
@@ -1391,6 +1406,7 @@ export function materializeM0Pi(
 			current.maxCompartmentSeq !== snapshotMarkers.maxCompartmentSeq ||
 			current.maxMutationId !== snapshotMarkers.maxMutationId ||
 			current.maxMemoryMutationId !== snapshotMarkers.maxMemoryMutationId ||
+			current.projectIdentity !== snapshotMarkers.projectIdentity ||
 			// Inert today (both harnesses pin sessionFactsVersion to 0 — facts are
 			// retired in v2), but kept for structural parity with OpenCode
 			// materializeM0 so the two stale checks can't silently drift if either
@@ -1428,6 +1444,7 @@ export function materializeM0Pi(
 			upgradeState: snapshotMarkers.upgradeState,
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
+			projectIdentity: snapshotMarkers.projectIdentity,
 		});
 		// Persist the rendered-memory identity in the SAME transaction as the m[0]
 		// snapshot (parity with OpenCode materializeM0). `memory_block_ids` /
@@ -1743,6 +1760,7 @@ interface CachedPiM0M1Row {
 	cached_m0_upgrade_state: string | null;
 	cached_m0_system_hash: string | null;
 	cached_m0_model_key: string | null;
+	cached_m0_project_identity: string | null;
 	cached_m0_last_baseline_end_message_id: string | null;
 	memory_block_ids: string | null;
 }
@@ -1792,6 +1810,7 @@ function readCachedPiM0M1Row(
 					cached_m0_upgrade_state,
 					cached_m0_system_hash,
 					cached_m0_model_key,
+					cached_m0_project_identity,
 					cached_m0_last_baseline_end_message_id,
 					memory_block_ids
 			   FROM session_meta
@@ -1836,6 +1855,7 @@ function markersFromCachedPiRow(
 				: null,
 		systemHash: row.cached_m0_system_hash ?? "",
 		modelKey: row.cached_m0_model_key ?? "",
+		projectIdentity: row.cached_m0_project_identity ?? null,
 	};
 }
 
@@ -1870,6 +1890,8 @@ function cachedPiRowMatchesSnapshot(args: {
 		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].
 		(rowMarkers.systemHash ?? "") === (args.markers.systemHash ?? "") &&
 		(rowMarkers.modelKey ?? "") === (args.markers.modelKey ?? "") &&
+		(rowMarkers.projectIdentity ?? null) ===
+			(args.markers.projectIdentity ?? null) &&
 		// Workspace fingerprint (parity with OpenCode cachedRowMatchesState):
 		// projectMemoryEpoch above only tracks THIS session's own project, but a
 		// FOREIGN member's epoch bump changes the workspace fingerprint without
@@ -1879,6 +1901,15 @@ function cachedPiRowMatchesSnapshot(args: {
 		(rowMarkers.workspaceFingerprint ?? null) ===
 			(args.markers.workspaceFingerprint ?? null)
 	);
+}
+
+function adoptCachedPiProjectIdentity(
+	db: ContextDatabase,
+	state: PiM0M1State,
+): void {
+	db.prepare(
+		"UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ? AND cached_m0_project_identity IS NULL",
+	).run(state.projectIdentity, state.sessionId);
 }
 
 function decodeCachedM1(row: CachedPiM0M1Row, sessionId: string): string {
@@ -2167,6 +2198,10 @@ export function injectM0M1Pi(
 		throw new PiMaterializeContentionError(
 			`missing m[0] markers for ${state.sessionId}`,
 		);
+	}
+	if (!materialized && markers.projectIdentity === null) {
+		adoptCachedPiProjectIdentity(db, state);
+		markers = { ...markers, projectIdentity: state.projectIdentity };
 	}
 
 	if (materialized) {

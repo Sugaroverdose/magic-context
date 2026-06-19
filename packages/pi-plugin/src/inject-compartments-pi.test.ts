@@ -1451,6 +1451,160 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 		}
 	});
 
+	it("lazy-adopts a NULL cached project marker without a no-switch HARD fold", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-project-null-a-"));
+		const cwdB = mkdtempSync(join(tmpdir(), "pi-tax-project-null-b-"));
+		try {
+			const state = {
+				...piState("ses-pi-tax-project-null", cwd),
+				hardSignals: baseHard,
+			};
+			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
+			const first = [userMessage("hi", 10)];
+			injectM0M1Pi(state, db, first as never, ["entry-0"]);
+			const baselineM0 = textOf(first[0] as never);
+
+			db.prepare(
+				"UPDATE session_meta SET cached_m0_project_identity = NULL WHERE session_id = ?",
+			).run(state.sessionId);
+
+			expect(mustMaterializePi(state, db)).toEqual({
+				value: false,
+				reason: null,
+			});
+			const noSwitch = [userMessage("same project", 11)];
+			const noSwitchResult = injectM0M1Pi(state, db, noSwitch as never, [
+				"entry-0",
+			]);
+
+			expect(noSwitchResult.m0Materialized).toBe(false);
+			expect(noSwitchResult.m0Reason).not.toBe("first_render");
+			expect(noSwitchResult.m0Reason).not.toBe("project_change");
+			expect(textOf(noSwitch[0] as never)).toBe(baselineM0);
+			expect(
+				db
+					.prepare(
+						"SELECT cached_m0_project_identity FROM session_meta WHERE session_id = ?",
+					)
+					.get(state.sessionId),
+			).toEqual({ cached_m0_project_identity: state.projectIdentity });
+
+			const switched = {
+				...piState(state.sessionId, cwdB),
+				hardSignals: baseHard,
+			};
+			expect(mustMaterializePi(switched, db)).toEqual({
+				value: true,
+				reason: "project_change",
+			});
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			rmSync(cwdB, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("HARD: a genuine same-session project switch folds exactly once, then stabilizes", () => {
+		const db = createTestDb();
+		const cwdA = mkdtempSync(join(tmpdir(), "pi-tax-project-a-"));
+		const cwdB = mkdtempSync(join(tmpdir(), "pi-tax-project-b-"));
+		try {
+			const stateA = {
+				...piState("ses-pi-tax-project-switch", cwdA),
+				hardSignals: baseHard,
+			};
+			insertMemory(db, {
+				projectPath: stateA.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Project A memory must not replay after /cd.",
+			});
+			const first = [userMessage("hi", 10)];
+			injectM0M1Pi(stateA, db, first as never, undefined, true);
+			expect(textOf(first[0] as never)).toContain("Project A memory");
+
+			const stateB = {
+				...piState(stateA.sessionId, cwdB),
+				hardSignals: baseHard,
+			};
+			insertMemory(db, {
+				projectPath: stateB.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "Project B memory is the switched project baseline.",
+			});
+
+			const switched = [userMessage("after cd", 11)];
+			const switchedResult = injectM0M1Pi(
+				stateB,
+				db,
+				switched as never,
+				undefined,
+				true,
+			);
+			expect(switchedResult.m0Materialized).toBe(true);
+			expect(switchedResult.m0Reason).toBe("project_change");
+			expect(textOf(switched[0] as never)).toContain("Project B memory");
+			expect(textOf(switched[0] as never)).not.toContain("Project A memory");
+
+			const stable = [userMessage("after cd stable", 12)];
+			const stableResult = injectM0M1Pi(
+				stateB,
+				db,
+				stable as never,
+				undefined,
+				false,
+			);
+			expect(stableResult.m0Materialized).toBe(false);
+			expect(stableResult.m0Reason).toBeNull();
+			expect(textOf(stable[0] as never)).toBe(textOf(switched[0] as never));
+		} finally {
+			rmSync(cwdA, { recursive: true, force: true });
+			rmSync(cwdB, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("model and system changes materialize with classified reasons, not first_render", () => {
+		const db = createTestDb();
+		const cwdModel = mkdtempSync(join(tmpdir(), "pi-tax-model-reason-"));
+		const cwdSystem = mkdtempSync(join(tmpdir(), "pi-tax-system-reason-"));
+		try {
+			const modelState = {
+				...piState("ses-pi-tax-model-reason", cwdModel),
+				hardSignals: baseHard,
+			};
+			injectM0M1Pi(modelState, db, [userMessage("hi", 10)] as never);
+			const modelChanged = {
+				...modelState,
+				hardSignals: { ...baseHard, modelKey: "anthropic/sonnet" },
+			};
+			const modelPass = [userMessage("model", 11)];
+			const modelResult = injectM0M1Pi(modelChanged, db, modelPass as never);
+			expect(modelResult.m0Materialized).toBe(true);
+			expect(modelResult.m0Reason).toBe("model_change");
+			expect(modelResult.m0Reason).not.toBe("first_render");
+
+			const systemState = {
+				...piState("ses-pi-tax-system-reason", cwdSystem),
+				hardSignals: baseHard,
+			};
+			injectM0M1Pi(systemState, db, [userMessage("hi", 10)] as never);
+			const systemChanged = {
+				...systemState,
+				hardSignals: { ...baseHard, systemHash: "sys-v2" },
+			};
+			const systemPass = [userMessage("system", 11)];
+			const systemResult = injectM0M1Pi(systemChanged, db, systemPass as never);
+			expect(systemResult.m0Materialized).toBe(true);
+			expect(systemResult.m0Reason).toBe("system_hash");
+			expect(systemResult.m0Reason).not.toBe("first_render");
+		} finally {
+			rmSync(cwdModel, { recursive: true, force: true });
+			rmSync(cwdSystem, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
 	it("an empty current HARD signal is never treated as a change", () => {
 		const db = createTestDb();
 		const cwd = mkdtempSync(join(tmpdir(), "pi-tax-empty-"));

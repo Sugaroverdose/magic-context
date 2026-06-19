@@ -45,7 +45,10 @@ import {
 	appendCompartments,
 	getCompartments,
 } from "@magic-context/core/features/magic-context/compartment-storage";
-import { promoteSessionFactsToMemory } from "@magic-context/core/features/magic-context/memory";
+import {
+	embedPromotedFacts,
+	promoteSessionFactsDurable,
+} from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
@@ -213,6 +216,11 @@ export interface PiHistorianDeps {
 	readBranchEntries?: () => unknown[];
 	/** Optional callback for surfacing failure notices (Pi UI / logs). */
 	notifyIssue?: (message: string) => void | Promise<void>;
+	/** Test seam / embedding bootstrap override. Defaults to Pi directory registration. */
+	ensureProjectRegistered?: (
+		directory: string,
+		db: Database,
+	) => void | Promise<void>;
 }
 
 export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
@@ -238,6 +246,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		compartmentLeaseHolderId,
 		readBranchEntries,
 		notifyIssue,
+		ensureProjectRegistered = ensureProjectRegisteredFromPiDirectory,
 	} = deps;
 
 	const notify = async (message: string): Promise<void> => {
@@ -851,7 +860,29 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
-			// Atomic publication: append + replace facts + clear failure state.
+			// discard-last: when the provisional last compartment was dropped, its
+			// facts AND observations are not durable yet — skip both this run
+			// (unanchored; re-derived next run). Computed before publication so
+			// durable promotion can share the publish transaction.
+			const discardedLast = newCompartments.length < emittedCompartments.length;
+
+			// Two distinct gates (parity with OpenCode): embeddingActive = memory
+			// feature on (drives registration + embedding, the ctx_search / dreamer
+			// linking substrate); promotionActive additionally requires auto_promote
+			// (drives writing facts as memories).
+			const embeddingActive = memoryEnabled !== false;
+			const promotionActive = embeddingActive && autoPromote !== false;
+
+			// Events: stored, NOT rendered. Best-effort. discard-last: drop events
+			// anchored to the discarded provisional compartment.
+			const publishableEvents = (validatedPass.events ?? []).filter(
+				(e) =>
+					e.atCompartment == null || e.atCompartment <= newCompartments.length,
+			);
+			let promotedFactRefs: Array<{ memoryId: number; content: string }> = [];
+			let persistedIds: number[] = [];
+
+			// Atomic publication: append + durable facts/events/drop queue + clear failure state.
 			// The Pi-native compaction marker payload is staged in the same
 			// transaction so a crash cannot leave compartments without a queued
 			// marker for the deferred materializing drain. BEGIN IMMEDIATE keeps the
@@ -877,12 +908,47 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					return;
 				}
 				appendCompartments(db, sessionId, newCompartments);
+				// Resolve durable ids for the just-appended compartments (last N rows by
+				// sequence — appendCompartments inserts at the tail). Used for events
+				// anchoring + post-commit embeddings.
+				persistedIds = getCompartments(db, sessionId)
+					.slice(-newCompartments.length)
+					.map((c) => c.id);
 				// v2 faithful fact lifecycle (E6 parity): facts are no longer a
 				// REPLACE-the-whole-list store. The historian emits only THIS
 				// chunk's facts (deduped against <project-memory> in the prompt);
-				// they flow to project memory via promoteSessionFactsToMemory
-				// (gated, below). No replaceSessionFacts — promoted facts reach
-				// the agent through the renderer's m[1] new-memories watermark.
+				// they flow to project memory via in-transaction durable promotion.
+				// No replaceSessionFacts — promoted facts reach the agent through the
+				// renderer's m[1] new-memories watermark. Promotion is in the SAME
+				// transaction as the boundary floor below, so both commit or both roll back.
+				if (promotionActive && !discardedLast) {
+					promotedFactRefs = promoteSessionFactsDurable(
+						db,
+						sessionId,
+						projectPath,
+						validatedPass.facts ?? [],
+					);
+				}
+
+				if (publishableEvents.length > 0) {
+					try {
+						insertCompartmentEvents(
+							db,
+							sessionId,
+							publishableEvents,
+							persistedIds,
+						);
+						sessionLog(
+							sessionId,
+							`stored ${publishableEvents.length} compartment event(s)`,
+						);
+					} catch (error) {
+						sessionLog(sessionId, "failed to store compartment events:", error);
+					}
+				}
+
+				queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
+
 				clearHistorianFailureState(db, sessionId);
 				// Healthy historian progress — clear the drain-failure backoff so the
 				// emergency catch-up latch can bypass the budget freely again.
@@ -915,36 +981,23 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
+			// Signal deferred materialization/history-refresh immediately after COMMIT.
+			// All publish-visible durable state (compartments, boundary floor, promoted
+			// facts, event attempts, and drop queue) is already in the transaction above;
+			// embedding registration and provider calls below are post-commit best-effort
+			// and must never leave a committed publish marked failed or unsignaled.
+			onPublished?.();
+			completedSuccessfully = true;
+
+			sessionLog(
+				sessionId,
+				`historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
+			);
+
 			// Note-nudge trigger #1 (of 3): historian publication is a natural
 			// work boundary, so signal that deferred notes should surface on
-			// the next user turn. Mirrors OpenCode's
-			// `compartment-runner-incremental.ts:274` placement.
+			// the next user turn. Mirrors OpenCode's placement.
 			onNoteTrigger(db, sessionId, "historian_complete");
-
-			// Queue the tool/history drops for the just-compartmentalized range
-			// here (post-COMMIT, pre-signal). onPublished fires the deferred
-			// materialization/history-refresh signal; a concurrent `context` pass
-			// can consume that signal and materialize m[0]/m[1]. Anything that
-			// must be visible to that materialization has to be durable BEFORE
-			// onPublished fires:
-			//   - drops (queued here): else the materializing pass runs with empty
-			//     pendingOps and the drops are stranded without their one-shot
-			//     trigger. queueDrops is a pure synchronous DB write.
-			//   - promoted facts (promoted below, then onPublished moved AFTER the
-			//     promotion block): m[1] renders new memories via the
-			//     `id > cachedM0MaxMemoryId` watermark, so if onPublished fired
-			//     here the concurrent materialization would miss this chunk's
-			//     just-promoted facts and surface them only one bust later.
-			// Events + p1 embeddings are stored-not-rendered / fire-and-forget, so
-			// they intentionally run AFTER onPublished — they don't affect the
-			// rendered m[0]/m[1] bytes.
-			queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
-
-			// discard-last: when the provisional last compartment was dropped, its
-			// facts AND observations are not durable yet — skip both this run
-			// (unanchored; re-derived next run). Computed before the observations
-			// block so we can gate it too (parity with OpenCode).
-			const discardedLast = newCompartments.length < emittedCompartments.length;
 
 			// user observations are inserted POST-COMMIT,
 			// best-effort, so an auxiliary failure never rolls back the publish.
@@ -978,60 +1031,6 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
-			// register the project for embeddings against the
-			// LIVE directory ONCE up front (not inside the promotion block), so a
-			// discard-last pass that skips promotion still registers before the
-			// embedding block below — embedTextForProject() silently no-ops
-			// without a registration. Mirrors OpenCode.
-			// Two distinct gates (parity with OpenCode):
-			// embeddingActive = memory feature on (drives registration + embedding,
-			// the ctx_search / dreamer-linking substrate); promotionActive
-			// additionally requires auto_promote (drives writing facts as memories).
-			const embeddingActive = memoryEnabled !== false;
-			const promotionActive = embeddingActive && autoPromote !== false;
-			if (embeddingActive) {
-				await ensureProjectRegisteredFromPiDirectory(directory, db);
-			}
-			if (promotionActive && !discardedLast) {
-				promoteSessionFactsToMemory(
-					db,
-					sessionId,
-					projectPath,
-					validatedPass.facts ?? [],
-				);
-			}
-
-			// v2 (E6/E2 parity): resolve durable ids for the just-appended
-			// compartments (last N rows by sequence — appendCompartments inserts
-			// at the tail), then persist events + P1 embeddings. Mirrors the
-			// OpenCode runner.
-			const persistedIds = getCompartments(db, sessionId)
-				.slice(-newCompartments.length)
-				.map((c) => c.id);
-
-			// Events: stored, NOT rendered. Best-effort. discard-last:
-			// drop events anchored to the discarded provisional compartment.
-			const publishableEvents = (validatedPass.events ?? []).filter(
-				(e) =>
-					e.atCompartment == null || e.atCompartment <= newCompartments.length,
-			);
-			if (publishableEvents.length > 0) {
-				try {
-					insertCompartmentEvents(
-						db,
-						sessionId,
-						publishableEvents,
-						persistedIds,
-					);
-					sessionLog(
-						sessionId,
-						`stored ${publishableEvents.length} compartment event(s)`,
-					);
-				} catch (error) {
-					sessionLog(sessionId, "failed to store compartment events:", error);
-				}
-			}
-
 			// Raw chunk embeddings: the ctx_search semantic substrate over session
 			// history. Fire-and-forget, best-effort, memory-gated.
 			if (embeddingActive) {
@@ -1043,29 +1042,46 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						sourceChunkText: chunk.text,
 					}))
 					.filter((c) => typeof c.id === "number");
-				void embedAndStoreCompartmentChunks(
-					db,
-					sessionId,
-					projectPath,
-					chunksToEmbed,
-				);
+				void (async () => {
+					try {
+						await ensureProjectRegistered(directory, db);
+					} catch (error) {
+						sessionLog(
+							sessionId,
+							"project registration after publish failed:",
+							error,
+						);
+					}
+					try {
+						await embedPromotedFacts(
+							db,
+							sessionId,
+							projectPath,
+							promotedFactRefs,
+						);
+					} catch (error) {
+						sessionLog(
+							sessionId,
+							"promoted fact embedding dispatch failed:",
+							error,
+						);
+					}
+					try {
+						await embedAndStoreCompartmentChunks(
+							db,
+							sessionId,
+							projectPath,
+							chunksToEmbed,
+						);
+					} catch (error) {
+						sessionLog(
+							sessionId,
+							"compartment embedding dispatch failed:",
+							error,
+						);
+					}
+				})();
 			}
-
-			// Signal deferred materialization/history-refresh LAST — after fact
-			// promotion (above) so a concurrent `context` pass that consumes the
-			// signal renders this chunk's just-promoted facts in m[1] (new-memories
-			// watermark) instead of missing them until the next bust. Drops were
-			// queued pre-signal (a materializing pass needs them in pendingOps);
-			// events/embeddings are stored-not-rendered so their position is moot.
-			// Mirrors OpenCode's signal-last ordering in
-			// compartment-runner-incremental.ts.
-			onPublished?.();
-			completedSuccessfully = true;
-
-			sessionLog(
-				sessionId,
-				`historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
-			);
 
 			// historian_runs telemetry — full success metrics.
 			{

@@ -12,6 +12,11 @@ interface SessionFact {
     content: string;
 }
 
+export interface PromotedMemoryRef {
+    memoryId: number;
+    content: string;
+}
+
 function isPromotableCategory(category: string): category is MemoryCategory {
     return PROMOTABLE_CATEGORIES.some((promotableCategory) => promotableCategory === category);
 }
@@ -22,50 +27,69 @@ function resolveExpiresAt(category: MemoryCategory): number | null {
 }
 
 /**
- * Promote eligible session facts to cross-session memories.
- * Called after replaceAllCompartmentState() commits.
- * Uses normalized_hash for fast dedup. Async embedding runs post-commit.
+ * Synchronously promote eligible session facts to cross-session memories.
+ *
+ * Transaction contract: callers may run this inside their publish transaction.
+ * Storage failures deliberately propagate so the enclosing publication rolls
+ * back atomically with the boundary; malformed/unpromotable facts are validation
+ * skips and do not abort the publish.
  */
-export function promoteSessionFactsToMemory(
+export function promoteSessionFactsDurable(
     db: Database,
     sessionId: string,
     projectPath: string,
     facts: SessionFact[],
-): void {
+): PromotedMemoryRef[] {
+    const refs: PromotedMemoryRef[] = [];
     for (const fact of facts) {
+        if (
+            !fact ||
+            typeof fact.category !== "string" ||
+            typeof fact.content !== "string" ||
+            fact.content.trim().length === 0
+        ) {
+            continue;
+        }
         if (!isPromotableCategory(fact.category)) {
             continue;
         }
 
-        try {
-            const normalizedHash = computeNormalizedHash(fact.content);
-            const existingMemory = getMemoryByHash(db, projectPath, fact.category, normalizedHash);
+        const normalizedHash = computeNormalizedHash(fact.content);
+        const existingMemory = getMemoryByHash(db, projectPath, fact.category, normalizedHash);
 
-            if (existingMemory) {
-                updateMemorySeenCount(db, existingMemory.id);
-                continue;
-            }
-
-            const memoryInput: MemoryInput = {
-                projectPath,
-                category: fact.category,
-                content: fact.content,
-                sourceSessionId: sessionId,
-                sourceType: "historian",
-                expiresAt: resolveExpiresAt(fact.category),
-            };
-
-            const memory = insertMemory(db, memoryInput);
-            // Intentional: fire-and-forget embedding — promotion runs infrequently (after historian passes)
-            // and the number of new facts per pass is small. Batching adds complexity for negligible benefit.
-            void embedAndStoreMemory(db, sessionId, projectPath, memory.id, memory.content);
-        } catch (error) {
-            sessionLog(
-                sessionId,
-                `memory promotion failed for fact "${fact.content.slice(0, 60)}":`,
-                error,
-            );
+        if (existingMemory) {
+            updateMemorySeenCount(db, existingMemory.id);
+            continue;
         }
+
+        const memoryInput: MemoryInput = {
+            projectPath,
+            category: fact.category,
+            content: fact.content,
+            sourceSessionId: sessionId,
+            sourceType: "historian",
+            expiresAt: resolveExpiresAt(fact.category),
+        };
+
+        const memory = insertMemory(db, memoryInput);
+        refs.push({ memoryId: memory.id, content: memory.content });
+    }
+
+    return refs;
+}
+
+/**
+ * Best-effort asynchronous embedding for newly promoted facts. Must run after
+ * the durable publish transaction commits.
+ */
+export async function embedPromotedFacts(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    refs: PromotedMemoryRef[],
+): Promise<void> {
+    for (const ref of refs) {
+        await embedAndStoreMemory(db, sessionId, projectPath, ref.memoryId, ref.content);
     }
 }
 
