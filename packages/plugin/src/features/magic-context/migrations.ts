@@ -1518,6 +1518,18 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 40,
+        description: "index Pi fallback tool owners for stable-id cutover",
+        up: (db: Database) => {
+            if (!tableExists(db, "tags")) return;
+            db.exec(`
+                CREATE INDEX IF NOT EXISTS idx_tags_pi_fallback_tool_owner
+                ON tags(session_id, tool_owner_message_id)
+                WHERE type='tool';
+            `);
+        },
+    },
 ];
 
 /**

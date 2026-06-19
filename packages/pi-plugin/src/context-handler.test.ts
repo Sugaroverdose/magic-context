@@ -157,6 +157,67 @@ describe("applyForwardPressureFloor", () => {
 });
 
 describe("Pi fallback tag adoption", () => {
+	type RawTagRow = {
+		tagNumber: number;
+		messageId: string;
+		status: string;
+		byteSize: number | null;
+		reasoningByteSize: number | null;
+		inputByteSize: number | null;
+		tokenCount: number | null;
+		inputTokenCount: number | null;
+		reasoningTokenCount: number | null;
+		toolOwnerMessageId: string | null;
+	};
+
+	function readTagRow(
+		db: ReturnType<typeof createTestDb>,
+		sessionId: string,
+		tagNumber: number,
+	): RawTagRow | undefined {
+		const row = db
+			.prepare(
+				`SELECT tag_number AS tagNumber,
+				        message_id AS messageId,
+				        status,
+				        byte_size AS byteSize,
+				        reasoning_byte_size AS reasoningByteSize,
+				        input_byte_size AS inputByteSize,
+				        token_count AS tokenCount,
+				        input_token_count AS inputTokenCount,
+				        reasoning_token_count AS reasoningTokenCount,
+				        tool_owner_message_id AS toolOwnerMessageId
+				 FROM tags
+				 WHERE session_id = ? AND tag_number = ?`,
+			)
+			.get(sessionId, tagNumber) as RawTagRow | null | undefined;
+		return row ?? undefined;
+	}
+
+	function sourceContent(
+		db: ReturnType<typeof createTestDb>,
+		sessionId: string,
+		tagNumber: number,
+	): string | undefined {
+		const row = db
+			.prepare(
+				"SELECT content FROM source_contents WHERE session_id = ? AND tag_id = ?",
+			)
+			.get(sessionId, tagNumber) as { content: string } | null | undefined;
+		return row?.content;
+	}
+
+	function saveSource(
+		db: ReturnType<typeof createTestDb>,
+		sessionId: string,
+		tagNumber: number,
+		content: string,
+	): void {
+		db.prepare(
+			"INSERT INTO source_contents (session_id, tag_id, content, created_at, harness) VALUES (?, ?, ?, ?, 'pi')",
+		).run(sessionId, tagNumber, content, Date.now());
+	}
+
 	it("unbinds the pi-msg fallback alias while preserving the adopted §N§ prefix", () => {
 		const db = createTestDb();
 		try {
@@ -220,6 +281,433 @@ describe("Pi fallback tag adoption", () => {
 			expect(
 				tagger.assignTag(sessionId, `${fallbackId}:p0`, "message", 5, db),
 			).toBe(2);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("migrates dropped sentinelized tool-only owners without allocating a fresh tag", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-dropped";
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+
+			const fallbackMessages = [
+				assistantToolCall("call-dropped", "Read", { path: "/tmp/full" }, 10),
+				toolResultMessage("call-dropped", "FULL TOOL OUTPUT", 11),
+			];
+			const fallbackTranscript = createPiTranscript(
+				fallbackMessages,
+				sessionId,
+				[undefined, undefined],
+			);
+			tagTranscript(sessionId, fallbackTranscript, tagger, db);
+			fallbackTranscript.commit();
+			const original = getTagsBySession(db, sessionId).find(
+				(tag) => tag.type === "tool",
+			);
+			expect(original?.tagNumber).toBe(1);
+			expect(original?.toolOwnerMessageId).toBe("pi-msg-0-10-assistant");
+			db.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?",
+			).run(sessionId, 1);
+
+			const realOwner = "entry-tool-owner";
+			const realMessages = [
+				assistantToolCall(
+					"call-dropped",
+					"Read",
+					{ __magic_context_dropped__: true },
+					10,
+				),
+				toolResultMessage("call-dropped", "[dropped §1§]", 11),
+			];
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: realMessages,
+					resolveStableId: (_msg: unknown, index: number) =>
+						index === 0 ? realOwner : "entry-tool-result",
+				},
+			);
+
+			expect(
+				tagger.getToolTag(sessionId, "call-dropped", "pi-msg-0-10-assistant"),
+			).toBeUndefined();
+			expect(tagger.getToolTag(sessionId, "call-dropped", realOwner)).toBe(1);
+			expect(readTagRow(db, sessionId, 1)).toMatchObject({
+				status: "dropped",
+				toolOwnerMessageId: realOwner,
+			});
+
+			const realTranscript = createPiTranscript(realMessages, sessionId, [
+				realOwner,
+				"entry-tool-result",
+			]);
+			tagTranscript(sessionId, realTranscript, tagger, db);
+			expect(
+				getTagsBySession(db, sessionId).filter((tag) => tag.type === "tool"),
+			).toHaveLength(1);
+			expect(readTagRow(db, sessionId, 1)?.status).toBe("dropped");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("folds tool-owner collisions into the synthetic survivor with max accounting and alias rebinding", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-fold-max";
+			const tagger = createTagger();
+			const callId = "call-max";
+			const piOwner = "pi-msg-0-10-assistant";
+			const realOwner = "entry-tool-owner";
+			insertTag(
+				db,
+				sessionId,
+				callId,
+				"tool",
+				12,
+				10,
+				1,
+				"Read",
+				3,
+				piOwner,
+				null,
+				{
+					tokenCount: 2,
+					inputTokenCount: 1,
+					reasoningTokenCount: 0,
+				},
+			);
+			db.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = 10",
+			).run(sessionId);
+			insertTag(
+				db,
+				sessionId,
+				callId,
+				"tool",
+				1000,
+				20,
+				7,
+				"Read",
+				200,
+				realOwner,
+				null,
+				{
+					tokenCount: 300,
+					inputTokenCount: 40,
+					reasoningTokenCount: 5,
+				},
+			);
+			saveSource(db, sessionId, 20, "duplicate source");
+			tagger.bindToolTag(sessionId, callId, piOwner, 10);
+			tagger.bindToolTag(sessionId, callId, realOwner, 20);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [
+						assistantToolCall(
+							callId,
+							"Read",
+							{ __magic_context_dropped__: true },
+							10,
+						),
+					],
+					resolveStableId: () => realOwner,
+				},
+			);
+
+			expect(readTagRow(db, sessionId, 20)).toBeUndefined();
+			expect(sourceContent(db, sessionId, 20)).toBeUndefined();
+			expect(readTagRow(db, sessionId, 10)).toMatchObject({
+				status: "dropped",
+				byteSize: 1000,
+				reasoningByteSize: 7,
+				inputByteSize: 200,
+				tokenCount: 300,
+				inputTokenCount: 40,
+				reasoningTokenCount: 5,
+				toolOwnerMessageId: realOwner,
+			});
+			expect(tagger.getToolTag(sessionId, callId, piOwner)).toBeUndefined();
+			expect(tagger.getToolTag(sessionId, callId, realOwner)).toBe(10);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("retargets pending ops on collision without treating queued drops as applied", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-pending-fold";
+			const tagger = createTagger();
+			const callId = "call-pending";
+			const piOwner = "pi-msg-0-20-assistant";
+			const realOwner = "entry-tool-pending";
+			insertTag(db, sessionId, callId, "tool", 10, 30, 0, "Read", 0, piOwner);
+			insertTag(db, sessionId, callId, "tool", 20, 31, 0, "Read", 0, realOwner);
+			queuePendingOp(db, sessionId, 30, "drop", 100);
+			queuePendingOp(db, sessionId, 31, "drop", 101);
+			tagger.bindToolTag(sessionId, callId, piOwner, 30);
+			tagger.bindToolTag(sessionId, callId, realOwner, 31);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 20)],
+					resolveStableId: () => realOwner,
+				},
+			);
+
+			expect(readTagRow(db, sessionId, 31)).toBeUndefined();
+			expect(readTagRow(db, sessionId, 30)).toMatchObject({
+				status: "active",
+				toolOwnerMessageId: realOwner,
+			});
+			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([30]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("skips same-timestamp reused-callID ambiguity instead of wrong-migrating", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-ambiguous";
+			const tagger = createTagger();
+			const callId = "call-reused";
+			const piOwner = "pi-msg-0-30-assistant";
+			insertTag(db, sessionId, callId, "tool", 10, 40, 0, "Read", 0, piOwner);
+			tagger.bindToolTag(sessionId, callId, piOwner, 40);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [
+						assistantToolCall(callId, "Read", {}, 30),
+						assistantToolCall(callId, "Read", {}, 30),
+					],
+					resolveStableId: (_msg: unknown, index: number) =>
+						index === 0 ? "entry-a" : "entry-b",
+				},
+			);
+
+			expect(readTagRow(db, sessionId, 40)?.toolOwnerMessageId).toBe(piOwner);
+			expect(tagger.getToolTag(sessionId, callId, "entry-a")).toBeUndefined();
+			expect(tagger.getToolTag(sessionId, callId, "entry-b")).toBeUndefined();
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps side tables attached to the survivor on simple tool-owner rekey", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-simple-side-tables";
+			const tagger = createTagger();
+			const callId = "call-side";
+			const piOwner = "pi-msg-0-40-assistant";
+			const realOwner = "entry-tool-side";
+			insertTag(db, sessionId, callId, "tool", 10, 50, 0, "Read", 0, piOwner);
+			saveSource(db, sessionId, 50, "original source");
+			queuePendingOp(db, sessionId, 50, "drop", 123);
+			tagger.bindToolTag(sessionId, callId, piOwner, 50);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 40)],
+					resolveStableId: () => realOwner,
+				},
+			);
+
+			expect(readTagRow(db, sessionId, 50)?.toolOwnerMessageId).toBe(realOwner);
+			expect(sourceContent(db, sessionId, 50)).toBe("original source");
+			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([50]);
+			expect(tagger.getToolTag(sessionId, callId, realOwner)).toBe(50);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("remains runnable after the scheme stamp so late-resolving tool owners rekey later", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-late";
+			const tagger = createTagger();
+			const callId = "call-late";
+			const piOwner = "pi-msg-0-55-assistant";
+			const realOwner = "entry-tool-late";
+			insertTag(db, sessionId, callId, "tool", 10, 60, 0, "Read", 0, piOwner);
+			tagger.bindToolTag(sessionId, callId, piOwner, 60);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [],
+					resolveStableId: () => undefined,
+					stampStableIdScheme: 1,
+				},
+			);
+			expect(getOrCreateSessionMeta(db, sessionId).piStableIdScheme).toBe(1);
+			expect(readTagRow(db, sessionId, 60)?.toolOwnerMessageId).toBe(piOwner);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 55)],
+					resolveStableId: () => realOwner,
+				},
+			);
+			expect(readTagRow(db, sessionId, 60)?.toolOwnerMessageId).toBe(realOwner);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall(callId, "Read", {}, 55)],
+					resolveStableId: () => realOwner,
+				},
+			);
+			expect(
+				getTagsBySession(db, sessionId).filter((tag) => tag.type === "tool"),
+			).toHaveLength(1);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("folds colliding message-tag adoption into the synthetic survivor", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-message-fold";
+			const tagger = createTagger();
+			const fallbackId = "pi-msg-0-70-user";
+			const realId = "entry-user-real";
+			const message = userMessage("hello", 70);
+			const fingerprint = contextHandlerInternals
+				.buildEntryFingerprintMap([message], () => fallbackId)
+				.get(fallbackId);
+			if (!fingerprint) throw new Error("missing fingerprint");
+			insertTag(
+				db,
+				sessionId,
+				`${fallbackId}:p0`,
+				"message",
+				10,
+				70,
+				0,
+				null,
+				0,
+				null,
+				fingerprint,
+				{ tokenCount: 1, inputTokenCount: null, reasoningTokenCount: null },
+			);
+			insertTag(
+				db,
+				sessionId,
+				`${realId}:p0`,
+				"message",
+				100,
+				71,
+				0,
+				null,
+				0,
+				null,
+				null,
+				{ tokenCount: 9, inputTokenCount: null, reasoningTokenCount: null },
+			);
+			db.prepare(
+				"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = 71",
+			).run(sessionId);
+			saveSource(db, sessionId, 71, "duplicate message source");
+			queuePendingOp(db, sessionId, 71, "drop", 200);
+			tagger.bindTag(sessionId, `${fallbackId}:p0`, 70);
+			tagger.bindTag(sessionId, `${realId}:p0`, 71);
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map([[realId, fingerprint]]),
+			);
+
+			expect(readTagRow(db, sessionId, 71)).toBeUndefined();
+			expect(sourceContent(db, sessionId, 71)).toBeUndefined();
+			expect(readTagRow(db, sessionId, 70)).toMatchObject({
+				messageId: `${realId}:p0`,
+				status: "dropped",
+				byteSize: 100,
+				tokenCount: 9,
+			});
+			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([70]);
+			expect(
+				tagger.getTag(sessionId, `${fallbackId}:p0`, "message"),
+			).toBeUndefined();
+			expect(tagger.getTag(sessionId, `${realId}:p0`, "message")).toBe(70);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("leaves sessions with no pi-msg tool owners unchanged", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-tool-owner-noop";
+			const tagger = createTagger();
+			insertTag(
+				db,
+				sessionId,
+				"call-real",
+				"tool",
+				10,
+				80,
+				0,
+				"Read",
+				0,
+				"entry-real",
+			);
+			const before = JSON.stringify(getTagsBySession(db, sessionId));
+
+			contextHandlerInternals.adoptPiFallbackTags(
+				db,
+				sessionId,
+				tagger,
+				new Map(),
+				{
+					messages: [assistantToolCall("call-real", "Read", {}, 80)],
+					resolveStableId: () => "entry-real",
+				},
+			);
+
+			expect(JSON.stringify(getTagsBySession(db, sessionId))).toBe(before);
 		} finally {
 			closeQuietly(db);
 		}

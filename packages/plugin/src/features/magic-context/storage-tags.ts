@@ -783,6 +783,437 @@ export function adoptFallbackTagMessageId(
     return (result.changes ?? 0) > 0;
 }
 
+export interface PiFallbackToolOwnerTag {
+    tagNumber: number;
+    callId: string;
+    toolOwnerMessageId: string;
+    status: string;
+}
+
+export type PiFallbackTagAdoptionResult =
+    | { action: "skipped" }
+    | { action: "rekeyed"; tagNumber: number }
+    | { action: "folded"; tagNumber: number; deletedTagNumbers: number[] };
+
+interface PiFallbackFoldTagRow {
+    tagNumber: number;
+    messageId: string;
+    toolOwnerMessageId: string | null;
+    type: string;
+    status: string;
+    byteSize: number | null;
+    reasoningByteSize: number | null;
+    inputByteSize: number | null;
+    tokenCount: number | null;
+    inputTokenCount: number | null;
+    reasoningTokenCount: number | null;
+}
+
+interface PendingOpIdentityRow {
+    id: number;
+    operation: string;
+}
+
+function isPiFallbackToolOwnerTag(row: unknown): row is PiFallbackToolOwnerTag {
+    if (row === null || typeof row !== "object") return false;
+    const r = row as Record<string, unknown>;
+    return (
+        typeof r.tagNumber === "number" &&
+        typeof r.callId === "string" &&
+        typeof r.toolOwnerMessageId === "string" &&
+        typeof r.status === "string"
+    );
+}
+
+function isPiFallbackFoldTagRow(row: unknown): row is PiFallbackFoldTagRow {
+    if (row === null || typeof row !== "object") return false;
+    const r = row as Record<string, unknown>;
+    return (
+        typeof r.tagNumber === "number" &&
+        typeof r.messageId === "string" &&
+        (typeof r.toolOwnerMessageId === "string" || r.toolOwnerMessageId === null) &&
+        typeof r.type === "string" &&
+        typeof r.status === "string" &&
+        (typeof r.byteSize === "number" || r.byteSize === null) &&
+        (typeof r.reasoningByteSize === "number" || r.reasoningByteSize === null) &&
+        (typeof r.inputByteSize === "number" || r.inputByteSize === null) &&
+        (typeof r.tokenCount === "number" || r.tokenCount === null) &&
+        (typeof r.inputTokenCount === "number" || r.inputTokenCount === null) &&
+        (typeof r.reasoningTokenCount === "number" || r.reasoningTokenCount === null)
+    );
+}
+
+function isPendingOpIdentityRow(row: unknown): row is PendingOpIdentityRow {
+    if (row === null || typeof row !== "object") return false;
+    const r = row as Record<string, unknown>;
+    return typeof r.id === "number" && typeof r.operation === "string";
+}
+
+function maxNullableNumber(a: number | null, b: number | null): number | null {
+    if (typeof a === "number" && typeof b === "number") return Math.max(a, b);
+    if (typeof a === "number") return a;
+    if (typeof b === "number") return b;
+    return null;
+}
+
+function getPiFallbackFoldTagRowByNumber(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+): PiFallbackFoldTagRow | null {
+    const row = db
+        .prepare(
+            `SELECT tag_number AS tagNumber,
+                    message_id AS messageId,
+                    tool_owner_message_id AS toolOwnerMessageId,
+                    type,
+                    status,
+                    byte_size AS byteSize,
+                    reasoning_byte_size AS reasoningByteSize,
+                    input_byte_size AS inputByteSize,
+                    token_count AS tokenCount,
+                    input_token_count AS inputTokenCount,
+                    reasoning_token_count AS reasoningTokenCount
+             FROM tags
+             WHERE session_id = ? AND tag_number = ?`,
+        )
+        .get(sessionId, tagNumber);
+    return isPiFallbackFoldTagRow(row) ? row : null;
+}
+
+function getPiFallbackToolFoldTagRowByOwner(
+    db: Database,
+    sessionId: string,
+    callId: string,
+    ownerMsgId: string,
+): PiFallbackFoldTagRow | null {
+    const row = db
+        .prepare(
+            `SELECT tag_number AS tagNumber,
+                    message_id AS messageId,
+                    tool_owner_message_id AS toolOwnerMessageId,
+                    type,
+                    status,
+                    byte_size AS byteSize,
+                    reasoning_byte_size AS reasoningByteSize,
+                    input_byte_size AS inputByteSize,
+                    token_count AS tokenCount,
+                    input_token_count AS inputTokenCount,
+                    reasoning_token_count AS reasoningTokenCount
+             FROM tags
+             WHERE session_id = ?
+               AND message_id = ?
+               AND type = 'tool'
+               AND tool_owner_message_id = ?
+             LIMIT 1`,
+        )
+        .get(sessionId, callId, ownerMsgId);
+    return isPiFallbackFoldTagRow(row) ? row : null;
+}
+
+function getPiFallbackMessageFoldTagRowsByMessageId(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): PiFallbackFoldTagRow[] {
+    return db
+        .prepare(
+            `SELECT tag_number AS tagNumber,
+                    message_id AS messageId,
+                    tool_owner_message_id AS toolOwnerMessageId,
+                    type,
+                    status,
+                    byte_size AS byteSize,
+                    reasoning_byte_size AS reasoningByteSize,
+                    input_byte_size AS inputByteSize,
+                    token_count AS tokenCount,
+                    input_token_count AS inputTokenCount,
+                    reasoning_token_count AS reasoningTokenCount
+             FROM tags
+             WHERE session_id = ?
+               AND message_id = ?
+               AND type = 'message'
+             ORDER BY tag_number ASC`,
+        )
+        .all(sessionId, messageId)
+        .filter(isPiFallbackFoldTagRow);
+}
+
+function mergeSizeAndTokenColumnsIntoSurvivor(
+    db: Database,
+    sessionId: string,
+    survivor: PiFallbackFoldTagRow,
+    duplicate: PiFallbackFoldTagRow,
+): void {
+    db.prepare(
+        `UPDATE tags
+         SET byte_size = ?,
+             reasoning_byte_size = ?,
+             input_byte_size = ?,
+             token_count = ?,
+             input_token_count = ?,
+             reasoning_token_count = ?
+         WHERE session_id = ? AND tag_number = ?`,
+    ).run(
+        maxNullableNumber(survivor.byteSize, duplicate.byteSize),
+        maxNullableNumber(survivor.reasoningByteSize, duplicate.reasoningByteSize),
+        maxNullableNumber(survivor.inputByteSize, duplicate.inputByteSize),
+        maxNullableNumber(survivor.tokenCount, duplicate.tokenCount),
+        maxNullableNumber(survivor.inputTokenCount, duplicate.inputTokenCount),
+        maxNullableNumber(survivor.reasoningTokenCount, duplicate.reasoningTokenCount),
+        sessionId,
+        survivor.tagNumber,
+    );
+    survivor.byteSize = maxNullableNumber(survivor.byteSize, duplicate.byteSize);
+    survivor.reasoningByteSize = maxNullableNumber(
+        survivor.reasoningByteSize,
+        duplicate.reasoningByteSize,
+    );
+    survivor.inputByteSize = maxNullableNumber(survivor.inputByteSize, duplicate.inputByteSize);
+    survivor.tokenCount = maxNullableNumber(survivor.tokenCount, duplicate.tokenCount);
+    survivor.inputTokenCount = maxNullableNumber(
+        survivor.inputTokenCount,
+        duplicate.inputTokenCount,
+    );
+    survivor.reasoningTokenCount = maxNullableNumber(
+        survivor.reasoningTokenCount,
+        duplicate.reasoningTokenCount,
+    );
+}
+
+function applyDroppedStatusIfNeeded(
+    db: Database,
+    sessionId: string,
+    survivor: PiFallbackFoldTagRow,
+    duplicate: PiFallbackFoldTagRow,
+): void {
+    if (survivor.status === "dropped") return;
+    if (duplicate.status !== "dropped") return;
+    db.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = ?").run(
+        sessionId,
+        survivor.tagNumber,
+    );
+    survivor.status = "dropped";
+}
+
+function retargetPendingOps(
+    db: Database,
+    sessionId: string,
+    fromTagNumber: number,
+    toTagNumber: number,
+): void {
+    const rows = db
+        .prepare(
+            `SELECT id, operation
+             FROM pending_ops
+             WHERE session_id = ? AND tag_id = ?
+             ORDER BY id ASC`,
+        )
+        .all(sessionId, fromTagNumber)
+        .filter(isPendingOpIdentityRow);
+    for (const row of rows) {
+        const existing = db
+            .prepare(
+                `SELECT 1
+                 FROM pending_ops
+                 WHERE session_id = ? AND tag_id = ? AND operation = ?
+                 LIMIT 1`,
+            )
+            .get(sessionId, toTagNumber, row.operation);
+        if (existing) {
+            db.prepare("DELETE FROM pending_ops WHERE session_id = ? AND id = ?").run(
+                sessionId,
+                row.id,
+            );
+        } else {
+            db.prepare("UPDATE pending_ops SET tag_id = ? WHERE session_id = ? AND id = ?").run(
+                toTagNumber,
+                sessionId,
+                row.id,
+            );
+        }
+    }
+    db.prepare("DELETE FROM pending_ops WHERE session_id = ? AND tag_id = ?").run(
+        sessionId,
+        fromTagNumber,
+    );
+}
+
+function deleteFoldedDuplicateTag(db: Database, sessionId: string, tagNumber: number): void {
+    db.prepare("DELETE FROM source_contents WHERE session_id = ? AND tag_id = ?").run(
+        sessionId,
+        tagNumber,
+    );
+    db.prepare("DELETE FROM tags WHERE session_id = ? AND tag_number = ?").run(
+        sessionId,
+        tagNumber,
+    );
+    db.prepare("DELETE FROM pending_ops WHERE session_id = ? AND tag_id = ?").run(
+        sessionId,
+        tagNumber,
+    );
+}
+
+function foldDuplicateIntoSurvivor(
+    db: Database,
+    sessionId: string,
+    survivor: PiFallbackFoldTagRow,
+    duplicate: PiFallbackFoldTagRow,
+): void {
+    mergeSizeAndTokenColumnsIntoSurvivor(db, sessionId, survivor, duplicate);
+    applyDroppedStatusIfNeeded(db, sessionId, survivor, duplicate);
+    retargetPendingOps(db, sessionId, duplicate.tagNumber, survivor.tagNumber);
+    deleteFoldedDuplicateTag(db, sessionId, duplicate.tagNumber);
+}
+
+export function hasPiFallbackToolOwnerTags(db: Database, sessionId: string): boolean {
+    const row = db
+        .prepare(
+            `SELECT 1
+             FROM tags
+             WHERE session_id = ?
+               AND type = 'tool'
+               AND tool_owner_message_id LIKE 'pi-msg-%'
+             LIMIT 1`,
+        )
+        .get(sessionId);
+    return row !== undefined;
+}
+
+export function findPiFallbackToolOwnerTags(
+    db: Database,
+    sessionId: string,
+): PiFallbackToolOwnerTag[] {
+    return db
+        .prepare(
+            `SELECT tag_number AS tagNumber,
+                    message_id AS callId,
+                    tool_owner_message_id AS toolOwnerMessageId,
+                    status
+             FROM tags
+             WHERE session_id = ?
+               AND type = 'tool'
+               AND tool_owner_message_id LIKE 'pi-msg-%'
+             ORDER BY tag_number ASC`,
+        )
+        .all(sessionId)
+        .filter(isPiFallbackToolOwnerTag);
+}
+
+export function adoptPiFallbackToolOwnerTag(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    callId: string,
+    oldOwnerMessageId: string,
+    newOwnerMessageId: string,
+): PiFallbackTagAdoptionResult {
+    const survivor = getPiFallbackFoldTagRowByNumber(db, sessionId, tagNumber);
+    if (
+        survivor === null ||
+        survivor.type !== "tool" ||
+        survivor.messageId !== callId ||
+        survivor.toolOwnerMessageId !== oldOwnerMessageId
+    ) {
+        return { action: "skipped" };
+    }
+
+    const existing = getPiFallbackToolFoldTagRowByOwner(db, sessionId, callId, newOwnerMessageId);
+    if (existing === null) {
+        const result = db
+            .prepare(
+                `UPDATE tags
+                 SET tool_owner_message_id = ?
+                 WHERE session_id = ?
+                   AND tag_number = ?
+                   AND type = 'tool'
+                   AND message_id = ?
+                   AND tool_owner_message_id = ?`,
+            )
+            .run(newOwnerMessageId, sessionId, tagNumber, callId, oldOwnerMessageId);
+        return (result.changes ?? 0) === 1
+            ? { action: "rekeyed", tagNumber }
+            : { action: "skipped" };
+    }
+
+    if (existing.tagNumber === tagNumber) {
+        return { action: "skipped" };
+    }
+
+    foldDuplicateIntoSurvivor(db, sessionId, survivor, existing);
+    const result = db
+        .prepare(
+            `UPDATE tags
+             SET tool_owner_message_id = ?
+             WHERE session_id = ?
+               AND tag_number = ?
+               AND type = 'tool'
+               AND message_id = ?
+               AND tool_owner_message_id = ?`,
+        )
+        .run(newOwnerMessageId, sessionId, tagNumber, callId, oldOwnerMessageId);
+    return (result.changes ?? 0) === 1
+        ? { action: "folded", tagNumber, deletedTagNumbers: [existing.tagNumber] }
+        : { action: "skipped" };
+}
+
+export function adoptPiFallbackMessageTag(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    oldFallbackMessageId: string,
+    newRealMessageId: string,
+): PiFallbackTagAdoptionResult {
+    const survivor = getPiFallbackFoldTagRowByNumber(db, sessionId, tagNumber);
+    if (
+        survivor === null ||
+        survivor.type !== "message" ||
+        survivor.messageId !== oldFallbackMessageId
+    ) {
+        return { action: "skipped" };
+    }
+
+    const duplicates = getPiFallbackMessageFoldTagRowsByMessageId(
+        db,
+        sessionId,
+        newRealMessageId,
+    ).filter((row) => row.tagNumber !== tagNumber);
+    if (duplicates.length === 0) {
+        const result = db
+            .prepare(
+                `UPDATE tags
+                 SET message_id = ?
+                 WHERE session_id = ?
+                   AND tag_number = ?
+                   AND type = 'message'
+                   AND message_id = ?`,
+            )
+            .run(newRealMessageId, sessionId, tagNumber, oldFallbackMessageId);
+        return (result.changes ?? 0) === 1
+            ? { action: "rekeyed", tagNumber }
+            : { action: "skipped" };
+    }
+
+    const deletedTagNumbers: number[] = [];
+    for (const duplicate of duplicates) {
+        foldDuplicateIntoSurvivor(db, sessionId, survivor, duplicate);
+        deletedTagNumbers.push(duplicate.tagNumber);
+    }
+    const result = db
+        .prepare(
+            `UPDATE tags
+             SET message_id = ?
+             WHERE session_id = ?
+               AND tag_number = ?
+               AND type = 'message'
+               AND message_id = ?`,
+        )
+        .run(newRealMessageId, sessionId, tagNumber, oldFallbackMessageId);
+    return (result.changes ?? 0) === 1
+        ? { action: "folded", tagNumber, deletedTagNumbers }
+        : { action: "skipped" };
+}
+
 /**
  * Delete every tag whose source content lives on `messageId`. This is
  * the `message.removed` event handler's primary cleanup path.

@@ -313,6 +313,20 @@ describe("createTagger", () => {
             //#then
             expect(result).toBe(1);
         });
+
+        it("unbindToolTag removes only the addressed composite alias", () => {
+            //#given
+            const sessionId = "session-1";
+            tagger.bindToolTag(sessionId, "call-1", "owner-old", 7);
+            tagger.bindToolTag(sessionId, "call-1", "owner-real", 8);
+
+            //#when
+            tagger.unbindToolTag(sessionId, "owner-old", "call-1");
+
+            //#then
+            expect(tagger.getToolTag(sessionId, "call-1", "owner-old")).toBeUndefined();
+            expect(tagger.getToolTag(sessionId, "call-1", "owner-real")).toBe(8);
+        });
     });
 
     describe("getCounter", () => {

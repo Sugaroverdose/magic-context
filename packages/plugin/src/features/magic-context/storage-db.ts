@@ -37,7 +37,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 39;
+export const LATEST_SUPPORTED_VERSION = 40;
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -894,6 +894,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
         `CREATE INDEX IF NOT EXISTS idx_tags_pi_adopt
             ON tags(session_id, entry_fingerprint)
             WHERE type='message' AND entry_fingerprint IS NOT NULL`,
+    );
+    db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_tags_pi_fallback_tool_owner
+            ON tags(session_id, tool_owner_message_id)
+            WHERE type='tool'`,
     );
     // Per-tag token counts (real Claude tokenizer), computed once when a tag is
     // first inserted and never recomputed — the content a tag covers is final on

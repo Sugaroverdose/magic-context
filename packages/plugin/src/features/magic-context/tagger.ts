@@ -127,6 +127,12 @@ export interface Tagger {
      * `${ownerMsgId}\x00${callId}`.
      */
     bindToolTag(sessionId: string, callId: string, ownerMsgId: string, tagNumber: number): void;
+    /**
+     * Remove a stale tool composite assignment. Used by Pi fallback-owner
+     * adoption when a tool tag moves from a synthetic pi-msg-* owner to the
+     * real SessionEntry id (or when a duplicate real-owner row is folded away).
+     */
+    unbindToolTag(sessionId: string, ownerMsgId: string, callId: string): void;
     getAssignments(sessionId: string): ReadonlyMap<string, number>;
     resetCounter(sessionId: string, db: Database): void;
     getCounter(sessionId: string): number;
@@ -622,6 +628,10 @@ export function createTagger(): Tagger {
         getSessionAssignments(sessionId).set(makeToolCompositeKey(ownerMsgId, callId), tagNumber);
     }
 
+    function unbindToolTag(sessionId: string, ownerMsgId: string, callId: string): void {
+        getSessionAssignments(sessionId).delete(makeToolCompositeKey(ownerMsgId, callId));
+    }
+
     function getAssignments(sessionId: string): ReadonlyMap<string, number> {
         return getSessionAssignments(sessionId);
     }
@@ -778,6 +788,7 @@ export function createTagger(): Tagger {
         bindTag,
         unbindTag,
         bindToolTag,
+        unbindToolTag,
         getAssignments,
         resetCounter,
         getCounter,
