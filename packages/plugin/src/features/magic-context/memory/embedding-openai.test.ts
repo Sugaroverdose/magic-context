@@ -1,5 +1,43 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
+import { embeddingModelsMatch, OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
+
+describe("embeddingModelsMatch token-boundary semantics", () => {
+    test("exact match", () => {
+        expect(embeddingModelsMatch("qwen3-embedding-4b", "qwen3-embedding-4b")).toBe(true);
+    });
+    test("version-expansion suffix on a boundary matches", () => {
+        expect(embeddingModelsMatch("text-embedding-3-small-v1", "text-embedding-3-small")).toBe(
+            true,
+        );
+    });
+    test("vendor-prefix trim on a boundary matches (either direction)", () => {
+        expect(
+            embeddingModelsMatch("openai/text-embedding-3-small", "text-embedding-3-small"),
+        ).toBe(true);
+        expect(
+            embeddingModelsMatch("text-embedding-3-small", "openai/text-embedding-3-small"),
+        ).toBe(true);
+    });
+    test("REJECTS a broad configured name contained as an interior token (corruption hole)", () => {
+        // The bug: served `…-qwen3-embedding-0.6b` contains configured `qwen3-embedding`
+        // but `0.6b` is a distinct model token, not a version suffix.
+        expect(embeddingModelsMatch("text-embedding-qwen3-embedding-0.6b", "qwen3-embedding")).toBe(
+            false,
+        );
+        expect(
+            embeddingModelsMatch("qwen3-embedding-4b-dwq", "text-embedding-qwen3-embedding-0.6b"),
+        ).toBe(false);
+    });
+    test("REJECTS a non-boundary prefix collision (small vs smaller)", () => {
+        expect(embeddingModelsMatch("text-embedding-3-smallish", "text-embedding-3-small")).toBe(
+            false,
+        );
+    });
+    test("empty served or requested cannot be compared → not rejected", () => {
+        expect(embeddingModelsMatch("", "anything")).toBe(true);
+        expect(embeddingModelsMatch("anything", "")).toBe(true);
+    });
+});
 
 type FetchLike = typeof fetch;
 

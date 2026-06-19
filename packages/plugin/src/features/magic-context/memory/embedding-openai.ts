@@ -35,17 +35,33 @@ function normalizeEndpoint(endpoint?: string): string {
 /**
  * Whether the model an endpoint served is the model we asked for.
  *
- * Exact match after trim+lowercase, with prefix/suffix tolerance so a server
- * that version-expands a name (`text-embedding-3-small` → `…-small-v1`) or
- * trims a vendor prefix still counts as a match. A genuine substitution to a
- * DIFFERENT model (e.g. requested `qwen3-embedding-4b-dwq`, served
- * `text-embedding-qwen3-embedding-0.6b` — neither contains the other) does not.
+ * Exact match after trim+lowercase, with TOKEN-BOUNDARY prefix/suffix tolerance
+ * so a server that version-expands a name (`text-embedding-3-small` →
+ * `…-small-v1`) or trims a vendor prefix (`openai/text-embedding-3-small` →
+ * `text-embedding-3-small`) still counts as a match.
+ *
+ * Crucially this is NOT a plain substring test. A loose `a.includes(b)` would
+ * MATCH a broadly-configured name against an unrelated served model that merely
+ * contains it as a middle token — e.g. configured `qwen3-embedding`, served
+ * `text-embedding-qwen3-embedding-0.6b` → store 0.6b vectors under the broad
+ * identity (wrong-dim corruption, the exact failure this guard exists to stop).
+ * So the shorter name must align on a `-`/`/` boundary as a genuine PREFIX or
+ * SUFFIX of the longer, never as an interior fragment.
  */
 export function embeddingModelsMatch(served: string, requested: string): boolean {
     const a = served.trim().toLowerCase();
     const b = requested.trim().toLowerCase();
     if (a.length === 0 || b.length === 0) return true; // can't compare → don't reject
-    return a === b || a.includes(b) || b.includes(a);
+    if (a === b) return true;
+    const longer = a.length >= b.length ? a : b;
+    const shorter = a.length >= b.length ? b : a;
+    const isBoundary = (ch: string) => ch === "-" || ch === "/";
+    // Version-expansion: longer = shorter + boundary + suffix (e.g. `…-small` → `…-small-v1`).
+    if (longer.startsWith(shorter) && isBoundary(longer.charAt(shorter.length))) return true;
+    // Vendor-prefix trim: longer = prefix + boundary + shorter (e.g. `openai/X` ↔ `X`).
+    if (longer.endsWith(shorter) && isBoundary(longer.charAt(longer.length - shorter.length - 1)))
+        return true;
+    return false;
 }
 
 /**
