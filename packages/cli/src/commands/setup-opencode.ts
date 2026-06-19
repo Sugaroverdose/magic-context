@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
@@ -44,7 +45,7 @@ function addPluginToOpenCodeConfig(configPath: string, format: "json" | "jsonc" 
             plugin: [PLUGIN_ENTRY],
             compaction: { auto: false, prune: false },
         };
-        writeFileSync(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+        writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
         return;
     }
 
@@ -79,14 +80,14 @@ function addPluginToOpenCodeConfig(configPath: string, format: "json" | "jsonc" 
     compaction.prune = false;
     existing.compaction = compaction;
 
-    writeFileSync(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
+    writeFileAtomic(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
 }
 
 function addPluginToTuiConfig(configPath: string, format: "json" | "jsonc" | "none"): void {
     ensureDir(dirname(configPath));
 
     if (format === "none") {
-        writeFileSync(configPath, `${stringifyJsonc({ plugin: [PLUGIN_ENTRY] }, null, 2)}\n`);
+        writeFileAtomic(configPath, `${stringifyJsonc({ plugin: [PLUGIN_ENTRY] }, null, 2)}\n`);
         return;
     }
 
@@ -107,7 +108,7 @@ function addPluginToTuiConfig(configPath: string, format: "json" | "jsonc" | "no
     }
 
     existing.plugin = rawPlugins;
-    writeFileSync(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
+    writeFileAtomic(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
 }
 
 export function findDcpPluginIndexes(plugins: unknown[]): number[] {
@@ -141,7 +142,7 @@ async function resolveDcpConflictBeforeSetup(
     const shouldRemove = await confirm("Remove opencode-dcp from your config?", true);
     if (shouldRemove) {
         ocConfig.plugin = plugins.filter((_plugin, index) => !dcpIndexes.includes(index));
-        writeFileSync(configPath, `${stringifyJsonc(ocConfig, null, 2)}\n`);
+        writeFileAtomic(configPath, `${stringifyJsonc(ocConfig, null, 2)}\n`);
         log.success("Removed opencode-dcp from plugin list");
     } else {
         log.warn("Skipped — you may experience context management conflicts");
@@ -208,7 +209,7 @@ function writeMagicContextConfig(
         config.cache_ttl = cacheTtl;
     }
 
-    writeFileSync(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+    writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
 }
 // ─── Main Setup Flow ──────────────────────────────────────
 

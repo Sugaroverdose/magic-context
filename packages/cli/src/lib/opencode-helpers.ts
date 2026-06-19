@@ -1,12 +1,8 @@
 import { execSync } from "node:child_process";
+import { isOpenCodeInstalledOnSystem } from "./opencode-install";
 
 export function isOpenCodeInstalled(): boolean {
-    try {
-        execSync("opencode --version", { stdio: "pipe" });
-        return true;
-    } catch {
-        return false;
-    }
+    return isOpenCodeInstalledOnSystem();
 }
 
 export function getOpenCodeVersion(): string | null {

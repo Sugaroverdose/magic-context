@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
-import { findOnPath } from "../lib/find-on-path";
+import { writeFileAtomic } from "../lib/atomic-write";
+import { isOpenCodeInstalledOnSystem } from "../lib/opencode-install";
 import {
     detectConfigPaths,
     dirSizeBytes,
@@ -25,23 +25,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
     readonly pluginPackageName = PLUGIN_NAME;
 
     isInstalled(): boolean {
-        // Stock OpenCode install location takes priority. Use os.homedir()
-        // (not process.env.HOME) and OS-specific binary name so this works
-        // on Windows where HOME is typically undefined and binaries end in
-        // `.exe`.
-        const isWindows = process.platform === "win32";
-        const stockBin = isWindows
-            ? join(homedir(), ".opencode", "bin", "opencode.exe")
-            : join(homedir(), ".opencode", "bin", "opencode");
-        if (existsSync(stockBin)) return true;
-
-        // PATH walk via Node primitives (issue #75). Previously shelled out
-        // to `which`/`where`, which fails in environments where those
-        // binaries aren't on PATH (Alpine/slim containers, bunx sandboxes,
-        // NixOS) — even when `opencode` itself is reachable. Manually
-        // walking PATH using process.env.PATH + path.delimiter is portable
-        // and works regardless of which shell utilities are installed.
-        return findOnPath("opencode") !== null;
+        return isOpenCodeInstalledOnSystem();
     }
 
     hasPluginEntry(): boolean {
@@ -80,7 +64,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     plugin: [PLUGIN_ENTRY],
                 };
                 ensureDir(target);
-                writeFileSync(target, `${JSON.stringify(initial, null, 4)}\n`);
+                writeFileAtomic(target, `${JSON.stringify(initial, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
@@ -112,7 +96,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             if (existingIdx === -1 && existingDevIdx === -1) {
                 plugin.push(PLUGIN_ENTRY);
                 cfg.plugin = plugin;
-                writeFileSync(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "added",
@@ -136,7 +120,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
             if (typeof current === "string" && current !== PLUGIN_ENTRY) {
                 plugin[existingIdx] = PLUGIN_ENTRY;
                 cfg.plugin = plugin;
-                writeFileSync(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+                writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
                 return {
                     ok: true,
                     action: "updated",
@@ -194,7 +178,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
-            writeFileSync(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+            writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
             return {
                 ok: true,
                 action: "updated",

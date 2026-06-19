@@ -267,6 +267,23 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         expect(result.dreamer?.pin_key_files?.enabled).toBe(true);
     });
 
+
+    it("merges experimental.pin_key_files sub-fields when dreamer.pin_key_files is a boolean shorthand", () => {
+        const config = JSON.stringify({
+            experimental: {
+                pin_key_files: { token_budget: 9000, min_reads: 5 },
+            },
+            dreamer: {
+                pin_key_files: true,
+            },
+        });
+
+        const result = loadWithUserConfig(config);
+        expect(result.dreamer?.pin_key_files?.enabled).toBe(true);
+        expect(result.dreamer?.pin_key_files?.token_budget).toBe(9000);
+        expect(result.dreamer?.pin_key_files?.min_reads).toBe(5);
+    });
+
     it("preserves existing dreamer.user_memories over legacy experimental.user_memories", () => {
         // When both exist, dreamer.* wins (user has graduated), but missing
         // sub-fields from the old block fill in.

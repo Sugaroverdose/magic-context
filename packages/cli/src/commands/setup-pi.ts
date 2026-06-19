@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
 
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
@@ -118,7 +119,7 @@ export function writePiSettingsPackage(
 
     if (!hasPackage) packages.push(packageSource);
     settings.packages = packages;
-    writeFileSync(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
+    writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return !hasPackage;
 }
 
@@ -165,8 +166,11 @@ export function writeMagicContextConfig(
     };
     config.sidekick = compactObject(sidekick);
 
-    config.embedding = options.embedding;
-    writeFileSync(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+    config.embedding = {
+        ...((config.embedding as Record<string, unknown> | undefined) ?? {}),
+        ...options.embedding,
+    };
+    writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
 async function chooseEmbedding(prompts: PromptIO): Promise<EmbeddingChoice> {

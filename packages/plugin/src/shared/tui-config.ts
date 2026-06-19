@@ -3,7 +3,15 @@
  * Called from the server plugin at startup so the TUI sidebar loads on next restart.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    renameSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { parse, stringify } from "comment-json";
 import { log } from "./logger";
@@ -12,27 +20,41 @@ import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
 
-/**
- * Detect whether a tui.json plugin entry already references magic-context, in
- * any form. Covers:
- *   - Bare npm name: "@cortexkit/opencode-magic-context"
- *   - Versioned npm: "@cortexkit/opencode-magic-context@latest" / "@0.15.7" / etc.
- *   - Local dev directory path (absolute or relative): ".../magic-context"
- *     or ".../magic-context/packages/plugin"
- *   - file:// URLs pointing at the same paths
- *   - Tarball paths ending in opencode-magic-context-*.tgz
- *
- * Without the path/URL detection, doctor/setup auto-injection adds the npm
- * @latest entry on top of an existing dev path, double-loading the plugin.
- */
-function isMagicContextEntry(entry: string): boolean {
-    if (!entry) return false;
-    if (entry === PLUGIN_NAME) return true;
-    if (entry.startsWith(`${PLUGIN_NAME}@`)) return true;
-    // Local directory paths: match anywhere in the string so the setup pattern
-    // (dir-only, dir + /packages/plugin, file:// + either) all qualify.
-    if (entry.includes("opencode-magic-context")) return true;
-    return false;
+function pluginEntryId(entry: unknown): string {
+    if (typeof entry === "string") return entry;
+    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+    return "";
+}
+
+function isLocalMagicContextDevEntry(entry: unknown): boolean {
+    const id = pluginEntryId(entry);
+    if (!id) return false;
+    if (id === PLUGIN_NAME || id.startsWith(`${PLUGIN_NAME}@`)) return false;
+    const isPath =
+        id.startsWith("file://") || id.startsWith("/") || id.startsWith("./") || id.includes("\\");
+    if (!isPath) return false;
+    return id.includes("opencode-magic-context") || id.includes("magic-context");
+}
+
+function isMagicContextPluginEntry(entry: unknown): boolean {
+    const id = pluginEntryId(entry);
+    if (!id) return false;
+    if (id === PLUGIN_NAME || id.startsWith(`${PLUGIN_NAME}@`)) return true;
+    return isLocalMagicContextDevEntry(entry);
+}
+
+function writeTuiConfigAtomic(configPath: string, config: Record<string, unknown>): void {
+    const body = `${stringify(config, null, 2)}\n`;
+    const tmpPath = `${configPath}.tmp`;
+    writeFileSync(tmpPath, body);
+    try {
+        if (statSync(configPath, { throwIfNoEntry: false })?.isFile()) {
+            chmodSync(tmpPath, statSync(configPath).mode & 0o777);
+        }
+    } catch {
+        /* new file */
+    }
+    renameSync(tmpPath, configPath);
 }
 
 function resolveTuiConfigPath(): string {
@@ -59,35 +81,41 @@ export function ensureTuiPluginEntry(): boolean {
             config = (parse(raw) as Record<string, unknown>) ?? {};
         }
 
-        const plugins = Array.isArray(config.plugin)
-            ? config.plugin.filter((p): p is string => typeof p === "string")
-            : [];
+        const plugins: unknown[] = Array.isArray(config.plugin) ? [...config.plugin] : [];
 
-        const existingIdx = plugins.findIndex(isMagicContextEntry);
+        const existingIdx = plugins.findIndex(isMagicContextPluginEntry);
         if (existingIdx >= 0) {
             const existing = plugins[existingIdx];
-            if (existing === PLUGIN_ENTRY) {
-                return false; // Already @latest
+            if (isLocalMagicContextDevEntry(existing)) {
+                return false;
             }
-            // Only upgrade the bare versionless npm name to @latest.
-            // Pinned versions (e.g. @0.8.10), local dev paths
-            // (~/Work/OSS/magic-context/packages/plugin), and
-            // file:// URLs are all left as-is — the user chose them
-            // intentionally and overwriting their dev-loop entry would
-            // either double-load the plugin (npm + dev) or replace
-            // their working directory pointer.
-            if (existing === PLUGIN_NAME) {
-                plugins[existingIdx] = PLUGIN_ENTRY;
+            const id = pluginEntryId(existing);
+            if (id === PLUGIN_ENTRY) {
+                return false;
+            }
+            if (id === PLUGIN_NAME) {
+                if (Array.isArray(existing) && existing.length >= 1) {
+                    const replacement = [...existing];
+                    replacement[0] = PLUGIN_ENTRY;
+                    plugins[existingIdx] = replacement;
+                } else {
+                    plugins[existingIdx] = PLUGIN_ENTRY;
+                }
             } else {
                 return false;
             }
         } else {
-            plugins.push(PLUGIN_ENTRY);
+            const hasDev = plugins.some(isLocalMagicContextDevEntry);
+            if (!hasDev) {
+                plugins.push(PLUGIN_ENTRY);
+            } else {
+                return false;
+            }
         }
         config.plugin = plugins;
 
         mkdirSync(dirname(configPath), { recursive: true });
-        writeFileSync(configPath, `${stringify(config, null, 2)}\n`);
+        writeTuiConfigAtomic(configPath, config);
         log(`[magic-context] updated TUI plugin entry in ${configPath}`);
         return true;
     } catch (error) {

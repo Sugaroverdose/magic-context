@@ -140,6 +140,8 @@ export function migrateLegacyExperimental(
                     ...oldPKF,
                     ...(dreamer.pin_key_files as Record<string, unknown>),
                 };
+            } else if (typeof dreamer.pin_key_files === "boolean") {
+                dreamer.pin_key_files = { ...oldPKF, enabled: dreamer.pin_key_files };
             }
         }
         delete newExperimental.pin_key_files;

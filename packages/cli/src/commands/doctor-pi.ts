@@ -1,16 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-    existsSync,
-    mkdirSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { writeFileAtomic } from "../lib/atomic-write";
 import {
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
@@ -804,7 +797,7 @@ function writeDefaultMagicContextConfig(path: string): void {
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
         ...MagicContextConfigSchema.parse({}),
     };
-    writeFileSync(path, `${stringifyJsonc(config, null, 2)}\n`);
+    writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
 function repair(plan: RepairPlan, prompts: PromptIO): number {

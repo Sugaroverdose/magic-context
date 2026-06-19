@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -21,9 +21,11 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-opencode";
+import { migrateExperimentalPinKeyFilesForDoctor } from "../lib/migrate-experimental-doctor";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
 import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
@@ -800,45 +802,7 @@ export async function runDoctor(
                 fixed++;
             }
 
-            // Migrate experimental.pin_key_files → dreamer.pin_key_files.
-            // Same story as user_memories — feature graduated to stable under
-            // dreamer config. Existing `enabled: true` values are preserved so
-            // we do not silently disable the feature for users who opted in.
-            if (experimental && "pin_key_files" in experimental) {
-                const dreamer = (mcConfig.dreamer as Record<string, unknown> | undefined) ?? {};
-                const oldPKF = experimental.pin_key_files;
-                const existingPKF = dreamer.pin_key_files;
-                if (existingPKF === undefined) {
-                    dreamer.pin_key_files = oldPKF;
-                } else if (
-                    typeof oldPKF === "object" &&
-                    oldPKF !== null &&
-                    typeof existingPKF === "object" &&
-                    existingPKF !== null
-                ) {
-                    // Merge field-by-field so sub-fields like `token_budget`
-                    // and `min_reads` from the old block are not silently lost
-                    // when a user has partially graduated.
-                    const merged = {
-                        ...(oldPKF as Record<string, unknown>),
-                        ...(existingPKF as Record<string, unknown>),
-                    };
-                    dreamer.pin_key_files = merged;
-                } else if (typeof oldPKF === "object" && oldPKF !== null) {
-                    // Old block is a proper object but new block is a malformed
-                    // primitive. Coerce and merge so sub-fields like
-                    // `token_budget` / `min_reads` are not dropped.
-                    const coerced: Record<string, unknown> = {
-                        ...(oldPKF as Record<string, unknown>),
-                        enabled: Boolean(existingPKF),
-                    };
-                    dreamer.pin_key_files = coerced;
-                    log.warn(
-                        `Coerced malformed dreamer.pin_key_files (${typeof existingPKF}) to object form while merging sub-fields from experimental.pin_key_files`,
-                    );
-                }
-                mcConfig.dreamer = dreamer;
-                delete experimental.pin_key_files;
+            if (experimental && migrateExperimentalPinKeyFilesForDoctor(mcConfig)) {
                 mcChanged = true;
                 log.success(
                     "Migrated experimental.pin_key_files → dreamer.pin_key_files (preserved user enabled state)",
@@ -910,7 +874,7 @@ export async function runDoctor(
             }
 
             if (mcChanged) {
-                writeFileSync(paths.magicContextConfig, `${stringify(mcConfig, null, 2)}\n`);
+                writeFileAtomic(paths.magicContextConfig, `${stringify(mcConfig, null, 2)}\n`);
             }
         } catch {
             log.warn("Could not migrate deprecated config keys in magic-context.jsonc");
@@ -982,7 +946,7 @@ export async function runDoctor(
                             rawPlugins[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
                         }
                         config.plugin = rawPlugins;
-                        writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
+                        writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                         pass(
                             `Upgraded plugin entry in ${configName}: ${oldEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`,
                         );
@@ -994,7 +958,7 @@ export async function runDoctor(
                 // tuple/options entry the user already had.
                 rawPlugins.push(PLUGIN_ENTRY_WITH_VERSION);
                 config.plugin = rawPlugins;
-                writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
+                writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                 pass(`Added plugin to ${configName}`);
                 fixed++;
             }
@@ -1071,7 +1035,7 @@ export async function runDoctor(
                             tuiRawPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
                         }
                         tuiConfig.plugin = tuiRawPlugins;
-                        writeFileSync(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
+                        writeFileAtomic(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
                         pass(`Upgraded TUI plugin: ${tuiEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`);
                         fixed++;
                     } else {

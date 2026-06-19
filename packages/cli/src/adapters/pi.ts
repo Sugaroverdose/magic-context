@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { getMagicContextLogPath, getPiAgentConfigDir, getPiUserExtensionsPath } from "../lib/paths";
@@ -179,7 +180,7 @@ function writePiSettings(settings: PiSettingsLike): void {
     const settingsPath = getPiUserExtensionsPath();
     ensureDir(settingsPath);
     const text = stringifyJsonc(settings, null, 2);
-    writeFileSync(settingsPath, `${text}\n`);
+    writeFileAtomic(settingsPath, `${text}\n`);
 }
 
 /**

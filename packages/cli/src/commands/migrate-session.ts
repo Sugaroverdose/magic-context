@@ -505,8 +505,9 @@ export async function runMigrateSessionCli(args: string[]): Promise<number> {
 
     const opencodeDbPath = defaultOpenCodeDbPath();
     const contextDbPath = defaultContextDbPath();
-    const opencodeDb = new Database(opencodeDbPath);
-    const contextDb = new Database(contextDbPath);
+    const dbReadonly = dryRun ? { readonly: true } : undefined;
+    const opencodeDb = new Database(opencodeDbPath, dbReadonly);
+    const contextDb = new Database(contextDbPath, dbReadonly);
     // This CLI opens context.db directly (bypassing initializeDatabase), so the
     // pragmas the plugin normally sets are absent. foreign_keys=ON is REQUIRED:
     // the collision-merge path (rekeyMemoryRowWithCollisionMerge) relies on
