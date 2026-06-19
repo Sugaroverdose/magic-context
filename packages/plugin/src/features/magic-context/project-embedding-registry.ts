@@ -635,9 +635,10 @@ async function embedCommitBatch(
 /**
  * Drain a project's unembedded-commit backlog, coordinated across processes.
  *
- * This is the ONLY path that drains pure backlogs (the dream-timer git-sweep
- * only embeds when `git log` finds NEW commits, so a repo indexed before
- * embeddings were enabled never drains there). Every plugin process runs this
+ * Drains pure backlogs (indexed commits with no embedding row). The dream-timer
+ * git-sweep embeds new commits from `git log` but skips backlog drain when
+ * `embedded=0`; this path runs after each sweep (ignoreCooldown lease) so
+ * pre-existing backlogs clear. Every plugin process runs this
  * on its dream-timer tick, so without coordination N processes hammer the
  * embedding provider with the same commits. We take the shared git-sweep lease
  * (mutual exclusion) per identity — but with `ignoreCooldown`, because a
@@ -645,7 +646,7 @@ async function embedCommitBatch(
  * the cooldown the dream-timer sweep advances. We release without marking
  * success so the two paths' cooldown tracking stays independent.
  */
-async function drainCommitBacklogForProject(
+export async function drainCommitBacklogForProject(
     db: Database,
     projectIdentity: string,
     deadline: number,

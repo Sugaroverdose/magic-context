@@ -13,6 +13,7 @@ import {
     embedUnembeddedMemoriesForProject,
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
+import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
 import { resolveFallbackChain } from "../shared/resolve-fallbacks";
@@ -21,6 +22,8 @@ import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
 const DREAM_TIMER_INTERVAL_MS = 15 * 60 * 1000;
+/** Wall-clock budget for post-sweep commit backlog drain (matches indexer embed sweep). */
+const GIT_COMMIT_BACKLOG_DRAIN_MAX_MS = 5 * 60 * 1000;
 
 /**
  * Per-project work registered with the timer. The timer is a process-wide
@@ -313,7 +316,7 @@ async function sweepGitCommits(args: {
             sinceDays: gitCommitIndexing.since_days,
             maxCommits: gitCommitIndexing.max_commits,
         });
-        // Drain any remaining embedding backlog (indexer caps per run).
+        // Drain any remaining embedding backlog from this sweep (indexer caps per run).
         let drainedEmbeddings = 0;
         if (result.embedded > 0) {
             drainedEmbeddings = await embedUnembeddedCommits(db, projectIdentity);
@@ -325,9 +328,26 @@ async function sweepGitCommits(args: {
                 `[git-commits] sweep finished for ${projectIdentity}, but lease was no longer active; cooldown not advanced`,
             );
         }
+
+        const memorySnapshot = getProjectEmbeddingSnapshot(projectIdentity);
+        let backlogDrained = 0;
+        if (memorySnapshot?.gitCommitEnabled) {
+            try {
+                backlogDrained = await drainCommitBacklogForProject(
+                    db,
+                    projectIdentity,
+                    Date.now() + GIT_COMMIT_BACKLOG_DRAIN_MAX_MS,
+                );
+            } catch (error) {
+                log(
+                    `[git-commits] commit backlog drain failed for ${projectIdentity}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
+        }
+
         const elapsedMs = Date.now() - startedAt;
         log(
-            `[git-commits] sweep finished for ${projectIdentity} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings}`,
+            `[git-commits] sweep finished for ${projectIdentity} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings} backlogDrained=${backlogDrained}`,
         );
     } catch (error) {
         releaseGitSweepLease(db, projectIdentity, holderId);

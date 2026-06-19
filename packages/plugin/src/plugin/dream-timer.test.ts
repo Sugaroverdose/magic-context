@@ -71,3 +71,13 @@ describe("dream-timer null-DB guards (static)", () => {
         expect(source).not.toContain("db: Database = openDatabase()");
     });
 });
+
+describe("dream-timer git commit backlog drain (static)", () => {
+    const source = readFileSync(join(import.meta.dir, "dream-timer.ts"), "utf8");
+
+    test("sweepGitCommits invokes coordinated backlog drain after the index sweep", () => {
+        expect(source).toContain("drainCommitBacklogForProject");
+        expect(source).toContain("memorySnapshot?.gitCommitEnabled");
+        expect(source).toContain("backlogDrained");
+    });
+});

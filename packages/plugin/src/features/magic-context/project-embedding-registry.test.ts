@@ -10,12 +10,17 @@ import {
     replaceCompartmentChunkEmbeddings,
 } from "./compartment-chunk-embedding";
 import { appendCompartments, getCompartments } from "./compartment-storage";
+import type { GitCommit } from "./git-commits/git-log-reader";
+import { countEmbeddedCommits } from "./git-commits/storage-git-commit-embeddings";
+import { upsertCommits } from "./git-commits/storage-git-commits";
+import { acquireGitSweepLease, releaseGitSweepLease } from "./git-commits/sweep-coordinator";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./memory/embedding-provider";
 import { insertMemory } from "./memory/storage-memory";
 import { getStoredModelId, saveEmbedding } from "./memory/storage-memory-embeddings";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
+    drainCommitBacklogForProject,
     embedSessionCompartmentChunks,
     embedTextForProject,
     embedUnembeddedCompartmentChunksForProject,
@@ -69,6 +74,17 @@ function localConfig(model: string, maxInputTokens?: number): EmbeddingConfig {
         provider: "local",
         model,
         ...(maxInputTokens !== undefined ? { max_input_tokens: maxInputTokens } : {}),
+    };
+}
+
+function makeGitCommit(shaSeed: string, committedAtMs: number): GitCommit {
+    const sha = shaSeed.padEnd(40, shaSeed);
+    return {
+        sha,
+        shortSha: sha.slice(0, 7),
+        message: `commit ${shaSeed}`,
+        author: "dev@example.com",
+        committedAtMs,
     };
 }
 
@@ -149,6 +165,92 @@ describe("project embedding registry", () => {
             }
         }
         tempDirs.length = 0;
+    });
+
+    it("drainCommitBacklogForProject embeds pre-indexed commits with no new git log work", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        const projectIdentity = "git:commit-backlog";
+        upsertCommits(db, projectIdentity, [
+            makeGitCommit("backlog-a", 1000),
+            makeGitCommit("backlog-b", 2000),
+        ]);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            projectIdentity,
+            localConfig("model-commits"),
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/tmp/commits",
+        );
+
+        expect(countEmbeddedCommits(db, projectIdentity)).toBe(0);
+        const drained = await drainCommitBacklogForProject(
+            db,
+            projectIdentity,
+            Date.now() + 60_000,
+        );
+        expect(drained).toBe(2);
+        expect(countEmbeddedCommits(db, projectIdentity)).toBe(2);
+    });
+
+    it("drainCommitBacklogForProject skips when git commit indexing is disabled", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        const projectIdentity = "git:commits-off";
+        upsertCommits(db, projectIdentity, [makeGitCommit("off-a", 1000)]);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            projectIdentity,
+            localConfig("model-commits"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/commits-off",
+        );
+
+        const drained = await drainCommitBacklogForProject(
+            db,
+            projectIdentity,
+            Date.now() + 60_000,
+        );
+        expect(drained).toBe(0);
+        expect(countEmbeddedCommits(db, projectIdentity)).toBe(0);
+    });
+
+    it("drainCommitBacklogForProject short-circuits when the git sweep lease is held", async () => {
+        _setTestProviderFactoryForProject(
+            (config) =>
+                new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
+        );
+        const db = useTempDb();
+        const projectIdentity = "git:lease-block";
+        upsertCommits(db, projectIdentity, [makeGitCommit("lease-a", 1000)]);
+        registerProjectEmbeddingAndMaybeWipe(
+            db,
+            projectIdentity,
+            localConfig("model-commits"),
+            { memoryEnabled: true, gitCommitEnabled: true },
+            "/tmp/lease",
+        );
+
+        const holder = acquireGitSweepLease(db, projectIdentity, "other-holder");
+        expect(holder.acquired).toBe(true);
+
+        const drained = await drainCommitBacklogForProject(
+            db,
+            projectIdentity,
+            Date.now() + 60_000,
+        );
+        expect(drained).toBe(0);
+        expect(countEmbeddedCommits(db, projectIdentity)).toBe(0);
+
+        if (holder.acquired) {
+            releaseGitSweepLease(db, projectIdentity, holder.holderId);
+        }
     });
 
     it("keeps independent snapshots and providers for two projects in one process", async () => {
