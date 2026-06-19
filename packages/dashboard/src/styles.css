@@ -965,14 +965,56 @@ body {
    colored by severity. The neutral top gap = uncached tokens (full-price).
    A full-height marker line flags steps where MC reclaimed context. */
 .ctx-chart {
+  position: relative;
+  height: 120px;
+}
+/* Horizontal row of per-context-window segments. Each segment grows in
+   proportion to how many steps it holds (flex-grow set inline = event count). */
+.ctx-segments {
   display: flex;
   align-items: stretch;
-  gap: 6px;
-  height: 120px;
+  height: 100%;
+  width: 100%;
+}
+.ctx-segment {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  flex-shrink: 1;
+  flex-basis: 0;
+  min-width: 46px;
+}
+/* Vertical divider between two windows, labelled "old → new" (e.g. 1M → 256k). */
+.ctx-model-divider {
   position: relative;
+  width: 18px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ctx-model-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--border-light);
+}
+.ctx-model-divider-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-size: 8px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  padding: 3px 1px;
+  white-space: nowrap;
+  z-index: 1;
 }
 /* Custom drop-line tooltip — immediate on hover, anchored in .ctx-chart so it
-   isn't clipped by .ctx-bars-wrap (overflow:hidden). Positioned via inline
+   isn't clipped by the overflow:hidden segment box. Positioned via inline
    left:%, centered on its own width, sitting just above the bars. */
 .ctx-drop-tip {
   position: absolute;
@@ -1009,19 +1051,24 @@ body {
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
-  width: 34px;
+  width: 30px;
   flex-shrink: 0;
   font-size: 9px;
   font-family: var(--font-mono, monospace);
   color: var(--text-muted);
   padding: 1px 0;
-  border-right: 1px solid var(--border);
 }
-.ctx-bars-wrap {
+/* The rounded box that holds one context window's bars. Its own border + radius
+   make each window read as a distinct panel with its own scale. */
+.ctx-segment-box {
   position: relative;
   flex: 1 1 auto;
   height: 100%;
   overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-active) 30%, transparent);
+  padding: 0 2px;
 }
 .ctx-gridline {
   position: absolute;
