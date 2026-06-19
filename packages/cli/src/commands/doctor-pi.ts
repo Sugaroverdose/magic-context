@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { writeFileAtomic } from "../lib/atomic-write";
 import {
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
@@ -23,6 +22,7 @@ import {
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
 import { checkLocalEmbeddingRuntimeByResolution } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-pi";

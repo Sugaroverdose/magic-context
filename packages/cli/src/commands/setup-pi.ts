@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
-
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "../lib/paths";
 import {

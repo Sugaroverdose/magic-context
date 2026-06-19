@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { pickModel } from "../lib/model-picker";
 import {
     getAvailableModels,

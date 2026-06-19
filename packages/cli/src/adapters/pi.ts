@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { writeFileAtomic } from "../lib/atomic-write";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { writeFileAtomic } from "../lib/atomic-write";
 import { getMagicContextLogPath, getPiAgentConfigDir, getPiUserExtensionsPath } from "../lib/paths";
 import { detectPiBinary, PI_PACKAGE_SOURCE } from "../lib/pi-helpers";
 import type {
