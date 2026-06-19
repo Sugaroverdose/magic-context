@@ -484,6 +484,21 @@ export function createCtxMemoryTool(
 					if (inactive) {
 						return err(inactiveMemoryError(inactive.id, "merging"));
 					}
+				} else if (workspaceIdentitySet.identities.length > 1) {
+					// The dreamer keeps cross-PROJECT merge power (#5971) OUTSIDE a
+					// workspace, but INSIDE a workspace per-category sharing is the
+					// user's explicit privacy boundary the dreamer honors too: a
+					// foreign member's memory in a non-shared category is off-limits.
+					// memoryVisibleToTool already encodes own→true,
+					// foreign-shared→true, else→false. (Parity with OpenCode D1.)
+					const blocked = sourceMemories.find(
+						(memory) => !memoryVisibleToTool(memory),
+					);
+					if (blocked) {
+						return err(
+							`Error: Memory with ID ${blocked.id} is in a category not shared with this workspace member and cannot be merged.`,
+						);
+					}
 				}
 
 				// Schema-validated literal union — no runtime re-check needed.

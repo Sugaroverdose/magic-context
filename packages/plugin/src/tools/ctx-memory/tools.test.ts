@@ -582,6 +582,77 @@ describe("createCtxMemoryTools", () => {
         expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
     });
 
+    it("REFUSES a DREAMER merge of a foreign NON-shared-category memory INSIDE a workspace (D1)", async () => {
+        // The dreamer keeps cross-project merge OUTSIDE a workspace (#5971), but
+        // INSIDE a workspace the per-category sharing policy is the user's explicit
+        // privacy boundary the dreamer must honor too.
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const own = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE",
+            content: "Own architecture detail D1.",
+        });
+        const foreignHidden = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "ARCHITECTURE", // foreign, NON-shared category
+            content: "Foreign architecture not shared with this workspace member.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "merge",
+                ids: [own.id, foreignHidden.id],
+                content: "Merged architecture detail D1.",
+                category: "ARCHITECTURE",
+            },
+            toolContext("ses-dreamer", DREAMER_AGENT),
+        );
+
+        expect(result).toContain("not shared with this workspace member");
+        expect(getMemoryById(db, own.id)?.status).toBe("active");
+        expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+    });
+
+    it("ALLOWS a DREAMER merge of a foreign SHARED-category memory INSIDE a workspace (D1)", async () => {
+        db.exec(`
+                INSERT INTO workspaces (id, name, created_at, updated_at, share_categories)
+                VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+                INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+                VALUES (1, '/repo/project', 'Own', '/repo/project', 1),
+                       (1, '/repo/foreign', 'Foreign', '/repo/foreign', 1);
+            `);
+        const own = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "CONSTRAINTS",
+            content: "Own constraint D1.",
+        });
+        const foreignShared = insertMemory(db, {
+            projectPath: "/repo/foreign",
+            category: "CONSTRAINTS", // shared
+            content: "Foreign constraint shared with the workspace.",
+        });
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "merge",
+                ids: [own.id, foreignShared.id],
+                content: "Merged shared constraint D1.",
+                category: "CONSTRAINTS",
+            },
+            toolContext("ses-dreamer", DREAMER_AGENT),
+        );
+
+        expect(result).not.toContain("not shared");
+        expect(getMemoryById(db, own.id)?.status).toBe("archived");
+        expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+    });
+
     describe("#given update action", () => {
         it("updates a foreign workspace memory with duplicate checks and mutations under the target identity", async () => {
             db.exec(`

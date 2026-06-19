@@ -54,12 +54,20 @@ path that seldom runs and whose bias is already the desired one. Accepted.
 held to the same visibility gate as `update`/`archive`: every source memory must
 pass `memoryVisibleToTool` (own project in any category, or a foreign workspace
 member only in a shared category). A primary agent cannot consolidate a memory it
-cannot see. The **dreamer** keeps the unrestricted cross-identity path — its merge
-loop supersedes each source under **its own** project identity and queues a
-per-project supersede-delta row, so every affected project's m[1] reconciles
+cannot see. The **dreamer** keeps the cross-identity path **outside a workspace** —
+its merge loop supersedes each source under **its own** project identity and queues
+a per-project supersede-delta row, so every affected project's m[1] reconciles
 (see the "merging across identities" test). The gate is the same one
 update/archive use; do not weaken `merge` back to a bare project-ownership check —
 that reintroduces the foreign-non-shared-category mutation hole.
+
+**Workspace refinement (D1):** *inside* a workspace, the dreamer ALSO honors the
+per-category sharing policy — a foreign member's memory in a non-shared category is
+off-limits even to the dreamer, because the policy is the user's explicit privacy
+boundary that the system's own consolidation worker must respect. Outside a
+workspace the dreamer's cross-project power is unchanged (#5971). The gate is
+`agent === DREAMER && workspaceIdentitySet.identities.length > 1 →
+memoryVisibleToTool(source)`. Mirrored in Pi `ctx-memory.ts`.
 
 ### A5. Re-observing a fact does not revive an archived memory
 
