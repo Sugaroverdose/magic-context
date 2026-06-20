@@ -1,14 +1,16 @@
 import type { Plugin } from "@opencode-ai/plugin";
+// DREAMER_AGENT + DREAMER_ALLOWED_TOOLS + HISTORIAN_ALLOWED_TOOLS are imported
+// ONLY for the config-start diagnostic that logs their typeof — agent
+// registration itself no longer depends on these module-level consts (it uses
+// inline literals via buildHiddenAgentRegistrations). Remove once the Desktop
+// boot-storm partial-eval question is closed.
 import { DREAMER_AGENT } from "./agents/dreamer";
-import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
     applyDisallowedTools,
     buildAllowOnlyPermission,
     DREAMER_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
-    SIDEKICK_ALLOWED_TOOLS,
 } from "./agents/permissions";
-import { SIDEKICK_AGENT } from "./agents/sidekick";
 import { loadPluginConfig } from "./config";
 import { isDreamerRunnable } from "./config/agent-disable";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
@@ -44,16 +46,117 @@ import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
-// Hard tool-iteration caps for the hidden agents (loop insurance — see
-// buildHiddenAgentConfig). Sized to bound a runaway weak-model tool loop
-// without truncating legitimate work: the historian/sidekick do a handful of
-// tool calls at most; the dreamer is a real multi-step maintenance loop.
-const HISTORIAN_MAX_STEPS = 40;
-const SIDEKICK_MAX_STEPS = 40;
-const DREAMER_MAX_STEPS = 150;
-
+// Clamp a user-provided step override to the hidden-agent's built-in cap (loop
+// insurance — see buildHiddenAgentConfig). Caps live as inline literals in
+// buildHiddenAgentRegistrations (historian/sidekick=40, dreamer=150): a handful
+// of tool calls for the historian/sidekick, a real multi-step maintenance loop
+// for the dreamer.
 function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
     return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
+}
+
+/**
+ * Static registration data for one hidden agent. The id / allow-list / step cap
+ * are INLINE LITERALS sourced from {@link buildHiddenAgentRegistrations} (a
+ * hoisted function declaration) rather than cross-module `const` imports.
+ *
+ * # Why inline, not imported consts
+ *
+ * OpenCode Desktop cold-boots a SEPARATE plugin instance per project/worktree
+ * concurrently. During that boot storm the `config` hook can be driven against
+ * a not-fully-initialized module: in the flattened bundle, the FUNCTIONS we
+ * call (`buildHiddenAgentConfig`, `buildAllowOnlyPermission`,
+ * `applyDisallowedTools`) are hoisted function declarations and are always
+ * callable, but module-level `var X = "dreamer"` / `var Y = [...]` assignments
+ * (the agent ids, tool arrays, step caps) can still read `undefined` if their
+ * initializer hasn't run yet. That produced 24 "allow-list UNDEFINED" hits in a
+ * 14s window across 6 instances × 4 agents — and, before the guard, a hard
+ * `undefined is not an object (evaluating 'allowedTools')` that failed the WHOLE
+ * plugin load (no transform → unbounded context growth). A hoisted function
+ * returning fresh inline literals cannot observe that init-order window.
+ *
+ * The only value that genuinely cannot be inlined is the multi-KB generated
+ * system prompt; it stays a module `var` and is guarded at the call site (skip
+ * the agent + log if undefined, never register a broken/deny-all agent).
+ *
+ * `agent-registration-drift.test.ts` asserts the inline literals here stay
+ * byte-identical to the canonical exported constants so they can't silently
+ * diverge.
+ */
+interface HiddenAgentRegistration {
+    id: string;
+    prompt: string | undefined;
+    allowedTools: readonly string[];
+    maxSteps: number;
+    overrides?: Record<string, unknown>;
+}
+
+/**
+ * Hoisted function declaration: returns the four hidden-agent registrations with
+ * INLINE id / allow-list / step-cap literals (see {@link HiddenAgentRegistration}
+ * for why these must not come from module-level `var` consts). Prompts and
+ * computed overrides are passed in by the caller; the historian disallow filter
+ * is applied here against an inline default allow-list.
+ */
+export function buildHiddenAgentRegistrations(args: {
+    dreamerPrompt: string | undefined;
+    historianPrompt: string | undefined;
+    historianEditorPrompt: string | undefined;
+    sidekickPrompt: string | undefined;
+    dreamerOverrides?: Record<string, unknown>;
+    historianOverrides?: Record<string, unknown>;
+    sidekickOverrides?: Record<string, unknown>;
+    historianDisallowed: readonly string[];
+}): HiddenAgentRegistration[] {
+    const historianAllowedTools = applyDisallowedTools(
+        ["read", "aft_outline", "aft_zoom", "aft_search"],
+        args.historianDisallowed,
+    );
+    return [
+        {
+            id: "dreamer",
+            prompt: args.dreamerPrompt,
+            allowedTools: [
+                "read",
+                "grep",
+                "glob",
+                "bash",
+                "write",
+                "edit",
+                "aft_outline",
+                "aft_zoom",
+                "aft_search",
+                "ctx_memory",
+                "ctx_search",
+                "ctx_note",
+            ],
+            // The dreamer is a genuine multi-step maintenance loop (~60-72 model
+            // turns observed), so it needs a high cap.
+            maxSteps: 150,
+            overrides: args.dreamerOverrides,
+        },
+        {
+            id: "historian",
+            prompt: args.historianPrompt,
+            allowedTools: historianAllowedTools,
+            maxSteps: 40,
+            overrides: args.historianOverrides,
+        },
+        {
+            id: "historian-editor",
+            prompt: args.historianEditorPrompt,
+            allowedTools: historianAllowedTools,
+            maxSteps: 40,
+            overrides: args.historianOverrides,
+        },
+        {
+            id: "sidekick",
+            prompt: args.sidekickPrompt,
+            allowedTools: ["ctx_search", "aft_outline", "aft_zoom"],
+            maxSteps: 40,
+            overrides: args.sidekickOverrides,
+        },
+    ];
 }
 
 /**
@@ -555,54 +658,67 @@ const plugin: Plugin = async (ctx) => {
                           return agentOverrides;
                       })()
                     : undefined;
-                // Apply disallowed_tools to the default allow-list. "*" removes all.
-                const historianDisallowed = pluginConfig.historian?.disallowed_tools ?? [];
-                const historianAllowedTools = applyDisallowedTools(
-                    HISTORIAN_ALLOWED_TOOLS,
-                    historianDisallowed,
+                // Diagnostic (Desktop multi-instance boot-storm investigation):
+                // prove/disprove whether the imported top-level agent consts read
+                // `undefined` at config-hook time on a concurrent per-directory
+                // cold boot. Hoisted-function registration (below) no longer
+                // DEPENDS on these, but logging their typeof here pins the cause.
+                log(
+                    `[magic-context] config-start url=${import.meta.url} dir=${ctx.directory} consts=${JSON.stringify(
+                        {
+                            DREAMER_AGENT: typeof DREAMER_AGENT,
+                            DREAMER_ALLOWED_TOOLS: Array.isArray(DREAMER_ALLOWED_TOOLS)
+                                ? DREAMER_ALLOWED_TOOLS.length
+                                : typeof DREAMER_ALLOWED_TOOLS,
+                            DREAMER_SYSTEM_PROMPT: typeof DREAMER_SYSTEM_PROMPT,
+                            HISTORIAN_ALLOWED_TOOLS: Array.isArray(HISTORIAN_ALLOWED_TOOLS)
+                                ? HISTORIAN_ALLOWED_TOOLS.length
+                                : typeof HISTORIAN_ALLOWED_TOOLS,
+                        },
+                    )}`,
                 );
 
-                config.agent = {
-                    ...(config.agent ?? {}),
-                    [DREAMER_AGENT]: buildHiddenAgentConfig(
-                        DREAMER_SYSTEM_PROMPT,
-                        DREAMER_ALLOWED_TOOLS,
-                        // The dreamer is a genuine multi-step maintenance loop
-                        // (consolidate / verify / archive-stale / improve /
-                        // maintain-docs, ~60-72 model turns observed), so it needs a
-                        // high cap — just high enough to bound a runaway, not low
-                        // enough to truncate legitimate work.
-                        DREAMER_MAX_STEPS,
-                        dreamerAgentOverrides,
-                        DREAMER_AGENT,
-                    ),
-                    [HISTORIAN_AGENT]: buildHiddenAgentConfig(
-                        // v2: the v8.7.3 historian prompt always describes the
-                        // <user_observations> output; observations are simply not
-                        // promoted to user-profile when user_memories is disabled
-                        // (gated in the runner). Keeping the system prompt constant
-                        // preserves prompt-cache byte stability.
-                        COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                        historianAllowedTools,
-                        HISTORIAN_MAX_STEPS,
-                        historianAgentOverrides,
-                        HISTORIAN_AGENT,
-                    ),
-                    [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
-                        HISTORIAN_EDITOR_SYSTEM_PROMPT,
-                        historianAllowedTools,
-                        HISTORIAN_MAX_STEPS,
-                        historianAgentOverrides,
-                        HISTORIAN_EDITOR_AGENT,
-                    ),
-                    [SIDEKICK_AGENT]: buildHiddenAgentConfig(
-                        SIDEKICK_SYSTEM_PROMPT,
-                        SIDEKICK_ALLOWED_TOOLS,
-                        SIDEKICK_MAX_STEPS,
-                        sidekickAgentOverrides,
-                        SIDEKICK_AGENT,
-                    ),
-                };
+                // Build the hidden-agent registrations from a HOISTED FUNCTION with
+                // inline literals — robust to the per-directory boot storm that can
+                // leave module-level `var` consts undefined (see
+                // buildHiddenAgentRegistrations docs). Each agent is guarded on its
+                // prompt (the one value that cannot be inlined): if a prompt is
+                // somehow undefined at this instant, SKIP that agent and log, rather
+                // than register a broken/deny-all agent. A later complete config
+                // pass re-registers it.
+                const registrations = buildHiddenAgentRegistrations({
+                    dreamerPrompt: DREAMER_SYSTEM_PROMPT,
+                    // v2: the v8.7.3 historian prompt always describes the
+                    // <user_observations> output; observations are simply not
+                    // promoted to user-profile when user_memories is disabled
+                    // (gated in the runner). Keeping the system prompt constant
+                    // preserves prompt-cache byte stability.
+                    historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                    historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                    sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
+                    dreamerOverrides: dreamerAgentOverrides,
+                    historianOverrides: historianAgentOverrides,
+                    sidekickOverrides: sidekickAgentOverrides,
+                    historianDisallowed: pluginConfig.historian?.disallowed_tools ?? [],
+                });
+
+                const agentConfig = { ...(config.agent ?? {}) } as NonNullable<typeof config.agent>;
+                for (const reg of registrations) {
+                    if (typeof reg.prompt !== "string" || reg.prompt.length === 0) {
+                        log(
+                            `[magic-context] skipping hidden agent '${reg.id}' — prompt unavailable at config time (dir=${ctx.directory}); will re-register on a later complete pass`,
+                        );
+                        continue;
+                    }
+                    agentConfig[reg.id] = buildHiddenAgentConfig(
+                        reg.prompt,
+                        reg.allowedTools,
+                        reg.maxSteps,
+                        reg.overrides,
+                        reg.id,
+                    );
+                }
+                config.agent = agentConfig;
             } catch (error) {
                 // A failure registering commands/agents must NEVER fail the whole
                 // plugin load — that would also disable the transform/compaction
