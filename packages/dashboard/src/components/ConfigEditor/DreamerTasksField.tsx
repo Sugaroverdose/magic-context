@@ -47,6 +47,11 @@ const TASKS: TaskMeta[] = [
     defaultSchedule: "0 4 * * 0",
   },
   {
+    name: "classify-memories",
+    description: "Scores memory importance, scope, and shareability",
+    defaultSchedule: "0 6 * * *",
+  },
+  {
     name: "maintain-docs",
     description: "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
     defaultSchedule: "",

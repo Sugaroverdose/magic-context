@@ -168,6 +168,7 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 - **Verify**: incrementally check memories against the current codebase (paths, configs, patterns) and fix/remove stale facts.
 - **Curate**: scan the whole memory pool to merge duplicates, tighten wording, and archive low-value or redundant entries.
+- **Classify**: score each memory's importance, scope, and safe shareability without disturbing the live prompt cache.
 - **Maintain docs**: keep `ARCHITECTURE.md` and `STRUCTURE.md` current from codebase changes.
 - **User memories**: promote recurring observations about how you work (communication style, review focus, working patterns) into a `<user-profile>` that travels with every session.
 - **Smart notes**: evaluate deferred notes whose `surface_condition` has come true and surface the ready ones.

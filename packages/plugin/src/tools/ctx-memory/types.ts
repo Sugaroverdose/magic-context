@@ -6,11 +6,16 @@ import type { Database } from "../../shared/sqlite";
 // can target a specific memory to archive/update/merge in-session without
 // waiting for the dreamer. `archive` is the single soft-remove action (sets
 // status='archived'); the former `delete` action was an exact alias of it and
-// was removed. Only `list` (bulk enumeration — large output, and unnecessary
-// since active memories are already in context) stays dreamer-only.
+// was removed. `list` (bulk enumeration), `verified` (backing-file side table),
+// and `classify` (dreamer metadata scoring) stay dreamer-only.
 export const CTX_MEMORY_ACTIONS = ["write", "archive", "update", "merge"] as const;
 
-export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list", "verified"] as const;
+export const CTX_MEMORY_DREAMER_ACTIONS = [
+    ...CTX_MEMORY_ACTIONS,
+    "list",
+    "verified",
+    "classify",
+] as const;
 
 export type CtxMemoryAction = (typeof CTX_MEMORY_DREAMER_ACTIONS)[number];
 
@@ -30,6 +35,10 @@ export interface CtxMemoryArgs {
     files?: string[];
     /** COMPLETE backing-file set to record while updating/archiving a memory. */
     verified_files?: string[];
+    /** Classification fields for dreamer-only action='classify'. */
+    importance?: number;
+    scope?: "project" | "ecosystem" | "universe";
+    shareable?: boolean;
 }
 
 export interface CtxMemoryToolDeps {

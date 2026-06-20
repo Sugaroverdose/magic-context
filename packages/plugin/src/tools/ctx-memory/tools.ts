@@ -10,8 +10,10 @@ import {
     insertMemory,
     type Memory,
     type MemoryCategory,
+    type MemoryScope,
     mergeMemoryStats,
     saveEmbedding,
+    setMemoryClassification,
     supersededMemory,
     updateMemorySeenCount,
     V2_MEMORY_CATEGORIES,
@@ -35,6 +37,7 @@ import {
     storedPathBelongsToWorkspace,
 } from "../../features/magic-context/workspaces";
 import { sessionLog } from "../../shared/logger";
+import { hasShareabilitySensitiveText } from "../../shared/redaction";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
     CTX_MEMORY_ACTIONS,
@@ -50,6 +53,7 @@ import {
 } from "./verification-recording";
 
 const MEMORY_CATEGORIES = new Set<string>(CATEGORY_PRIORITY);
+const CLASSIFY_SCOPES: readonly MemoryScope[] = ["project", "ecosystem", "universe"];
 
 function isMemoryCategory(value: string): value is MemoryCategory {
     return MEMORY_CATEGORIES.has(value);
@@ -252,7 +256,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // schema visible to the runtime and enforce primary-session safety below.
             action: tool.schema
                 .enum([...CTX_MEMORY_DREAMER_ACTIONS])
-                .describe("What to do: write, update, archive, merge, list, or verified"),
+                .describe("What to do: write, update, archive, merge, list, verified, or classify"),
             content: tool.schema
                 .string()
                 .optional()
@@ -288,6 +292,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 .describe(
                     "update/archive: COMPLETE backing-file set to record with the mutation; [] records a file-independent memory",
                 ),
+            importance: tool.schema
+                .number()
+                .optional()
+                .describe("classify: durable importance score (clamped 1-100)"),
+            scope: tool.schema
+                .enum(["project", "ecosystem", "universe"])
+                .optional()
+                .describe("classify: memory scope"),
+            shareable: tool.schema
+                .boolean()
+                .optional()
+                .describe("classify: whether this memory is safe to share with a team"),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
             // Sidekick consumes untrusted `/ctx-aug` prompt text and is retrieval-only;
@@ -456,6 +472,50 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     memory_ids: memoryIds,
                     ...(plan.warnings.length ? { warnings: plan.warnings } : {}),
                 });
+            }
+
+            if (args.action === "classify") {
+                const ids = args.ids;
+                if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
+                    return "Error: 'ids' must contain at least one integer memory ID when action is 'classify'.";
+                }
+                if (
+                    args.importance === undefined &&
+                    args.scope === undefined &&
+                    args.shareable === undefined
+                ) {
+                    return "Error: At least one of 'importance', 'scope', or 'shareable' is required when action is 'classify'.";
+                }
+                const importance =
+                    args.importance === undefined
+                        ? undefined
+                        : Math.max(1, Math.min(100, Math.round(args.importance)));
+                const scope = args.scope as MemoryScope | undefined;
+                if (scope !== undefined && !CLASSIFY_SCOPES.includes(scope)) {
+                    return `Error: Unknown memory scope '${String(args.scope)}'.`;
+                }
+                const memoryIds = [...new Set(ids)];
+                let classified = 0;
+                for (const memoryId of memoryIds) {
+                    const memory = getMemoryById(deps.db, memoryId);
+                    if (!memory || !memoryBelongsToProject(memory, projectPath)) {
+                        return `Error: Memory with ID ${memoryId} was not found.`;
+                    }
+                    const shareable =
+                        args.shareable === true && hasShareabilitySensitiveText(memory.content)
+                            ? false
+                            : args.shareable;
+                    if (
+                        setMemoryClassification(deps.db, memory.id, {
+                            importance,
+                            scope,
+                            shareable,
+                        })
+                    ) {
+                        classified += 1;
+                    }
+                }
+                return JSON.stringify({ classified });
             }
 
             if (args.action === "update") {

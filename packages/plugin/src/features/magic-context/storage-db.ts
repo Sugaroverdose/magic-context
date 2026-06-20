@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 43;
+export const LATEST_SUPPORTED_VERSION = 44;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -498,6 +498,8 @@ export function initializeDatabase(db: Database): void {
       content TEXT NOT NULL,
       normalized_hash TEXT NOT NULL,
       importance INTEGER,
+      scope TEXT NOT NULL DEFAULT 'project',
+      shareable INTEGER NOT NULL DEFAULT 0,
       source_session_id TEXT,
       source_type TEXT DEFAULT 'historian',
       seen_count INTEGER DEFAULT 1,

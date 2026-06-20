@@ -47,13 +47,15 @@ describe("migrateDreamerV2", () => {
     });
 
     it("listed tasks get the base cron; OMITTED canonical tasks are DISABLED", () => {
-        // Deliberate selection: only consolidate + verify. The others must be "".
+        // Deliberate selection: only consolidate + verify. Legacy canonical tasks are disabled;
+        // the new classify task defaults on daily because it did not exist in v1.
         const { out } = migrate({
             dreamer: { schedule: "03:30-06:00", tasks: ["consolidate", "verify"] },
         });
         const t = tasks(out);
         expect(t.verify.schedule).toBe("30 3 * * *");
         expect(t.curate.schedule).toBe("30 3 * * *");
+        expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
@@ -64,6 +66,7 @@ describe("migrateDreamerV2", () => {
         expect(t.verify.broad_interval_days).toBe(7);
         expect(t.curate.schedule).toBe("0 2 * * *");
         expect(t.curate.broad_interval_days).toBeUndefined();
+        expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t["maintain-docs"].schedule).toBe(""); // not in v1 default list
     });
 
@@ -113,6 +116,14 @@ describe("migrateDreamerV2", () => {
         expect(tasks(out)["evaluate-smart-notes"].schedule).toBe("0 2 * * *");
     });
 
+    it("new classify-memories task defaults on daily unless dreamer is disabled", () => {
+        const { out } = migrate({ dreamer: { schedule: "02:00-06:00", tasks: [] } });
+        expect(tasks(out)["classify-memories"].schedule).toBe("0 6 * * *");
+
+        const disabled = migrate({ dreamer: { disable: true, schedule: "02:00-06:00" } });
+        expect(tasks(disabled.out)["classify-memories"].schedule).toBe("");
+    });
+
     it("task_timeout_minutes becomes each task's timeout_minutes", () => {
         const { out } = migrate({
             dreamer: { schedule: "02:00-06:00", task_timeout_minutes: 15 },
@@ -151,10 +162,11 @@ describe("migrateDreamerV2", () => {
         expect(warnings.join("\n")).toContain("dreamer.tasks");
     });
 
-    it("all 6 canonical tasks are present after migration", () => {
+    it("all 7 canonical tasks are present after migration", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         expect(Object.keys(tasks(out)).sort()).toEqual(
             [
+                "classify-memories",
                 "curate",
                 "evaluate-smart-notes",
                 "key-files",
@@ -179,6 +191,7 @@ describe("migrateDreamerV2", () => {
         expect(t.verify.schedule).toBe("0 3 * * *");
         expect(t.verify.broad_interval_days).toBe(7);
         expect(t.curate.schedule).toBe("0 * * * *");
+        expect(t["classify-memories"].schedule).toBe("0 6 * * *");
         expect(t["maintain-docs"].schedule).toBe("0 4 * * *");
         expect(t.improve).toBeUndefined();
     });

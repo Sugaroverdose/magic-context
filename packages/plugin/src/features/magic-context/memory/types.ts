@@ -20,6 +20,7 @@ export type MemoryCategory =
     | "KNOWN_ISSUES";
 
 export type MemoryStatus = "active" | "permanent" | "archived";
+export type MemoryScope = "project" | "ecosystem" | "universe";
 export type VerificationStatus = "unverified" | "verified" | "stale" | "flagged";
 export type MemorySourceType = "historian" | "agent" | "dreamer" | "user";
 
@@ -30,6 +31,9 @@ export interface Memory {
     content: string;
     normalizedHash: string;
     importance: number;
+    scope: MemoryScope;
+    /** SQLite INTEGER boolean: 1 = shareable, 0 = private. */
+    shareable: number;
     sourceSessionId: string | null;
     sourceType: MemorySourceType;
     seenCount: number;

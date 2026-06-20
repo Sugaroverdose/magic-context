@@ -13,6 +13,7 @@
  *  Dreamer-only (gated on `allowDreamerActions: true`):
  *    - list: list active memories for the current project
  *    - verified: record COMPLETE backing-file sets in the side table
+ *    - classify: write importance/scope/shareable columns without cache-visible mutation logs
  *
  * Allowlist gating mirrors OpenCode's `allowedActions` deps field. In OpenCode,
  * the dreamer subagent gets the full action surface because `toolContext.agent
@@ -40,8 +41,10 @@ import {
 	insertMemory,
 	type Memory,
 	type MemoryCategory,
+	type MemoryScope,
 	mergeMemoryStats,
 	saveEmbedding,
+	setMemoryClassification,
 	supersededMemory,
 	updateMemoryContent,
 	updateMemorySeenCount,
@@ -70,6 +73,7 @@ import {
 	storedPathBelongsToWorkspace,
 } from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
+import { hasShareabilitySensitiveText } from "@magic-context/core/shared/redaction";
 import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
 import {
 	prepareMemoryVerificationRecording,
@@ -84,7 +88,8 @@ const DEFAULT_LIST_LIMIT = 10;
 // exact alias of `archive` (both soft-archive); `archive` is the single
 // soft-remove action. Primary agents get write/archive/update/merge on the
 // memories they already see (with ids) in the injected project-memory block;
-// only `list` (bulk enumeration) stays dreamer-only.
+// `list` (bulk enumeration), `verified` (backing-file side table), and
+// `classify` (dreamer metadata scoring) stay dreamer-only.
 const ALL_ACTIONS = [
 	"write",
 	"archive",
@@ -92,18 +97,28 @@ const ALL_ACTIONS = [
 	"merge",
 	"list",
 	"verified",
+	"classify",
 ] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
 const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set([
 	"list",
 	"verified",
+	"classify",
 ]);
+const CLASSIFY_SCOPES: readonly MemoryScope[] = [
+	"project",
+	"ecosystem",
+	"universe",
+];
 
 const ParamsSchema = Type.Object({
 	action: Type.Union(
 		ALL_ACTIONS.map((a) => Type.Literal(a)),
-		{ description: "What to do: write, update, archive, or merge" },
+		{
+			description:
+				"What to do: write, update, archive, merge, list, verified, or classify",
+		},
 	),
 	content: Type.Optional(
 		Type.String({
@@ -146,6 +161,26 @@ const ParamsSchema = Type.Object({
 		Type.Array(Type.String(), {
 			description:
 				"update/archive: COMPLETE backing-file set to record with the mutation; [] records a file-independent memory",
+		}),
+	),
+	importance: Type.Optional(
+		Type.Number({
+			description: "classify: durable importance score (clamped 1-100)",
+		}),
+	),
+	scope: Type.Optional(
+		Type.Union(
+			[
+				Type.Literal("project"),
+				Type.Literal("ecosystem"),
+				Type.Literal("universe"),
+			],
+			{ description: "classify: memory scope" },
+		),
+	),
+	shareable: Type.Optional(
+		Type.Boolean({
+			description: "classify: whether this memory is safe to share with a team",
 		}),
 	),
 });
@@ -280,7 +315,7 @@ export function createCtxMemoryTool(
 ): ToolDefinition<typeof ParamsSchema> {
 	const dreamerAllowed = deps.allowDreamerActions === true;
 	const description = dreamerAllowed
-		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).`
+		? `${CTX_MEMORY_DESCRIPTION}\n- list: enumerate stored memories (maintenance sessions).\n- verified: record COMPLETE backing-file sets.\n- classify: set importance/scope/shareable without mutating cached prompt state.`
 		: CTX_MEMORY_DESCRIPTION;
 
 	return {
@@ -468,6 +503,58 @@ export function createCtxMemoryTool(
 						...(plan.warnings.length ? { warnings: plan.warnings } : {}),
 					}),
 				);
+			}
+
+			if (params.action === "classify") {
+				const ids = params.ids;
+				if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
+					return err(
+						"Error: 'ids' must contain at least one integer memory ID when action is 'classify'.",
+					);
+				}
+				if (
+					params.importance === undefined &&
+					params.scope === undefined &&
+					params.shareable === undefined
+				) {
+					return err(
+						"Error: At least one of 'importance', 'scope', or 'shareable' is required when action is 'classify'.",
+					);
+				}
+				const importance =
+					params.importance === undefined
+						? undefined
+						: Math.max(1, Math.min(100, Math.round(params.importance)));
+				const scope = params.scope as MemoryScope | undefined;
+				if (scope !== undefined && !CLASSIFY_SCOPES.includes(scope)) {
+					return err(`Error: Unknown memory scope '${String(params.scope)}'.`);
+				}
+				const memoryIds = [...new Set(ids)];
+				let classified = 0;
+				for (const memoryId of memoryIds) {
+					const memory = getMemoryById(deps.db, memoryId);
+					if (
+						!memory ||
+						!storedPathBelongsToIdentity(memory.projectPath, projectIdentity)
+					) {
+						return err(`Error: Memory with ID ${memoryId} was not found.`);
+					}
+					const shareable =
+						params.shareable === true &&
+						hasShareabilitySensitiveText(memory.content)
+							? false
+							: params.shareable;
+					if (
+						setMemoryClassification(deps.db, memory.id, {
+							importance,
+							scope,
+							shareable,
+						})
+					) {
+						classified += 1;
+					}
+				}
+				return ok(JSON.stringify({ classified }));
 			}
 
 			if (params.action === "update") {

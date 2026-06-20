@@ -1586,6 +1586,15 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 44,
+        description: "memory classification scope and shareability columns",
+        up: (db: Database) => {
+            if (!tableExists(db, "memories")) return;
+            ensureColumn(db, "memories", "scope", "TEXT NOT NULL DEFAULT 'project'");
+            ensureColumn(db, "memories", "shareable", "INTEGER NOT NULL DEFAULT 0");
+        },
+    },
 ];
 
 /**

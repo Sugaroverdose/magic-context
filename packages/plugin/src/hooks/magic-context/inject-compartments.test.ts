@@ -5,7 +5,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
-import { insertMemory } from "../../features/magic-context/memory/storage-memory";
+import {
+    getMemoriesByProject,
+    insertMemory,
+    setMemoryClassification,
+} from "../../features/magic-context/memory/storage-memory";
 import {
     bumpSessionFactsVersion,
     getOrCreateSessionMeta,
@@ -25,6 +29,7 @@ import {
     mustMaterialize,
     prepareCompartmentInjection,
     renderCompartmentInjection,
+    trimMemoriesToBudgetV2,
 } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 
@@ -701,6 +706,101 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(second[0])).toContain("Updated architecture");
         expect(renderedText(second[0])).toContain("Fresh docs folded on hard bust.");
         expect(renderedText(second[0])).not.toContain("Old architecture");
+    });
+
+    it("classify writes stay cache-neutral until the next natural HARD materialization", () => {
+        db = makeDb();
+        const high = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "PROJECT_RULES",
+            content: "HIGH_PRIORITY_MEMORY: Always run focused tests before shipping.",
+            importance: 90,
+        });
+        const low = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "PROJECT_RULES",
+            content: "LOW_PRIORITY_MEMORY: Use lint alias.",
+            importance: 10,
+        });
+
+        let budget = 1;
+        while (
+            !(() => {
+                const selected = trimMemoriesToBudgetV2(
+                    SESSION_ID,
+                    getMemoriesByProject(db, PROJECT_PATH),
+                    budget,
+                ).selected;
+                return selected.length === 1 && selected[0]?.id === high.id;
+            })() &&
+            budget < 500
+        ) {
+            budget += 1;
+        }
+        expect(budget).toBeLessThan(500);
+
+        const state = readStateFromMeta();
+        const hardV1 = {
+            systemHash: "sys-v1",
+            modelKey: "model-v1",
+            cacheExpired: false,
+            lastResponseTime: 0,
+        };
+        const first = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: first,
+            state,
+            projectPath: PROJECT_PATH,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: hardV1,
+        });
+        const initialM0 = renderedText(first[0]);
+        const initialM1 = renderedText(first[1]);
+        expect(initialM0).toContain("HIGH_PRIORITY_MEMORY");
+        expect(initialM0).not.toContain("LOW_PRIORITY_MEMORY");
+
+        expect(setMemoryClassification(db, high.id, { importance: 1 })).toBe(true);
+        expect(setMemoryClassification(db, low.id, { importance: 100 })).toBe(true);
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                hardSignals: hardV1,
+            }),
+        ).toEqual({ value: false, reason: null });
+
+        const second = [userMessage("m2", "after classify defer")];
+        const soft = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: second,
+            state,
+            projectPath: PROJECT_PATH,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: hardV1,
+        });
+        expect(soft.m0RematerializedThisPass).toBe(false);
+        expect(renderedText(second[0])).toBe(initialM0);
+        expect(renderedText(second[1])).toBe(initialM1);
+
+        const third = [userMessage("m3", "natural hard bust")];
+        const hard = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: third,
+            state,
+            projectPath: PROJECT_PATH,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: { ...hardV1, systemHash: "sys-v2" },
+        });
+        expect(hard.m0RematerializedThisPass).toBe(true);
+        expect(renderedText(third[0])).toContain('importance="100"');
+        expect(renderedText(third[0])).toContain("LOW_PRIORITY_MEMORY");
+        expect(renderedText(third[0])).not.toContain("HIGH_PRIORITY_MEMORY");
     });
 
     it("v2: a session facts version bump does NOT trigger re-materialization", () => {

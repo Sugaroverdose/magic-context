@@ -35,6 +35,9 @@ function createTestDb(): Database {
             category                TEXT    NOT NULL,
             content                 TEXT    NOT NULL,
             normalized_hash         TEXT    NOT NULL,
+            importance              INTEGER NOT NULL DEFAULT 50,
+            scope                   TEXT    NOT NULL DEFAULT 'project',
+            shareable               INTEGER NOT NULL DEFAULT 0,
             source_session_id       TEXT,
             source_type             TEXT    DEFAULT 'historian',
             seen_count              INTEGER DEFAULT 1,
@@ -1361,7 +1364,7 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given restricted actions", () => {
-        // Primary set = write/archive/update/merge. Only `list` is dreamer-only.
+        // Primary set = write/archive/update/merge. list/verified/classify are dreamer-only.
         const PRIMARY_ACTIONS = ["write", "archive", "update", "merge"] as const;
 
         it("rejects sidekick ctx_memory calls even if the tool is exposed", async () => {
@@ -1394,6 +1397,7 @@ describe("createCtxMemoryTools", () => {
             // The shared schema must still accept `list` (the runtime gate, not
             // the schema, blocks it for primary agents).
             expect(actionSchema.safeParse("list").success).toBe(true);
+            expect(actionSchema.safeParse("classify").success).toBe(true);
             expect(actionSchema.safeParse("merge").success).toBe(true);
         });
 
@@ -1454,6 +1458,141 @@ describe("createCtxMemoryTools", () => {
             );
 
             expect(result).toContain("Found 1 active memory");
+        });
+    });
+
+    describe("#given classify action", () => {
+        it("is dreamer-only and writes classification columns without mutation log or epoch bump", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Provider requests must include x-trace-id.",
+            });
+
+            const primary = await tools.ctx_memory.execute(
+                {
+                    action: "classify",
+                    ids: [memory.id],
+                    importance: 120,
+                    scope: "ecosystem",
+                    shareable: true,
+                },
+                toolContext("ses-primary", "general"),
+            );
+            expect(primary).toContain("not allowed");
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "classify",
+                    ids: [memory.id],
+                    importance: 120,
+                    scope: "ecosystem",
+                    shareable: true,
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(JSON.parse(result as string)).toEqual({ classified: 1 });
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                importance: 100,
+                scope: "ecosystem",
+                shareable: 1,
+            });
+            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toHaveLength(0);
+        });
+
+        it("is project-scoped and refuses workspace-visible foreign memories", async () => {
+            const foreign = insertMemory(db, {
+                projectPath: "/repo/other",
+                category: "PROJECT_RULES",
+                content: "Foreign project fact.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "classify", ids: [foreign.id], importance: 90 },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain(`Memory with ID ${foreign.id} was not found`);
+            expect(getMemoryById(db, foreign.id)?.importance).toBe(50);
+        });
+
+        it("fails closed on shareability-sensitive paths and skips no-op writes", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "PROJECT_RULES",
+                content: "Debug output lives under /Users/alice/private/repo/logs.",
+            });
+            db.exec(`
+                CREATE TABLE memory_update_audit (id INTEGER PRIMARY KEY AUTOINCREMENT);
+                CREATE TRIGGER memory_update_audit_trg AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memory_update_audit (id) VALUES (NULL);
+                END;
+            `);
+            db.prepare("UPDATE memories SET updated_at = 123 WHERE id = ?").run(memory.id);
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "classify",
+                    ids: [memory.id],
+                    importance: -5,
+                    scope: "universe",
+                    shareable: true,
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+            expect(JSON.parse(result as string)).toEqual({ classified: 1 });
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                importance: 1,
+                scope: "universe",
+                shareable: 0,
+            });
+            const beforeNoop = db
+                .prepare("SELECT COUNT(*) AS cnt FROM memory_update_audit")
+                .get() as {
+                cnt: number;
+            };
+
+            const noop = await tools.ctx_memory.execute(
+                {
+                    action: "classify",
+                    ids: [memory.id],
+                    importance: 1,
+                    scope: "universe",
+                    shareable: true,
+                },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+            expect(JSON.parse(noop as string)).toEqual({ classified: 0 });
+            const row = db
+                .prepare("SELECT updated_at FROM memories WHERE id = ?")
+                .get(memory.id) as {
+                updated_at: number;
+            };
+            expect(row.updated_at).toBe(123);
+            const afterNoop = db
+                .prepare("SELECT COUNT(*) AS cnt FROM memory_update_audit")
+                .get() as {
+                cnt: number;
+            };
+            expect(afterNoop.cnt).toBe(beforeNoop.cnt);
+            expect(getMutationRows(db, "/repo/project", [memory.id])).toHaveLength(0);
+        });
+
+        it("requires at least one classification field", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "PROJECT_RULES",
+                content: "Use focused tests for changed code.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "classify", ids: [memory.id] },
+                toolContext("ses-dreamer", DREAMER_AGENT),
+            );
+
+            expect(result).toContain("At least one of 'importance', 'scope', or 'shareable'");
         });
     });
 });

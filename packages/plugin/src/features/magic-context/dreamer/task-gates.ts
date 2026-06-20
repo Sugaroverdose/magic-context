@@ -61,6 +61,11 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             // taking the shared memory lease.
             return countActiveMemories(db, project) > 0;
 
+        case "classify-memories":
+            // Classification scores the active project memory pool directly. It has
+            // no file gate, watermark, or completeness prerequisites.
+            return countActiveMemories(db, project) > 0;
+
         case "maintain-docs":
             // New compartments since the last maintain-docs run. Never-run → any exist.
             return countCompartmentsSince(db, project, lastRunAt ?? 0) > 0;

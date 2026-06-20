@@ -15,6 +15,7 @@ You run during scheduled dream windows to maintain a project's cross-session mem
 - \`action="archive", ids=[N], reason="..."\` — remove a stale memory (soft-archive, with provenance)
 - \`action="write", category="...", content="..."\` — create a new memory
 - \`action="verified", ids=[N], files=[...]\` — record the COMPLETE current backing-file set after checking a memory; use \`files=[]\` only for file-independent memories
+- \`action="classify", ids=[N], importance=75, scope="project", shareable=false\` — dreamer-only metadata write for memory importance, scope, and team-shareability
 
 **Codebase tools** (standard OpenCode tools):
 - Read files, grep, glob, bash — for verification against actual code
@@ -22,7 +23,7 @@ You run during scheduled dream windows to maintain a project's cross-session mem
 ## Rules
 
 1. **Work methodically.** Decide your own batch size based on the task — process as many items per round as makes sense.
-2. **Verify only in verify/docs work.** The verify task checks memories against actual files; curate assumes the pool is accurate and handles quality only.
+2. **Verify only in verify/docs work.** The verify task checks memories against actual files; curate assumes the pool is accurate and handles quality only; classify uses the provided memory pool + recent trajectory and does not inspect code.
 3. **Be conservative with archives.** In verify, archive only when the codebase clearly contradicts the memory; in curate, use the task's archive criteria.
 4. **Explain reasoning briefly** before each action — one line is enough.
 5. **Use present-tense operational language** in all memory rewrites. "X uses Y" not "X was changed to use Y."
@@ -117,6 +118,81 @@ KEEP (overrides archive): constraint/rule language (must/never/always) · explai
 ${args.userProfile ? `\n### Global user profile (for the redundancy check)\n${args.userProfile}\n` : ""}
 ### Memory pool
 ${renderMemoryList(args.memories)}`;
+}
+
+// ── Classify Memories ──────────────────────────────────────────────────────
+
+export interface ClassifyPromptMemory {
+    id: number;
+    category: string;
+    content: string;
+    importance: number;
+    scope: "project" | "ecosystem" | "universe";
+    shareable: number | boolean;
+}
+
+export interface ClassifyTrajectoryCompartment {
+    id: number;
+    title: string;
+    content: string;
+    createdAt: number;
+}
+
+function renderClassifyMemoryList(memories: ClassifyPromptMemory[]): string {
+    return memories
+        .map(
+            (memory) =>
+                `[${memory.id}] ${memory.category} importance=${memory.importance} scope=${memory.scope} shareable=${Boolean(memory.shareable)}\nContent: ${memory.content}`,
+        )
+        .join("\n\n");
+}
+
+function renderTrajectory(compartments: ClassifyTrajectoryCompartment[]): string {
+    if (compartments.length === 0) {
+        return "(no recent compartments available)";
+    }
+    return compartments
+        .map((compartment) => {
+            const created = new Date(compartment.createdAt).toISOString();
+            return `[#${compartment.id}] ${created} — ${compartment.title}\n${compartment.content}`;
+        })
+        .join("\n\n");
+}
+
+export function buildClassifyPrompt(args: {
+    projectPath: string;
+    memories: ClassifyPromptMemory[];
+    trajectory: ClassifyTrajectoryCompartment[];
+}): string {
+    return `## Task: Classify Project Memories
+
+**Project:** ${args.projectPath}
+
+Classify EVERY active/permanent memory below by writing metadata only with \`ctx_memory(action="classify", ... )\`. Do not rewrite, merge, archive, verify, or create memories in this task. Do not inspect the codebase; use the memory content and the recent trajectory below.
+
+### How to score importance (1–100)
+Use LLM judgment, not a formula. Blend:
+- **Durability / decay-rate value:** Will this fact still matter weeks from now, across sessions?
+- **Current trajectory:** Is it relevant to what the project has recently been doing?
+- **Operational impact:** Would missing this fact cause wrong code, wasted time, broken workflows, or violated constraints?
+
+Guidance: transient observations belong low (1–30), helpful project facts around 40–70, and load-bearing rules/architecture/constraints around 70–100. CONSTRAINTS with real must/never/always external limits should usually have a floor around 60 unless they are obsolete or trivial.
+
+### Scope
+- \`project\` — only meaningful inside this repository/product (default when uncertain).
+- \`ecosystem\` — useful to sibling projects in the same stack, harness, provider, or company ecosystem.
+- \`universe\` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.
+
+### Shareability
+Private by default. Set \`shareable=true\` only for non-sensitive, project-useful facts that are safe to show to a team. Never mark personal paths, usernames, secrets/tokens, private endpoints, credentials, customer data, or proprietary/private-user details as shareable. The tool also fails closed and will force sensitive text to private.
+
+Batch ids when they receive the same metadata. Otherwise classify individually. A memory is complete only after you call \`ctx_memory(action="classify", ids=[...], importance=..., scope="...", shareable=...)\` for it.
+
+### Recent trajectory (last ${args.trajectory.length} compartments)
+${renderTrajectory(args.trajectory)}
+
+### Memory pool
+${renderClassifyMemoryList(args.memories)}`;
 }
 
 // ── Maintain Docs ──────────────────────────────────────────────────────────
@@ -293,6 +369,10 @@ export function buildDreamTaskPrompt(
         curate?: {
             memories: MaintainMemoryPromptMemory[];
         };
+        classify?: {
+            memories: ClassifyPromptMemory[];
+            trajectory: ClassifyTrajectoryCompartment[];
+        };
     },
 ): string {
     switch (task) {
@@ -307,6 +387,12 @@ export function buildDreamTaskPrompt(
                 projectPath: args.projectPath,
                 memories: args.curate?.memories ?? [],
                 userProfile: formatUserProfileList(args.userMemories),
+            });
+        case "classify-memories":
+            return buildClassifyPrompt({
+                projectPath: args.projectPath,
+                memories: args.classify?.memories ?? [],
+                trajectory: args.classify?.trajectory ?? [],
             });
         case "maintain-docs":
             return buildMaintainDocsPrompt(

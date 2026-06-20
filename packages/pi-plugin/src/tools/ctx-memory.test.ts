@@ -131,6 +131,92 @@ describe("createCtxMemoryTool", () => {
 		}
 	});
 
+	it("rejects classify for primary agents and column-only classifies for dreamer agents", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const projectIdentity = resolveProjectIdentity(process.cwd());
+			const memory = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "PROJECT_RULES",
+				content: "Logs are stored under /Users/alice/private/logs.",
+			});
+
+			const primaryResult = await primary.execute(
+				"call-primary",
+				{
+					action: "classify",
+					ids: [memory.id],
+					importance: 99,
+					scope: "universe",
+					shareable: true,
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			const dreamerResult = await dreamer.execute(
+				"call-dreamer",
+				{
+					action: "classify",
+					ids: [memory.id],
+					importance: 99,
+					scope: "universe",
+					shareable: true,
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(primaryResult.isError).toBe(true);
+			expect(dreamerResult.isError).toBeUndefined();
+			expect(JSON.parse(dreamerResult.content[0]?.text ?? "{}")).toEqual({
+				classified: 1,
+			});
+			expect(getMemoryById(db, memory.id)).toMatchObject({
+				importance: 99,
+				scope: "universe",
+				shareable: 0,
+			});
+			expect(
+				getMemoryMutationsForRender(db, projectIdentity, 0, [memory.id]),
+			).toHaveLength(0);
+
+			const foreign = insertMemory(db, {
+				projectPath: `${projectIdentity}:foreign`,
+				category: "PROJECT_RULES",
+				content: "Foreign project fact.",
+			});
+			const foreignResult = await dreamer.execute(
+				"call-foreign",
+				{ action: "classify", ids: [foreign.id], importance: 90 },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			expect(foreignResult.isError).toBe(true);
+			expect(foreignResult.content[0]?.text).toContain(
+				`Memory with ID ${foreign.id} was not found`,
+			);
+			expect(getMemoryById(db, foreign.id)?.importance).toBe(50);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("records verified_files on Pi update", async () => {
 		const db = createTestDb();
 		const repo = makeGitRepo();

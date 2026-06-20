@@ -25,6 +25,8 @@
  *    (disabled). Built-in defaults are used ONLY when `tasks` is absent.
  *  - user_memories.enabled false → review-user-memories "" ; true → base cron
  *    (promotion_threshold carried). Same for pin_key_files → key-files.
+ *  - classify-memories is NEW in v2 and defaults ON daily at 06:00, unless the
+ *    whole dreamer block is disabled.
  *  - evaluate-smart-notes → base cron (it always ran on pending notes).
  *  - task_timeout_minutes → each task's timeout_minutes default; max_runtime_minutes dropped.
  *  - Object-shaped A+B configs carrying retired memory task keys are folded into
@@ -37,12 +39,14 @@ const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as 
 const CANONICAL = [
     "verify",
     "curate",
+    "classify-memories",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
 ] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *"; // matches the historical "02:00-06:00" default window start
+const DEFAULT_CLASSIFY_CRON = "0 6 * * *";
 
 /** "02:00-06:00" → "0 2 * * *". Falls back to the default base cron on any
  *  unparseable window (never throws — config migration is fail-open). */
@@ -128,6 +132,7 @@ export function migrateDreamerV2(
         typeof dreamer.task_timeout_minutes === "number" ? dreamer.task_timeout_minutes : undefined;
     const withTimeout = <T extends Record<string, unknown>>(entry: T): T =>
         timeout !== undefined ? { ...entry, timeout_minutes: timeout } : entry;
+    const classifySchedule = dreamer.disable === true ? "" : DEFAULT_CLASSIFY_CRON;
 
     const tasks: Record<string, Record<string, unknown>> = {};
 
@@ -190,9 +195,11 @@ export function migrateDreamerV2(
                 const schedule =
                     task === "verify" || task === "curate"
                         ? ""
-                        : task === "maintain-docs" || task === "key-files"
-                          ? ""
-                          : baseCron;
+                        : task === "classify-memories"
+                          ? classifySchedule
+                          : task === "maintain-docs" || task === "key-files"
+                            ? ""
+                            : baseCron;
                 tasks[task] = withTimeout({
                     schedule,
                     ...(task === "verify" ? { broad_interval_days: 7 } : {}),
@@ -216,6 +223,9 @@ export function migrateDreamerV2(
         });
         tasks.curate = withTimeout({
             schedule: curateSelected ? baseCron : "",
+        });
+        tasks["classify-memories"] = withTimeout({
+            schedule: classifySchedule,
         });
         tasks["maintain-docs"] = withTimeout({
             schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",

@@ -34,7 +34,11 @@ import {
 } from "./maintain-memory-gate";
 import { type DreamRunMemoryChanges, insertDreamRun } from "./storage-dream-runs";
 import { getTaskScheduleState } from "./storage-task-schedule";
-import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
+import {
+    buildDreamTaskPrompt,
+    type ClassifyTrajectoryCompartment,
+    DREAMER_SYSTEM_PROMPT,
+} from "./task-prompts";
 import { isAgenticTask } from "./task-registry";
 import type { DreamTaskRuntimeConfig, TaskExecOutcome, TaskExecutor } from "./task-scheduler";
 
@@ -96,6 +100,29 @@ function loadActiveMemoryPromptMemories(
         memories.map((memory) => memory.id),
     );
     return memories.map((memory) => toPromptMemory(memory, verificationById));
+}
+
+export const CLASSIFY_TRAJECTORY_COMPARTMENT_LIMIT = 30;
+
+export function loadRecentTrajectoryCompartments(
+    db: Database,
+    projectIdentity: string,
+    limit = CLASSIFY_TRAJECTORY_COMPARTMENT_LIMIT,
+): ClassifyTrajectoryCompartment[] {
+    const rows = db
+        .prepare<[string, number], ClassifyTrajectoryCompartment>(
+            `SELECT c.id AS id,
+                    c.title AS title,
+                    COALESCE(NULLIF(c.p1, ''), c.content) AS content,
+                    c.created_at AS createdAt
+               FROM compartments c
+               JOIN session_projects sp ON sp.session_id = c.session_id
+              WHERE sp.project_path = ?
+              ORDER BY c.created_at DESC, c.id DESC
+              LIMIT ?`,
+        )
+        .all(projectIdentity, Math.max(0, Math.floor(limit)));
+    return rows.reverse();
 }
 
 /**
@@ -330,6 +357,21 @@ async function runAgenticTask(
         task === "curate"
             ? getActiveUserMemories(db).map((um) => ({ id: um.id, content: um.content }))
             : undefined;
+    const classifyMemories =
+        task === "classify-memories"
+            ? getMemoriesByProject(db, projectIdentity).map((memory) => ({
+                  id: memory.id,
+                  category: memory.category,
+                  content: memory.content,
+                  importance: memory.importance,
+                  scope: memory.scope,
+                  shareable: memory.shareable,
+              }))
+            : undefined;
+    const classifyTrajectory =
+        task === "classify-memories"
+            ? loadRecentTrajectoryCompartments(db, projectIdentity)
+            : undefined;
 
     let verifyGate: MaintainMemoryGateResult | null = null;
     let curateMemories: MaintainMemoryGateResult["inScope"] | undefined;
@@ -359,6 +401,10 @@ async function runAgenticTask(
     } else if (task === "curate") {
         curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
         log(`[dreamer] curate pool: in_scope=${curateMemories.length}`);
+    } else if (task === "classify-memories") {
+        log(
+            `[dreamer] classify pool: in_scope=${classifyMemories?.length ?? 0} trajectory=${classifyTrajectory?.length ?? 0}`,
+        );
     }
 
     const taskPrompt = buildDreamTaskPrompt(task, {
@@ -373,6 +419,10 @@ async function runAgenticTask(
               }
             : undefined,
         curate: curateMemories ? { memories: curateMemories } : undefined,
+        classify:
+            classifyMemories && classifyTrajectory
+                ? { memories: classifyMemories, trajectory: classifyTrajectory }
+                : undefined,
     });
 
     const abortController = new AbortController();

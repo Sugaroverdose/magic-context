@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { isSecretKey, sanitizeConfigValue } from "./redaction";
+import { hasShareabilitySensitiveText, isSecretKey, sanitizeConfigValue } from "./redaction";
 
 describe("isSecretKey — true positives", () => {
     // Real secret-bearing key names from common providers and config shapes.
@@ -136,5 +136,18 @@ describe("sanitizeConfigValue — preserves benign config keys", () => {
         const sanitized = sanitizeConfigValue(config) as typeof config;
         expect(sanitized.execute_threshold_tokens.default).toBe(80000);
         expect(sanitized.execute_threshold_tokens["openai/gpt-5.5"]).toBe(200000);
+    });
+});
+
+describe("hasShareabilitySensitiveText", () => {
+    it("treats personal paths and secrets as sensitive", () => {
+        expect(hasShareabilitySensitiveText("Config lives under /Users/alice/private/repo")).toBe(
+            true,
+        );
+        expect(hasShareabilitySensitiveText("Authorization: Bearer abcdefghijklmnop")).toBe(true);
+    });
+
+    it("allows non-sensitive project facts", () => {
+        expect(hasShareabilitySensitiveText("Use Bun for test scripts in this repo.")).toBe(false);
     });
 });

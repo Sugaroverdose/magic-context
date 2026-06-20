@@ -11,6 +11,7 @@
 export const CANONICAL_DREAM_TASKS = [
     "verify",
     "curate",
+    "classify-memories",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
@@ -25,7 +26,12 @@ export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
  * key-files, evaluate-smart-notes) have their own specialized runners and do NOT
  * go through the prompt builder.
  */
-export const AGENTIC_DREAM_TASKS = ["verify", "curate", "maintain-docs"] as const;
+export const AGENTIC_DREAM_TASKS = [
+    "verify",
+    "curate",
+    "classify-memories",
+    "maintain-docs",
+] as const;
 
 export type AgenticDreamTask = (typeof AGENTIC_DREAM_TASKS)[number];
 
@@ -41,7 +47,11 @@ export function isAgenticTask(task: DreamTaskName): task is AgenticDreamTask {
  * serialize with each other — concurrent runs race semantically (stale-view
  * merges/splits). Canonical run order when several are due in one drain.
  */
-export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = ["verify", "curate"];
+export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
+    "verify",
+    "curate",
+    "classify-memories",
+];
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);
 

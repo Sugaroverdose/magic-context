@@ -6,6 +6,7 @@ import type {
     Memory,
     MemoryCategory,
     MemoryInput,
+    MemoryScope,
     MemorySourceType,
     MemoryStatus,
     VerificationStatus,
@@ -18,6 +19,8 @@ export const COLUMN_MAP: Record<keyof Memory, string> = {
     content: "content",
     normalizedHash: "normalized_hash",
     importance: "importance",
+    scope: "scope",
+    shareable: "shareable",
     sourceSessionId: "source_session_id",
     sourceType: "source_type",
     seenCount: "seen_count",
@@ -59,6 +62,12 @@ const MEMORY_STATUS_LOOKUP = {
     archived: true,
 } satisfies Record<MemoryStatus, true>;
 
+const MEMORY_SCOPE_LOOKUP = {
+    project: true,
+    ecosystem: true,
+    universe: true,
+} satisfies Record<MemoryScope, true>;
+
 const MEMORY_SOURCE_TYPE_LOOKUP = {
     historian: true,
     agent: true,
@@ -93,6 +102,8 @@ const getMemoryCountByProjectStatements = new WeakMap<Database, PreparedStatemen
 const getMemoryCountsByStatusStatements = new WeakMap<Database, PreparedStatement>();
 const memoriesByProjectStatements = new Map<string, WeakMap<Database, PreparedStatement>>();
 const memoryImportanceColumnCache = new WeakMap<Database, boolean>();
+const memoryScopeColumnCache = new WeakMap<Database, boolean>();
+const memoryShareableColumnCache = new WeakMap<Database, boolean>();
 
 export interface MemoryCountsByStatus {
     total: number;
@@ -120,6 +131,24 @@ function hasMemoryImportanceColumn(db: Database): boolean {
     return hasColumn;
 }
 
+function hasMemoryScopeColumn(db: Database): boolean {
+    const cached = memoryScopeColumnCache.get(db);
+    if (cached !== undefined) return cached;
+    const columns = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name?: string }>;
+    const hasColumn = columns.some((column) => column.name === "scope");
+    memoryScopeColumnCache.set(db, hasColumn);
+    return hasColumn;
+}
+
+function hasMemoryShareableColumn(db: Database): boolean {
+    const cached = memoryShareableColumnCache.get(db);
+    if (cached !== undefined) return cached;
+    const columns = db.prepare("PRAGMA table_info(memories)").all() as Array<{ name?: string }>;
+    const hasColumn = columns.some((column) => column.name === "shareable");
+    memoryShareableColumnCache.set(db, hasColumn);
+    return hasColumn;
+}
+
 export function getMemorySelectColumns(db: Database, tableName = "memories"): string {
     return Object.entries(COLUMN_MAP)
         .map(([property, column]) => {
@@ -128,6 +157,18 @@ export function getMemorySelectColumns(db: Database, tableName = "memories"): st
             }
             if (property === "importance") {
                 return `COALESCE(${tableName}.${column}, 50) AS ${property}`;
+            }
+            if (property === "scope" && !hasMemoryScopeColumn(db)) {
+                return "'project' AS scope";
+            }
+            if (property === "scope") {
+                return `COALESCE(${tableName}.${column}, 'project') AS ${property}`;
+            }
+            if (property === "shareable" && !hasMemoryShareableColumn(db)) {
+                return "0 AS shareable";
+            }
+            if (property === "shareable") {
+                return `COALESCE(${tableName}.${column}, 0) AS ${property}`;
             }
             return `${tableName}.${column} AS ${property}`;
         })
@@ -140,6 +181,10 @@ function isMemoryCategory(value: unknown): value is MemoryCategory {
 
 function isMemoryStatus(value: unknown): value is MemoryStatus {
     return typeof value === "string" && value in MEMORY_STATUS_LOOKUP;
+}
+
+function isMemoryScope(value: unknown): value is MemoryScope {
+    return typeof value === "string" && value in MEMORY_SCOPE_LOOKUP;
 }
 
 function isMemorySourceType(value: unknown): value is MemorySourceType {
@@ -178,6 +223,8 @@ export function isMemoryRow(row: unknown): row is Memory {
         typeof candidate.content === "string" &&
         typeof candidate.normalizedHash === "string" &&
         typeof candidate.importance === "number" &&
+        isMemoryScope(candidate.scope) &&
+        typeof candidate.shareable === "number" &&
         isNullableString(candidate.sourceSessionId) &&
         isMemorySourceType(candidate.sourceType) &&
         typeof candidate.seenCount === "number" &&
@@ -205,6 +252,8 @@ export function toMemory(row: Memory): Memory {
         content: row.content,
         normalizedHash: row.normalizedHash,
         importance: row.importance,
+        scope: row.scope,
+        shareable: row.shareable,
         sourceSessionId: row.sourceSessionId,
         sourceType: row.sourceType,
         seenCount: row.seenCount,
@@ -761,6 +810,64 @@ export function updateMemoryContent(
     if (memory) {
         invalidateMemory(memory.projectPath, id);
     }
+}
+
+export interface MemoryClassificationUpdate {
+    importance?: number;
+    scope?: MemoryScope;
+    shareable?: boolean;
+}
+
+function normalizeImportance(value: number): number {
+    if (!Number.isFinite(value)) return 50;
+    return Math.max(1, Math.min(100, Math.round(value)));
+}
+
+export function setMemoryClassification(
+    db: Database,
+    id: number,
+    classification: MemoryClassificationUpdate,
+): boolean {
+    const hasImportance = classification.importance !== undefined;
+    const hasScope = classification.scope !== undefined;
+    const hasShareable = classification.shareable !== undefined;
+    if (!hasImportance && !hasScope && !hasShareable) {
+        throw new Error("setMemoryClassification requires at least one supplied field");
+    }
+
+    const memory = getMemoryById(db, id);
+    if (!memory) return false;
+
+    const assignments: string[] = [];
+    const values: Array<number | string> = [];
+    if (hasImportance) {
+        const next = normalizeImportance(classification.importance as number);
+        if (memory.importance !== next) {
+            assignments.push("importance = ?");
+            values.push(next);
+        }
+    }
+    if (hasScope) {
+        const next = classification.scope as MemoryScope;
+        if (!isMemoryScope(next)) {
+            throw new Error(`invalid memory scope: ${String(next)}`);
+        }
+        if (memory.scope !== next) {
+            assignments.push("scope = ?");
+            values.push(next);
+        }
+    }
+    if (hasShareable) {
+        const next = classification.shareable ? 1 : 0;
+        if ((memory.shareable ? 1 : 0) !== next) {
+            assignments.push("shareable = ?");
+            values.push(next);
+        }
+    }
+
+    if (assignments.length === 0) return false;
+    db.prepare(`UPDATE memories SET ${assignments.join(", ")} WHERE id = ?`).run(...values, id);
+    return true;
 }
 
 export function supersededMemory(db: Database, id: number, supersededById: number): void {

@@ -110,12 +110,14 @@ const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
 /** Default schedule per task. Preserves v1 behavior: verify runs nightly;
- *  curate runs weekly; maintain-docs + key-files default OFF (maintain-docs was
- *  not in the v1 default list; key-files' pin_key_files.enabled defaulted false);
- *  the two promoted post-phases run nightly and are gated. */
+ *  curate runs weekly; classify runs daily after curation; maintain-docs +
+ *  key-files default OFF (maintain-docs was not in the v1 default list;
+ *  key-files' pin_key_files.enabled defaulted false); the two promoted
+ *  post-phases run nightly and are gated. */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     verify: "0 3 * * *",
     curate: "0 4 * * 0",
+    "classify-memories": "0 6 * * *",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
@@ -145,6 +147,9 @@ export const DreamTasksSchema = z
         ),
         curate: DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("curate")),
+        ),
+        "classify-memories": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("classify-memories")),
         ),
         "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),

@@ -162,5 +162,6 @@ export const MEMORY_ITEMS = [
 export const DREAMER_PILLS = [
   { icon: "✓", text: "Verify: check memories against codebase", type: "success" },
   { icon: "🗜️", text: "Curate: merge, tighten, and prune", type: "success" },
+  { icon: "🏷️", text: "Classify: score importance and shareability", type: "success" },
   { icon: "📝", text: "Maintain docs: update ARCHITECTURE.md", type: "success" },
 ];
