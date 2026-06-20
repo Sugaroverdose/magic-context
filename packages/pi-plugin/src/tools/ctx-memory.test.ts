@@ -332,6 +332,218 @@ describe("createCtxMemoryTool", () => {
 		}
 	});
 
+	it("REFUSES a PRIMARY merge pulling in a foreign NON-shared-category memory (P0 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			// Workspace shares only CONSTRAINTS; a foreign ARCHITECTURE memory is
+			// invisible in the render and must not be mergeable by a primary agent.
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const own = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "ARCHITECTURE",
+				content: "Own architecture detail A.",
+			});
+			const foreignHidden = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "ARCHITECTURE", // foreign, NON-shared category
+				content: "Foreign architecture not shared with this project.",
+			});
+
+			const result = await primary.execute(
+				"call-block",
+				{
+					action: "merge",
+					ids: [own.id, foreignHidden.id],
+					content: "Merged architecture detail.",
+					category: "ARCHITECTURE",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			// Primary agents get the opaque "not found" reply (no existence oracle).
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toBe(
+				`Error: Memory with ID ${foreignHidden.id} was not found.`,
+			);
+			expect(getMemoryById(db, own.id)?.status).toBe("active");
+			expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("allows a PRIMARY merge of a foreign SHARED-category memory (P0 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const ctx = fakeContext("ses-memory") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const own = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "CONSTRAINTS",
+				content: "Own constraint A.",
+			});
+			const foreignShared = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "CONSTRAINTS", // shared
+				content: "Foreign constraint shared with this project.",
+			});
+
+			const result = await primary.execute(
+				"call-ok",
+				{
+					action: "merge",
+					ids: [own.id, foreignShared.id],
+					content: "Merged shared constraint.",
+					category: "CONSTRAINTS",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			// New merged content matches neither source, so a FRESH canonical is
+			// inserted and both sources are superseded → archived (parity with
+			// OpenCode's shared-merge test).
+			expect(result.isError).toBeUndefined();
+			expect(getMemoryById(db, own.id)?.status).toBe("archived");
+			expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("REFUSES a DREAMER merge of a foreign NON-shared-category memory INSIDE a workspace (D1 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-dreamer") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			// The dreamer keeps cross-project merge OUTSIDE a workspace, but INSIDE
+			// a workspace the per-category sharing policy is the user's privacy
+			// boundary it must honor too.
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const own = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "ARCHITECTURE",
+				content: "Own architecture detail D1.",
+			});
+			const foreignHidden = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "ARCHITECTURE", // foreign, NON-shared
+				content: "Foreign architecture not shared with this workspace member.",
+			});
+
+			const result = await dreamer.execute(
+				"call-d1-block",
+				{
+					action: "merge",
+					ids: [own.id, foreignHidden.id],
+					content: "Merged architecture detail D1.",
+					category: "ARCHITECTURE",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBe(true);
+			expect(result.content[0]?.text).toBe(
+				`Error: Memory with ID ${foreignHidden.id} is in a category not shared with this workspace member and cannot be merged.`,
+			);
+			expect(getMemoryById(db, own.id)?.status).toBe("active");
+			expect(getMemoryById(db, foreignHidden.id)?.status).toBe("active");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("ALLOWS a DREAMER merge of a foreign SHARED-category memory INSIDE a workspace (D1 parity)", async () => {
+		const db = createTestDb();
+		try {
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-dreamer") as never;
+			const ownIdentity = resolveProjectIdentity((ctx as { cwd: string }).cwd);
+			db.exec(`
+				INSERT INTO workspaces (id, name, created_at, updated_at, share_categories) VALUES (1, 'ws', 1, 1, '["CONSTRAINTS"]');
+				INSERT INTO workspace_members (workspace_id, project_path, display_name, display_path, added_at)
+				VALUES (1, '${ownIdentity}', 'Own', '${ownIdentity}', 1),
+				       (1, 'git:foreign', 'Foreign', '/foreign', 1);
+			`);
+			const own = insertMemory(db, {
+				projectPath: ownIdentity,
+				category: "CONSTRAINTS",
+				content: "Own constraint D1.",
+			});
+			const foreignShared = insertMemory(db, {
+				projectPath: "git:foreign",
+				category: "CONSTRAINTS", // shared
+				content: "Foreign constraint shared with the workspace.",
+			});
+
+			const result = await dreamer.execute(
+				"call-d1-ok",
+				{
+					action: "merge",
+					ids: [own.id, foreignShared.id],
+					content: "Merged shared constraint D1.",
+					category: "CONSTRAINTS",
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			// Fresh canonical inserted; both sources superseded → archived.
+			expect(result.isError).toBeUndefined();
+			expect(getMemoryById(db, own.id)?.status).toBe("archived");
+			expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("rejects malformed ids and duplicate merge ids for primary agents", async () => {
 		const db = createTestDb();
 		try {
