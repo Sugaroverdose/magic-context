@@ -66,12 +66,13 @@ export function buildHiddenAgentConfig(
     allowedTools: readonly string[],
     maxSteps: number,
     overrides?: Record<string, unknown>,
+    agentLabel?: string,
 ) {
     const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
         permission?: Record<string, unknown>;
         [key: string]: unknown;
     };
-    const basePermission = buildAllowOnlyPermission(allowedTools);
+    const basePermission = buildAllowOnlyPermission(allowedTools, agentLabel);
     return {
         prompt,
         // No builtin fallback chain: the user's `fallback_models` (if any) flow
@@ -491,112 +492,131 @@ const plugin: Plugin = async (ctx) => {
             await hooks.magicContext?.["experimental.text.complete"]?.(input, output);
         },
         config: async (config) => {
-            // If the runtime is disabled (a conflicting plugin — DCP / OMO /
-            // OpenCode auto-compaction — was detected and we fail-safed at boot),
-            // do NOT register the /ctx-* commands or hidden agents. The transform/
-            // tools/RPC are already no-op'd, so surfacing command entries + hidden
-            // agents the runtime won't service is pure UX confusion.
-            if (pluginConfig.enabled !== true) {
-                return;
+            try {
+                // If the runtime is disabled (a conflicting plugin — DCP / OMO /
+                // OpenCode auto-compaction — was detected and we fail-safed at boot),
+                // do NOT register the /ctx-* commands or hidden agents. The transform/
+                // tools/RPC are already no-op'd, so surfacing command entries + hidden
+                // agents the runtime won't service is pure UX confusion.
+                if (pluginConfig.enabled !== true) {
+                    return;
+                }
+                // See top-level buildHiddenAgentConfig for permission precedence and
+                // hard `steps`/`maxSteps` cap semantics.
+                const commandConfig = {
+                    ...(config.command ?? {}),
+                    ...getMagicContextBuiltinCommands(),
+                    ...(pluginConfig.command ?? {}),
+                };
+
+                config.command = commandConfig;
+                // Extract only agent-override fields (not scheduling fields) for agent registration
+                // thinking_level is stripped from every hidden agent's overrides: it
+                // is Pi-only (passed as --thinking to the Pi subprocess) and is not a
+                // valid OpenCode agent config field, so leaking it puts an unknown key
+                // on the OpenCode agent config.
+                const dreamerAgentOverrides = pluginConfig.dreamer
+                    ? (() => {
+                          const {
+                              tasks: _tasks,
+                              inject_docs: _injectDocs,
+                              thinking_level: _thinkingLevel,
+                              ...agentOverrides
+                          } = pluginConfig.dreamer;
+                          return agentOverrides;
+                      })()
+                    : undefined;
+                const sidekickAgentOverrides = pluginConfig.sidekick
+                    ? (() => {
+                          const {
+                              timeout_ms: _timeoutMs,
+                              system_prompt: _systemPrompt,
+                              thinking_level: _thinkingLevel,
+                              ...agentOverrides
+                          } = pluginConfig.sidekick;
+                          return agentOverrides;
+                      })()
+                    : undefined;
+                // Strip two_pass + disallowed_tools + thinking_level from historian
+                // overrides — two_pass is consumed by the runner, disallowed_tools is
+                // consumed below to build the permission map, thinking_level is Pi-only
+                // (passed as --thinking to the Pi subprocess). None is a valid OpenCode
+                // agent config field, so leaking them in would put unknown keys on the
+                // OpenCode agent config. Both historian and historian-editor agents use
+                // the remaining overrides (same model, fallbacks, etc.).
+                const historianAgentOverrides = pluginConfig.historian
+                    ? (() => {
+                          const {
+                              two_pass: _twoPass,
+                              disallowed_tools: _disallowedTools,
+                              thinking_level: _thinkingLevel,
+                              ...agentOverrides
+                          } = pluginConfig.historian;
+                          return agentOverrides;
+                      })()
+                    : undefined;
+                // Apply disallowed_tools to the default allow-list. "*" removes all.
+                const historianDisallowed = pluginConfig.historian?.disallowed_tools ?? [];
+                const historianAllowedTools = applyDisallowedTools(
+                    HISTORIAN_ALLOWED_TOOLS,
+                    historianDisallowed,
+                );
+
+                config.agent = {
+                    ...(config.agent ?? {}),
+                    [DREAMER_AGENT]: buildHiddenAgentConfig(
+                        DREAMER_SYSTEM_PROMPT,
+                        DREAMER_ALLOWED_TOOLS,
+                        // The dreamer is a genuine multi-step maintenance loop
+                        // (consolidate / verify / archive-stale / improve /
+                        // maintain-docs, ~60-72 model turns observed), so it needs a
+                        // high cap — just high enough to bound a runaway, not low
+                        // enough to truncate legitimate work.
+                        DREAMER_MAX_STEPS,
+                        dreamerAgentOverrides,
+                        DREAMER_AGENT,
+                    ),
+                    [HISTORIAN_AGENT]: buildHiddenAgentConfig(
+                        // v2: the v8.7.3 historian prompt always describes the
+                        // <user_observations> output; observations are simply not
+                        // promoted to user-profile when user_memories is disabled
+                        // (gated in the runner). Keeping the system prompt constant
+                        // preserves prompt-cache byte stability.
+                        COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                        historianAllowedTools,
+                        HISTORIAN_MAX_STEPS,
+                        historianAgentOverrides,
+                        HISTORIAN_AGENT,
+                    ),
+                    [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
+                        HISTORIAN_EDITOR_SYSTEM_PROMPT,
+                        historianAllowedTools,
+                        HISTORIAN_MAX_STEPS,
+                        historianAgentOverrides,
+                        HISTORIAN_EDITOR_AGENT,
+                    ),
+                    [SIDEKICK_AGENT]: buildHiddenAgentConfig(
+                        SIDEKICK_SYSTEM_PROMPT,
+                        SIDEKICK_ALLOWED_TOOLS,
+                        SIDEKICK_MAX_STEPS,
+                        sidekickAgentOverrides,
+                        SIDEKICK_AGENT,
+                    ),
+                };
+            } catch (error) {
+                // A failure registering commands/agents must NEVER fail the whole
+                // plugin load — that would also disable the transform/compaction
+                // (the core context-management path), letting every session's
+                // context grow unbounded. Log with the stack so the real cause is
+                // visible, and let Magic Context keep running with whatever it had.
+                const e = error as { message?: string; stack?: string };
+                log(
+                    `[magic-context] config hook failed (commands/agents NOT registered; transform still active): ${e?.message ?? error}`,
+                    e?.stack
+                        ? { stackHead: e.stack.split("\n").slice(0, 6).join("\n") }
+                        : undefined,
+                );
             }
-            // See top-level buildHiddenAgentConfig for permission precedence and
-            // hard `steps`/`maxSteps` cap semantics.
-            const commandConfig = {
-                ...(config.command ?? {}),
-                ...getMagicContextBuiltinCommands(),
-                ...(pluginConfig.command ?? {}),
-            };
-
-            config.command = commandConfig;
-            // Extract only agent-override fields (not scheduling fields) for agent registration
-            // thinking_level is stripped from every hidden agent's overrides: it
-            // is Pi-only (passed as --thinking to the Pi subprocess) and is not a
-            // valid OpenCode agent config field, so leaking it puts an unknown key
-            // on the OpenCode agent config.
-            const dreamerAgentOverrides = pluginConfig.dreamer
-                ? (() => {
-                      const {
-                          tasks: _tasks,
-                          inject_docs: _injectDocs,
-                          thinking_level: _thinkingLevel,
-                          ...agentOverrides
-                      } = pluginConfig.dreamer;
-                      return agentOverrides;
-                  })()
-                : undefined;
-            const sidekickAgentOverrides = pluginConfig.sidekick
-                ? (() => {
-                      const {
-                          timeout_ms: _timeoutMs,
-                          system_prompt: _systemPrompt,
-                          thinking_level: _thinkingLevel,
-                          ...agentOverrides
-                      } = pluginConfig.sidekick;
-                      return agentOverrides;
-                  })()
-                : undefined;
-            // Strip two_pass + disallowed_tools + thinking_level from historian
-            // overrides — two_pass is consumed by the runner, disallowed_tools is
-            // consumed below to build the permission map, thinking_level is Pi-only
-            // (passed as --thinking to the Pi subprocess). None is a valid OpenCode
-            // agent config field, so leaking them in would put unknown keys on the
-            // OpenCode agent config. Both historian and historian-editor agents use
-            // the remaining overrides (same model, fallbacks, etc.).
-            const historianAgentOverrides = pluginConfig.historian
-                ? (() => {
-                      const {
-                          two_pass: _twoPass,
-                          disallowed_tools: _disallowedTools,
-                          thinking_level: _thinkingLevel,
-                          ...agentOverrides
-                      } = pluginConfig.historian;
-                      return agentOverrides;
-                  })()
-                : undefined;
-            // Apply disallowed_tools to the default allow-list. "*" removes all.
-            const historianDisallowed = pluginConfig.historian?.disallowed_tools ?? [];
-            const historianAllowedTools = applyDisallowedTools(
-                HISTORIAN_ALLOWED_TOOLS,
-                historianDisallowed,
-            );
-
-            config.agent = {
-                ...(config.agent ?? {}),
-                [DREAMER_AGENT]: buildHiddenAgentConfig(
-                    DREAMER_SYSTEM_PROMPT,
-                    DREAMER_ALLOWED_TOOLS,
-                    // The dreamer is a genuine multi-step maintenance loop
-                    // (consolidate / verify / archive-stale / improve /
-                    // maintain-docs, ~60-72 model turns observed), so it needs a
-                    // high cap — just high enough to bound a runaway, not low
-                    // enough to truncate legitimate work.
-                    DREAMER_MAX_STEPS,
-                    dreamerAgentOverrides,
-                ),
-                [HISTORIAN_AGENT]: buildHiddenAgentConfig(
-                    // v2: the v8.7.3 historian prompt always describes the
-                    // <user_observations> output; observations are simply not
-                    // promoted to user-profile when user_memories is disabled
-                    // (gated in the runner). Keeping the system prompt constant
-                    // preserves prompt-cache byte stability.
-                    COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                    historianAllowedTools,
-                    HISTORIAN_MAX_STEPS,
-                    historianAgentOverrides,
-                ),
-                [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
-                    HISTORIAN_EDITOR_SYSTEM_PROMPT,
-                    historianAllowedTools,
-                    HISTORIAN_MAX_STEPS,
-                    historianAgentOverrides,
-                ),
-                [SIDEKICK_AGENT]: buildHiddenAgentConfig(
-                    SIDEKICK_SYSTEM_PROMPT,
-                    SIDEKICK_ALLOWED_TOOLS,
-                    SIDEKICK_MAX_STEPS,
-                    sidekickAgentOverrides,
-                ),
-            };
         },
     };
 };

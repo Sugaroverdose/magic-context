@@ -1,3 +1,5 @@
+import { log } from "../shared/logger";
+
 /**
  * Permission rulesets for Magic Context's hidden subagents.
  *
@@ -82,10 +84,25 @@
  * agent profiles.
  */
 export function buildAllowOnlyPermission(
-    allowedTools: readonly string[],
+    allowedTools: readonly string[] | undefined,
+    agentLabel?: string,
 ): Record<string, "deny" | "allow"> {
     const permission: Record<string, "deny" | "allow"> = { "*": "deny" };
-    for (const tool of allowedTools) {
+    // Defensive: never throw on an undefined allow-list. A `for..of` on undefined
+    // crashes with "undefined is not an object (evaluating 'allowedTools')", and
+    // because this runs inside the plugin's `config` hook a throw there fails the
+    // ENTIRE plugin load — disabling the transform/compaction. Degrade to a
+    // deny-all agent instead of taking Magic Context down.
+    if (allowedTools === undefined) {
+        // Observed only inside OpenCode's plugin loader (never in an isolated
+        // import of the same dist), so capture WHICH agent + a stack to pin the
+        // real cause on the next natural restart. Should never fire.
+        log(
+            `[magic-context] buildAllowOnlyPermission: allow-list UNDEFINED for ${agentLabel ?? "unknown agent"} — registering deny-all (defensive)`,
+            { stackHead: new Error().stack?.split("\n").slice(1, 6).join("\n") },
+        );
+    }
+    for (const tool of allowedTools ?? []) {
         permission[tool] = "allow";
     }
     return permission;
