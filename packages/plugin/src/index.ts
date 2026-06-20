@@ -1,4 +1,4 @@
-import type { Plugin } from "@opencode-ai/plugin";
+import type { Plugin, PluginModule } from "@opencode-ai/plugin";
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -38,7 +38,7 @@ import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
-const plugin: Plugin = async (ctx) => {
+const server: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);
     // Apply SQLite connection tuning before the first openDatabase() below.
     setSqlitePragmaConfig({
@@ -560,6 +560,22 @@ const plugin: Plugin = async (ctx) => {
             }
         },
     };
+};
+
+// V1 plugin-object shape (`{ id, server }`), NOT a bare function. This is
+// load-bearing, not cosmetic: OpenCode's loader (opencode plugin/index.ts →
+// readV1Plugin / shared.ts:278-283) detects a default export that is an OBJECT
+// carrying `id`/`server`/`tui` as a V1 plugin and uses ONLY its `server`
+// function. A default export that is a FUNCTION instead falls through to the
+// legacy `getLegacyPlugins` path, which invokes EVERY exported function in this
+// module as a plugin factory `fn(input, options)` — so any stray helper export
+// would be called with the plugin input and could throw, failing the whole
+// plugin load (this caused the 2026-06 hidden-agent load incident). The object
+// shape bypasses that scan entirely, eliminating the footgun class. The `./tui`
+// entry already uses this same `{ id, tui }` shape.
+const plugin: PluginModule = {
+    id: "opencode-magic-context",
+    server,
 };
 
 export default plugin;
