@@ -92,9 +92,15 @@ const plugin: Plugin = async (ctx) => {
                 const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
                 const sessionId = sessionList?.[0]?.id;
                 if (sessionId) {
-                    // This runs before any active session necessarily reports its live agent,
-                    // so keep the startup warning unbound to a specific agent on purpose.
-                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
+                    // Startup warning: opt OUT of prompt-context pinning. At
+                    // startup the only resolvable "last turn" is the resumed
+                    // session's stale pre-restart context; pinning that onto the
+                    // warning can itself cause a ModelSwitched on the user's
+                    // actual first turn (mirrors AFT's includeAgent:false for
+                    // config warnings).
+                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {
+                        pinContext: false,
+                    });
                 }
             } catch {
                 // Intentional: config warning delivery must not crash startup

@@ -8,6 +8,16 @@ export interface NotificationParams {
     modelId?: string;
     /** TUI toast lifetime in milliseconds (default: 5000). */
     toastDurationMs?: number;
+    /**
+     * Whether to pin the session's most-recent prompt context (agent + model +
+     * variant) onto this ignored message so it doesn't switch the model on the
+     * user's next real turn (default: true). Set false for STARTUP notices
+     * (e.g. the config warning) where the only resolvable "last turn" is the
+     * resumed session's stale pre-restart context — pinning that can itself
+     * cause a ModelSwitched on the user's actual first turn. Mirrors AFT's
+     * `includeAgent: false` for config warnings.
+     */
+    pinContext?: boolean;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "skipped" | "failed";
@@ -114,21 +124,45 @@ export async function sendIgnoredMessage(
         return "skipped";
     }
 
-    const agent = params.agent || undefined;
-    const variant = params.variant || undefined;
-    const model =
-        params.providerId && params.modelId
-            ? {
-                  providerID: params.providerId,
-                  modelID: params.modelId,
-              }
-            : undefined;
-
     if (!hasNotificationSessionClient(client)) {
         sessionLog(sessionId, "session prompt API unavailable for notification");
         return "failed";
     }
     const c = client;
+
+    // Pin the prompt context (agent + model + variant) to the session's most
+    // recent real turn. WHY: even though this is `noReply: true` (no assistant
+    // turn fires now), OpenCode's createUserMessage RECORDS prompt context on
+    // the appended user message, and THAT becomes the session's active
+    // model/agent for the NEXT real turn. Passing nothing makes OpenCode record
+    // the DEFAULT agent/model — which then switches the model on the user's
+    // next turn and busts the provider prefix cache the prior turn warmed.
+    // Mirrors AFT's notifications.ts (issue #62).
+    //
+    // Caller-supplied params win; otherwise resolve from the last assistant
+    // turn. We only pin values actually resolved from real messages (never a
+    // synthesized default), and resolution failures degrade to "pin nothing"
+    // (today's behavior) — so a fresh/empty session is never made worse.
+    let agent = params.agent || undefined;
+    let variant = params.variant || undefined;
+    let model =
+        params.providerId && params.modelId
+            ? { providerID: params.providerId, modelID: params.modelId }
+            : undefined;
+    if (params.pinContext !== false && (!agent || !model || !variant)) {
+        try {
+            const { resolvePromptContext } = await import("../../shared/prompt-context");
+            const resolved = await resolvePromptContext(client, sessionId);
+            if (resolved) {
+                agent = agent ?? resolved.agent;
+                model = model ?? resolved.model;
+                variant = variant ?? resolved.variant;
+            }
+        } catch {
+            // Resolution is best-effort; on failure fall back to whatever the
+            // caller passed (possibly nothing) rather than blocking the notice.
+        }
+    }
 
     const input = {
         path: { id: sessionId },

@@ -295,9 +295,19 @@ describe("executeContextRecomp", () => {
         const db = openDatabase();
 
         const prompt = mock(async () => ({}));
-        const messages = mock(async () => {
-            const callIndex = messages.mock.calls.length;
-            if (callIndex === 1) {
+        // Two distinct `session.messages` consumers now share this mock:
+        //  - the HISTORIAN output fetch (targets the agent session, passes
+        //    `query.directory`)
+        //  - notification model-pinning via resolvePromptContext (targets the
+        //    MAIN session, `query.limit` only, NO directory)
+        // Discriminate on `query.directory` so the historian-pass counter only
+        // advances on real historian fetches; prompt-context reads resolve to
+        // null (empty data) → no pin, harmless.
+        let historianFetches = 0;
+        const messages = mock(async (input: { query?: { directory?: string } }) => {
+            if (!input?.query?.directory) return { data: [] };
+            historianFetches += 1;
+            if (historianFetches === 1) {
                 return {
                     data: [
                         {
@@ -349,7 +359,10 @@ describe("executeContextRecomp", () => {
         // Gap healing absorbs the 1-message gap (1→3), so the first attempt succeeds
         // without a repair retry. Both compartments are kept with the gap healed.
         expect(result).toContain("Rebuilt 2 compartments across 1 historian pass");
-        expect(messages).toHaveBeenCalledTimes(1);
+        // Exactly one HISTORIAN output fetch (directory-scoped). The completion
+        // notice also reads messages (prompt-context model-pinning, no directory)
+        // — counted separately so this assertion stays about historian passes.
+        expect(historianFetches).toBe(1);
         expect(getHistorianPromptCount(prompt)).toBe(1);
         expect(getIgnoredNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
@@ -377,9 +390,14 @@ describe("executeContextRecomp", () => {
         const db = openDatabase();
 
         const prompt = mock(async () => ({}));
-        const messages = mock(async () => {
-            const callIndex = messages.mock.calls.length;
-            if (callIndex === 1) {
+        // Discriminate historian-output fetches (pass `query.directory`) from
+        // notification model-pinning reads (resolvePromptContext: `query.limit`
+        // only, no directory) so the historian-pass counter is accurate.
+        let historianFetches = 0;
+        const messages = mock(async (input: { query?: { directory?: string } }) => {
+            if (!input?.query?.directory) return { data: [] };
+            historianFetches += 1;
+            if (historianFetches === 1) {
                 return {
                     data: [
                         {
