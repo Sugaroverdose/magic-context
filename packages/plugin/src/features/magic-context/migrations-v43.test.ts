@@ -25,7 +25,7 @@ function columns(db: Database, table: string): string[] {
 }
 
 describe("migration v43 — memory verification side table", () => {
-    test("fresh database has memory_verifications and maintain-memory columns", () => {
+    test("fresh database has memory_verifications and verify watermark columns", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);

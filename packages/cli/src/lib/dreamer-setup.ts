@@ -24,7 +24,8 @@ import type { PromptIO, SelectOption } from "./prompts";
 
 /** Short, user-facing description of what each task does (wizard copy). */
 const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
-    "maintain-memory": "Incrementally verify, consolidate, improve, and archive project memories",
+    verify: "Checks memories against code and fixes/removes stale ones",
+    curate: "Deduplicates, tightens, and prunes the memory pool",
     "maintain-docs": "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
     "key-files": "Pin frequently-read files into the system prompt",
     "evaluate-smart-notes": "Surface smart notes whose conditions are now met",
@@ -33,7 +34,8 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
 
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
-    "maintain-memory": "0 3 * * *",
+    verify: "0 3 * * *",
+    curate: "0 4 * * 0",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
@@ -95,7 +97,7 @@ export async function runDreamerSetup(
     prompts.log.success(`Dreamer model: ${model}`);
 
     const useDefaults = await prompts.confirm(
-        "Use recommended task schedules? (memory upkeep nightly; docs & key-files off)",
+        "Use recommended task schedules? (memory verification nightly; curation weekly; docs & key-files off)",
         true,
     );
     if (useDefaults) {

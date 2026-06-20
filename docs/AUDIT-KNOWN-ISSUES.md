@@ -723,7 +723,7 @@ this surface wholesale — re-tuning the RRF band now is wasted churn.
 
 ### A47. Dreamer agentic memory tasks can commit a `ctx_memory` write in the ≤60s window between a lost lease and the abort (pre-existing, not a v2 regression)
 
-The maintain-memory agentic task mutates memories by driving the dreamer child
+The verify/curate agentic tasks mutate memories by driving the dreamer child
 session, which calls the `ctx_memory` tool.
 Those tool writes commit DURING the child run. The agentic path guards the lease
 with a 60s `renewLease` tick that, on failure, aborts the child and then throws

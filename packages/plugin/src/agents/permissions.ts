@@ -144,18 +144,17 @@ export function applyDisallowedTools(
  * exploration plus external command execution:
  *
  *   - `ctx_memory` / `ctx_search` / `ctx_note` — the canonical memory
- *     CRUD and retrieval path for maintain-memory /
- *     improve and smart-note dismissal.
+ *     CRUD and retrieval path for verify / curate and smart-note dismissal.
  *   - `read` / `grep` / `glob` — the verify task prompt
  *     (`task-prompts.ts`) explicitly tells the model to grep schema
  *     files for default values, read source to confirm claimed
  *     behavior, and use glob for project structure inventory.
  *   - `bash` — required for smart-note condition evaluation (the
  *     prompt explicitly mentions `gh` / `git` / `curl` / file reads),
- *     for the verify task's `git log --oneline --since=...` step, and
- *     for the improve task's `find` / `grep` directory inventory. The
+ *     for the verify task's code checks, and for the maintain-docs task's
+ *     `find` / `grep` directory inventory. The
  *     live OpenCode DB shows over 100 `bash` invocations across
- *     maintain-memory / maintain-docs / smart-notes
+ *     verify / curate / maintain-docs / smart-notes
  *     dreamer child sessions, so removing it would regress real,
  *     documented dreamer behavior.
  *   - `write` / `edit` — the maintain-docs task (`task-prompts.ts`)

@@ -31,7 +31,7 @@ export interface DreamTaskRuntimeConfig {
     /** key-files */
     tokenBudget?: number;
     minReads?: number;
-    /** maintain-memory */
+    /** verify */
     broadIntervalDays?: number;
 }
 
@@ -171,7 +171,7 @@ function advanceAfterRun(
         projectPath: projectIdentity,
         task: due.config.task,
         // last_run_at means "last SUCCESSFUL run" — the cutoff for "changed since"
-        // gates (maintain-memory / maintain-docs). A failed or skipped run did NOT
+        // gates (verify / maintain-docs). A failed or skipped run did NOT
         // process the work, so the cutoff must NOT advance past it (mirrors v1,
         // where last_dream_at only advanced when a task succeeded).
         lastRunAt:

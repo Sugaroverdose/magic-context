@@ -25,9 +25,9 @@ export interface TaskScheduleStateRow {
     lastStatus: "completed" | "failed" | "skipped" | null;
     lastError: string | null;
     retryCount: number;
-    /** maintain-memory commit watermark captured at run start. Undefined on writes preserves existing DB value. */
+    /** verify commit watermark captured at run start. Undefined on writes preserves existing DB value. */
     lastCheckedCommit?: string | null;
-    /** maintain-memory broad-pass watermark. Undefined on writes preserves existing DB value. */
+    /** verify broad-pass watermark. Undefined on writes preserves existing DB value. */
     lastBroadRunAt?: number | null;
 }
 

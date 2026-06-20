@@ -12,7 +12,12 @@ import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runKeyFilesTask } from "../key-files/identify-key-files";
-import { getMemoryCountsByStatus } from "../memory/storage-memory";
+import {
+    getMemoriesByProject,
+    getMemoryCountsByStatus,
+    getMemoryVerifications,
+    type Memory,
+} from "../memory";
 import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
@@ -64,6 +69,33 @@ function newIds(beforeIds: number[], afterIds: number[]): number[] {
     const out: number[] = [];
     for (const id of afterIds) if (!before.has(id)) out.push(id);
     return out;
+}
+
+function toPromptMemory(
+    memory: Memory,
+    verificationById: ReturnType<typeof getMemoryVerifications>,
+): MaintainMemoryGateResult["inScope"][number] {
+    const verification = verificationById.get(memory.id);
+    return {
+        id: memory.id,
+        category: memory.category,
+        content: memory.content,
+        mappedFiles: verification?.files ?? [],
+        verifiedAt: verification?.verifiedAt ?? null,
+        hasNoFileSentinel: verification?.hasSentinel ?? false,
+    };
+}
+
+function loadActiveMemoryPromptMemories(
+    db: Database,
+    projectIdentity: string,
+): MaintainMemoryGateResult["inScope"] {
+    const memories = getMemoriesByProject(db, projectIdentity);
+    const verificationById = getMemoryVerifications(
+        db,
+        memories.map((memory) => memory.id),
+    );
+    return memories.map((memory) => toPromptMemory(memory, verificationById));
 }
 
 /**
@@ -233,7 +265,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 return { status: "completed" };
             }
 
-            // Agentic tasks: maintain-memory / maintain-docs.
+            // Agentic tasks: verify / curate / maintain-docs.
             return await runAgenticTask(config, ctx, {
                 deps,
                 deadline,
@@ -295,13 +327,14 @@ async function runAgenticTask(
               }
             : undefined;
     const userMemories =
-        task === "maintain-memory"
+        task === "curate"
             ? getActiveUserMemories(db).map((um) => ({ id: um.id, content: um.content }))
             : undefined;
 
-    let maintainMemoryGate: MaintainMemoryGateResult | null = null;
-    if (task === "maintain-memory") {
-        maintainMemoryGate = await partitionMaintainMemoryScope({
+    let verifyGate: MaintainMemoryGateResult | null = null;
+    let curateMemories: MaintainMemoryGateResult["inScope"] | undefined;
+    if (task === "verify") {
+        verifyGate = await partitionMaintainMemoryScope({
             db,
             projectIdentity,
             projectDirectory: deps.sessionDirectory,
@@ -309,13 +342,13 @@ async function runAgenticTask(
             broadIntervalDays: config.broadIntervalDays,
         });
         log(
-            `[dreamer] maintain-memory gate: mode=${maintainMemoryGate.mode} in_scope=${maintainMemoryGate.inScopeIds.length} skipped=${maintainMemoryGate.skippedIds.length} reason=${maintainMemoryGate.reason}`,
+            `[dreamer] verify gate: mode=${verifyGate.mode} in_scope=${verifyGate.inScopeIds.length} skipped=${verifyGate.skippedIds.length} reason=${verifyGate.reason}`,
         );
-        if (maintainMemoryGate.inScopeIds.length === 0) {
-            const schedulePatch = maintainMemoryGate.startHead
+        if (verifyGate.inScopeIds.length === 0) {
+            const schedulePatch = verifyGate.startHead
                 ? {
-                      lastCheckedCommit: maintainMemoryGate.startHead,
-                      ...(maintainMemoryGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
+                      lastCheckedCommit: verifyGate.startHead,
+                      ...(verifyGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
                   }
                 : undefined;
             helpers.recordRun("completed", null, {
@@ -323,6 +356,9 @@ async function runAgenticTask(
             });
             return { status: "completed", schedulePatch };
         }
+    } else if (task === "curate") {
+        curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
+        log(`[dreamer] curate pool: in_scope=${curateMemories.length}`);
     }
 
     const taskPrompt = buildDreamTaskPrompt(task, {
@@ -330,14 +366,13 @@ async function runAgenticTask(
         lastDreamAt: lastRunAt ? String(lastRunAt) : null,
         existingDocs,
         userMemories,
-        maintainMemory: maintainMemoryGate
+        verify: verifyGate
             ? {
-                  memories: maintainMemoryGate.inScope,
-                  mode: maintainMemoryGate.mode,
-                  reason: maintainMemoryGate.reason,
-                  skippedCount: maintainMemoryGate.skippedIds.length,
+                  memories: verifyGate.inScope,
+                  mode: verifyGate.mode,
               }
             : undefined,
+        curate: curateMemories ? { memories: curateMemories } : undefined,
     });
 
     const abortController = new AbortController();
@@ -434,20 +469,20 @@ async function runAgenticTask(
         }
 
         let schedulePatch: TaskExecOutcome["schedulePatch"];
-        if (maintainMemoryGate) {
+        if (verifyGate) {
             const coverage = checkMaintainMemoryCoverage({
                 db,
-                inScopeIds: maintainMemoryGate.inScopeIds,
-                runStartedAt: maintainMemoryGate.runStartedAt,
+                inScopeIds: verifyGate.inScopeIds,
+                runStartedAt: verifyGate.runStartedAt,
             });
-            if (coverage.covered && maintainMemoryGate.startHead) {
+            if (coverage.covered && verifyGate.startHead) {
                 schedulePatch = {
-                    lastCheckedCommit: maintainMemoryGate.startHead,
-                    ...(maintainMemoryGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
+                    lastCheckedCommit: verifyGate.startHead,
+                    ...(verifyGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
                 };
             } else if (!coverage.covered) {
                 log(
-                    `[dreamer] maintain-memory coverage incomplete: uncovered=${coverage.uncoveredIds.length} ids=${coverage.uncoveredIds.slice(0, 20).join(",")}`,
+                    `[dreamer] verify coverage incomplete: uncovered=${coverage.uncoveredIds.length} ids=${coverage.uncoveredIds.slice(0, 20).join(",")}`,
                 );
             }
         }

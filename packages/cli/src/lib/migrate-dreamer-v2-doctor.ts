@@ -12,9 +12,12 @@
  * dreamer.user_memories / dreamer.pin_key_files is folded into the tasks record.
  */
 
-const OLD_MEMORY_TASKS = ["consolidate", "verify", "archive-stale", "improve"] as const;
+const OLD_VERIFY_TASK = "verify";
+const OLD_CURATE_TASKS = ["consolidate", "archive-stale", "improve"] as const;
+const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as const;
 const CANONICAL = [
-    "maintain-memory",
+    "verify",
+    "curate",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
@@ -60,16 +63,21 @@ function mostFrequentSchedule(schedules: string[]): string {
     return enabled.sort((a, b) => cronIntervalScore(a) - cronIntervalScore(b))[0] ?? "";
 }
 
+function withoutBroadInterval(entry: Record<string, unknown>): Record<string, unknown> {
+    const { broad_interval_days: _broad, ...rest } = entry;
+    return rest;
+}
+
 export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): boolean {
     const dreamer = asObject(mcConfig.dreamer);
     if (!dreamer) return false;
 
     const tasksObject = asObject(dreamer.tasks);
-    const hasOldObjectTasks = tasksObject
-        ? OLD_MEMORY_TASKS.some((task) => task in tasksObject)
+    const hasRetiredObjectTasks = tasksObject
+        ? RETIRED_OBJECT_MEMORY_TASKS.some((task) => task in tasksObject)
         : false;
 
-    if (tasksObject && !hasOldObjectTasks) {
+    if (tasksObject && !hasRetiredObjectTasks) {
         const hasLegacyOutsideTasks =
             "schedule" in dreamer ||
             "user_memories" in dreamer ||
@@ -82,7 +90,7 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
     const hasLegacy =
         "schedule" in dreamer ||
         Array.isArray(dreamer.tasks) ||
-        hasOldObjectTasks ||
+        hasRetiredObjectTasks ||
         "user_memories" in dreamer ||
         "pin_key_files" in dreamer ||
         "task_timeout_minutes" in dreamer ||
@@ -99,43 +107,86 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
 
     if (tasksObject) {
         for (const [key, value] of Object.entries(tasksObject)) {
-            if ((OLD_MEMORY_TASKS as readonly string[]).includes(key)) continue;
+            if ((RETIRED_OBJECT_MEMORY_TASKS as readonly string[]).includes(key)) continue;
             if (asObject(value)) tasks[key] = { ...(value as Record<string, unknown>) };
         }
-        if (hasOldObjectTasks) {
-            const oldEntries = OLD_MEMORY_TASKS.map((task) => asObject(tasksObject[task])).filter(
-                (entry): entry is Record<string, unknown> => Boolean(entry),
-            );
-            const oldSchedules = oldEntries.map((entry) =>
+
+        const maintainMemoryEntry = asObject(tasksObject["maintain-memory"]);
+        if (maintainMemoryEntry) {
+            const schedule =
+                typeof maintainMemoryEntry.schedule === "string"
+                    ? maintainMemoryEntry.schedule
+                    : baseCron;
+            tasks.verify = withTimeout({
+                ...maintainMemoryEntry,
+                ...(tasks.verify ?? {}),
+                schedule: tasks.verify?.schedule ?? schedule,
+                broad_interval_days:
+                    tasks.verify?.broad_interval_days ??
+                    maintainMemoryEntry.broad_interval_days ??
+                    7,
+            });
+            tasks.curate = withTimeout({
+                ...withoutBroadInterval(maintainMemoryEntry),
+                ...(tasks.curate ?? {}),
+                schedule: tasks.curate?.schedule ?? schedule,
+            });
+        }
+
+        const oldVerifyEntry = asObject(tasksObject[OLD_VERIFY_TASK]);
+        if (oldVerifyEntry) {
+            tasks.verify = withTimeout({
+                ...oldVerifyEntry,
+                ...(tasks.verify ?? {}),
+                schedule:
+                    tasks.verify?.schedule ??
+                    (typeof oldVerifyEntry.schedule === "string"
+                        ? oldVerifyEntry.schedule
+                        : baseCron),
+                broad_interval_days: tasks.verify?.broad_interval_days ?? 7,
+            });
+        }
+
+        const oldCurateEntries = OLD_CURATE_TASKS.map((task) => asObject(tasksObject[task])).filter(
+            (entry): entry is Record<string, unknown> => Boolean(entry),
+        );
+        if (oldCurateEntries.length > 0) {
+            const oldSchedules = oldCurateEntries.map((entry) =>
                 typeof entry.schedule === "string" ? entry.schedule : baseCron,
             );
-            tasks["maintain-memory"] = withTimeout({
-                ...(tasks["maintain-memory"] ?? {}),
+            tasks.curate = withTimeout({
+                ...(tasks.curate ?? {}),
                 schedule: mostFrequentSchedule(oldSchedules),
-                broad_interval_days: 7,
             });
         }
         for (const task of CANONICAL) {
             if (!tasks[task]) {
                 const schedule =
-                    task === "maintain-memory"
-                        ? baseCron
+                    task === "verify" || task === "curate"
+                        ? ""
                         : task === "maintain-docs" || task === "key-files"
                           ? ""
                           : baseCron;
-                tasks[task] = withTimeout({ schedule });
+                tasks[task] = withTimeout({
+                    schedule,
+                    ...(task === "verify" ? { broad_interval_days: 7 } : {}),
+                });
             }
         }
     } else {
         const legacyArray = Array.isArray(dreamer.tasks)
             ? (dreamer.tasks as unknown[]).filter((t): t is string => typeof t === "string")
             : null;
-        const memorySelected = legacyArray
-            ? legacyArray.some((task) => (OLD_MEMORY_TASKS as readonly string[]).includes(task))
+        const verifySelected = legacyArray ? legacyArray.includes(OLD_VERIFY_TASK) : true;
+        const curateSelected = legacyArray
+            ? legacyArray.some((task) => (OLD_CURATE_TASKS as readonly string[]).includes(task))
             : true;
-        tasks["maintain-memory"] = withTimeout({
-            schedule: memorySelected ? baseCron : "",
+        tasks.verify = withTimeout({
+            schedule: verifySelected ? baseCron : "",
             broad_interval_days: 7,
+        });
+        tasks.curate = withTimeout({
+            schedule: curateSelected ? baseCron : "",
         });
         tasks["maintain-docs"] = withTimeout({
             schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",

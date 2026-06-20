@@ -18,7 +18,7 @@ describe("migrateDreamerV2ForDoctor", () => {
 
     it("is idempotent when tasks is already a v2 record", () => {
         const cfg: Record<string, unknown> = {
-            dreamer: { tasks: { "maintain-memory": { schedule: "0 3 * * *" } } },
+            dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } },
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(false);
     });
@@ -29,7 +29,8 @@ describe("migrateDreamerV2ForDoctor", () => {
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
         const t = tasksOf(cfg);
-        expect(t["maintain-memory"].schedule).toBe("0 2 * * *");
+        expect(t.curate.schedule).toBe("0 2 * * *");
+        expect(t.verify.schedule).toBe("");
         expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
@@ -63,10 +64,11 @@ describe("migrateDreamerV2ForDoctor", () => {
         migrateDreamerV2ForDoctor(cfg);
         // Same object reference retained (comment-json comment symbols survive).
         expect(cfg.dreamer).toBe(dreamer);
-        expect((dreamer.tasks as Record<string, unknown>)["maintain-memory"]).toBeDefined();
+        expect((dreamer.tasks as Record<string, unknown>).verify).toBeDefined();
+        expect((dreamer.tasks as Record<string, unknown>).curate).toBeDefined();
     });
 
-    it("folds object-shaped retired memory tasks into maintain-memory", () => {
+    it("folds object-shaped retired memory tasks into verify + curate", () => {
         const cfg: Record<string, unknown> = {
             dreamer: {
                 tasks: {
@@ -77,8 +79,32 @@ describe("migrateDreamerV2ForDoctor", () => {
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
         const t = tasksOf(cfg);
-        expect(t["maintain-memory"].schedule).toBe("0 * * * *");
-        expect(t.verify).toBeUndefined();
+        expect(t.verify.schedule).toBe("0 3 * * *");
+        expect(t.verify.broad_interval_days).toBe(7);
+        expect(t.curate.schedule).toBe("0 * * * *");
         expect(t.improve).toBeUndefined();
+    });
+
+    it("maps object-shaped maintain-memory to verify + curate", () => {
+        const cfg: Record<string, unknown> = {
+            dreamer: {
+                tasks: {
+                    "maintain-memory": {
+                        schedule: "0 5 * * *",
+                        model: "x/y",
+                        broad_interval_days: 9,
+                    },
+                },
+            },
+        };
+        expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
+        const t = tasksOf(cfg);
+        expect(t.verify.schedule).toBe("0 5 * * *");
+        expect(t.verify.model).toBe("x/y");
+        expect(t.verify.broad_interval_days).toBe(9);
+        expect(t.curate.schedule).toBe("0 5 * * *");
+        expect(t.curate.model).toBe("x/y");
+        expect(t.curate.broad_interval_days).toBeUndefined();
+        expect(t["maintain-memory"]).toBeUndefined();
     });
 });

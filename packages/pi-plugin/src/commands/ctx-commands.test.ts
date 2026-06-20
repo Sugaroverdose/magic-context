@@ -179,6 +179,35 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.options?.triggerTurn).toBe(false);
 	});
 
+	it("/ctx-dream accepts split memory tasks and rejects retired task names", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+
+		registerCtxDreamCommand(pi as never, {
+			db,
+			projectDir: "/tmp/project",
+			projectIdentity: "/tmp/project",
+		});
+
+		await handlers.get("ctx-dream")?.("verify", createCtx());
+		expect(sent[0]?.message.content).toContain('Running dream task "verify"');
+
+		sent.length = 0;
+		await handlers.get("ctx-dream")?.("curate", createCtx());
+		expect(sent[0]?.message.content).toContain('Running dream task "curate"');
+
+		for (const retired of [
+			"maintain-memory",
+			"consolidate",
+			"improve",
+			"archive-stale",
+		]) {
+			sent.length = 0;
+			await handlers.get("ctx-dream")?.(retired, createCtx());
+			expect(sent[0]?.message.content).toContain(`Unknown task "${retired}"`);
+		}
+	});
+
 	it("/ctx-dream reports friendly disabled state without running", async () => {
 		const db = createDb();
 		const { pi, handlers, sent } = createMockPi();
@@ -220,7 +249,7 @@ describe("Pi Magic Context commands", () => {
 		registerCtxStatusCommand(pi as never, {
 			db,
 			projectIdentity: "/tmp/project",
-			dreamer: { runnable: true, scheduleSummary: "maintain-memory 0 3 * * *" },
+			dreamer: { runnable: true, scheduleSummary: "verify 0 3 * * *" },
 		});
 
 		await handlers.get("ctx-status")?.("", createCtx());
@@ -228,7 +257,7 @@ describe("Pi Magic Context commands", () => {
 			details: {
 				dreamer: {
 					enabled: true,
-					scheduleSummary: "maintain-memory 0 3 * * *",
+					scheduleSummary: "verify 0 3 * * *",
 				},
 			},
 		});

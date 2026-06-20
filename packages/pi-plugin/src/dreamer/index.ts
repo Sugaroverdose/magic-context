@@ -294,7 +294,7 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 					]),
 				];
 				// G5: fire conservatively after every successful dreamer task. Many
-				// dreamer tasks (maintain-memory, docs) don't touch the system-
+				// dreamer tasks (verify, curate, docs) don't touch the system-
 				// prompt adjuncts, but improve / maintain-docs / user-memory-review
 				// can update <project-docs>, <user-profile>, or <key-files>. The cost
 				// of one extra disk read per session next turn is tiny compared to

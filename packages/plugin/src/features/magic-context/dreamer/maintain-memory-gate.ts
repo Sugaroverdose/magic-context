@@ -13,6 +13,7 @@ import {
 } from "../memory";
 import type { TaskScheduleStateRow } from "./storage-task-schedule";
 
+// Verify task gate substrate (formerly maintain-memory); kept here to avoid a noisy mechanical rename.
 const DEFAULT_BROAD_INTERVAL_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -105,7 +106,7 @@ export async function partitionMaintainMemoryScope(args: {
     if (!storedWatermark) {
         return allInScope(
             broadMode ? "broad" : "full",
-            "no stored maintain-memory commit watermark; full verification",
+            "no stored verify commit watermark; full verification",
         );
     }
 
@@ -113,12 +114,12 @@ export async function partitionMaintainMemoryScope(args: {
     if (!changedFiles) {
         return allInScope(
             broadMode ? "broad" : "full",
-            "stored maintain-memory commit watermark is unavailable; full verification",
+            "stored verify commit watermark is unavailable; full verification",
         );
     }
 
     if (broadMode) {
-        return allInScope("broad", "broad maintain-memory interval elapsed");
+        return allInScope("broad", "broad verify interval elapsed");
     }
 
     const gitRoot =

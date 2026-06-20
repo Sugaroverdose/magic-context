@@ -1568,7 +1568,7 @@ const MIGRATIONS: Migration[] = [
     },
     {
         version: 43,
-        description: "memory verification side table and maintain-memory watermarks",
+        description: "memory verification side table and verify watermarks",
         up: (db: Database) => {
             db.exec(`
                 CREATE TABLE IF NOT EXISTS memory_verifications (

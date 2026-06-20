@@ -28,7 +28,7 @@ describe("migrateDreamerV2", () => {
     });
 
     it("is a no-op (idempotent) when tasks is already a v2 record", () => {
-        const v2 = { dreamer: { tasks: { "maintain-memory": { schedule: "0 3 * * *" } } } };
+        const v2 = { dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } } };
         const { out, warnings } = migrate(structuredClone(v2));
         expect(out).toEqual(v2);
         expect(warnings).toHaveLength(0);
@@ -42,7 +42,8 @@ describe("migrateDreamerV2", () => {
 
     it("derives the base cron from the window START", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00", tasks: ["consolidate"] } });
-        expect(tasks(out)["maintain-memory"].schedule).toBe("0 2 * * *");
+        expect(tasks(out).curate.schedule).toBe("0 2 * * *");
+        expect(tasks(out).verify.schedule).toBe("");
     });
 
     it("listed tasks get the base cron; OMITTED canonical tasks are DISABLED", () => {
@@ -51,15 +52,18 @@ describe("migrateDreamerV2", () => {
             dreamer: { schedule: "03:30-06:00", tasks: ["consolidate", "verify"] },
         });
         const t = tasks(out);
-        expect(t["maintain-memory"].schedule).toBe("30 3 * * *");
+        expect(t.verify.schedule).toBe("30 3 * * *");
+        expect(t.curate.schedule).toBe("30 3 * * *");
         expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
     it("when tasks array is ABSENT, preserves the v1 default suite (maintain-docs off)", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         const t = tasks(out);
-        expect(t["maintain-memory"].schedule).toBe("0 2 * * *");
-        expect(t["maintain-memory"].broad_interval_days).toBe(7);
+        expect(t.verify.schedule).toBe("0 2 * * *");
+        expect(t.verify.broad_interval_days).toBe(7);
+        expect(t.curate.schedule).toBe("0 2 * * *");
+        expect(t.curate.broad_interval_days).toBeUndefined();
         expect(t["maintain-docs"].schedule).toBe(""); // not in v1 default list
     });
 
@@ -114,7 +118,8 @@ describe("migrateDreamerV2", () => {
             dreamer: { schedule: "02:00-06:00", task_timeout_minutes: 15 },
         });
         const t = tasks(out);
-        expect(t["maintain-memory"].timeout_minutes).toBe(15);
+        expect(t.verify.timeout_minutes).toBe(15);
+        expect(t.curate.timeout_minutes).toBe(15);
         expect(t["review-user-memories"].timeout_minutes).toBe(15);
     });
 
@@ -138,7 +143,7 @@ describe("migrateDreamerV2", () => {
 
     it("falls back to the default base cron on an unparseable window", () => {
         const { out } = migrate({ dreamer: { schedule: "garbage", tasks: ["consolidate"] } });
-        expect(tasks(out)["maintain-memory"].schedule).toBe("0 2 * * *");
+        expect(tasks(out).curate.schedule).toBe("0 2 * * *");
     });
 
     it("emits a migration warning", () => {
@@ -146,20 +151,21 @@ describe("migrateDreamerV2", () => {
         expect(warnings.join("\n")).toContain("dreamer.tasks");
     });
 
-    it("all 5 canonical tasks are present after migration", () => {
+    it("all 6 canonical tasks are present after migration", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         expect(Object.keys(tasks(out)).sort()).toEqual(
             [
+                "curate",
                 "evaluate-smart-notes",
                 "key-files",
                 "maintain-docs",
-                "maintain-memory",
                 "review-user-memories",
+                "verify",
             ].sort(),
         );
     });
 
-    it("folds object-shaped retired memory tasks into maintain-memory using the most frequent schedule", () => {
+    it("folds object-shaped retired memory tasks into verify + curate", () => {
         const { out } = migrate({
             dreamer: {
                 tasks: {
@@ -170,9 +176,32 @@ describe("migrateDreamerV2", () => {
             },
         });
         const t = tasks(out);
-        expect(t["maintain-memory"].schedule).toBe("0 * * * *");
+        expect(t.verify.schedule).toBe("0 3 * * *");
+        expect(t.verify.broad_interval_days).toBe(7);
+        expect(t.curate.schedule).toBe("0 * * * *");
         expect(t["maintain-docs"].schedule).toBe("0 4 * * *");
-        expect(t.verify).toBeUndefined();
         expect(t.improve).toBeUndefined();
+    });
+
+    it("maps object-shaped maintain-memory to verify + curate", () => {
+        const { out } = migrate({
+            dreamer: {
+                tasks: {
+                    "maintain-memory": {
+                        schedule: "0 5 * * *",
+                        model: "x/y",
+                        broad_interval_days: 9,
+                    },
+                },
+            },
+        });
+        const t = tasks(out);
+        expect(t.verify.schedule).toBe("0 5 * * *");
+        expect(t.verify.model).toBe("x/y");
+        expect(t.verify.broad_interval_days).toBe(9);
+        expect(t.curate.schedule).toBe("0 5 * * *");
+        expect(t.curate.model).toBe("x/y");
+        expect(t.curate.broad_interval_days).toBeUndefined();
+        expect(t["maintain-memory"]).toBeUndefined();
     });
 });

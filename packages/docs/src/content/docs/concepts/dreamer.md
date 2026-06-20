@@ -1,6 +1,6 @@
 ---
 title: Dreamer
-description: The off-hours maintenance agent that consolidates memory, verifies facts against code, and keeps project documentation current.
+description: The off-hours maintenance agent that verifies memory against code, curates the memory pool, and keeps project documentation current.
 ---
 
 The dreamer is an optional background agent that runs during idle time to maintain memory quality and project documentation. It spins up ephemeral child sessions, each focused on one maintenance task.
@@ -13,8 +13,8 @@ Schedules are standard 5-field cron expressions, or `""` to disable a task:
 
 | Cron | Meaning |
 |------|---------|
-| `0 3 * * *` | Every day at 3:00 AM (the default for memory tasks) |
-| `0 3 * * 0` | Every Sunday at 3:00 AM |
+| `0 3 * * *` | Every day at 3:00 AM (the default for verification) |
+| `0 4 * * 0` | Every Sunday at 4:00 AM (the default for curation) |
 | `0 */6 * * *` | Every 6 hours |
 | `0 * * * *` | Every hour |
 | `""` | Disabled (still runnable manually via `/ctx-dream <task>`) |
@@ -25,17 +25,18 @@ The dreamer pairs well with local or inexpensive models. Nobody is waiting — i
 
 ## The tasks
 
-The dreamer has five tasks, each independently scheduled:
+The dreamer has six tasks, each independently scheduled:
 
 | Task | Default | What it does |
 |------|---------|-------------|
-| **maintain-memory** | nightly | Incrementally verify memories against backing files, then consolidate duplicates, improve wording, and archive stale facts. |
+| **verify** | nightly | Incrementally verify memories against backing files and fix or remove stale facts. |
+| **curate** | weekly | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
 | **maintain-docs** | off | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
 | **review-user-memories** | nightly | Promote recurring behavioral observations into your `<user-profile>` (privacy-sensitive — see below). |
 | **key-files** | off | Pin frequently-read project files into a `<key-files>` block injected into the conversation. |
 | **evaluate-smart-notes** | nightly | Check whether any smart-note conditions (`ctx_note` with a surface condition) have come true and surface the ready ones. |
 
-Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). maintain-memory owns the per-project memory lease; the others run independently.
+Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `verify` and `curate` share the per-project memory lease; the others run independently.
 
 Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
 

@@ -1221,7 +1221,7 @@ describe("createCtxMemoryTools", () => {
                 content: "src.ts and keep.ts back this memory.",
             });
             db.prepare(
-                "INSERT INTO task_schedule_state (project_path, task, last_checked_commit, last_broad_run_at, retry_count) VALUES (?, 'maintain-memory', ?, ?, 0)",
+                "INSERT INTO task_schedule_state (project_path, task, last_checked_commit, last_broad_run_at, retry_count) VALUES (?, 'verify', ?, ?, 0)",
             ).run("/repo/project", repo.head, Date.now());
             await tools.ctx_memory.execute(
                 { action: "verified", ids: [memory.id], files: ["src.ts", "keep.ts"] },

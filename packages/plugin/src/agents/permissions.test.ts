@@ -157,7 +157,7 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
         expect(DREAMER_ALLOWED_TOOLS).toContain("edit");
     });
 
-    it("includes `aft_search` for code search across maintain-memory/maintain-docs", () => {
+    it("includes `aft_search` for code search across verify/curate/maintain-docs", () => {
         expect(DREAMER_ALLOWED_TOOLS).toContain("aft_search");
     });
 

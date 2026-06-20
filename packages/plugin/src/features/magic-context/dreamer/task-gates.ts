@@ -51,9 +51,14 @@ function countCompartmentsSince(db: Database, projectPath: string, since: number
 export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boolean {
     const { db, projectIdentity: project, lastRunAt } = ctx;
     switch (task) {
-        case "maintain-memory":
+        case "verify":
             // The executor's file gate does the precise incremental partition; the
             // scheduler only avoids taking the memory lease when there is no pool.
+            return countActiveMemories(db, project) > 0;
+
+        case "curate":
+            // Curate is whole-pool hygiene, but still needs an active pool before
+            // taking the shared memory lease.
             return countActiveMemories(db, project) > 0;
 
         case "maintain-docs":

@@ -31,7 +31,7 @@ async function readGuardChangedFiles(args: {
     const watermark = getTaskScheduleState(
         args.db,
         args.projectIdentity,
-        "maintain-memory",
+        "verify",
     )?.lastCheckedCommit;
     if (!watermark) return null;
     return readGitChangedFilesSince(args.cwd, watermark);

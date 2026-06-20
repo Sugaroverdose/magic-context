@@ -73,16 +73,17 @@ describe("runDreamerSetup", () => {
     });
 
     it("declining defaults runs the per-task loop and writes every task's schedule", async () => {
-        // useRecommendedSchedules = NO, then 5 preset selects (all "Nightly").
+        // useRecommendedSchedules = NO, then 6 preset selects (all "Nightly").
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: Array(5).fill("cron:0 3 * * *"),
+            selects: Array(6).fill("cron:0 3 * * *"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks).toBeDefined();
-        expect(Object.keys(result.tasks ?? {}).length).toBe(5);
-        expect(result.tasks?.["maintain-memory"].schedule).toBe("0 3 * * *");
+        expect(Object.keys(result.tasks ?? {}).length).toBe(6);
+        expect(result.tasks?.verify.schedule).toBe("0 3 * * *");
+        expect(result.tasks?.curate.schedule).toBe("0 3 * * *");
     });
 
     it("Disabled preset writes an empty schedule", async () => {
@@ -90,10 +91,11 @@ describe("runDreamerSetup", () => {
             confirms: [false],
             autos: ["x/y"],
             // all disabled
-            selects: Array(5).fill("cron:"),
+            selects: Array(6).fill("cron:"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
-        expect(result.tasks?.["maintain-memory"].schedule).toBe("");
+        expect(result.tasks?.verify.schedule).toBe("");
+        expect(result.tasks?.curate.schedule).toBe("");
         expect(result.tasks?.["key-files"].schedule).toBe("");
     });
 
@@ -102,10 +104,10 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: ["__custom__", ...Array(4).fill("cron:0 3 * * *")],
+            selects: ["__custom__", ...Array(5).fill("cron:0 3 * * *")],
             texts: ["30 4 * * 1"],
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
-        expect(result.tasks?.["maintain-memory"].schedule).toBe("30 4 * * 1");
+        expect(result.tasks?.verify.schedule).toBe("30 4 * * 1");
     });
 });

@@ -2,14 +2,15 @@
  * Canonical Dreamer v2 task registry (pure — no DB imports, so the config schema
  * can import the task names without pulling runtime code).
  *
- * v2 promotes the three former post-phases (review-user-memories, key-files,
- * evaluate-smart-notes) to first-class scheduled tasks alongside the five v1
- * agentic tasks, and assigns each a LEASE DOMAIN so disjoint-state tasks run
+ * v2 promotes the former post-phases (review-user-memories, key-files,
+ * evaluate-smart-notes) to first-class scheduled tasks alongside the agentic
+ * maintenance tasks, and assigns each a LEASE DOMAIN so disjoint-state tasks run
  * concurrently while memory-mutating tasks serialize. See lease.ts + the A+B spec.
  */
 
 export const CANONICAL_DREAM_TASKS = [
-    "maintain-memory",
+    "verify",
+    "curate",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
@@ -19,12 +20,12 @@ export const CANONICAL_DREAM_TASKS = [
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
 /**
- * The v1 "agentic" tasks — those run as a generic dreamer agent session driven by
- * `buildDreamTaskPrompt`. The other three canonical tasks (review-user-memories,
+ * The agentic tasks — those run as a generic dreamer agent session driven by
+ * `buildDreamTaskPrompt`. The other canonical tasks (review-user-memories,
  * key-files, evaluate-smart-notes) have their own specialized runners and do NOT
  * go through the prompt builder.
  */
-export const AGENTIC_DREAM_TASKS = ["maintain-memory", "maintain-docs"] as const;
+export const AGENTIC_DREAM_TASKS = ["verify", "curate", "maintain-docs"] as const;
 
 export type AgenticDreamTask = (typeof AGENTIC_DREAM_TASKS)[number];
 
@@ -40,7 +41,7 @@ export function isAgenticTask(task: DreamTaskName): task is AgenticDreamTask {
  * serialize with each other — concurrent runs race semantically (stale-view
  * merges/splits). Canonical run order when several are due in one drain.
  */
-export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = ["maintain-memory"];
+export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = ["verify", "curate"];
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);
 
@@ -89,7 +90,7 @@ export function isCanonicalDreamTask(value: string): value is DreamTaskName {
 
 /**
  * Stable canonical ordering used when multiple due tasks share a lease domain
- * (preserves the v1 suite order for the memory domain).
+ * (preserves the suite order for the memory domain).
  */
 export function compareTaskOrder(a: DreamTaskName, b: DreamTaskName): number {
     return CANONICAL_DREAM_TASKS.indexOf(a) - CANONICAL_DREAM_TASKS.indexOf(b);

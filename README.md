@@ -42,7 +42,7 @@ Coding agents work the opposite way. Every task is a fresh hire with no memory o
 Magic Context gives them one. It is the **hippocampus** for coding agents, the part of the brain that forms memories, consolidates them, and recalls them, entirely in the background. One session stops being a disposable contractor and becomes a long-term teammate who was there for the whole project:
 
 - **Capture.** As the historian compresses your history, it lifts the durable knowledge (decisions, constraints, conventions) into project memory. You get a memory system for free, from work you are already doing.
-- **Consolidate.** Overnight, a dreamer agent does what sleep does for you: it merges duplicates, verifies memories against the codebase, retires the stale, and promotes what recurs.
+- **Consolidate.** Overnight, dreamer agents do what sleep does for you: verify memories against the codebase, curate duplicates and stale entries, and promote what recurs.
 - **Recall.** The right memories surface automatically every turn, and the agent can search across memories, past conversations, and git history on demand. Across sessions, and across OpenCode and Pi.
 
 Two promises: your agent **never stops to manage its context** (no compaction pauses, no broken flow) and it **never forgets**.
@@ -166,10 +166,8 @@ ctx_memory(action="write", category="ARCHITECTURE", content="Event sourcing for 
 
 *What sleep does for memory.* An optional **dreamer** agent runs overnight to keep memory quality high, spinning up ephemeral child sessions for each task:
 
-- **Consolidate**: merge semantically similar memories into canonical facts.
-- **Verify**: check memories against the current codebase (paths, configs, patterns).
-- **Archive stale**: retire memories about removed features or old paths.
-- **Improve**: rewrite verbose memories into terse, operational form.
+- **Verify**: incrementally check memories against the current codebase (paths, configs, patterns) and fix/remove stale facts.
+- **Curate**: scan the whole memory pool to merge duplicates, tighten wording, and archive low-value or redundant entries.
 - **Maintain docs**: keep `ARCHITECTURE.md` and `STRUCTURE.md` current from codebase changes.
 - **User memories**: promote recurring observations about how you work (communication style, review focus, working patterns) into a `<user-profile>` that travels with every session.
 - **Smart notes**: evaluate deferred notes whose `surface_condition` has come true and surface the ready ones.

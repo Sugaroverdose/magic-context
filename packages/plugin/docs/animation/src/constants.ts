@@ -160,9 +160,7 @@ export const MEMORY_ITEMS = [
 
 // Dreamer pills for Scene 6
 export const DREAMER_PILLS = [
-  { icon: "🗜️", text: "Consolidate: merge similar memories", type: "success" },
   { icon: "✓", text: "Verify: check memories against codebase", type: "success" },
-  { icon: "⊘", text: "Archive stale: retire removed features", type: "archive" },
-  { icon: "✍️", text: "Improve: rewrite into terse facts", type: "success" },
+  { icon: "🗜️", text: "Curate: merge, tighten, and prune", type: "success" },
   { icon: "📝", text: "Maintain docs: update ARCHITECTURE.md", type: "success" },
 ];

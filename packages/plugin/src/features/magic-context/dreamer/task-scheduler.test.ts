@@ -56,10 +56,10 @@ describe("task-scheduler — planDueTasks", () => {
     it("first-seed does NOT fire immediately (next_due in the future)", () => {
         db = freshDb();
         const now = Date.UTC(2026, 0, 1, 12, 0); // midday
-        const due = planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
+        const due = planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
         expect(due).toHaveLength(0);
         // A row was seeded with a future next_due.
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.nextDueAt).not.toBeNull();
         expect(state?.nextDueAt).toBeGreaterThan(now);
     });
@@ -67,8 +67,8 @@ describe("task-scheduler — planDueTasks", () => {
     it("seeds last_run_at from legacy last_dream_at (no full historical pass)", () => {
         db = freshDb();
         setDreamState(db, `last_dream_at:${PROJECT}`, "555000");
-        planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], Date.now());
-        expect(getTaskScheduleState(db, PROJECT, "maintain-memory")?.lastRunAt).toBe(555000);
+        planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], Date.now());
+        expect(getTaskScheduleState(db, PROJECT, "verify")?.lastRunAt).toBe(555000);
     });
 
     it("disabled schedule ('') seeds a NULL-due row that is never due", () => {
@@ -82,10 +82,10 @@ describe("task-scheduler — planDueTasks", () => {
         db = freshDb();
         // Seed then force the row's next_due into the past.
         const now = Date.now();
-        planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
+        planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
         writeTaskScheduleState(db, {
             projectPath: PROJECT,
-            task: "maintain-memory",
+            task: "verify",
             lastRunAt: null,
             nextDueAt: now - 1000,
             schedule: "0 3 * * *",
@@ -93,8 +93,8 @@ describe("task-scheduler — planDueTasks", () => {
             lastError: null,
             retryCount: 0,
         });
-        const due = planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
-        expect(due.map((d) => d.config.task)).toEqual(["maintain-memory"]);
+        const due = planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
+        expect(due.map((d) => d.config.task)).toEqual(["verify"]);
     });
 
     // ── Config-authoritative reconciliation (Oracle P0 #1) ──────────────
@@ -102,12 +102,12 @@ describe("task-scheduler — planDueTasks", () => {
         db = freshDb();
         const now = Date.now();
         // Seed enabled, force it due.
-        planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
-        forceDue(db, "maintain-memory", now);
+        planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
+        forceDue(db, "verify", now);
         // Now the config disables it. The stale past-due slot must NOT fire.
-        const due = planDueTasks(db, PROJECT, [cfg("maintain-memory", "")], now);
+        const due = planDueTasks(db, PROJECT, [cfg("verify", "")], now);
         expect(due).toHaveLength(0);
-        expect(getTaskScheduleState(db, PROJECT, "maintain-memory")?.nextDueAt).toBeNull();
+        expect(getTaskScheduleState(db, PROJECT, "verify")?.nextDueAt).toBeNull();
     });
 
     it("enabling a task that was seeded NULL (disabled) makes it due-eligible", () => {
@@ -127,11 +127,11 @@ describe("task-scheduler — planDueTasks", () => {
     it("changing the cron recomputes next_due_at from the new schedule", () => {
         db = freshDb();
         const now = Date.UTC(2026, 0, 1, 12, 0);
-        planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
-        const before = getTaskScheduleState(db, PROJECT, "maintain-memory")?.nextDueAt;
+        planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
+        const before = getTaskScheduleState(db, PROJECT, "verify")?.nextDueAt;
         // Switch to hourly: next_due must move earlier (next top-of-hour).
-        planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 * * * *")], now);
-        const after = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        planDueTasks(db, PROJECT, [cfg("verify", "0 * * * *")], now);
+        const after = getTaskScheduleState(db, PROJECT, "verify");
         expect(after?.schedule).toBe("0 * * * *");
         expect(after?.nextDueAt).not.toBe(before);
         expect(after?.nextDueAt).toBeLessThan(before ?? Number.POSITIVE_INFINITY);
@@ -144,7 +144,7 @@ describe("task-scheduler — planDueTasks", () => {
         // Simulate a pre-column row: live next_due in the past, schedule NULL.
         writeTaskScheduleState(db, {
             projectPath: PROJECT,
-            task: "maintain-memory",
+            task: "verify",
             lastRunAt: null,
             nextDueAt: due,
             schedule: null,
@@ -152,10 +152,10 @@ describe("task-scheduler — planDueTasks", () => {
             lastError: null,
             retryCount: 0,
         });
-        const collected = planDueTasks(db, PROJECT, [cfg("maintain-memory", "0 3 * * *")], now);
+        const collected = planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], now);
         // The past-due slot is preserved (NOT recomputed into the future) and fires.
-        expect(collected.map((d) => d.config.task)).toEqual(["maintain-memory"]);
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        expect(collected.map((d) => d.config.task)).toEqual(["verify"]);
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.schedule).toBe("0 3 * * *");
         expect(state?.nextDueAt).toBe(due);
     });
@@ -181,13 +181,13 @@ describe("task-scheduler — runDueTasksForProject", () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
 
         const ran: string[] = [];
         const executor = async (): Promise<TaskExecOutcome> => {
-            ran.push("maintain-memory");
+            ran.push("verify");
             return { status: "completed" };
         };
         const count = await runDueTasksForProject({
@@ -198,19 +198,19 @@ describe("task-scheduler — runDueTasksForProject", () => {
             now,
         });
         expect(count).toBe(1);
-        expect(ran).toEqual(["maintain-memory"]);
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        expect(ran).toEqual(["verify"]);
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.lastStatus).toBe("completed");
         expect(state?.nextDueAt).toBeGreaterThan(now);
     });
 
     it("skips a due task whose gate fails (no active memories) and advances it", async () => {
         db = freshDb();
-        // No memories → maintain-memory gate fails.
+        // No memories → verify gate fails.
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
 
         let ranExecutor = false;
         const executor = async (): Promise<TaskExecOutcome> => {
@@ -226,25 +226,25 @@ describe("task-scheduler — runDueTasksForProject", () => {
         });
         expect(count).toBe(0);
         expect(ranExecutor).toBe(false);
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.lastStatus).toBe("skipped");
         expect(state?.nextDueAt).toBeGreaterThan(now);
     });
 
-    it("completed maintain-memory runs persist schedule watermark patches", async () => {
+    it("completed verify runs persist schedule watermark patches", async () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
 
         const executor = async (): Promise<TaskExecOutcome> => ({
             status: "completed",
             schedulePatch: { lastCheckedCommit: "abc123", lastBroadRunAt: 42 },
         });
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.lastCheckedCommit).toBe("abc123");
         expect(state?.lastBroadRunAt).toBe(42);
     });
@@ -253,13 +253,11 @@ describe("task-scheduler — runDueTasksForProject", () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
         // Hold the memory-domain lease from "another process".
-        expect(acquireLease(db, "other-holder", leaseKeyFor("maintain-memory", PROJECT))).toBe(
-            true,
-        );
+        expect(acquireLease(db, "other-holder", leaseKeyFor("verify", PROJECT))).toBe(true);
 
         let ran = false;
         const executor = async (): Promise<TaskExecOutcome> => {
@@ -269,7 +267,7 @@ describe("task-scheduler — runDueTasksForProject", () => {
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
         expect(ran).toBe(false);
         // next_due stayed in the past → still due next tick.
-        const state = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.nextDueAt).toBeLessThan(now);
         expect(state?.lastStatus).toBeNull();
     });
@@ -283,12 +281,9 @@ describe("task-scheduler — runDueTasksForProject", () => {
              VALUES ('smart', ?, 'n', 'pending', 1, 1)`,
         ).run(PROJECT);
         const now = Date.now();
-        const tasks = [
-            cfg("maintain-memory", "0 3 * * *"),
-            cfg("evaluate-smart-notes", "0 3 * * *"),
-        ];
+        const tasks = [cfg("verify", "0 3 * * *"), cfg("evaluate-smart-notes", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
         forceDue(db, "evaluate-smart-notes", now);
 
         const ran = new Set<string>();
@@ -304,15 +299,47 @@ describe("task-scheduler — runDueTasksForProject", () => {
             now,
         });
         expect(count).toBe(2);
-        expect(ran.has("maintain-memory")).toBe(true);
+        expect(ran.has("verify")).toBe(true);
         expect(ran.has("evaluate-smart-notes")).toBe(true);
+    });
+
+    it("verify and curate share the memory domain and run in canonical order", async () => {
+        db = freshDb();
+        seedActiveMemory(db);
+        const now = Date.now();
+        const tasks = [cfg("curate", "0 4 * * 0"), cfg("verify", "0 3 * * *")];
+        planDueTasks(db, PROJECT, tasks, now);
+        forceDue(db, "verify", now);
+        forceDue(db, "curate", now);
+
+        const ran: string[] = [];
+        const leaseKeys = new Set<string>();
+        const executor = async (
+            c: DreamTaskRuntimeConfig,
+            ctx: { leaseKey: string },
+        ): Promise<TaskExecOutcome> => {
+            ran.push(c.task);
+            leaseKeys.add(ctx.leaseKey);
+            return { status: "completed" };
+        };
+
+        const count = await runDueTasksForProject({
+            db,
+            projectIdentity: PROJECT,
+            tasks,
+            executor,
+            now,
+        });
+        expect(count).toBe(2);
+        expect(ran).toEqual(["verify", "curate"]);
+        expect([...leaseKeys]).toEqual([leaseKeyFor("verify", PROJECT)]);
     });
 
     it("transient failure keeps next_due (hot-retry) until MAX_TASK_RETRIES, then advances", async () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
 
         const executor = async (): Promise<TaskExecOutcome> => ({
             status: "failed",
@@ -324,17 +351,17 @@ describe("task-scheduler — runDueTasksForProject", () => {
         // task stays due across ticks without re-forcing (re-forcing would reset
         // retry_count, which is the bug this exercises).
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
         // Attempts 1..3 keep next_due in the past (retry next tick).
         for (let attempt = 1; attempt <= 3; attempt++) {
             await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-            const s = getTaskScheduleState(db, PROJECT, "maintain-memory");
+            const s = getTaskScheduleState(db, PROJECT, "verify");
             expect(s?.retryCount).toBe(attempt);
             expect(s?.nextDueAt).toBeLessThan(now); // still due
         }
         // Attempt 4 exceeds MAX_TASK_RETRIES=3 → advance + reset.
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-        const s = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const s = getTaskScheduleState(db, PROJECT, "verify");
         expect(s?.retryCount).toBe(0);
         expect(s?.nextDueAt).toBeGreaterThan(now);
         expect(s?.lastStatus).toBe("failed");
@@ -344,16 +371,16 @@ describe("task-scheduler — runDueTasksForProject", () => {
         db = freshDb();
         seedActiveMemory(db);
         const now = Date.now();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         planDueTasks(db, PROJECT, tasks, now);
-        forceDue(db, "maintain-memory", now);
+        forceDue(db, "verify", now);
         const executor = async (): Promise<TaskExecOutcome> => ({
             status: "failed",
             transient: false,
             error: "model not found",
         });
         await runDueTasksForProject({ db, projectIdentity: PROJECT, tasks, executor, now });
-        const s = getTaskScheduleState(db, PROJECT, "maintain-memory");
+        const s = getTaskScheduleState(db, PROJECT, "verify");
         expect(s?.nextDueAt).toBeGreaterThan(now);
         expect(s?.retryCount).toBe(0);
         expect(s?.lastStatus).toBe("failed");
@@ -369,7 +396,7 @@ describe("task-scheduler — runManualDream", () => {
              VALUES ('smart', ?, 'n', 'pending', 1, 1)`,
         ).run(PROJECT);
         const tasks = [
-            cfg("maintain-memory", "0 3 * * *"),
+            cfg("verify", "0 3 * * *"),
             cfg("evaluate-smart-notes", "0 3 * * *"),
             cfg("maintain-docs", ""), // disabled → must NOT run even manually
         ];
@@ -379,14 +406,14 @@ describe("task-scheduler — runManualDream", () => {
             return { status: "completed" };
         };
         const result = await runManualDream({ db, projectIdentity: PROJECT, tasks, executor });
-        expect(result.ran.sort()).toEqual(["evaluate-smart-notes", "maintain-memory"]);
+        expect(result.ran.sort()).toEqual(["evaluate-smart-notes", "verify"]);
         expect(ran).not.toContain("maintain-docs"); // disabled stays off
     });
 
     it("a single task arg FORCE-runs it ignoring the activity gate", async () => {
         db = freshDb();
-        // No active memories → maintain-memory's gate would normally fail. Forced runs anyway.
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        // No active memories → verify's gate would normally fail. Forced runs anyway.
+        const tasks = [cfg("verify", "0 3 * * *")];
         let ran = false;
         const executor = async (): Promise<TaskExecOutcome> => {
             ran = true;
@@ -397,10 +424,10 @@ describe("task-scheduler — runManualDream", () => {
             projectIdentity: PROJECT,
             tasks,
             executor,
-            task: "maintain-memory",
+            task: "verify",
         });
         expect(ran).toBe(true);
-        expect(result.ran).toEqual(["maintain-memory"]);
+        expect(result.ran).toEqual(["verify"]);
     });
 
     it("a single DISABLED task can still be force-run by name", async () => {
@@ -424,17 +451,17 @@ describe("task-scheduler — runManualDream", () => {
 
     it("reports gate-skipped tasks in the all-enabled run", async () => {
         db = freshDb();
-        // No active memories → maintain-memory gate fails; it is enabled but skipped.
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        // No active memories → verify gate fails; it is enabled but skipped.
+        const tasks = [cfg("verify", "0 3 * * *")];
         const executor = async (): Promise<TaskExecOutcome> => ({ status: "completed" });
         const result = await runManualDream({ db, projectIdentity: PROJECT, tasks, executor });
         expect(result.ran).toEqual([]);
-        expect(result.skippedNoWork).toEqual(["maintain-memory"]);
+        expect(result.skippedNoWork).toEqual(["verify"]);
     });
 
     it("an unknown forced task name is a no-op", async () => {
         db = freshDb();
-        const tasks = [cfg("maintain-memory", "0 3 * * *")];
+        const tasks = [cfg("verify", "0 3 * * *")];
         const executor = async (): Promise<TaskExecOutcome> => ({ status: "completed" });
         const result = await runManualDream({
             db,

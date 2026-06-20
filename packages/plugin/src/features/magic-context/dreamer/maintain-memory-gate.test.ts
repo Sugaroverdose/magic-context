@@ -29,7 +29,7 @@ function git(args: string[], cwd: string): string {
 }
 
 function makeGitRepo(): { dir: string; head: string } {
-    const dir = mkdtempSync(join(tmpdir(), "mc-maintain-memory-"));
+    const dir = mkdtempSync(join(tmpdir(), "mc-verify-"));
     git(["init"], dir);
     git(["config", "user.email", "test@example.invalid"], dir);
     git(["config", "user.name", "Magic Context Test"], dir);
@@ -56,7 +56,7 @@ function scheduleState(
 ): TaskScheduleStateRow {
     return {
         projectPath,
-        task: "maintain-memory",
+        task: "verify",
         lastRunAt: now - 1000,
         nextDueAt: now,
         schedule: "0 3 * * *",
@@ -77,7 +77,7 @@ afterEach(() => {
     dirs = [];
 });
 
-describe("maintain-memory incremental gate", () => {
+describe("verify incremental gate", () => {
     test("never-verified memories are in scope while sentinel-only memories skip", async () => {
         db = freshDb();
         const repo = makeGitRepo();
@@ -122,7 +122,7 @@ describe("maintain-memory incremental gate", () => {
 
     test("non-git projects and broad mode full-verify active memories", async () => {
         db = freshDb();
-        const nonGitDir = mkdtempSync(join(tmpdir(), "mc-maintain-memory-non-git-"));
+        const nonGitDir = mkdtempSync(join(tmpdir(), "mc-verify-non-git-"));
         dirs.push(nonGitDir);
         const nonGitMemory = activeMemory(db, nonGitDir, "Non-git memory.");
         const nonGit = await partitionMaintainMemoryScope({
@@ -171,7 +171,7 @@ describe("maintain-memory incremental gate", () => {
     });
 });
 
-describe("maintain-memory deterministic coverage", () => {
+describe("verify deterministic coverage", () => {
     test("requires fresh verification rows unless memory is no longer active", () => {
         db = freshDb();
         const project = "git:coverage";

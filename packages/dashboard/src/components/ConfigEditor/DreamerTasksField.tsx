@@ -37,9 +37,14 @@ interface TaskMeta {
 // Mirrors CANONICAL_DREAM_TASKS + DEFAULT_TASK_SCHEDULES in the plugin schema.
 const TASKS: TaskMeta[] = [
   {
-    name: "maintain-memory",
-    description: "Incrementally verify, consolidate, improve, and archive project memories",
+    name: "verify",
+    description: "Checks memories against code and fixes/removes stale ones",
     defaultSchedule: "0 3 * * *",
+  },
+  {
+    name: "curate",
+    description: "Deduplicates, tightens, and prunes the memory pool",
+    defaultSchedule: "0 4 * * 0",
   },
   {
     name: "maintain-docs",
@@ -65,7 +70,7 @@ const TASKS: TaskMeta[] = [
 
 const PRESETS: { label: string; cron: string }[] = [
   { label: "Nightly (3am)", cron: "0 3 * * *" },
-  { label: "Weekly (Sun 3am)", cron: "0 3 * * 0" },
+  { label: "Weekly (Sun 4am)", cron: "0 4 * * 0" },
   { label: "Every 6 hours", cron: "0 */6 * * *" },
   { label: "Hourly", cron: "0 * * * *" },
   { label: "Disabled", cron: "" },

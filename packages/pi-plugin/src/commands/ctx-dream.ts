@@ -31,7 +31,7 @@ export function registerCtxDreamCommand(
 			};
 			deps.onProjectSeen?.(project.projectIdentity);
 
-			// Optional single-task arg: `/ctx-dream maintain-memory`.
+			// Optional single-task arg: `/ctx-dream verify`.
 			const requested =
 				typeof args === "string" ? args.trim() : String(args ?? "").trim();
 			let task: DreamTaskName | undefined;

@@ -23,7 +23,7 @@ export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 // Re-exported from the (DB-free) task registry so the schema and the runtime
 // scheduler share ONE source of truth for task names. DreamingTask remains the
 // agentic tasks (those driven by buildDreamTaskPrompt); CANONICAL_DREAM_TASKS
-// is the full 8-task set used for per-task scheduling config.
+// is the full task set used for per-task scheduling config.
 export const DREAMER_TASKS = AGENTIC_DREAM_TASKS;
 export const DreamingTaskSchema = z.enum(AGENTIC_DREAM_TASKS);
 export type DreamingTask = (typeof AGENTIC_DREAM_TASKS)[number];
@@ -49,7 +49,7 @@ const CronScheduleSchema = z
  *  dreamer-level defaults when omitted. Task-specific params (promotion_threshold,
  *  token_budget, min_reads) are optional and only meaningful for their owning
  *  task. */
-export const DreamTaskConfigSchema = z.object({
+const DreamTaskBaseConfigSchema = z.object({
     schedule: CronScheduleSchema.default(""),
     model: z.string().optional().describe("Per-task model override (inherits dreamer.model)"),
     fallback_models: z
@@ -62,44 +62,60 @@ export const DreamTaskConfigSchema = z.object({
         .min(5)
         .default(20)
         .describe("Minutes allowed for this task before it is aborted"),
-    // review-user-memories
-    promotion_threshold: z
-        .number()
-        .min(2)
-        .max(20)
-        .optional()
-        .describe(
-            "review-user-memories: min candidate observations before promotion is considered (default: 3)",
-        ),
-    // key-files
-    token_budget: z
-        .number()
-        .min(2000)
-        .max(30000)
-        .optional()
-        .describe("key-files: total token budget for pinned files (default: 10000)"),
-    min_reads: z
-        .number()
-        .min(2)
-        .max(20)
-        .optional()
-        .describe("key-files: min full-read count before a file is pinned (default: 4)"),
-    // maintain-memory
-    broad_interval_days: z
-        .number()
-        .min(1)
-        .max(365)
-        .default(7)
-        .describe("maintain-memory: days between broad full-pool passes (default: 7)"),
+});
+
+const PromotionThresholdSchema = z
+    .number()
+    .min(2)
+    .max(20)
+    .optional()
+    .describe(
+        "review-user-memories: min candidate observations before promotion is considered (default: 3)",
+    );
+const TokenBudgetSchema = z
+    .number()
+    .min(2000)
+    .max(30000)
+    .optional()
+    .describe("key-files: total token budget for pinned files (default: 10000)");
+const MinReadsSchema = z
+    .number()
+    .min(2)
+    .max(20)
+    .optional()
+    .describe("key-files: min full-read count before a file is pinned (default: 4)");
+const BroadIntervalDaysSchema = z
+    .number()
+    .min(1)
+    .max(365)
+    .default(7)
+    .describe("verify: days between broad full-pool passes (default: 7)");
+
+export const DreamTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    promotion_threshold: PromotionThresholdSchema,
+    token_budget: TokenBudgetSchema,
+    min_reads: MinReadsSchema,
+    broad_interval_days: BroadIntervalDaysSchema.optional(),
+});
+const VerifyTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    broad_interval_days: BroadIntervalDaysSchema,
+});
+const KeyFilesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    token_budget: TokenBudgetSchema,
+    min_reads: MinReadsSchema,
+});
+const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    promotion_threshold: PromotionThresholdSchema,
 });
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
-/** Default schedule per task. Preserves v1 behavior: the 4 v1-default tasks run
- *  nightly; maintain-docs + key-files default OFF (maintain-docs was not in the
- *  v1 default list; key-files' pin_key_files.enabled defaulted false); the two
- *  promoted post-phases run nightly and are gated (candidates / pending notes). */
+/** Default schedule per task. Preserves v1 behavior: verify runs nightly;
+ *  curate runs weekly; maintain-docs + key-files default OFF (maintain-docs was
+ *  not in the v1 default list; key-files' pin_key_files.enabled defaulted false);
+ *  the two promoted post-phases run nightly and are gated. */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
-    "maintain-memory": "0 3 * * *",
+    verify: "0 3 * * *",
+    curate: "0 4 * * 0",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
@@ -108,7 +124,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
-    if (task === "maintain-memory") base.broad_interval_days = 7;
+    if (task === "verify") base.broad_interval_days = 7;
     if (task === "review-user-memories") base.promotion_threshold = 3;
     if (task === "key-files") {
         base.token_budget = 10000;
@@ -119,19 +135,29 @@ function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigS
 
 // `.default()` in Zod 4 wants the OUTPUT shape; the function form lets us derive
 // it by parsing the (partial) input default so timeout_minutes etc. fill in.
-const TaskField = (task: DreamTaskName) =>
-    DreamTaskConfigSchema.default(() => DreamTaskConfigSchema.parse(defaultTaskConfig(task)));
-
 /** The `tasks` record: one entry per canonical task, each defaulting to its
  *  v1-behavior-preserving schedule. Written explicitly (not via fromEntries) so
  *  the inferred type stays a precise per-key object. */
 export const DreamTasksSchema = z
     .object({
-        "maintain-memory": TaskField("maintain-memory"),
-        "maintain-docs": TaskField("maintain-docs"),
-        "key-files": TaskField("key-files"),
-        "evaluate-smart-notes": TaskField("evaluate-smart-notes"),
-        "review-user-memories": TaskField("review-user-memories"),
+        verify: VerifyTaskConfigSchema.default(() =>
+            VerifyTaskConfigSchema.parse(defaultTaskConfig("verify")),
+        ),
+        curate: DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("curate")),
+        ),
+        "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),
+        ),
+        "key-files": KeyFilesTaskConfigSchema.default(() =>
+            KeyFilesTaskConfigSchema.parse(defaultTaskConfig("key-files")),
+        ),
+        "evaluate-smart-notes": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("evaluate-smart-notes")),
+        ),
+        "review-user-memories": ReviewUserMemoriesTaskConfigSchema.default(() =>
+            ReviewUserMemoriesTaskConfigSchema.parse(defaultTaskConfig("review-user-memories")),
+        ),
     })
     .describe(
         "Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model.",

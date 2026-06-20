@@ -111,7 +111,7 @@ The long-history pipeline. Tiered compartments + deterministic decay renderer (r
 
 ## Dreamer
 
-Background maintenance, one worker at a time. Eligible projects detected on `message.updated` (12h cooldown), enqueued by a process-wide 15-min timer, serialized by a DB lease (TTL + renewal). Each task spawns one child session (`dreamer/runner.ts`); model resolved through the fallback chain. Tasks: maintain-memory, maintain-docs, plus optional user-memory review / smart-note evaluation / key-file identification (config-gated). A circuit breaker aborts after 3 consecutive identical failures. Queue rows are project-scoped (a host only dequeues projects it has loaded).
+Background maintenance, one worker at a time. Eligible projects detected on `message.updated` (12h cooldown), enqueued by a process-wide 15-min timer, serialized by a DB lease (TTL + renewal). Each task spawns one child session (`dreamer/runner.ts`); model resolved through the fallback chain. Tasks: verify, curate, maintain-docs, plus optional user-memory review / smart-note evaluation / key-file identification (config-gated). A circuit breaker aborts after 3 consecutive identical failures. Queue rows are project-scoped (a host only dequeues projects it has loaded).
 
 ## Other subsystems
 
