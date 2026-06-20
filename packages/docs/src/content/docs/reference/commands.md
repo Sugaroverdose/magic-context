@@ -67,7 +67,7 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 
 ## /ctx-dream
 
-**What it does.** Runs **dreamer** tasks for this project immediately. `/ctx-dream` (no argument) runs every enabled task whose activity gate passes; `/ctx-dream <task>` force-runs one task (e.g. `/ctx-dream consolidate`), ignoring its gate and schedule.
+**What it does.** Runs **dreamer** tasks for this project immediately. `/ctx-dream` (no argument) runs every enabled task whose activity gate passes; `/ctx-dream <task>` force-runs one task (e.g. `/ctx-dream maintain-memory`), ignoring its gate and schedule.
 
 **When to use it.** A manual run instead of waiting for a task's cron schedule, or to force a single task on demand.
 

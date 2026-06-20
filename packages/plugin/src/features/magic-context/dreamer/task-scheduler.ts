@@ -31,6 +31,8 @@ export interface DreamTaskRuntimeConfig {
     /** key-files */
     tokenBudget?: number;
     minReads?: number;
+    /** maintain-memory */
+    broadIntervalDays?: number;
 }
 
 export interface TaskExecOutcome {
@@ -39,6 +41,10 @@ export interface TaskExecOutcome {
      *  MAX_TASK_RETRIES; a permanent failure advances to the next cron slot. */
     transient?: boolean;
     error?: string;
+    schedulePatch?: {
+        lastCheckedCommit?: string;
+        lastBroadRunAt?: number;
+    };
 }
 
 /** Runs ONE task's actual work (LLM loop). Supplied by the runner (step 4). The
@@ -159,12 +165,13 @@ function advanceAfterRun(
     finishedAt: number,
     status: "completed" | "failed" | "skipped",
     error: string | null,
+    schedulePatch?: TaskExecOutcome["schedulePatch"],
 ): void {
     writeTaskScheduleState(db, {
         projectPath: projectIdentity,
         task: due.config.task,
         // last_run_at means "last SUCCESSFUL run" — the cutoff for "changed since"
-        // gates (consolidate / maintain-docs). A failed or skipped run did NOT
+        // gates (maintain-memory / maintain-docs). A failed or skipped run did NOT
         // process the work, so the cutoff must NOT advance past it (mirrors v1,
         // where last_dream_at only advanced when a task succeeded).
         lastRunAt:
@@ -176,6 +183,8 @@ function advanceAfterRun(
         lastStatus: status,
         lastError: error,
         retryCount: 0,
+        lastCheckedCommit: schedulePatch?.lastCheckedCommit,
+        lastBroadRunAt: schedulePatch?.lastBroadRunAt,
     });
 }
 
@@ -284,7 +293,15 @@ async function runDomainGroup(
 
             const finishedAt = Date.now();
             if (outcome.status === "completed") {
-                advanceAfterRun(db, projectIdentity, due, finishedAt, "completed", null);
+                advanceAfterRun(
+                    db,
+                    projectIdentity,
+                    due,
+                    finishedAt,
+                    "completed",
+                    null,
+                    outcome.schedulePatch,
+                );
                 cb?.onRan?.(due.config.task);
             } else if (outcome.transient) {
                 recordTransientFailure(db, projectIdentity, due, finishedAt, outcome.error ?? null);

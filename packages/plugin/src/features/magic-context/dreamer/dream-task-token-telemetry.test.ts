@@ -43,7 +43,7 @@ describe("dream-task token telemetry mapping", () => {
     it("the agentic executor records invocations under the canonical task name", () => {
         const exec = read("dreamer/task-executor.ts");
         // The agentic path records with `task` = the canonical config.task name
-        // (consolidate/verify/archive-stale/improve/maintain-docs).
+        // (maintain-memory/maintain-docs).
         expect(exec.includes("recordChildInvocation")).toBe(true);
         expect(exec.includes('subagent: "dreamer"')).toBe(true);
         expect(exec.includes("task,")).toBe(true);

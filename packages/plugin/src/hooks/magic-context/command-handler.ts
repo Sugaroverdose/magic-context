@@ -296,7 +296,7 @@ async function executeDreaming(
         throwSentinel("CTX-DREAM");
     }
 
-    // Optional single-task arg: `/ctx-dream consolidate`.
+    // Optional single-task arg: `/ctx-dream maintain-memory`.
     const requested = argText?.trim();
     let task: DreamTaskName | undefined;
     if (requested) {

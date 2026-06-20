@@ -642,7 +642,7 @@ describe("createMagicContextCommandHandler", () => {
         it("runs all enabled tasks, sends summary, and throws the sentinel", async () => {
             const sendNotification = mock(async () => {});
             const runManual = mock(async () => ({
-                ran: ["consolidate"],
+                ran: ["maintain-memory"],
                 skippedNoWork: [],
                 deferredBusy: [],
                 failed: [],
@@ -679,7 +679,7 @@ describe("createMagicContextCommandHandler", () => {
             expect(sendNotification).toHaveBeenNthCalledWith(
                 2,
                 "ses-dream",
-                expect.stringContaining("Ran: consolidate"),
+                expect.stringContaining("Ran: maintain-memory"),
                 { toastDurationMs: 5000 },
             );
         });
@@ -687,7 +687,7 @@ describe("createMagicContextCommandHandler", () => {
         it("force-runs a single named task when given an argument", async () => {
             const sendNotification = mock(async () => {});
             const runManual = mock(async () => ({
-                ran: ["verify"],
+                ran: ["maintain-memory"],
                 skippedNoWork: [],
                 deferredBusy: [],
                 failed: [],
@@ -705,18 +705,18 @@ describe("createMagicContextCommandHandler", () => {
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "verify" },
+                    { command: "ctx-dream", sessionID: "ses-dream", arguments: "maintain-memory" },
                     makeOutput(""),
                     {},
                 ),
                 "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
             );
 
-            expect(runManual).toHaveBeenCalledWith("verify");
+            expect(runManual).toHaveBeenCalledWith("maintain-memory");
             expect(sendNotification).toHaveBeenNthCalledWith(
                 1,
                 "ses-dream",
-                'Running dream task "verify"...',
+                'Running dream task "maintain-memory"...',
                 { toastDurationMs: 5000 },
             );
         });

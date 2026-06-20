@@ -9,4 +9,6 @@ export { embedPromotedFacts, promoteSessionFactsDurable } from "./promotion";
 export * from "./storage-memory";
 export * from "./storage-memory-embeddings";
 export * from "./storage-memory-fts";
+export * from "./storage-memory-verifications";
 export * from "./types";
+export * from "./verification-paths";

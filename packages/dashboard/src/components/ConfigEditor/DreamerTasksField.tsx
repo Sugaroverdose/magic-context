@@ -22,6 +22,7 @@ export interface DreamTaskConfig {
   promotion_threshold?: number;
   token_budget?: number;
   min_reads?: number;
+  broad_interval_days?: number;
   [key: string]: unknown;
 }
 
@@ -36,23 +37,8 @@ interface TaskMeta {
 // Mirrors CANONICAL_DREAM_TASKS + DEFAULT_TASK_SCHEDULES in the plugin schema.
 const TASKS: TaskMeta[] = [
   {
-    name: "consolidate",
-    description: "Merge near-duplicate project memories",
-    defaultSchedule: "0 3 * * *",
-  },
-  {
-    name: "verify",
-    description: "Re-check memories against the codebase and flag stale ones",
-    defaultSchedule: "0 3 * * *",
-  },
-  {
-    name: "archive-stale",
-    description: "Archive memories that no longer apply",
-    defaultSchedule: "0 3 * * *",
-  },
-  {
-    name: "improve",
-    description: "Refine and split overly-broad memories",
+    name: "maintain-memory",
+    description: "Incrementally verify, consolidate, improve, and archive project memories",
     defaultSchedule: "0 3 * * *",
   },
   {
@@ -126,6 +112,10 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
   // future field — survive an edit instead of being whitelisted away.
   const update = (name: string, patch: Partial<DreamTaskConfig>): void => {
     const next: Record<string, DreamTaskConfig> = {};
+    const canonicalNames = new Set(TASKS.map((task) => task.name));
+    for (const [taskName, taskConfig] of Object.entries(props.value ?? {})) {
+      if (!canonicalNames.has(taskName)) next[taskName] = { ...taskConfig };
+    }
     for (const meta of TASKS) {
       const stored = props.value?.[meta.name];
       // Start from the full stored object (preserve unknown keys), default the

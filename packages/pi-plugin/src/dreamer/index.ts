@@ -23,7 +23,7 @@ export interface PiDreamerOptions {
 	config: DreamerConfig;
 	/**
 	 * Council finding #7: dreamer needs the real embedding config so it can
-	 * (a) consolidate near-duplicate memories using cosine similarity and
+	 * (a) maintain near-duplicate/stale memories using deterministic file gates and
 	 * (b) re-embed memory content when it gets rewritten by `improve`.
 	 * Hardcoded `{provider:"off"}` previously meant dreamer skipped both
 	 * paths even when the user had a real embedding model configured.
@@ -294,7 +294,7 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 					]),
 				];
 				// G5: fire conservatively after every successful dreamer task. Many
-				// dreamer tasks (consolidate, verify, decay) don't touch the system-
+				// dreamer tasks (maintain-memory, docs) don't touch the system-
 				// prompt adjuncts, but improve / maintain-docs / user-memory-review
 				// can update <project-docs>, <user-profile>, or <key-files>. The cost
 				// of one extra disk read per session next turn is tiny compared to

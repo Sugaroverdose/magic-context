@@ -18,7 +18,7 @@ describe("migrateDreamerV2ForDoctor", () => {
 
     it("is idempotent when tasks is already a v2 record", () => {
         const cfg: Record<string, unknown> = {
-            dreamer: { tasks: { consolidate: { schedule: "0 3 * * *" } } },
+            dreamer: { tasks: { "maintain-memory": { schedule: "0 3 * * *" } } },
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(false);
     });
@@ -29,8 +29,8 @@ describe("migrateDreamerV2ForDoctor", () => {
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
         const t = tasksOf(cfg);
-        expect(t.consolidate.schedule).toBe("0 2 * * *");
-        expect(t.verify.schedule).toBe(""); // omitted → disabled
+        expect(t["maintain-memory"].schedule).toBe("0 2 * * *");
+        expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
     it("preserves user_memories opt-out and key-files params, drops retired keys", () => {
@@ -63,6 +63,22 @@ describe("migrateDreamerV2ForDoctor", () => {
         migrateDreamerV2ForDoctor(cfg);
         // Same object reference retained (comment-json comment symbols survive).
         expect(cfg.dreamer).toBe(dreamer);
-        expect((dreamer.tasks as Record<string, unknown>).consolidate).toBeDefined();
+        expect((dreamer.tasks as Record<string, unknown>)["maintain-memory"]).toBeDefined();
+    });
+
+    it("folds object-shaped retired memory tasks into maintain-memory", () => {
+        const cfg: Record<string, unknown> = {
+            dreamer: {
+                tasks: {
+                    verify: { schedule: "0 3 * * *" },
+                    improve: { schedule: "0 * * * *" },
+                },
+            },
+        };
+        expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
+        const t = tasksOf(cfg);
+        expect(t["maintain-memory"].schedule).toBe("0 * * * *");
+        expect(t.verify).toBeUndefined();
+        expect(t.improve).toBeUndefined();
     });
 });

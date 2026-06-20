@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 42;
+export const LATEST_SUPPORTED_VERSION = 43;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -526,6 +526,14 @@ export function initializeDatabase(db: Database): void {
       model_id TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS memory_verifications (
+      memory_id    INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      file_path    TEXT NOT NULL,
+      verified_at  INTEGER NOT NULL,
+      PRIMARY KEY (memory_id, file_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);
+
     CREATE TABLE IF NOT EXISTS memory_mutation_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       project_path TEXT NOT NULL,
@@ -579,6 +587,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       schedule      TEXT,
       last_status   TEXT,
       last_error    TEXT,
+      last_checked_commit TEXT,
+      last_broad_run_at INTEGER,
       retry_count   INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (project_path, task)
     );
@@ -1029,6 +1039,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // Dreamer v2: the cron string next_due_at was computed from, so the scheduler
     // can detect a config schedule change and recompute (config-authoritative).
     ensureColumn(db, "task_schedule_state", "schedule", "TEXT");
+    ensureColumn(db, "task_schedule_state", "last_checked_commit", "TEXT");
+    ensureColumn(db, "task_schedule_state", "last_broad_run_at", "INTEGER");
     // Dreamer v2: parent (dreamer child) session that produced this run, so the
     // dashboard token join can scope to THIS run's invocations instead of every
     // dreamer invocation in the time window (concurrent same-name cross-project

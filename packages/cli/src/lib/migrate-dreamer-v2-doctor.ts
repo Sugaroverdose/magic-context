@@ -12,7 +12,14 @@
  * dreamer.user_memories / dreamer.pin_key_files is folded into the tasks record.
  */
 
-const AGENTIC = ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"] as const;
+const OLD_MEMORY_TASKS = ["consolidate", "verify", "archive-stale", "improve"] as const;
+const CANONICAL = [
+    "maintain-memory",
+    "maintain-docs",
+    "key-files",
+    "evaluate-smart-notes",
+    "review-user-memories",
+] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *";
 
 function windowToCron(schedule: unknown): string {
@@ -31,16 +38,51 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
+function cronIntervalScore(schedule: string): number {
+    const parts = schedule.trim().split(/\s+/);
+    if (parts.length !== 5) return Number.POSITIVE_INFINITY;
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+    if (month !== "*") return 366 * 24 * 60;
+    if (dayOfMonth !== "*") return 31 * 24 * 60;
+    if (dayOfWeek !== "*") return 7 * 24 * 60;
+    const everyHour = /^\*\/(\d+)$/.exec(hour ?? "");
+    if (everyHour) return Math.max(1, Number(everyHour[1])) * 60;
+    if (hour === "*") {
+        const everyMinute = /^\*\/(\d+)$/.exec(minute ?? "");
+        return everyMinute ? Math.max(1, Number(everyMinute[1])) : 60;
+    }
+    return 24 * 60;
+}
+
+function mostFrequentSchedule(schedules: string[]): string {
+    const enabled = schedules.map((s) => s.trim()).filter(Boolean);
+    if (enabled.length === 0) return "";
+    return enabled.sort((a, b) => cronIntervalScore(a) - cronIntervalScore(b))[0] ?? "";
+}
+
 export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): boolean {
     const dreamer = asObject(mcConfig.dreamer);
     if (!dreamer) return false;
 
-    // Idempotent: v2 already has tasks as an OBJECT (v1 had an ARRAY).
-    if (asObject(dreamer.tasks)) return false;
+    const tasksObject = asObject(dreamer.tasks);
+    const hasOldObjectTasks = tasksObject
+        ? OLD_MEMORY_TASKS.some((task) => task in tasksObject)
+        : false;
+
+    if (tasksObject && !hasOldObjectTasks) {
+        const hasLegacyOutsideTasks =
+            "schedule" in dreamer ||
+            "user_memories" in dreamer ||
+            "pin_key_files" in dreamer ||
+            "task_timeout_minutes" in dreamer ||
+            "max_runtime_minutes" in dreamer;
+        if (!hasLegacyOutsideTasks) return false;
+    }
 
     const hasLegacy =
         "schedule" in dreamer ||
         Array.isArray(dreamer.tasks) ||
+        hasOldObjectTasks ||
         "user_memories" in dreamer ||
         "pin_key_files" in dreamer ||
         "task_timeout_minutes" in dreamer ||
@@ -55,38 +97,77 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
 
     const tasks: Record<string, Record<string, unknown>> = {};
 
-    const legacyArray = Array.isArray(dreamer.tasks)
-        ? (dreamer.tasks as unknown[]).filter((t): t is string => typeof t === "string")
-        : null;
-    for (const task of AGENTIC) {
-        const schedule = legacyArray
-            ? legacyArray.includes(task)
-                ? baseCron
-                : ""
-            : task === "maintain-docs"
-              ? ""
-              : baseCron;
-        tasks[task] = withTimeout({ schedule });
+    if (tasksObject) {
+        for (const [key, value] of Object.entries(tasksObject)) {
+            if ((OLD_MEMORY_TASKS as readonly string[]).includes(key)) continue;
+            if (asObject(value)) tasks[key] = { ...(value as Record<string, unknown>) };
+        }
+        if (hasOldObjectTasks) {
+            const oldEntries = OLD_MEMORY_TASKS.map((task) => asObject(tasksObject[task])).filter(
+                (entry): entry is Record<string, unknown> => Boolean(entry),
+            );
+            const oldSchedules = oldEntries.map((entry) =>
+                typeof entry.schedule === "string" ? entry.schedule : baseCron,
+            );
+            tasks["maintain-memory"] = withTimeout({
+                ...(tasks["maintain-memory"] ?? {}),
+                schedule: mostFrequentSchedule(oldSchedules),
+                broad_interval_days: 7,
+            });
+        }
+        for (const task of CANONICAL) {
+            if (!tasks[task]) {
+                const schedule =
+                    task === "maintain-memory"
+                        ? baseCron
+                        : task === "maintain-docs" || task === "key-files"
+                          ? ""
+                          : baseCron;
+                tasks[task] = withTimeout({ schedule });
+            }
+        }
+    } else {
+        const legacyArray = Array.isArray(dreamer.tasks)
+            ? (dreamer.tasks as unknown[]).filter((t): t is string => typeof t === "string")
+            : null;
+        const memorySelected = legacyArray
+            ? legacyArray.some((task) => (OLD_MEMORY_TASKS as readonly string[]).includes(task))
+            : true;
+        tasks["maintain-memory"] = withTimeout({
+            schedule: memorySelected ? baseCron : "",
+            broad_interval_days: 7,
+        });
+        tasks["maintain-docs"] = withTimeout({
+            schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",
+        });
     }
 
-    tasks["evaluate-smart-notes"] = withTimeout({ schedule: baseCron });
+    tasks["evaluate-smart-notes"] ??= withTimeout({ schedule: baseCron });
 
     const um = asObject(dreamer.user_memories);
     const umEnabled = um ? um.enabled !== false : true;
-    tasks["review-user-memories"] = withTimeout({
-        schedule: umEnabled ? baseCron : "",
-        ...(um && typeof um.promotion_threshold === "number"
-            ? { promotion_threshold: um.promotion_threshold }
-            : {}),
-    });
+    if (um || !tasks["review-user-memories"]) {
+        tasks["review-user-memories"] = withTimeout({
+            ...(tasks["review-user-memories"] ?? {}),
+            schedule: umEnabled ? baseCron : "",
+            ...(um && typeof um.promotion_threshold === "number"
+                ? { promotion_threshold: um.promotion_threshold }
+                : {}),
+        });
+    }
 
     const pkf = asObject(dreamer.pin_key_files);
     const pkfEnabled = pkf ? pkf.enabled === true : false;
-    tasks["key-files"] = withTimeout({
-        schedule: pkfEnabled ? baseCron : "",
-        ...(pkf && typeof pkf.token_budget === "number" ? { token_budget: pkf.token_budget } : {}),
-        ...(pkf && typeof pkf.min_reads === "number" ? { min_reads: pkf.min_reads } : {}),
-    });
+    if (pkf || !tasks["key-files"]) {
+        tasks["key-files"] = withTimeout({
+            ...(tasks["key-files"] ?? {}),
+            schedule: pkfEnabled ? baseCron : "",
+            ...(pkf && typeof pkf.token_budget === "number"
+                ? { token_budget: pkf.token_budget }
+                : {}),
+            ...(pkf && typeof pkf.min_reads === "number" ? { min_reads: pkf.min_reads } : {}),
+        });
+    }
 
     // Mutate in place: drop retired keys, keep agent-config keys, add tasks.
     delete dreamer.schedule;

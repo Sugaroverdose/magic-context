@@ -25,6 +25,10 @@ export interface TaskScheduleStateRow {
     lastStatus: "completed" | "failed" | "skipped" | null;
     lastError: string | null;
     retryCount: number;
+    /** maintain-memory commit watermark captured at run start. Undefined on writes preserves existing DB value. */
+    lastCheckedCommit?: string | null;
+    /** maintain-memory broad-pass watermark. Undefined on writes preserves existing DB value. */
+    lastBroadRunAt?: number | null;
 }
 
 interface RawRow {
@@ -36,6 +40,8 @@ interface RawRow {
     last_status: string | null;
     last_error: string | null;
     retry_count: number | null;
+    last_checked_commit: string | null;
+    last_broad_run_at: number | null;
 }
 
 function toRow(r: RawRow): TaskScheduleStateRow {
@@ -48,8 +54,13 @@ function toRow(r: RawRow): TaskScheduleStateRow {
         lastStatus: (r.last_status as TaskScheduleStateRow["lastStatus"]) ?? null,
         lastError: r.last_error,
         retryCount: r.retry_count ?? 0,
+        lastCheckedCommit: r.last_checked_commit ?? null,
+        lastBroadRunAt: r.last_broad_run_at ?? null,
     };
 }
+
+const SELECT_COLUMNS =
+    "project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at";
 
 export function getTaskScheduleState(
     db: Database,
@@ -58,7 +69,7 @@ export function getTaskScheduleState(
 ): TaskScheduleStateRow | null {
     const row = db
         .prepare<[string, string], RawRow>(
-            "SELECT project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count FROM task_schedule_state WHERE project_path = ? AND task = ?",
+            `SELECT ${SELECT_COLUMNS} FROM task_schedule_state WHERE project_path = ? AND task = ?`,
         )
         .get(projectPath, task);
     return row ? toRow(row) : null;
@@ -70,7 +81,7 @@ export function getTaskScheduleStatesForProject(
 ): TaskScheduleStateRow[] {
     return db
         .prepare<[string], RawRow>(
-            "SELECT project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count FROM task_schedule_state WHERE project_path = ? ORDER BY task",
+            `SELECT ${SELECT_COLUMNS} FROM task_schedule_state WHERE project_path = ? ORDER BY task`,
         )
         .all(projectPath)
         .map(toRow);
@@ -101,15 +112,17 @@ export function seedTaskScheduleState(
 export function writeTaskScheduleState(db: Database, row: TaskScheduleStateRow): void {
     db.prepare(
         `INSERT INTO task_schedule_state
-           (project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_path, task) DO UPDATE SET
-           last_run_at = excluded.last_run_at,
-           next_due_at = excluded.next_due_at,
-           schedule    = excluded.schedule,
-           last_status = excluded.last_status,
-           last_error  = excluded.last_error,
-           retry_count = excluded.retry_count`,
+           last_run_at          = excluded.last_run_at,
+           next_due_at          = excluded.next_due_at,
+           schedule             = excluded.schedule,
+           last_status          = excluded.last_status,
+           last_error           = excluded.last_error,
+           retry_count          = excluded.retry_count,
+           last_checked_commit  = COALESCE(excluded.last_checked_commit, task_schedule_state.last_checked_commit),
+           last_broad_run_at    = COALESCE(excluded.last_broad_run_at, task_schedule_state.last_broad_run_at)`,
     ).run(
         row.projectPath,
         row.task,
@@ -119,5 +132,7 @@ export function writeTaskScheduleState(db: Database, row: TaskScheduleStateRow):
         row.lastStatus,
         row.lastError,
         row.retryCount,
+        row.lastCheckedCommit ?? null,
+        row.lastBroadRunAt ?? null,
     );
 }

@@ -1566,6 +1566,26 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 43,
+        description: "memory verification side table and maintain-memory watermarks",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_verifications (
+                    memory_id    INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                    file_path    TEXT NOT NULL,
+                    verified_at  INTEGER NOT NULL,
+                    PRIMARY KEY (memory_id, file_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory
+                    ON memory_verifications(memory_id);
+            `);
+            if (tableExists(db, "task_schedule_state")) {
+                ensureColumn(db, "task_schedule_state", "last_checked_commit", "TEXT");
+                ensureColumn(db, "task_schedule_state", "last_broad_run_at", "INTEGER");
+            }
+        },
+    },
 ];
 
 /**

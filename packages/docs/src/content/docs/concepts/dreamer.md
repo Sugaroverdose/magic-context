@@ -25,20 +25,17 @@ The dreamer pairs well with local or inexpensive models. Nobody is waiting — i
 
 ## The tasks
 
-The dreamer has eight tasks, each independently scheduled:
+The dreamer has five tasks, each independently scheduled:
 
 | Task | Default | What it does |
 |------|---------|-------------|
-| **consolidate** | nightly | Find semantically duplicate memories and merge each cluster into one canonical entry. |
-| **verify** | nightly | Check memories against the current codebase — paths, configs, patterns — and update or archive stale ones. |
-| **archive-stale** | nightly | Retire memories about removed features, old paths, or low-signal facts that waste the injection budget. |
-| **improve** | nightly | Rewrite verbose or narrative memories into terse, operational form. |
+| **maintain-memory** | nightly | Incrementally verify memories against backing files, then consolidate duplicates, improve wording, and archive stale facts. |
 | **maintain-docs** | off | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
 | **review-user-memories** | nightly | Promote recurring behavioral observations into your `<user-profile>` (privacy-sensitive — see below). |
 | **key-files** | off | Pin frequently-read project files into a `<key-files>` block injected into the conversation. |
 | **evaluate-smart-notes** | nightly | Check whether any smart-note conditions (`ctx_note` with a surface condition) have come true and surface the ready ones. |
 
-Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). The four memory-mutating tasks (consolidate, verify, archive-stale, improve) share a per-project lease so they never run concurrently against the same memory store; the others run independently.
+Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). maintain-memory owns the per-project memory lease; the others run independently.
 
 Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
 

@@ -216,7 +216,7 @@ Recall works **across sessions** (a new session inherits everything) and **acros
 | `/ctx-recomp` | Rebuild compartments from raw history (accepts a `start-end` range). Use when stored state seems wrong |
 | `/ctx-session-upgrade` | Upgrade this session to the latest history format: rebuild compartments and migrate project memories |
 | `/ctx-aug` | Run sidekick augmentation on a prompt: retrieve relevant memories via a separate model |
-| `/ctx-dream` | Run dreamer maintenance on demand: consolidate, verify, archive, improve |
+| `/ctx-dream` | Run dreamer maintenance on demand: maintain memory, docs, smart notes, and user-profile review |
 
 ---
 

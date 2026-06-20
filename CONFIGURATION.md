@@ -328,10 +328,7 @@ Each dreamer task is **independently scheduled** with its own cron expression. T
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "tasks": {
-      "consolidate": { "schedule": "0 3 * * *" },
-      "verify": { "schedule": "0 3 * * *" },
-      "archive-stale": { "schedule": "0 3 * * *" },
-      "improve": { "schedule": "0 3 * * *" },
+      "maintain-memory": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
       "maintain-docs": { "schedule": "" },
       "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
       "evaluate-smart-notes": { "schedule": "0 3 * * *" },
@@ -367,15 +364,13 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 | `promotion_threshold` | `number` (2–20) | `3` | **review-user-memories only.** Min candidate observations before promotion. |
 | `token_budget` | `number` (2k–30k) | `10000` | **key-files only.** Total token budget for pinned files. |
 | `min_reads` | `number` (2–20) | `4` | **key-files only.** Min full-read count before a file is pinned. |
+| `broad_interval_days` | `number` (1–365) | `7` | **maintain-memory only.** Days between broad full-pool passes; incremental runs verify only memories whose backing files changed. |
 
 ### The tasks
 
 | Task | Default schedule | What it does |
 |------|------------------|-------------|
-| `consolidate` | `0 3 * * *` | Find semantically duplicate memories and merge each cluster into one canonical fact. |
-| `verify` | `0 3 * * *` | Check memories against actual code (paths, configs, patterns) and update or archive stale ones. |
-| `archive-stale` | `0 3 * * *` | Archive memories that reference removed features, old paths, or discontinued workflows. |
-| `improve` | `0 3 * * *` | Rewrite verbose or narrative memories into terse operational statements. |
+| `maintain-memory` | `0 3 * * *` | Incrementally verify memories against backing files, then consolidate duplicates, improve wording, and archive stale facts. |
 | `maintain-docs` | `""` (off) | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
 | `key-files` | `""` (off) | Pin frequently-read project files into a `<key-files>` block. Requires AFT (see above). |
 | `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |
@@ -386,7 +381,7 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 A process-wide 15-minute timer checks every task's `next_due_at` regardless of user activity, so scheduled tasks trigger even when you aren't chatting:
 
 1. The timer evaluates each task's cron schedule and collects the tasks that are due.
-2. Due tasks pass their activity gate (e.g. consolidate only runs when there are memories to consolidate), then run grouped by lease domain — the four memory-mutating tasks (consolidate/verify/archive-stale/improve) share a per-project lease and run sequentially; the rest run independently.
+2. Due tasks pass their activity gate (e.g. maintain-memory only runs when there are memories to maintain), then run grouped by lease domain. maintain-memory owns the memory lease; docs, key-files, smart notes, and user-memory review use their own domains.
 3. Each task runs in its own ephemeral child session and advances its own `next_due_at`.
 4. `/ctx-dream` runs every enabled task now (honoring gates); `/ctx-dream <task>` force-runs one task immediately, ignoring its gate.
 
@@ -633,10 +628,13 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
   "dreamer": {
     "model": "github-copilot/gpt-5.4",
     "fallback_models": ["anthropic/claude-sonnet-4-6"],
-    "schedule": "02:00-06:00",
-    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"],
-    "user_memories": { "enabled": true },
-    "pin_key_files": { "enabled": true, "token_budget": 10000, "min_reads": 4 }
+    "tasks": {
+      "maintain-memory": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
+      "maintain-docs": { "schedule": "" },
+      "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
+      "evaluate-smart-notes": { "schedule": "0 3 * * *" },
+      "review-user-memories": { "schedule": "0 3 * * *", "promotion_threshold": 3 }
+    }
   },
 
   "embedding": {

@@ -220,13 +220,16 @@ describe("Pi Magic Context commands", () => {
 		registerCtxStatusCommand(pi as never, {
 			db,
 			projectIdentity: "/tmp/project",
-			dreamer: { runnable: true, scheduleSummary: "consolidate 0 3 * * *" },
+			dreamer: { runnable: true, scheduleSummary: "maintain-memory 0 3 * * *" },
 		});
 
 		await handlers.get("ctx-status")?.("", createCtx());
 		expect(sent[0]?.message.details).toMatchObject({
 			details: {
-				dreamer: { enabled: true, scheduleSummary: "consolidate 0 3 * * *" },
+				dreamer: {
+					enabled: true,
+					scheduleSummary: "maintain-memory 0 3 * * *",
+				},
 			},
 		});
 	});

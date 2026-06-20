@@ -3,6 +3,8 @@ import { resolveFallbackChain } from "../../../shared/resolve-fallbacks";
 import { CANONICAL_DREAM_TASKS, type DreamTaskName } from "./task-registry";
 import type { DreamTaskRuntimeConfig } from "./task-scheduler";
 
+type DreamTaskConfig = NonNullable<DreamerConfig["tasks"]>[DreamTaskName];
+
 /**
  * Resolve the full per-task runtime config the scheduler consumes from the
  * validated dreamer config: each task's schedule + its effective model chain
@@ -15,7 +17,11 @@ export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskR
     // missing entry as a disabled task with defaults rather than crashing.
     const tasks = (dreamer.tasks ?? {}) as Partial<DreamerConfig["tasks"]>;
     return CANONICAL_DREAM_TASKS.map((task) => {
-        const t = tasks[task] ?? { schedule: "", timeout_minutes: 20 };
+        const t = (tasks[task] ?? {
+            schedule: "",
+            timeout_minutes: 20,
+            broad_interval_days: 7,
+        }) as DreamTaskConfig;
         // Per-task model override falls back to the dreamer-level model. Fallback
         // chain: per-task list if set, else the dreamer-level list (resolved/deduped).
         const model = t.model ?? dreamer.model;
@@ -31,6 +37,7 @@ export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskR
             promotionThreshold: t.promotion_threshold,
             tokenBudget: t.token_budget,
             minReads: t.min_reads,
+            broadIntervalDays: t.broad_interval_days ?? 7,
         };
     });
 }
@@ -78,7 +85,7 @@ export function enabledDreamTasks(dreamer: DreamerConfig | undefined): DreamTask
 }
 
 /** A compact `/ctx-status`-style schedule summary, e.g.
- *  "consolidate 0 3 * * *, verify 0 3 * * 0" — or "manual-only" when nothing is
+ *  "maintain-memory 0 3 * * *, maintain-docs 0 3 * * 0" — or "manual-only" when nothing is
  *  scheduled. */
 export function summarizeDreamSchedule(dreamer: DreamerConfig | undefined): string {
     const enabled = enabledDreamTasks(dreamer);

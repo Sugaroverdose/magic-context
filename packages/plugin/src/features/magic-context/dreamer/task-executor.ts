@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+
 import { DREAMER_AGENT } from "../../../agents/dreamer";
 import type { DreamingTask } from "../../../config/schema/magic-context";
 import type { PluginContext } from "../../../plugin/types";
@@ -21,6 +22,11 @@ import {
     enforceMaintainDocsProtectedRegions,
     snapshotMaintainDocsFiles,
 } from "./maintain-docs-protected-enforcement";
+import {
+    checkMaintainMemoryCoverage,
+    type MaintainMemoryGateResult,
+    partitionMaintainMemoryScope,
+} from "./maintain-memory-gate";
 import { type DreamRunMemoryChanges, insertDreamRun } from "./storage-dream-runs";
 import { getTaskScheduleState } from "./storage-task-schedule";
 import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
@@ -227,7 +233,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 return { status: "completed" };
             }
 
-            // Agentic tasks: consolidate / verify / archive-stale / improve / maintain-docs.
+            // Agentic tasks: maintain-memory / maintain-docs.
             return await runAgenticTask(config, ctx, {
                 deps,
                 deadline,
@@ -289,15 +295,49 @@ async function runAgenticTask(
               }
             : undefined;
     const userMemories =
-        task === "archive-stale"
+        task === "maintain-memory"
             ? getActiveUserMemories(db).map((um) => ({ id: um.id, content: um.content }))
             : undefined;
+
+    let maintainMemoryGate: MaintainMemoryGateResult | null = null;
+    if (task === "maintain-memory") {
+        maintainMemoryGate = await partitionMaintainMemoryScope({
+            db,
+            projectIdentity,
+            projectDirectory: deps.sessionDirectory,
+            scheduleState: getTaskScheduleState(db, projectIdentity, config.task),
+            broadIntervalDays: config.broadIntervalDays,
+        });
+        log(
+            `[dreamer] maintain-memory gate: mode=${maintainMemoryGate.mode} in_scope=${maintainMemoryGate.inScopeIds.length} skipped=${maintainMemoryGate.skippedIds.length} reason=${maintainMemoryGate.reason}`,
+        );
+        if (maintainMemoryGate.inScopeIds.length === 0) {
+            const schedulePatch = maintainMemoryGate.startHead
+                ? {
+                      lastCheckedCommit: maintainMemoryGate.startHead,
+                      ...(maintainMemoryGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
+                  }
+                : undefined;
+            helpers.recordRun("completed", null, {
+                memoryChanges: helpers.computeMemoryDelta(memoryBefore),
+            });
+            return { status: "completed", schedulePatch };
+        }
+    }
 
     const taskPrompt = buildDreamTaskPrompt(task, {
         projectPath: projectIdentity,
         lastDreamAt: lastRunAt ? String(lastRunAt) : null,
         existingDocs,
         userMemories,
+        maintainMemory: maintainMemoryGate
+            ? {
+                  memories: maintainMemoryGate.inScope,
+                  mode: maintainMemoryGate.mode,
+                  reason: maintainMemoryGate.reason,
+                  skippedCount: maintainMemoryGate.skippedIds.length,
+              }
+            : undefined,
     });
 
     const abortController = new AbortController();
@@ -393,10 +433,29 @@ async function runAgenticTask(
             }
         }
 
+        let schedulePatch: TaskExecOutcome["schedulePatch"];
+        if (maintainMemoryGate) {
+            const coverage = checkMaintainMemoryCoverage({
+                db,
+                inScopeIds: maintainMemoryGate.inScopeIds,
+                runStartedAt: maintainMemoryGate.runStartedAt,
+            });
+            if (coverage.covered && maintainMemoryGate.startHead) {
+                schedulePatch = {
+                    lastCheckedCommit: maintainMemoryGate.startHead,
+                    ...(maintainMemoryGate.broadMode ? { lastBroadRunAt: Date.now() } : {}),
+                };
+            } else if (!coverage.covered) {
+                log(
+                    `[dreamer] maintain-memory coverage incomplete: uncovered=${coverage.uncoveredIds.length} ids=${coverage.uncoveredIds.slice(0, 20).join(",")}`,
+                );
+            }
+        }
+
         helpers.recordRun("completed", null, {
             memoryChanges: helpers.computeMemoryDelta(memoryBefore),
         });
-        return { status: "completed" };
+        return { status: "completed", schedulePatch };
     } catch (error) {
         taskFailed = true;
         throw error;

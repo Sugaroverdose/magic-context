@@ -30,15 +30,6 @@ function countActiveMemories(db: Database, projectPath: string): number {
     return row?.cnt ?? 0;
 }
 
-function countMemoriesChangedSince(db: Database, projectPath: string, since: number): number {
-    const row = db
-        .prepare<[string, number], { cnt: number }>(
-            "SELECT COUNT(*) AS cnt FROM memories WHERE project_path = ? AND status IN ('active','permanent') AND updated_at > ?",
-        )
-        .get(projectPath, since);
-    return row?.cnt ?? 0;
-}
-
 function countCompartmentsSince(db: Database, projectPath: string, since: number): number {
     // Compartments are keyed by session_id; map to project via session_projects.
     const row = db
@@ -60,16 +51,9 @@ function countCompartmentsSince(db: Database, projectPath: string, since: number
 export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boolean {
     const { db, projectIdentity: project, lastRunAt } = ctx;
     switch (task) {
-        case "consolidate":
-            // Active memories CHANGED since the last consolidate. Never-run → any exist.
-            return lastRunAt === null
-                ? countActiveMemories(db, project) > 0
-                : countMemoriesChangedSince(db, project, lastRunAt) > 0;
-
-        case "verify":
-        case "archive-stale":
-        case "improve":
-            // Mechanical memory passes — gate on "there is memory to work on".
+        case "maintain-memory":
+            // The executor's file gate does the precise incremental partition; the
+            // scheduler only avoids taking the memory lease when there is no pool.
             return countActiveMemories(db, project) > 0;
 
         case "maintain-docs":

@@ -27,10 +27,18 @@
  *    (promotion_threshold carried). Same for pin_key_files → key-files.
  *  - evaluate-smart-notes → base cron (it always ran on pending notes).
  *  - task_timeout_minutes → each task's timeout_minutes default; max_runtime_minutes dropped.
- *  - Idempotent: if dreamer.tasks is already an OBJECT (v2), do nothing.
+ *  - Object-shaped A+B configs carrying retired memory task keys are folded into
+ *    maintain-memory before schema parsing strips unknown keys.
  */
 
-const AGENTIC = ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"] as const;
+const OLD_MEMORY_TASKS = ["consolidate", "verify", "archive-stale", "improve"] as const;
+const CANONICAL = [
+    "maintain-memory",
+    "maintain-docs",
+    "key-files",
+    "evaluate-smart-notes",
+    "review-user-memories",
+] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *"; // matches the historical "02:00-06:00" default window start
 
 /** "02:00-06:00" → "0 2 * * *". Falls back to the default base cron on any
@@ -51,6 +59,28 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
         : undefined;
 }
 
+function cronIntervalScore(schedule: string): number {
+    const parts = schedule.trim().split(/\s+/);
+    if (parts.length !== 5) return Number.POSITIVE_INFINITY;
+    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+    if (month !== "*") return 366 * 24 * 60;
+    if (dayOfMonth !== "*") return 31 * 24 * 60;
+    if (dayOfWeek !== "*") return 7 * 24 * 60;
+    const everyHour = /^\*\/(\d+)$/.exec(hour ?? "");
+    if (everyHour) return Math.max(1, Number(everyHour[1])) * 60;
+    if (hour === "*") {
+        const everyMinute = /^\*\/(\d+)$/.exec(minute ?? "");
+        return everyMinute ? Math.max(1, Number(everyMinute[1])) : 60;
+    }
+    return 24 * 60;
+}
+
+function mostFrequentSchedule(schedules: string[]): string {
+    const enabled = schedules.map((s) => s.trim()).filter(Boolean);
+    if (enabled.length === 0) return "";
+    return enabled.sort((a, b) => cronIntervalScore(a) - cronIntervalScore(b))[0] ?? "";
+}
+
 export function migrateDreamerV2(
     rawConfig: Record<string, unknown>,
     warnings: string[],
@@ -58,14 +88,27 @@ export function migrateDreamerV2(
     const dreamer = asObject(rawConfig.dreamer);
     if (!dreamer) return rawConfig;
 
-    // Idempotent: v2 already has `tasks` as an OBJECT. A v1 `tasks` is an ARRAY.
-    if (asObject(dreamer.tasks)) return rawConfig;
+    const tasksObject = asObject(dreamer.tasks);
+    const hasOldObjectTasks = tasksObject
+        ? OLD_MEMORY_TASKS.some((task) => task in tasksObject)
+        : false;
+
+    if (tasksObject && !hasOldObjectTasks) {
+        const hasLegacyOutsideTasks =
+            "schedule" in dreamer ||
+            "user_memories" in dreamer ||
+            "pin_key_files" in dreamer ||
+            "task_timeout_minutes" in dreamer ||
+            "max_runtime_minutes" in dreamer;
+        if (!hasLegacyOutsideTasks) return rawConfig;
+    }
 
     // Nothing legacy to migrate (no window/array/blocks) → leave as-is; the
     // schema default fills `tasks`.
     const hasLegacy =
         "schedule" in dreamer ||
         Array.isArray(dreamer.tasks) ||
+        hasOldObjectTasks ||
         "user_memories" in dreamer ||
         "pin_key_files" in dreamer ||
         "task_timeout_minutes" in dreamer ||
@@ -80,44 +123,83 @@ export function migrateDreamerV2(
 
     const tasks: Record<string, Record<string, unknown>> = {};
 
-    // Agentic tasks: array present → listed-on / omitted-off; array absent →
-    // historical defaults (the 4 v1-default tasks on, maintain-docs off).
-    const legacyArray = Array.isArray(dreamer.tasks)
-        ? (dreamer.tasks as unknown[]).filter((t): t is string => typeof t === "string")
-        : null;
-    for (const task of AGENTIC) {
-        let schedule: string;
-        if (legacyArray) {
-            schedule = legacyArray.includes(task) ? baseCron : "";
-        } else {
-            // No explicit selection → preserve v1 default suite (maintain-docs was
-            // not in the default list).
-            schedule = task === "maintain-docs" ? "" : baseCron;
+    if (tasksObject) {
+        for (const [key, value] of Object.entries(tasksObject)) {
+            if ((OLD_MEMORY_TASKS as readonly string[]).includes(key)) continue;
+            if (asObject(value)) tasks[key] = { ...(value as Record<string, unknown>) };
         }
-        tasks[task] = withTimeout({ schedule });
+        if (hasOldObjectTasks) {
+            const oldEntries = OLD_MEMORY_TASKS.map((task) => asObject(tasksObject[task])).filter(
+                (entry): entry is Record<string, unknown> => Boolean(entry),
+            );
+            const oldSchedules = oldEntries.map((entry) =>
+                typeof entry.schedule === "string" ? entry.schedule : baseCron,
+            );
+            tasks["maintain-memory"] = withTimeout({
+                ...(tasks["maintain-memory"] ?? {}),
+                schedule: mostFrequentSchedule(oldSchedules),
+                broad_interval_days: 7,
+            });
+        }
+
+        for (const task of CANONICAL) {
+            if (!tasks[task]) {
+                const schedule =
+                    task === "maintain-memory"
+                        ? baseCron
+                        : task === "maintain-docs" || task === "key-files"
+                          ? ""
+                          : baseCron;
+                tasks[task] = withTimeout({ schedule });
+            }
+        }
+    } else {
+        // Agentic memory maintenance: array present → any old memory task enables
+        // maintain-memory; array absent → historical default suite on.
+        const legacyArray = Array.isArray(dreamer.tasks)
+            ? (dreamer.tasks as unknown[]).filter((t): t is string => typeof t === "string")
+            : null;
+        const memorySelected = legacyArray
+            ? legacyArray.some((task) => (OLD_MEMORY_TASKS as readonly string[]).includes(task))
+            : true;
+        tasks["maintain-memory"] = withTimeout({
+            schedule: memorySelected ? baseCron : "",
+            broad_interval_days: 7,
+        });
+        tasks["maintain-docs"] = withTimeout({
+            schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",
+        });
     }
 
     // evaluate-smart-notes always ran post-suite on pending notes.
-    tasks["evaluate-smart-notes"] = withTimeout({ schedule: baseCron });
+    tasks["evaluate-smart-notes"] ??= withTimeout({ schedule: baseCron });
 
     // review-user-memories ← user_memories block (default enabled in v1).
     const um = asObject(dreamer.user_memories);
     const umEnabled = um ? um.enabled !== false : true;
-    tasks["review-user-memories"] = withTimeout({
-        schedule: umEnabled ? baseCron : "",
-        ...(um && typeof um.promotion_threshold === "number"
-            ? { promotion_threshold: um.promotion_threshold }
-            : {}),
-    });
+    if (um || !tasks["review-user-memories"]) {
+        tasks["review-user-memories"] = withTimeout({
+            ...(tasks["review-user-memories"] ?? {}),
+            schedule: umEnabled ? baseCron : "",
+            ...(um && typeof um.promotion_threshold === "number"
+                ? { promotion_threshold: um.promotion_threshold }
+                : {}),
+        });
+    }
 
     // key-files ← pin_key_files block (default DISABLED in v1).
     const pkf = asObject(dreamer.pin_key_files);
     const pkfEnabled = pkf ? pkf.enabled === true : false;
-    tasks["key-files"] = withTimeout({
-        schedule: pkfEnabled ? baseCron : "",
-        ...(pkf && typeof pkf.token_budget === "number" ? { token_budget: pkf.token_budget } : {}),
-        ...(pkf && typeof pkf.min_reads === "number" ? { min_reads: pkf.min_reads } : {}),
-    });
+    if (pkf || !tasks["key-files"]) {
+        tasks["key-files"] = withTimeout({
+            ...(tasks["key-files"] ?? {}),
+            schedule: pkfEnabled ? baseCron : "",
+            ...(pkf && typeof pkf.token_budget === "number"
+                ? { token_budget: pkf.token_budget }
+                : {}),
+            ...(pkf && typeof pkf.min_reads === "number" ? { min_reads: pkf.min_reads } : {}),
+        });
+    }
 
     // Build the new dreamer block: keep agent-config keys (model, disable, etc.),
     // drop the retired scheduling keys, add the tasks record.

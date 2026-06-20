@@ -1,13 +1,37 @@
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	getMemoryById,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getMemoryVerifications } from "@magic-context/core/features/magic-context/memory/storage-memory-verifications";
 import { getMemoryMutationsForRender } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxMemoryTool } from "./ctx-memory";
+
+function git(args: string[], cwd: string): string {
+	return execFileSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+}
+
+function makeGitRepo(): { dir: string; head: string } {
+	const dir = mkdtempSync(join(tmpdir(), "mc-pi-ctx-memory-"));
+	git(["init"], dir);
+	git(["config", "user.email", "test@example.invalid"], dir);
+	git(["config", "user.name", "Magic Context Test"], dir);
+	writeFileSync(join(dir, "src.ts"), "export const value = 1;\n");
+	git(["add", "src.ts"], dir);
+	git(["commit", "-m", "initial"], dir);
+	return { dir, head: git(["rev-parse", "HEAD"], dir).trim() };
+}
 
 describe("createCtxMemoryTool", () => {
 	it("rejects list for primary agents and allows it for dreamer agents", async () => {
@@ -50,6 +74,101 @@ describe("createCtxMemoryTool", () => {
 			expect(dreamerResult.content[0]?.text).toBe("No active memories found.");
 		} finally {
 			closeQuietly(db);
+		}
+	});
+
+	it("rejects verified for primary agents and records tracked files for dreamer agents", async () => {
+		const db = createTestDb();
+		const repo = makeGitRepo();
+		try {
+			const primary = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: false,
+			});
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-memory", repo.dir) as never;
+			const projectIdentity = resolveProjectIdentity(repo.dir);
+			const memory = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONFIG_VALUES",
+				content: "src.ts exports value.",
+			});
+
+			const primaryResult = await primary.execute(
+				"call-primary",
+				{ action: "verified", ids: [memory.id], files: ["src.ts"] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			const dreamerResult = await dreamer.execute(
+				"call-dreamer",
+				{ action: "verified", ids: [memory.id], files: ["src.ts"] },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(primaryResult.isError).toBe(true);
+			expect(dreamerResult.isError).toBeUndefined();
+			expect(JSON.parse(dreamerResult.content[0]?.text ?? "{}")).toMatchObject({
+				recorded: 1,
+				memory_ids: [memory.id],
+			});
+			expect(
+				getMemoryVerifications(db, [memory.id]).get(memory.id)?.files,
+			).toEqual(["src.ts"]);
+		} finally {
+			closeQuietly(db);
+			rmSync(repo.dir, { recursive: true, force: true });
+		}
+	});
+
+	it("records verified_files on Pi update", async () => {
+		const db = createTestDb();
+		const repo = makeGitRepo();
+		try {
+			const dreamer = createCtxMemoryTool({
+				db,
+				memoryEnabled: true,
+				embeddingEnabled: false,
+				allowDreamerActions: true,
+			});
+			const ctx = fakeContext("ses-memory", repo.dir) as never;
+			const projectIdentity = resolveProjectIdentity(repo.dir);
+			const memory = insertMemory(db, {
+				projectPath: projectIdentity,
+				category: "CONFIG_VALUES",
+				content: "Old wording.",
+			});
+
+			const result = await dreamer.execute(
+				"call-update",
+				{
+					action: "update",
+					ids: [memory.id],
+					content: "src.ts exports value.",
+					verified_files: ["src.ts"],
+				},
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+
+			expect(result.isError).toBeUndefined();
+			expect(
+				getMemoryVerifications(db, [memory.id]).get(memory.id)?.files,
+			).toEqual(["src.ts"]);
+		} finally {
+			closeQuietly(db);
+			rmSync(repo.dir, { recursive: true, force: true });
 		}
 	});
 

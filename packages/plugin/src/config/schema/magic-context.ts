@@ -22,7 +22,7 @@ export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 // Re-exported from the (DB-free) task registry so the schema and the runtime
 // scheduler share ONE source of truth for task names. DreamingTask remains the
-// 5 "agentic" tasks (those driven by buildDreamTaskPrompt); CANONICAL_DREAM_TASKS
+// agentic tasks (those driven by buildDreamTaskPrompt); CANONICAL_DREAM_TASKS
 // is the full 8-task set used for per-task scheduling config.
 export const DREAMER_TASKS = AGENTIC_DREAM_TASKS;
 export const DreamingTaskSchema = z.enum(AGENTIC_DREAM_TASKS);
@@ -84,6 +84,13 @@ export const DreamTaskConfigSchema = z.object({
         .max(20)
         .optional()
         .describe("key-files: min full-read count before a file is pinned (default: 4)"),
+    // maintain-memory
+    broad_interval_days: z
+        .number()
+        .min(1)
+        .max(365)
+        .default(7)
+        .describe("maintain-memory: days between broad full-pool passes (default: 7)"),
 });
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
@@ -92,10 +99,7 @@ export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
  *  v1 default list; key-files' pin_key_files.enabled defaulted false); the two
  *  promoted post-phases run nightly and are gated (candidates / pending notes). */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
-    consolidate: "0 3 * * *",
-    verify: "0 3 * * *",
-    "archive-stale": "0 3 * * *",
-    improve: "0 3 * * *",
+    "maintain-memory": "0 3 * * *",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
@@ -104,6 +108,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
+    if (task === "maintain-memory") base.broad_interval_days = 7;
     if (task === "review-user-memories") base.promotion_threshold = 3;
     if (task === "key-files") {
         base.token_budget = 10000;
@@ -122,10 +127,7 @@ const TaskField = (task: DreamTaskName) =>
  *  the inferred type stays a precise per-key object. */
 export const DreamTasksSchema = z
     .object({
-        consolidate: TaskField("consolidate"),
-        verify: TaskField("verify"),
-        "archive-stale": TaskField("archive-stale"),
-        improve: TaskField("improve"),
+        "maintain-memory": TaskField("maintain-memory"),
         "maintain-docs": TaskField("maintain-docs"),
         "key-files": TaskField("key-files"),
         "evaluate-smart-notes": TaskField("evaluate-smart-notes"),

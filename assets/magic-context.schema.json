@@ -347,48 +347,42 @@
         },
         "tasks": {
           "default": {
-            "consolidate": {
+            "maintain-memory": {
               "schedule": "0 3 * * *",
-              "timeout_minutes": 20
-            },
-            "verify": {
-              "schedule": "0 3 * * *",
-              "timeout_minutes": 20
-            },
-            "archive-stale": {
-              "schedule": "0 3 * * *",
-              "timeout_minutes": 20
-            },
-            "improve": {
-              "schedule": "0 3 * * *",
-              "timeout_minutes": 20
+              "timeout_minutes": 20,
+              "broad_interval_days": 7
             },
             "maintain-docs": {
               "schedule": "",
-              "timeout_minutes": 20
+              "timeout_minutes": 20,
+              "broad_interval_days": 7
             },
             "key-files": {
               "schedule": "",
               "timeout_minutes": 20,
               "token_budget": 10000,
-              "min_reads": 4
+              "min_reads": 4,
+              "broad_interval_days": 7
             },
             "evaluate-smart-notes": {
               "schedule": "0 3 * * *",
-              "timeout_minutes": 20
+              "timeout_minutes": 20,
+              "broad_interval_days": 7
             },
             "review-user-memories": {
               "schedule": "0 3 * * *",
               "timeout_minutes": 20,
-              "promotion_threshold": 3
+              "promotion_threshold": 3,
+              "broad_interval_days": 7
             }
           },
           "type": "object",
           "properties": {
-            "consolidate": {
+            "maintain-memory": {
               "default": {
                 "schedule": "0 3 * * *",
-                "timeout_minutes": 20
+                "timeout_minutes": 20,
+                "broad_interval_days": 7
               },
               "type": "object",
               "properties": {
@@ -450,217 +444,21 @@
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
-                }
-              }
-            },
-            "verify": {
-              "default": {
-                "schedule": "0 3 * * *",
-                "timeout_minutes": 20
-              },
-              "type": "object",
-              "properties": {
-                "schedule": {
-                  "default": "",
-                  "type": "string",
-                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
                 },
-                "model": {
-                  "description": "Per-task model override (inherits dreamer.model)",
-                  "type": "string"
-                },
-                "fallback_models": {
-                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  ]
-                },
-                "thinking_level": {
-                  "description": "Pi only: per-task thinking level",
-                  "type": "string",
-                  "enum": [
-                    "off",
-                    "minimal",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh"
-                  ]
-                },
-                "timeout_minutes": {
-                  "default": 20,
-                  "description": "Minutes allowed for this task before it is aborted",
+                "broad_interval_days": {
+                  "default": 7,
+                  "description": "maintain-memory: days between broad full-pool passes (default: 7)",
                   "type": "number",
-                  "minimum": 5
-                },
-                "promotion_threshold": {
-                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
-                },
-                "token_budget": {
-                  "description": "key-files: total token budget for pinned files (default: 10000)",
-                  "type": "number",
-                  "minimum": 2000,
-                  "maximum": 30000
-                },
-                "min_reads": {
-                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
-                }
-              }
-            },
-            "archive-stale": {
-              "default": {
-                "schedule": "0 3 * * *",
-                "timeout_minutes": 20
-              },
-              "type": "object",
-              "properties": {
-                "schedule": {
-                  "default": "",
-                  "type": "string",
-                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
-                },
-                "model": {
-                  "description": "Per-task model override (inherits dreamer.model)",
-                  "type": "string"
-                },
-                "fallback_models": {
-                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  ]
-                },
-                "thinking_level": {
-                  "description": "Pi only: per-task thinking level",
-                  "type": "string",
-                  "enum": [
-                    "off",
-                    "minimal",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh"
-                  ]
-                },
-                "timeout_minutes": {
-                  "default": 20,
-                  "description": "Minutes allowed for this task before it is aborted",
-                  "type": "number",
-                  "minimum": 5
-                },
-                "promotion_threshold": {
-                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
-                },
-                "token_budget": {
-                  "description": "key-files: total token budget for pinned files (default: 10000)",
-                  "type": "number",
-                  "minimum": 2000,
-                  "maximum": 30000
-                },
-                "min_reads": {
-                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
-                }
-              }
-            },
-            "improve": {
-              "default": {
-                "schedule": "0 3 * * *",
-                "timeout_minutes": 20
-              },
-              "type": "object",
-              "properties": {
-                "schedule": {
-                  "default": "",
-                  "type": "string",
-                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
-                },
-                "model": {
-                  "description": "Per-task model override (inherits dreamer.model)",
-                  "type": "string"
-                },
-                "fallback_models": {
-                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  ]
-                },
-                "thinking_level": {
-                  "description": "Pi only: per-task thinking level",
-                  "type": "string",
-                  "enum": [
-                    "off",
-                    "minimal",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh"
-                  ]
-                },
-                "timeout_minutes": {
-                  "default": 20,
-                  "description": "Minutes allowed for this task before it is aborted",
-                  "type": "number",
-                  "minimum": 5
-                },
-                "promotion_threshold": {
-                  "description": "review-user-memories: min candidate observations before promotion is considered (default: 3)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
-                },
-                "token_budget": {
-                  "description": "key-files: total token budget for pinned files (default: 10000)",
-                  "type": "number",
-                  "minimum": 2000,
-                  "maximum": 30000
-                },
-                "min_reads": {
-                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
+                  "minimum": 1,
+                  "maximum": 365
                 }
               }
             },
             "maintain-docs": {
               "default": {
                 "schedule": "",
-                "timeout_minutes": 20
+                "timeout_minutes": 20,
+                "broad_interval_days": 7
               },
               "type": "object",
               "properties": {
@@ -722,6 +520,13 @@
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
+                },
+                "broad_interval_days": {
+                  "default": 7,
+                  "description": "maintain-memory: days between broad full-pool passes (default: 7)",
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 365
                 }
               }
             },
@@ -730,7 +535,8 @@
                 "schedule": "",
                 "timeout_minutes": 20,
                 "token_budget": 10000,
-                "min_reads": 4
+                "min_reads": 4,
+                "broad_interval_days": 7
               },
               "type": "object",
               "properties": {
@@ -792,13 +598,21 @@
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
+                },
+                "broad_interval_days": {
+                  "default": 7,
+                  "description": "maintain-memory: days between broad full-pool passes (default: 7)",
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 365
                 }
               }
             },
             "evaluate-smart-notes": {
               "default": {
                 "schedule": "0 3 * * *",
-                "timeout_minutes": 20
+                "timeout_minutes": 20,
+                "broad_interval_days": 7
               },
               "type": "object",
               "properties": {
@@ -860,6 +674,13 @@
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
+                },
+                "broad_interval_days": {
+                  "default": 7,
+                  "description": "maintain-memory: days between broad full-pool passes (default: 7)",
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 365
                 }
               }
             },
@@ -867,7 +688,8 @@
               "default": {
                 "schedule": "0 3 * * *",
                 "timeout_minutes": 20,
-                "promotion_threshold": 3
+                "promotion_threshold": 3,
+                "broad_interval_days": 7
               },
               "type": "object",
               "properties": {
@@ -929,6 +751,13 @@
                   "type": "number",
                   "minimum": 2,
                   "maximum": 20
+                },
+                "broad_interval_days": {
+                  "default": 7,
+                  "description": "maintain-memory: days between broad full-pool passes (default: 7)",
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 365
                 }
               }
             }

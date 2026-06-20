@@ -139,8 +139,8 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
     });
 
     it("includes ctx_memory + ctx_search + ctx_note for memory operations", () => {
-        // Dreamer's canonical job: consolidate / verify / archive /
-        // improve memories (`ctx_memory`), and dismiss / surface smart
+        // Dreamer's canonical job: maintain memories (`ctx_memory`),
+        // and dismiss / surface smart
         // notes (`ctx_note`). `ctx_search` for retrieval-count and
         // smart-note evidence lookup.
         expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_memory");
@@ -157,7 +157,7 @@ describe("DREAMER_ALLOWED_TOOLS", () => {
         expect(DREAMER_ALLOWED_TOOLS).toContain("edit");
     });
 
-    it("includes `aft_search` for code search across verify/improve/maintain-docs", () => {
+    it("includes `aft_search` for code search across maintain-memory/maintain-docs", () => {
         expect(DREAMER_ALLOWED_TOOLS).toContain("aft_search");
     });
 

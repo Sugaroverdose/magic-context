@@ -24,10 +24,7 @@ import type { PromptIO, SelectOption } from "./prompts";
 
 /** Short, user-facing description of what each task does (wizard copy). */
 const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
-    consolidate: "Merge near-duplicate project memories",
-    verify: "Re-check memories against the codebase and flag stale ones",
-    "archive-stale": "Archive memories that no longer apply",
-    improve: "Refine and split overly-broad memories",
+    "maintain-memory": "Incrementally verify, consolidate, improve, and archive project memories",
     "maintain-docs": "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
     "key-files": "Pin frequently-read files into the system prompt",
     "evaluate-smart-notes": "Surface smart notes whose conditions are now met",
@@ -36,10 +33,7 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
 
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
-    consolidate: "0 3 * * *",
-    verify: "0 3 * * *",
-    "archive-stale": "0 3 * * *",
-    improve: "0 3 * * *",
+    "maintain-memory": "0 3 * * *",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",

@@ -1,10 +1,15 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
     getMemoriesByProject,
     getMemoryById,
     getMemoryMutationsForRender,
+    getMemoryVerifications,
     getProjectState,
     insertMemory,
     normalizeStoredProjectPath,
@@ -54,6 +59,28 @@ function createTestDb(): Database {
             memory_id INTEGER PRIMARY KEY REFERENCES memories (id) ON DELETE CASCADE,
             embedding BLOB NOT NULL,
             model_id  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_verifications (
+            memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            file_path TEXT NOT NULL,
+            verified_at INTEGER NOT NULL,
+            PRIMARY KEY (memory_id, file_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);
+
+        CREATE TABLE IF NOT EXISTS task_schedule_state (
+            project_path TEXT NOT NULL,
+            task TEXT NOT NULL,
+            last_run_at INTEGER,
+            next_due_at INTEGER,
+            schedule TEXT,
+            last_status TEXT,
+            last_error TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            last_checked_commit TEXT,
+            last_broad_run_at INTEGER,
+            PRIMARY KEY(project_path, task)
         );
 
         CREATE TABLE IF NOT EXISTS project_state
@@ -137,6 +164,29 @@ function createTestDb(): Database {
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
     ({ sessionID, agent, directory: "/repo/project" }) as never;
 
+function git(args: string[], cwd: string): string {
+    return execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+    });
+}
+
+function makeGitRepo(): { dir: string; head: string } {
+    const dir = mkdtempSync(join(tmpdir(), "mc-ctx-memory-"));
+    git(["init"], dir);
+    git(["config", "user.email", "test@example.invalid"], dir);
+    git(["config", "user.name", "Magic Context Test"], dir);
+    writeFileSync(join(dir, "src.ts"), "export const value = 1;\n");
+    writeFileSync(join(dir, "keep.ts"), "export const keep = true;\n");
+    git(["add", "src.ts", "keep.ts"], dir);
+    git(["commit", "-m", "initial"], dir);
+    return { dir, head: git(["rev-parse", "HEAD"], dir).trim() };
+}
+
+const dreamerToolContext = (directory: string) =>
+    ({ sessionID: "ses-dream", agent: DREAMER_AGENT, directory }) as never;
+
 function getProjectMemoryEpoch(db: Database, projectPath: string): number {
     return getProjectState(db, normalizeStoredProjectPath(projectPath))?.projectMemoryEpoch ?? 0;
 }
@@ -157,6 +207,7 @@ afterAll(() => {
 describe("createCtxMemoryTools", () => {
     let db: Database;
     let tools: ReturnType<typeof createCtxMemoryTools>;
+    let tempDirs: string[] = [];
 
     beforeEach(() => {
         db = createTestDb();
@@ -170,6 +221,8 @@ describe("createCtxMemoryTools", () => {
 
     afterEach(() => {
         closeQuietly(db);
+        for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+        tempDirs = [];
     });
 
     describe("#given write action", () => {
@@ -1063,6 +1116,167 @@ describe("createCtxMemoryTools", () => {
             expect(getMutationRows(db, "/repo/project-b", [third.id])).toMatchObject([
                 { mutationType: "superseded", targetMemoryId: third.id },
             ]);
+        });
+    });
+
+    describe("#given verified action", () => {
+        it("is dreamer-only and records complete tracked file sets", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "src.ts exports value.",
+            });
+
+            const primary = await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: ["src.ts"] },
+                toolContext("ses-primary", "general"),
+            );
+            expect(primary).toContain("not allowed");
+
+            const result = await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: ["src.ts"] },
+                dreamerToolContext(repo.dir),
+            );
+
+            expect(JSON.parse(result as string)).toMatchObject({
+                recorded: 1,
+                memory_ids: [memory.id],
+            });
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
+                "src.ts",
+            ]);
+        });
+
+        it("writes the no-file sentinel only for explicit files=[]", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "PROJECT_RULES",
+                content: "Prefer narrow tests.",
+            });
+
+            await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: [] },
+                dreamerToolContext(repo.dir),
+            );
+
+            const state = getMemoryVerifications(db, [memory.id]).get(memory.id);
+            expect(state?.files).toEqual([]);
+            expect(state?.hasSentinel).toBe(true);
+        });
+
+        it("normalizes from monorepo subdirectories and canonicalizes case-only paths", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            mkdirSync(join(repo.dir, "packages", "app"), { recursive: true });
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "src.ts exports value.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: ["../../SRC.ts"] },
+                dreamerToolContext(join(repo.dir, "packages", "app")),
+            );
+
+            expect(JSON.parse(result as string)).toMatchObject({ recorded: 1 });
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
+                "src.ts",
+            ]);
+        });
+
+        it("rejects blank, escape, and untracked paths without collapsing to sentinel", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            writeFileSync(join(repo.dir, "untracked.ts"), "export const x = 1;\n");
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "untracked file backs this.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                {
+                    action: "verified",
+                    ids: [memory.id],
+                    files: ["", ".", "../escape.ts", "untracked.ts"],
+                },
+                dreamerToolContext(repo.dir),
+            );
+
+            expect(result).toContain("Error: No valid verification files");
+            expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
+        });
+
+        it("keeps unchanged live mappings when a complete-set call would drop them", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "src.ts and keep.ts back this memory.",
+            });
+            db.prepare(
+                "INSERT INTO task_schedule_state (project_path, task, last_checked_commit, last_broad_run_at, retry_count) VALUES (?, 'maintain-memory', ?, ?, 0)",
+            ).run("/repo/project", repo.head, Date.now());
+            await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: ["src.ts", "keep.ts"] },
+                dreamerToolContext(repo.dir),
+            );
+            writeFileSync(join(repo.dir, "src.ts"), "export const value = 2;\n");
+
+            const result = await tools.ctx_memory.execute(
+                { action: "verified", ids: [memory.id], files: ["src.ts"] },
+                dreamerToolContext(repo.dir),
+            );
+
+            expect(result).toContain("Kept existing verification mapping");
+            expect(getMemoryVerifications(db, [memory.id]).get(memory.id)?.files).toEqual([
+                "keep.ts",
+                "src.ts",
+            ]);
+        });
+
+        it("records verified_files on update and archive", async () => {
+            const repo = makeGitRepo();
+            tempDirs.push(repo.dir);
+            const updated = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "Old wording.",
+            });
+            const archived = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_VALUES",
+                content: "Stale wording.",
+            });
+
+            await tools.ctx_memory.execute(
+                {
+                    action: "update",
+                    ids: [updated.id],
+                    content: "src.ts exports value.",
+                    verified_files: ["src.ts"],
+                },
+                dreamerToolContext(repo.dir),
+            );
+            await tools.ctx_memory.execute(
+                {
+                    action: "archive",
+                    ids: [archived.id],
+                    reason: "stale",
+                    verified_files: ["keep.ts"],
+                },
+                dreamerToolContext(repo.dir),
+            );
+
+            const states = getMemoryVerifications(db, [updated.id, archived.id]);
+            expect(states.get(updated.id)?.files).toEqual(["src.ts"]);
+            expect(states.get(archived.id)?.files).toEqual(["keep.ts"]);
         });
     });
 

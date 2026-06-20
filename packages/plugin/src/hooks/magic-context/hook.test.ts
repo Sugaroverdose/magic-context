@@ -441,7 +441,7 @@ describe("magic-context hook", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-dream-notification-");
         const promptMocks = createPromptMocks();
         const deps = createMockDeps(promptMocks);
-        // Dreamer v2 per-task shape. Force a single task via `/ctx-dream consolidate`
+        // Dreamer v2 per-task shape. Force a single task via `/ctx-dream maintain-memory`
         // so the run is deterministic (the forced path ignores the activity gate,
         // so this doesn't depend on the test DB having memories).
         deps.config = {
@@ -449,10 +449,7 @@ describe("magic-context hook", () => {
             dreamer: {
                 inject_docs: true,
                 tasks: {
-                    consolidate: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    verify: { schedule: "", timeout_minutes: 10 },
-                    "archive-stale": { schedule: "", timeout_minutes: 10 },
-                    improve: { schedule: "", timeout_minutes: 10 },
+                    "maintain-memory": { schedule: "0 3 * * *", timeout_minutes: 10 },
                     "maintain-docs": { schedule: "", timeout_minutes: 10 },
                     "key-files": { schedule: "", timeout_minutes: 10 },
                     "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
@@ -461,10 +458,36 @@ describe("magic-context hook", () => {
             },
         };
         const hook = requireHook(createMagicContextHook(deps));
+        const db = openDatabase();
+        const projectPath = resolveProjectIdentity("/tmp");
+        db.prepare(
+            "INSERT INTO memories (project_path, category, content, normalized_hash, source_session_id, source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at, last_seen_at, last_retrieved_at, status, expires_at, verification_status, verified_at, superseded_by_memory_id, merged_from, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(
+            projectPath,
+            "CONFIG_VALUES",
+            "Dream me",
+            "dream-me-notification",
+            "ses-seed",
+            "historian",
+            1,
+            0,
+            Date.now(),
+            Date.now(),
+            Date.now(),
+            Date.now(),
+            null,
+            "active",
+            null,
+            "unverified",
+            null,
+            null,
+            null,
+            null,
+        );
 
         await expectSentinel(
             hook["command.execute.before"]!(
-                { command: "ctx-dream", sessionID: "ses-dream", arguments: "consolidate" },
+                { command: "ctx-dream", sessionID: "ses-dream", arguments: "maintain-memory" },
                 { parts: [{ type: "text", text: "" }] },
             ),
             "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
@@ -482,7 +505,7 @@ describe("magic-context hook", () => {
                 body: expect.objectContaining({
                     parts: [
                         expect.objectContaining({
-                            text: 'Running dream task "consolidate"...',
+                            text: 'Running dream task "maintain-memory"...',
                         }),
                     ],
                 }),
@@ -497,9 +520,7 @@ describe("magic-context hook", () => {
                     system: expect.stringContaining("memory maintenance agent"),
                     parts: expect.arrayContaining([
                         expect.objectContaining({
-                            text: expect.stringContaining(
-                                "## Task: Consolidate Duplicate Memories",
-                            ),
+                            text: expect.stringContaining("## Task: Maintain Memory"),
                         }),
                     ]),
                 }),
@@ -613,10 +634,7 @@ describe("magic-context hook", () => {
             dreamer: {
                 inject_docs: true,
                 tasks: {
-                    consolidate: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    verify: { schedule: "", timeout_minutes: 10 },
-                    "archive-stale": { schedule: "", timeout_minutes: 10 },
-                    improve: { schedule: "", timeout_minutes: 10 },
+                    "maintain-memory": { schedule: "0 3 * * *", timeout_minutes: 10 },
                     "maintain-docs": { schedule: "", timeout_minutes: 10 },
                     "key-files": { schedule: "", timeout_minutes: 10 },
                     "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
@@ -633,11 +651,11 @@ describe("magic-context hook", () => {
             const projectPath = resolveProjectIdentity("/repo/project");
             const now = Date.now();
             // Dreamer v2: a freshly-seeded task is NOT due until its next cron
-            // time. Pre-seed consolidate's schedule row as DUE (next_due_at in the
+            // time. Pre-seed maintain-memory's schedule row as DUE (next_due_at in the
             // past) so the background trigger actually runs it this pass.
             writeTaskScheduleState(db, {
                 projectPath,
-                task: "consolidate",
+                task: "maintain-memory",
                 lastRunAt: null,
                 nextDueAt: now - 1000,
                 schedule: "0 3 * * *",

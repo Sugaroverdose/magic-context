@@ -43,6 +43,11 @@ import {
     type CtxMemoryArgs,
     type CtxMemoryToolDeps,
 } from "./types";
+import {
+    prepareMemoryVerificationRecording,
+    runImmediateTransaction,
+    writePlannedMemoryVerificationRecords,
+} from "./verification-recording";
 
 const MEMORY_CATEGORIES = new Set<string>(CATEGORY_PRIORITY);
 
@@ -247,7 +252,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // schema visible to the runtime and enforce primary-session safety below.
             action: tool.schema
                 .enum([...CTX_MEMORY_DREAMER_ACTIONS])
-                .describe("What to do: write, update, archive, or merge"),
+                .describe("What to do: write, update, archive, merge, list, or verified"),
             content: tool.schema
                 .string()
                 .optional()
@@ -271,6 +276,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 .string()
                 .optional()
                 .describe("Why the memory is being archived (optional, recommended)"),
+            files: tool.schema
+                .array(tool.schema.string())
+                .optional()
+                .describe(
+                    "verified: COMPLETE current backing-file set; [] records a file-independent memory",
+                ),
+            verified_files: tool.schema
+                .array(tool.schema.string())
+                .optional()
+                .describe(
+                    "update/archive: COMPLETE backing-file set to record with the mutation; [] records a file-independent memory",
+                ),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
             // Sidekick consumes untrusted `/ctx-aug` prompt text and is retrieval-only;
@@ -404,9 +421,46 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return formatMemoryList(memories);
             }
 
+            if (args.action === "verified") {
+                const ids = args.ids;
+                if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
+                    return "Error: 'ids' must contain at least one integer memory ID when action is 'verified'.";
+                }
+                if (!Array.isArray(args.files)) {
+                    return "Error: 'files' is required when action is 'verified' (use [] for file-independent memories).";
+                }
+                const memoryIds = [...new Set(ids)];
+                for (const memoryId of memoryIds) {
+                    const memory = getMemoryById(deps.db, memoryId);
+                    if (!memory || !memoryVisibleToTool(memory)) {
+                        return `Error: Memory with ID ${memoryId} was not found.`;
+                    }
+                }
+
+                const plan = await prepareMemoryVerificationRecording({
+                    db: deps.db,
+                    cwd: toolContext.directory,
+                    projectIdentity: projectPath,
+                    memoryIds,
+                    rawFiles: args.files,
+                });
+                if (!plan.hasValidFilesOrSentinel) {
+                    return `Error: No valid verification files were recorded. Use files=[] only for genuinely file-independent memories.${plan.warnings.length ? `\nWarnings:\n- ${plan.warnings.join("\n- ")}` : ""}`;
+                }
+                const now = Date.now();
+                const recorded = runImmediateTransaction(deps.db, () =>
+                    writePlannedMemoryVerificationRecords(deps.db, plan.records, now),
+                );
+                return JSON.stringify({
+                    recorded,
+                    memory_ids: memoryIds,
+                    ...(plan.warnings.length ? { warnings: plan.warnings } : {}),
+                });
+            }
+
             if (args.action === "update") {
                 const updateIds = args.ids;
-                if (!updateIds || updateIds.length !== 1 || !updateIds.every(Number.isInteger)) {
+                if (updateIds?.length !== 1 || !updateIds.every(Number.isInteger)) {
                     return "Error: 'ids' must contain exactly one integer memory ID when action is 'update'.";
                 }
                 const updateId = updateIds[0];
@@ -436,8 +490,19 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
                 }
 
+                const verificationPlan = Array.isArray(args.verified_files)
+                    ? await prepareMemoryVerificationRecording({
+                          db: deps.db,
+                          cwd: toolContext.directory,
+                          projectIdentity: projectPath,
+                          memoryIds: [memory.id],
+                          rawFiles: args.verified_files,
+                      })
+                    : null;
+
                 const projectIdentity = targetIdentityForStoredPath(rawProjectPath);
-                deps.db.transaction(() => {
+                const now = Date.now();
+                const recorded = runImmediateTransaction(deps.db, () => {
                     updateMemoryContentInCurrentTransaction(
                         deps.db,
                         memory,
@@ -451,7 +516,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         category: memory.category,
                         newContent: content,
                     });
-                })();
+                    return verificationPlan?.hasValidFilesOrSentinel
+                        ? writePlannedMemoryVerificationRecords(
+                              deps.db,
+                              verificationPlan.records,
+                              now,
+                          )
+                        : 0;
+                });
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
@@ -460,7 +532,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     content,
                 });
 
-                return `Updated memory [ID: ${memory.id}] in ${memory.category}.`;
+                const verificationSuffix = verificationPlan
+                    ? ` Verification rows recorded: ${recorded}.${
+                          verificationPlan.warnings.length
+                              ? ` Warnings: ${verificationPlan.warnings.join("; ")}`
+                              : ""
+                      }`
+                    : "";
+                return `Updated memory [ID: ${memory.id}] in ${memory.category}.${verificationSuffix}`;
             }
 
             if (args.action === "merge") {
@@ -684,7 +763,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     });
                 }
 
-                deps.db.transaction(() => {
+                const verificationPlan = Array.isArray(args.verified_files)
+                    ? await prepareMemoryVerificationRecording({
+                          db: deps.db,
+                          cwd: toolContext.directory,
+                          projectIdentity: projectPath,
+                          memoryIds: targets.map((target) => target.memoryId),
+                          rawFiles: args.verified_files,
+                      })
+                    : null;
+
+                const now = Date.now();
+                const recorded = runImmediateTransaction(deps.db, () => {
                     for (const target of targets) {
                         archiveMemory(deps.db, target.memoryId, args.reason);
                         queueMemoryMutation(deps.db, {
@@ -693,12 +783,26 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                             targetMemoryId: target.memoryId,
                         });
                     }
-                })();
+                    return verificationPlan?.hasValidFilesOrSentinel
+                        ? writePlannedMemoryVerificationRecords(
+                              deps.db,
+                              verificationPlan.records,
+                              now,
+                          )
+                        : 0;
+                });
                 const idList = targets.map((t) => t.memoryId).join(", ");
                 const plural = targets.length > 1 ? "memories" : "memory";
+                const verificationSuffix = verificationPlan
+                    ? ` Verification rows recorded: ${recorded}.${
+                          verificationPlan.warnings.length
+                              ? ` Warnings: ${verificationPlan.warnings.join("; ")}`
+                              : ""
+                      }`
+                    : "";
                 return args.reason?.trim()
-                    ? `Archived ${plural} [ID: ${idList}] (${args.reason.trim()}).`
-                    : `Archived ${plural} [ID: ${idList}].`;
+                    ? `Archived ${plural} [ID: ${idList}] (${args.reason.trim()}).${verificationSuffix}`
+                    : `Archived ${plural} [ID: ${idList}].${verificationSuffix}`;
             }
 
             return "Error: Unknown action.";

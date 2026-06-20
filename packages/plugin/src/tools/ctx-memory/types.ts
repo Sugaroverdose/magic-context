@@ -10,7 +10,7 @@ import type { Database } from "../../shared/sqlite";
 // since active memories are already in context) stays dreamer-only.
 export const CTX_MEMORY_ACTIONS = ["write", "archive", "update", "merge"] as const;
 
-export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list"] as const;
+export const CTX_MEMORY_DREAMER_ACTIONS = [...CTX_MEMORY_ACTIONS, "list", "verified"] as const;
 
 export type CtxMemoryAction = (typeof CTX_MEMORY_DREAMER_ACTIONS)[number];
 
@@ -26,6 +26,10 @@ export interface CtxMemoryArgs {
     ids?: number[];
     limit?: number;
     reason?: string;
+    /** COMPLETE backing-file set for action='verified'. Empty array writes the no-file sentinel. */
+    files?: string[];
+    /** COMPLETE backing-file set to record while updating/archiving a memory. */
+    verified_files?: string[];
 }
 
 export interface CtxMemoryToolDeps {

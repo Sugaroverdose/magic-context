@@ -12,6 +12,7 @@
  *
  *  Dreamer-only (gated on `allowDreamerActions: true`):
  *    - list: list active memories for the current project
+ *    - verified: record COMPLETE backing-file sets in the side table
  *
  * Allowlist gating mirrors OpenCode's `allowedActions` deps field. In OpenCode,
  * the dreamer subagent gets the full action surface because `toolContext.agent
@@ -50,6 +51,7 @@ import {
 	embedTextForProject,
 	getProjectEmbeddingSnapshot,
 } from "@magic-context/core/features/magic-context/memory/embedding";
+import { invalidateMemory } from "@magic-context/core/features/magic-context/memory/embedding-cache";
 import { computeNormalizedHash } from "@magic-context/core/features/magic-context/memory/normalize-hash";
 import {
 	normalizeStoredProjectPath,
@@ -69,6 +71,11 @@ import {
 } from "@magic-context/core/features/magic-context/workspaces";
 import { log } from "@magic-context/core/shared/logger";
 import { CTX_MEMORY_DESCRIPTION } from "@magic-context/core/tools/ctx-memory/constants";
+import {
+	prepareMemoryVerificationRecording,
+	runImmediateTransaction,
+	writePlannedMemoryVerificationRecords,
+} from "@magic-context/core/tools/ctx-memory/verification-recording";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIST_LIMIT = 10;
@@ -78,10 +85,20 @@ const DEFAULT_LIST_LIMIT = 10;
 // soft-remove action. Primary agents get write/archive/update/merge on the
 // memories they already see (with ids) in the injected project-memory block;
 // only `list` (bulk enumeration) stays dreamer-only.
-const ALL_ACTIONS = ["write", "archive", "update", "merge", "list"] as const;
+const ALL_ACTIONS = [
+	"write",
+	"archive",
+	"update",
+	"merge",
+	"list",
+	"verified",
+] as const;
 type CtxMemoryAction = (typeof ALL_ACTIONS)[number];
 
-const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set(["list"]);
+const DREAMER_ONLY_ACTIONS: ReadonlySet<CtxMemoryAction> = new Set([
+	"list",
+	"verified",
+]);
 
 const ParamsSchema = Type.Object({
 	action: Type.Union(
@@ -117,6 +134,18 @@ const ParamsSchema = Type.Object({
 	reason: Type.Optional(
 		Type.String({
 			description: "Why the memory is being archived (optional, recommended)",
+		}),
+	),
+	files: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"verified: COMPLETE current backing-file set; [] records a file-independent memory",
+		}),
+	),
+	verified_files: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"update/archive: COMPLETE backing-file set to record with the mutation; [] records a file-independent memory",
 		}),
 	),
 });
@@ -184,6 +213,21 @@ function inactiveMemoryError(
 	action: "updating" | "merging" | "archiving",
 ): string {
 	return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
+}
+
+function updateMemoryContentInCurrentTransaction(
+	db: ContextDatabase,
+	memory: Memory,
+	content: string,
+	normalizedHash: string,
+): void {
+	db.prepare(
+		"UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
+	).run(content, normalizedHash, Date.now(), memory.id);
+	db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(
+		memory.id,
+	);
+	invalidateMemory(memory.projectPath, memory.id);
 }
 
 function queueEmbedding(args: {
@@ -381,13 +425,54 @@ export function createCtxMemoryTool(
 				return ok(formatMemoryList(filtered2.slice(0, limit)));
 			}
 
+			if (params.action === "verified") {
+				const ids = params.ids;
+				if (!ids || ids.length === 0 || !ids.every(Number.isInteger)) {
+					return err(
+						"Error: 'ids' must contain at least one integer memory ID when action is 'verified'.",
+					);
+				}
+				if (!Array.isArray(params.files)) {
+					return err(
+						"Error: 'files' is required when action is 'verified' (use [] for file-independent memories).",
+					);
+				}
+				const memoryIds = [...new Set(ids)];
+				for (const memoryId of memoryIds) {
+					const memory = getMemoryById(deps.db, memoryId);
+					if (!memory || !memoryVisibleToTool(memory)) {
+						return err(`Error: Memory with ID ${memoryId} was not found.`);
+					}
+				}
+
+				const plan = await prepareMemoryVerificationRecording({
+					db: deps.db,
+					cwd: ctx.cwd,
+					projectIdentity,
+					memoryIds,
+					rawFiles: params.files,
+				});
+				if (!plan.hasValidFilesOrSentinel) {
+					return err(
+						`Error: No valid verification files were recorded. Use files=[] only for genuinely file-independent memories.${plan.warnings.length ? `\nWarnings:\n- ${plan.warnings.join("\n- ")}` : ""}`,
+					);
+				}
+				const now = Date.now();
+				const recorded = runImmediateTransaction(deps.db, () =>
+					writePlannedMemoryVerificationRecords(deps.db, plan.records, now),
+				);
+				return ok(
+					JSON.stringify({
+						recorded,
+						memory_ids: memoryIds,
+						...(plan.warnings.length ? { warnings: plan.warnings } : {}),
+					}),
+				);
+			}
+
 			if (params.action === "update") {
 				const updateIds = params.ids;
-				if (
-					!updateIds ||
-					updateIds.length !== 1 ||
-					!updateIds.every(Number.isInteger)
-				) {
+				if (updateIds?.length !== 1 || !updateIds.every(Number.isInteger)) {
 					return err(
 						"Error: 'ids' must contain exactly one integer memory ID when action is 'update'.",
 					);
@@ -420,8 +505,24 @@ export function createCtxMemoryTool(
 					);
 				}
 
-				deps.db.transaction(() => {
-					updateMemoryContent(deps.db, memory.id, content, normalizedHash);
+				const verificationPlan = Array.isArray(params.verified_files)
+					? await prepareMemoryVerificationRecording({
+							db: deps.db,
+							cwd: ctx.cwd,
+							projectIdentity,
+							memoryIds: [memory.id],
+							rawFiles: params.verified_files,
+						})
+					: null;
+
+				const now = Date.now();
+				const recorded = runImmediateTransaction(deps.db, () => {
+					updateMemoryContentInCurrentTransaction(
+						deps.db,
+						memory,
+						content,
+						normalizedHash,
+					);
 					queueMemoryMutation(deps.db, {
 						projectPath: targetIdentity,
 						mutationType: "update",
@@ -429,14 +530,30 @@ export function createCtxMemoryTool(
 						category: memory.category,
 						newContent: content,
 					});
-				})();
+					return verificationPlan?.hasValidFilesOrSentinel
+						? writePlannedMemoryVerificationRecords(
+								deps.db,
+								verificationPlan.records,
+								now,
+							)
+						: 0;
+				});
 				queueEmbedding({
 					deps,
 					projectIdentity: targetIdentity,
 					memoryId: memory.id,
 					content,
 				});
-				return ok(`Updated memory [ID: ${memory.id}] in ${memory.category}.`);
+				const verificationSuffix = verificationPlan
+					? ` Verification rows recorded: ${recorded}.${
+							verificationPlan.warnings.length
+								? ` Warnings: ${verificationPlan.warnings.join("; ")}`
+								: ""
+						}`
+					: "";
+				return ok(
+					`Updated memory [ID: ${memory.id}] in ${memory.category}.${verificationSuffix}`,
+				);
 			}
 
 			if (params.action === "merge") {
@@ -695,7 +812,18 @@ export function createCtxMemoryTool(
 						projectIdentity: targetIdentityForStoredPath(memory.projectPath),
 					};
 				});
-				deps.db.transaction(() => {
+				const verificationPlan = Array.isArray(params.verified_files)
+					? await prepareMemoryVerificationRecording({
+							db: deps.db,
+							cwd: ctx.cwd,
+							projectIdentity,
+							memoryIds: targets.map((target) => target.memoryId),
+							rawFiles: params.verified_files,
+						})
+					: null;
+
+				const now = Date.now();
+				const recorded = runImmediateTransaction(deps.db, () => {
 					for (const target of targets) {
 						archiveMemory(deps.db, target.memoryId, params.reason);
 						queueMemoryMutation(deps.db, {
@@ -704,11 +832,27 @@ export function createCtxMemoryTool(
 							targetMemoryId: target.memoryId,
 						});
 					}
-				})();
+					return verificationPlan?.hasValidFilesOrSentinel
+						? writePlannedMemoryVerificationRecords(
+								deps.db,
+								verificationPlan.records,
+								now,
+							)
+						: 0;
+				});
 				const reasonSuffix = params.reason ? ` (${params.reason})` : "";
 				const idList = archiveIds.join(", ");
 				const plural = archiveIds.length > 1 ? "memories" : "memory";
-				return ok(`Archived ${plural} [ID: ${idList}]${reasonSuffix}.`);
+				const verificationSuffix = verificationPlan
+					? ` Verification rows recorded: ${recorded}.${
+							verificationPlan.warnings.length
+								? ` Warnings: ${verificationPlan.warnings.join("; ")}`
+								: ""
+						}`
+					: "";
+				return ok(
+					`Archived ${plural} [ID: ${idList}]${reasonSuffix}.${verificationSuffix}`,
+				);
 			}
 
 			return err("Error: Unknown action.");

@@ -39,7 +39,7 @@ function createDb(): Database {
 function enabledConfig() {
 	return DreamerConfigSchema.parse({
 		model: "test/model",
-		tasks: { consolidate: { schedule: "0 3 * * *" } },
+		tasks: { "maintain-memory": { schedule: "0 3 * * *" } },
 	});
 }
 
