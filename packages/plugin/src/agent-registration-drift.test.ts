@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DREAMER_AGENT } from "./agents/dreamer";
+import { buildHiddenAgentRegistrations } from "./agents/hidden-agent-registrations";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
     DREAMER_ALLOWED_TOOLS,
@@ -7,7 +8,6 @@ import {
     SIDEKICK_ALLOWED_TOOLS,
 } from "./agents/permissions";
 import { SIDEKICK_AGENT } from "./agents/sidekick";
-import { buildHiddenAgentRegistrations } from "./index";
 
 /**
  * `buildHiddenAgentRegistrations` deliberately uses INLINE literals for the
