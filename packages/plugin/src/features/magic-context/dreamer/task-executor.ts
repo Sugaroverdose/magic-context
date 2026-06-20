@@ -21,7 +21,7 @@ import {
     enforceMaintainDocsProtectedRegions,
     snapshotMaintainDocsFiles,
 } from "./maintain-docs-protected-enforcement";
-import { insertDreamRun } from "./storage-dream-runs";
+import { type DreamRunMemoryChanges, insertDreamRun } from "./storage-dream-runs";
 import { getTaskScheduleState } from "./storage-task-schedule";
 import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 import { isAgenticTask } from "./task-registry";
@@ -52,11 +52,12 @@ function classifyFailure(error: unknown): { transient: boolean; brief: string } 
     return { transient, brief };
 }
 
-function countNewIds(beforeIds: number[], afterIds: number[]): number {
+/** Ids present in `afterIds` but not in `beforeIds` (set difference). */
+function newIds(beforeIds: number[], afterIds: number[]): number[] {
     const before = new Set(beforeIds);
-    let n = 0;
-    for (const id of afterIds) if (!before.has(id)) n++;
-    return n;
+    const out: number[] = [];
+    for (const id of afterIds) if (!before.has(id)) out.push(id);
+    return out;
 }
 
 /**
@@ -132,15 +133,26 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
 
         function computeMemoryDelta(
             before: ReturnType<typeof getMemoryCountsByStatus>,
-        ): { written: number; deleted: number; archived: number; merged: number } | null {
+        ): DreamRunMemoryChanges | null {
             const after = getMemoryCountsByStatus(db, projectIdentity);
-            const changes = {
-                written: countNewIds(before.ids, after.ids),
-                deleted: countNewIds(after.ids, before.ids),
-                archived: countNewIds(before.archivedIds, after.archivedIds),
-                merged: countNewIds(before.mergedIds, after.mergedIds),
+            // Capture the exact changed ids (#221) — count === array length.
+            const writtenIds = newIds(before.ids, after.ids);
+            const deletedIds = newIds(after.ids, before.ids);
+            const archivedIds = newIds(before.archivedIds, after.archivedIds);
+            const mergedIds = newIds(before.mergedIds, after.mergedIds);
+            const changes: DreamRunMemoryChanges = {
+                written: writtenIds.length,
+                deleted: deletedIds.length,
+                archived: archivedIds.length,
+                merged: mergedIds.length,
+                writtenIds,
+                deletedIds,
+                archivedIds,
+                mergedIds,
             };
-            return Object.values(changes).some((v) => v > 0) ? changes : null;
+            return writtenIds.length || deletedIds.length || archivedIds.length || mergedIds.length
+                ? changes
+                : null;
         }
 
         try {

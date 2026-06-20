@@ -12,6 +12,16 @@ export interface DreamRunMemoryChanges {
     deleted: number;
     archived: number;
     merged: number;
+    // Exact ids of the memories changed in each bucket (#221). Persisted in the
+    // same `memory_changes_json` blob (no schema migration) so the dashboard
+    // drill-down can show EXACTLY which memories a run touched instead of
+    // reconstructing them with an approximate created_at/updated_at time-window
+    // query. Optional: older rows + the manual /ctx-dream summary path carry
+    // counts only. Each count stays === its array length when arrays are present.
+    writtenIds?: number[];
+    deletedIds?: number[];
+    archivedIds?: number[];
+    mergedIds?: number[];
 }
 
 export interface DreamRunRow {

@@ -212,7 +212,10 @@ Rewrite verbose, narrative, or poorly-structured memories into terse operational
    - Session-local language: "in this session", "after the refactor" → remove temporal context
    - Redundant qualifiers: "It's important to note that..." → drop
 3. **Rewrite** with \`ctx_memory(action="update", ids=[N], content="...")\`.
-4. **Split compound memories:** If one memory contains two distinct facts, update it to keep the first fact and \`action="write"\` a new memory for the second.
+4. **Split compound memories:** ONLY when one existing memory genuinely conflates two UNRELATED facts, repurpose it — \`action="update"\` it down to the first fact and \`action="write"\` the second. This is the ONLY situation where \`improve\` writes a new memory.
+
+### \`write\` is for splits only
+\`improve\` is a CLEANUP pass: it rewrites and tightens existing memories. It does NOT mint brand-new standalone facts — discovering and recording new facts is the historian's job, not improve's. The only \`write\` you may do is the second half of a genuine split (step 4). If you find yourself writing a new memory that is not the leftover half of a memory you just split, STOP — that fact does not belong here. A healthy improve run is net-neutral or net-shrinking: it should never add many new memories while archiving none.
 
 ### Good memory format
 \`\`\`
@@ -235,7 +238,8 @@ Content: We changed the execute threshold to be configurable in the session wher
 ### Success criteria
 - No memories use narrative/historical language.
 - No compound memories with unrelated facts.
-- All memories are terse and directly actionable.`;
+- All memories are terse and directly actionable.
+- The active pool did not GROW: any \`write\` is matched by the split it came from (the original memory was updated down to its first fact). improve never net-adds new facts.`;
 }
 
 // ── Maintain Docs ──────────────────────────────────────────────────────────

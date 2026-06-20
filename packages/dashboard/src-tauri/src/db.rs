@@ -4323,6 +4323,80 @@ pub struct DreamRunMemoryDetail {
     pub merged: Vec<DreamMemoryChange>,
 }
 
+/// Fetch a set of memories by id and project them into DreamMemoryChange rows,
+/// preserving the order of `ids` (a memory may have been deleted since the run,
+/// in which case it is silently dropped).
+fn fetch_dream_memory_changes(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<Vec<DreamMemoryChange>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT id, category, content, status FROM memories WHERE id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let mut by_id: std::collections::HashMap<i64, DreamMemoryChange> =
+        std::collections::HashMap::new();
+    let mut rows = stmt.query(params.as_slice()).map_err(|e| e.to_string())?;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+        by_id.insert(
+            id,
+            DreamMemoryChange {
+                id,
+                category: row.get(1).map_err(|e| e.to_string())?,
+                content: row.get(2).map_err(|e| e.to_string())?,
+                status: row.get(3).map_err(|e| e.to_string())?,
+            },
+        );
+    }
+    // Preserve input id order; skip ids no longer present.
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+/// Build the exact memory-change detail from a run's stored `memory_changes_json`
+/// id arrays. Returns `None` when the blob is absent or carries no id arrays
+/// (older runs that recorded counts only) so the caller falls back to the
+/// time-window reconstruction.
+fn exact_dream_run_memory_changes(
+    conn: &Connection,
+    memory_changes_json: Option<&str>,
+) -> Result<Option<DreamRunMemoryDetail>, String> {
+    let Some(raw) = memory_changes_json else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Ok(None);
+    };
+    let ids = |key: &str| -> Vec<i64> {
+        value
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|n| n.as_i64()).collect())
+            .unwrap_or_default()
+    };
+    let written_ids = ids("writtenIds");
+    let archived_ids = ids("archivedIds");
+    let merged_ids = ids("mergedIds");
+    // No id arrays at all → counts-only legacy row; let the caller approximate.
+    if value.get("writtenIds").is_none()
+        && value.get("archivedIds").is_none()
+        && value.get("mergedIds").is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(DreamRunMemoryDetail {
+        written: fetch_dream_memory_changes(conn, &written_ids)?,
+        archived: fetch_dream_memory_changes(conn, &archived_ids)?,
+        merged: fetch_dream_memory_changes(conn, &merged_ids)?,
+    }))
+}
+
 /// Reconstruct WHICH memories a dream run changed, by time-window over the run's
 /// [started_at, finished_at]. `dream_runs` stores only counts (id-set diffs at
 /// run time), so this is the retroactive view for existing runs:
@@ -4336,17 +4410,31 @@ pub fn get_dream_run_memory_changes(
     conn: &Connection,
     run_id: i64,
 ) -> Result<DreamRunMemoryDetail, String> {
-    let (project_path, started_at, finished_at): (String, i64, i64) = conn
+    let (project_path, started_at, finished_at, memory_changes_json): (
+        String,
+        i64,
+        i64,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT project_path, started_at, finished_at FROM dream_runs WHERE id = ?1",
+            "SELECT project_path, started_at, finished_at, memory_changes_json FROM dream_runs WHERE id = ?1",
             rusqlite::params![run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|e| e.to_string())?;
 
     let paths = resolve_paths_for_memory_filter(conn, &project_path).map_err(|e| e.to_string())?;
     if paths.is_empty() {
         return Ok(DreamRunMemoryDetail::default());
+    }
+
+    // Exact path (#221): runs written by Dreamer v2 store the actual changed ids
+    // in `memory_changes_json` ({writtenIds, archivedIds, mergedIds}). When
+    // present, fetch those memories by id directly — exact, immune to the
+    // time-window approximation. Older runs (counts only) fall through to the
+    // time-window reconstruction below.
+    if let Some(detail) = exact_dream_run_memory_changes(conn, memory_changes_json.as_deref())? {
+        return Ok(detail);
     }
     let placeholders = paths.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
 
@@ -6133,5 +6221,129 @@ mod memory_project_filter_tests {
             rows.is_empty(),
             "empty db should produce empty picker, got {rows:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod dream_run_memory_changes_tests {
+    //! #221: Dreamer v2 persists the exact changed ids in
+    //! `memory_changes_json` ({writtenIds, archivedIds, mergedIds}). The
+    //! drill-down should read those directly (exact) and fall back to the
+    //! time-window reconstruction only for older counts-only rows.
+    use super::*;
+    use rusqlite::Connection;
+
+    fn make_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at INTEGER,
+                updated_at INTEGER,
+                superseded_by_memory_id INTEGER
+            );
+            CREATE TABLE dream_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER NOT NULL,
+                holder_id TEXT,
+                tasks_json TEXT,
+                tasks_succeeded INTEGER,
+                tasks_failed INTEGER,
+                smart_notes_surfaced INTEGER,
+                smart_notes_pending INTEGER,
+                memory_changes_json TEXT,
+                parent_session_id TEXT
+            );",
+        )
+        .expect("schema");
+        conn
+    }
+
+    fn insert_memory(conn: &Connection, id: i64, status: &str, created: i64, updated: i64) {
+        conn.execute(
+            "INSERT INTO memories (id, project_path, category, content, status, created_at, updated_at)
+             VALUES (?1, 'dir:proj', 'PROJECT_RULES', ?2, ?3, ?4, ?5)",
+            (id, format!("memory {id}"), status, created, updated),
+        )
+        .expect("insert memory");
+    }
+
+    fn insert_run(conn: &Connection, changes_json: Option<&str>) -> i64 {
+        conn.execute(
+            "INSERT INTO dream_runs (project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json)
+             VALUES ('dir:proj', 1000, 2000, 'h', '[]', 1, 0, 0, 0, ?1)",
+            [changes_json],
+        )
+        .expect("insert run");
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn uses_exact_ids_when_present() {
+        let conn = make_db();
+        // A memory created LONG before the run window — the time-window path
+        // would MISS it, so finding it proves the exact-id path was taken.
+        insert_memory(&conn, 10, "active", 1, 1);
+        insert_memory(&conn, 11, "archived", 1, 1);
+        let run = insert_run(
+            &conn,
+            Some(r#"{"written":1,"archived":1,"merged":0,"writtenIds":[10],"archivedIds":[11],"mergedIds":[]}"#),
+        );
+
+        let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
+        assert_eq!(detail.written.len(), 1);
+        assert_eq!(detail.written[0].id, 10);
+        assert_eq!(detail.archived.len(), 1);
+        assert_eq!(detail.archived[0].id, 11);
+        assert!(detail.merged.is_empty());
+    }
+
+    #[test]
+    fn skips_ids_no_longer_present() {
+        let conn = make_db();
+        insert_memory(&conn, 10, "active", 1, 1);
+        // id 99 referenced by the run but since deleted → silently dropped.
+        let run = insert_run(
+            &conn,
+            Some(r#"{"written":2,"archived":0,"merged":0,"writtenIds":[10,99],"archivedIds":[],"mergedIds":[]}"#),
+        );
+        let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
+        assert_eq!(detail.written.len(), 1);
+        assert_eq!(detail.written[0].id, 10);
+    }
+
+    #[test]
+    fn falls_back_to_time_window_for_counts_only_rows() {
+        let conn = make_db();
+        // Created INSIDE the window → time-window path classifies it as written.
+        insert_memory(&conn, 20, "active", 1500, 1500);
+        // counts-only blob (legacy run): no *Ids arrays.
+        let run = insert_run(&conn, Some(r#"{"written":1,"archived":0,"merged":0}"#));
+        let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
+        assert_eq!(detail.written.len(), 1);
+        assert_eq!(detail.written[0].id, 20);
+    }
+
+    #[test]
+    fn empty_id_arrays_short_circuit_to_empty() {
+        let conn = make_db();
+        // A memory created in-window that the time-window path WOULD pick up —
+        // but the run explicitly recorded empty id arrays, so the exact path
+        // must win and return nothing.
+        insert_memory(&conn, 30, "active", 1500, 1500);
+        let run = insert_run(
+            &conn,
+            Some(r#"{"written":0,"archived":0,"merged":0,"writtenIds":[],"archivedIds":[],"mergedIds":[]}"#),
+        );
+        let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
+        assert!(detail.written.is_empty());
+        assert!(detail.archived.is_empty());
+        assert!(detail.merged.is_empty());
     }
 }
