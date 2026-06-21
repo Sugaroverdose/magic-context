@@ -118,6 +118,21 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
 	"dreamer-retrospective",
 ]);
 
+/**
+ * Agents that must run under a HARD tool allow-list (`pi --tools <names>`), not
+ * just a narrowed extension. The allow-list is a registry-build filter in Pi
+ * (AgentSession._refreshToolRegistry): a tool enters the registry ONLY if its
+ * name is in the set, so it strips Pi's built-ins (read/bash/edit/write) AND any
+ * other extension tool, leaving exactly the named tools. Used for
+ * `dreamer-retrospective`, which reads OTHER sessions' raw user text and must be
+ * structurally locked to ctx_search — no built-ins, no writes. (ctx_search must
+ * still be registered by the lean extension, which it is via the search-only set
+ * above; the allow-list gates an existing registration, it doesn't create one.)
+ */
+const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
+	["dreamer-retrospective", ["ctx_search"]],
+]);
+
 function inferAccountingSubagent(agent: string): SubagentKind {
 	if (agent.includes("sidekick")) return "sidekick";
 	if (agent.includes("retrospective")) return "dreamer";
@@ -925,6 +940,16 @@ export function buildArgs(
 		if (DREAMER_ACTION_AGENTS.has(options.agent)) {
 			args.push("--magic-context-dreamer-actions");
 		}
+	}
+
+	// HARD tool isolation: privacy-critical agents (dreamer-retrospective) run
+	// under `--tools <names>`, Pi's registry-build allow-list. This strips ALL
+	// built-ins (read/bash/edit/write) and every non-listed extension tool, so
+	// even if the lean extension exposed more, only the named tools survive. NOT
+	// `--no-tools` (that disables EVERYTHING, including the ctx_search we need).
+	const strictTools = STRICT_TOOL_ALLOWLIST.get(options.agent);
+	if (strictTools && strictTools.length > 0) {
+		args.push("--tools", strictTools.join(","));
 	}
 
 	if (options.systemPrompt && options.systemPrompt.length > 0) {

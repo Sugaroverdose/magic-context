@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "./agents/dreamer";
-import { buildHiddenAgentRegistrations } from "./agents/hidden-agent-registrations";
+import {
+    buildHiddenAgentConfig,
+    buildHiddenAgentRegistrations,
+} from "./agents/hidden-agent-registrations";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
     DREAMER_ALLOWED_TOOLS,
@@ -52,6 +55,28 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(DREAMER_RETROSPECTIVE_AGENT)?.allowedTools).toEqual([
             ...DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
         ]);
+    });
+
+    test("retrospective is the only lockPermissions agent (privacy-critical)", () => {
+        for (const reg of regs) {
+            expect(reg.lockPermissions === true).toBe(reg.id === DREAMER_RETROSPECTIVE_AGENT);
+        }
+    });
+
+    test("a user dreamer permission override cannot broaden the retrospective agent", () => {
+        // Simulate a user dreamer config that tries to grant bash/ctx_memory.
+        const cfg = buildHiddenAgentConfig(
+            "prompt",
+            DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
+            40,
+            { permission: { bash: "allow", ctx_memory: "allow", edit: "allow" } },
+            DREAMER_RETROSPECTIVE_AGENT,
+            true,
+        ) as { permission: Record<string, string> };
+        expect(cfg.permission.bash).not.toBe("allow");
+        expect(cfg.permission.ctx_memory).not.toBe("allow");
+        expect(cfg.permission.edit).not.toBe("allow");
+        expect(cfg.permission.ctx_search).toBe("allow");
     });
 
     test("sidekick inline allow-list matches canonical SIDEKICK_ALLOWED_TOOLS", () => {

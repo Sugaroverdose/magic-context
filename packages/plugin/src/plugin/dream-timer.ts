@@ -1,6 +1,9 @@
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
-import { OpenCodeRetrospectiveRawProvider } from "../features/magic-context/dreamer/retrospective-raw-provider";
+import {
+    OpenCodeRetrospectiveRawProvider,
+    type RetrospectiveRawProvider,
+} from "../features/magic-context/dreamer/retrospective-raw-provider";
 import {
     buildDreamTaskRuntimeConfigs,
     userMemoryCollectionEnabled,
@@ -48,6 +51,16 @@ interface ProjectRegistration {
         max_commits: number;
     };
     ensureRegistered: (directory: string, db: Database) => Promise<void>;
+    /**
+     * Per-registration retrospective raw-source provider factory. Each harness
+     * brings its own (the same way it brings its own `client`): OpenCode reads
+     * opencode.db, Pi reads its JSONL sessions. When omitted, the timer defaults
+     * to the OpenCode provider (preserving OpenCode behavior exactly).
+     */
+    retrospectiveRawProvider?: (
+        db: Database,
+        projectIdentity: string,
+    ) => RetrospectiveRawProvider | null;
 }
 
 /** Singleton timer state. */
@@ -234,8 +247,11 @@ async function sweepProject(
             client: reg.client,
             sessionDirectory: reg.directory,
             openOpenCodeDb,
-            retrospectiveRawProvider: (db) =>
-                new OpenCodeRetrospectiveRawProvider({ contextDb: db, openOpenCodeDb }),
+            // Each registration brings its own provider factory (Pi supplies the
+            // JSONL provider); default to OpenCode when none is given.
+            retrospectiveRawProvider:
+                reg.retrospectiveRawProvider ??
+                ((db) => new OpenCodeRetrospectiveRawProvider({ contextDb: db, openOpenCodeDb })),
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
         });
         const ran = await runDueTasksForProject({

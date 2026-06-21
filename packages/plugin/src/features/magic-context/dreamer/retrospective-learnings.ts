@@ -1,5 +1,6 @@
 import type { Database } from "../../../shared/sqlite";
-import { insertMemory } from "../memory/storage-memory";
+import { computeNormalizedHash } from "../memory/normalize-hash";
+import { getMemoryByHash, insertMemory } from "../memory/storage-memory";
 import type { MemoryCategory } from "../memory/types";
 import { insertUserMemoryCandidates } from "../user-memory/storage-user-memory";
 import { FRUSTRATION_MARKER_REGEX } from "./friction-signals";
@@ -58,10 +59,67 @@ export function parseRetrospectiveLearnings(text: string): ParsedRetrospectiveLe
     return learnings;
 }
 
-export function validateRetrospectiveLearningText(content: string): string | null {
+// A learning that shares a long verbatim run of words with a source user message
+// is a transcription, not a distillation — reject it. (Privacy: the durable
+// memory must be the third-person LESSON, never the user's own words.)
+export const MAX_SOURCE_WORD_RUN = 7;
+export const MAX_SOURCE_WORD_RUN_RATIO = 0.5;
+
+function toWords(text: string): string[] {
+    return text
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter((word) => word.length > 0);
+}
+
+/** Longest run of CONSECUTIVE shared words between two word sequences. */
+function longestCommonWordRun(a: string[], b: string[]): number {
+    if (a.length === 0 || b.length === 0) return 0;
+    let best = 0;
+    let prev = new Array<number>(b.length + 1).fill(0);
+    for (let i = 1; i <= a.length; i++) {
+        const curr = new Array<number>(b.length + 1).fill(0);
+        for (let j = 1; j <= b.length; j++) {
+            if (a[i - 1] === b[j - 1]) {
+                curr[j] = prev[j - 1] + 1;
+                if (curr[j] > best) best = curr[j];
+            }
+        }
+        prev = curr;
+    }
+    return best;
+}
+
+/**
+ * True when `content` reads as a near-transcription of any source user line:
+ * it shares a long contiguous word run (absolute threshold, or a large fraction
+ * of the learning's own length). This is the structural enforcement of "distill,
+ * don't transcribe" — the regexes catch quotes/dates/anger, this catches a
+ * lightly-reworded user sentence that would otherwise pass.
+ */
+export function hasHighSourceOverlap(content: string, sourceUserTexts: string[]): boolean {
+    const learningWords = toWords(content);
+    if (learningWords.length === 0) return false;
+    const runCap = Math.min(
+        MAX_SOURCE_WORD_RUN,
+        Math.max(3, Math.ceil(learningWords.length * MAX_SOURCE_WORD_RUN_RATIO)),
+    );
+    for (const source of sourceUserTexts) {
+        const run = longestCommonWordRun(learningWords, toWords(source));
+        if (run >= runCap) return true;
+    }
+    return false;
+}
+
+export function validateRetrospectiveLearningText(
+    content: string,
+    sourceUserTexts: readonly string[] = [],
+): string | null {
     if (RAW_QUOTE_REGEX.test(content)) return "raw_quote";
     if (DATE_REGEX.test(content)) return "date";
     if (FRUSTRATION_MARKER_REGEX.test(content)) return "frustration_marker";
+    if (hasHighSourceOverlap(content, [...sourceUserTexts])) return "source_overlap";
     return null;
 }
 
@@ -71,6 +129,8 @@ export function applyRetrospectiveLearnings(args: {
     sourceSessionId: string;
     learnings: ParsedRetrospectiveLearning[];
     userMemoryCollectionEnabled: boolean;
+    /** The raw source user lines, for the near-transcription reject check. */
+    sourceUserTexts?: readonly string[];
 }): RetrospectiveApplyResult {
     const result: RetrospectiveApplyResult = {
         memoryWritten: 0,
@@ -79,9 +139,19 @@ export function applyRetrospectiveLearnings(args: {
         rejected: [],
     };
     const observations: Array<{ content: string; sessionId: string }> = [];
+    const sourceUserTexts = args.sourceUserTexts ?? [];
+    // Idempotence: dedupe identical-content learnings within this batch, and
+    // skip a memory that already exists (the model can re-emit a learning across
+    // runs). A duplicate is a no-op, never a fatal UNIQUE throw that would abort
+    // the whole apply and retry the same window.
+    const seenContent = new Set<string>();
 
     for (const learning of args.learnings) {
-        const rejectReason = validateRetrospectiveLearningText(learning.content);
+        const dedupeKey = `${learning.route}:${learning.category ?? ""}:${learning.content}`;
+        if (seenContent.has(dedupeKey)) continue;
+        seenContent.add(dedupeKey);
+
+        const rejectReason = validateRetrospectiveLearningText(learning.content, sourceUserTexts);
         if (rejectReason) {
             result.rejected.push({ content: learning.content, reason: rejectReason });
             continue;
@@ -89,6 +159,15 @@ export function applyRetrospectiveLearnings(args: {
 
         if (learning.route === "memory") {
             if (!learning.category) continue;
+            // Skip an already-stored identical memory rather than throwing on the
+            // UNIQUE(project_path, category, normalized_hash) constraint.
+            const existing = getMemoryByHash(
+                args.db,
+                args.projectIdentity,
+                learning.category,
+                computeNormalizedHash(learning.content),
+            );
+            if (existing) continue;
             insertMemory(args.db, {
                 projectPath: args.projectIdentity,
                 category: learning.category,

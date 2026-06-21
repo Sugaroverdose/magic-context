@@ -836,6 +836,61 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(third[0])).not.toContain("HIGH_PRIORITY_MEMORY");
     });
 
+    it("classify writes do NOT pressure-refold m[0] on a cache-busting pass with a non-empty m[1]", () => {
+        db = makeDb();
+        const high = insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "PROJECT_RULES",
+            content: "HIGH_PRIORITY_MEMORY: Always run focused tests before shipping.",
+            importance: 90,
+        });
+
+        // Materialize m[0], then add a NEW memory so m[1] has real content (the
+        // <new-memories> delta). A classify write to the EXISTING memory must not
+        // trigger the pressure-refold on a subsequent cache-busting pass.
+        const budget = 4000;
+        const state = readStateFromMeta();
+        const hardV1 = {
+            systemHash: "sys-v1",
+            modelKey: "model-v1",
+            cacheExpired: false,
+            lastResponseTime: 0,
+        };
+        const first = [userMessage("m1", "hello")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: first,
+            state,
+            projectPath: PROJECT_PATH,
+            memoryInjectionBudgetTokens: budget,
+            hardSignals: hardV1,
+        });
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "PROJECT_RULES",
+            content: "NEW_DELTA_MEMORY: m[1] delta content keeps m[1] non-empty.",
+            importance: 80,
+        });
+
+        // A column-only classify write to the EXISTING memory.
+        expect(setMemoryClassification(db, high.id, { importance: 5 })).toBe(true);
+
+        // Cache-busting pass (soft refresh recomputes m[1]) — must NOT fold m[0].
+        const second = [userMessage("m2", "cache-busting soft pass")];
+        const soft = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: second,
+            state,
+            projectPath: PROJECT_PATH,
+            memoryInjectionBudgetTokens: budget,
+            isCacheBustingPass: true,
+            hardSignals: hardV1,
+        });
+        expect(soft.m0RematerializedThisPass).toBe(false);
+    });
+
     it("v2: a session facts version bump does NOT trigger re-materialization", () => {
         // v2 faithful facts: session_facts is retired as a render source, so a
         // facts-version bump must not force an m[0] rebuild (rendered bytes no

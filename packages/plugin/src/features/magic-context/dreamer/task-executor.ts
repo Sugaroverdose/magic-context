@@ -521,7 +521,6 @@ async function runRetrospectiveTask(
     }, 60_000);
 
     let childSessionId: string | null = null;
-    let taskFailed = false;
     try {
         const createResponse = await deps.client.session.create({
             body: {
@@ -598,16 +597,22 @@ async function runRetrospectiveTask(
             sourceSessionId,
             learnings,
             userMemoryCollectionEnabled: deps.userMemoryCollectionEnabled === true,
+            // Source user lines for the near-transcription reject: a learning that
+            // echoes a long verbatim run of the user's own words is a transcription.
+            sourceUserTexts: userMessages
+                .map((message) => message.text ?? "")
+                .filter((text) => text.length > 0),
         });
         log(
             `[dreamer] retrospective: signals=${signals.length} learnings=${learnings.length} memory=${applied.memoryWritten} observations=${applied.observationsInserted} dropped=${applied.observationsDropped} rejected=${applied.rejected.length}`,
         );
-    } catch (error) {
-        taskFailed = true;
-        throw error;
     } finally {
         clearInterval(leaseInterval);
-        if (childSessionId && !taskFailed && !shouldKeepSubagents()) {
+        // PRIVACY: a retrospective child's prompt embeds raw cross-session user
+        // text from the friction window. Always delete the child — even on
+        // failure, and even when keep_subagents is set. The debug-retention flag
+        // must never persist another session's raw user text on disk.
+        if (childSessionId) {
             await deps.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
         }
     }

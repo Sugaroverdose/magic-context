@@ -148,6 +148,12 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		dreamerConfig: opts.config,
 		gitCommitIndexing: opts.gitCommitIndexing,
 		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
+		// SCHEDULED Pi retrospective must read Pi JSONL sessions, not opencode.db.
+		// Supply the Pi provider factory (db arg ignored — Pi reads JSONL by cwd),
+		// converging the scheduled path onto the same provider the manual
+		// /ctx-dream path already uses.
+		retrospectiveRawProvider: () =>
+			new PiRetrospectiveRawProvider({ projectCwd: opts.projectDir }),
 	}).then((timerCleanup) => {
 		if (cancelled) {
 			// Registration was cancelled before timer setup completed —

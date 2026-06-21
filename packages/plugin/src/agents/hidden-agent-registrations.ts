@@ -60,6 +60,8 @@ export interface HiddenAgentRegistration {
     allowedTools: readonly string[];
     maxSteps: number;
     overrides?: Record<string, unknown>;
+    /** Drop any user `permission` override (privacy-critical agents only). */
+    lockPermissions?: boolean;
 }
 
 /**
@@ -112,6 +114,10 @@ export function buildHiddenAgentRegistrations(args: {
             allowedTools: ["ctx_search"],
             maxSteps: 40,
             overrides: args.dreamerOverrides,
+            // Privacy-critical: this child reads OTHER sessions' raw user text.
+            // Lock it to ctx_search-only — a user dreamer `permission` override
+            // must never broaden it.
+            lockPermissions: true,
         },
         {
             id: "historian",
@@ -148,6 +154,7 @@ export function buildHiddenAgentConfig(
     maxSteps: number,
     overrides?: Record<string, unknown>,
     agentLabel?: string,
+    lockPermissions = false,
 ) {
     const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
         permission?: Record<string, unknown>;
@@ -165,10 +172,14 @@ export function buildHiddenAgentConfig(
         // Permission baseline goes after `restOverrides` so that accidental
         // `permission` keys in user overrides we DIDN'T explicitly destructure
         // can't bypass the deny. The explicit override (destructured above) is
-        // then layered on top.
+        // then layered on top — UNLESS lockPermissions is set, in which case the
+        // user override is dropped entirely. lockPermissions is for
+        // privacy-critical agents (dreamer-retrospective reads other sessions'
+        // raw user text and MUST stay ctx_search-only; a user dreamer `permission`
+        // override must never grant it bash/edit/ctx_memory/etc).
         permission: {
             ...basePermission,
-            ...(overridePermission ?? {}),
+            ...(lockPermissions ? {} : (overridePermission ?? {})),
         },
         mode: "subagent" as const,
         hidden: true,

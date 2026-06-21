@@ -9,6 +9,10 @@ import { openOpenCodeDb } from "./open-opencode-db";
 
 export const RETROSPECTIVE_MAX_MESSAGES_PER_SESSION = 80;
 export const RETROSPECTIVE_MAX_MESSAGES_PER_RUN = 240;
+// Cap the number of (newest-first) sessions scanned per run. The first run
+// (watermark=0) would otherwise fan out over the project's entire session
+// history; this bounds the scan/IO regardless of how many sessions exist.
+export const RETROSPECTIVE_MAX_SESSIONS_PER_RUN = 20;
 
 export interface RetrospectiveProjectSession {
     sessionId: string;
@@ -32,6 +36,8 @@ export interface RetrospectiveRawProvider {
         sinceMs: number,
         capPerSession: number,
     ): RetrospectiveRawMessage[] | Promise<RetrospectiveRawMessage[]>;
+    /** Release any reused resources (e.g. a pooled DB handle) after a run. */
+    dispose?(): void;
 }
 
 interface OpenCodeRetrospectiveRawProviderDeps {
@@ -59,6 +65,12 @@ interface OpenCodePartRow {
 
 export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvider {
     private readonly openDb: () => Database | null;
+    // One read-only opencode.db handle reused across the run's per-session reads
+    // (opened lazily on the first read, closed via dispose()). Avoids opening +
+    // closing the DB once per session, which on a large project meant many
+    // open/close cycles per scheduled run.
+    private sharedDb: Database | null = null;
+    private sharedDbOpened = false;
 
     constructor(private readonly deps: OpenCodeRetrospectiveRawProviderDeps) {
         this.openDb = deps.openOpenCodeDb ?? openOpenCodeDb;
@@ -66,17 +78,27 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
 
     listProjectSessions(projectIdentity: string): RetrospectiveProjectSession[] {
         const rows = this.deps.contextDb
-            .prepare<[string], SessionProjectRow>(
+            .prepare<[string, number], SessionProjectRow>(
                 `SELECT session_id, updated_at
                    FROM session_projects
                   WHERE project_path = ? AND harness = 'opencode'
-                  ORDER BY updated_at DESC, session_id DESC`,
+                  ORDER BY updated_at DESC, session_id DESC
+                  LIMIT ?`,
             )
-            .all(projectIdentity);
+            .all(projectIdentity, RETROSPECTIVE_MAX_SESSIONS_PER_RUN);
         return rows.map((row) => ({
             sessionId: row.session_id,
             updatedAt: typeof row.updated_at === "number" ? row.updated_at : undefined,
         }));
+    }
+
+    private resolveDb(): Database | null {
+        if (this.deps.opencodeDb) return this.deps.opencodeDb;
+        if (!this.sharedDbOpened) {
+            this.sharedDbOpened = true;
+            this.sharedDb = this.openDb();
+        }
+        return this.sharedDb;
     }
 
     readUserMessagesSince(
@@ -84,15 +106,22 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
         sinceMs: number,
         capPerSession: number,
     ): RetrospectiveRawMessage[] {
-        const db = this.deps.opencodeDb ?? this.openDb();
+        const db = this.resolveDb();
         if (!db) return [];
         try {
             return readOpenCodeMessagesSince(db, sessionId, sinceMs, capPerSession);
         } catch {
             return [];
-        } finally {
-            if (!this.deps.opencodeDb) closeQuietly(db);
         }
+    }
+
+    /** Close the reused read-only handle. Safe to call multiple times. */
+    dispose(): void {
+        if (this.sharedDb && !this.deps.opencodeDb) {
+            closeQuietly(this.sharedDb);
+        }
+        this.sharedDb = null;
+        this.sharedDbOpened = false;
     }
 }
 
@@ -107,17 +136,22 @@ export async function readProjectRetrospectiveMessages(
 ): Promise<RetrospectiveRawMessage[]> {
     const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
     const capPerSession = options?.capPerSession ?? RETROSPECTIVE_MAX_MESSAGES_PER_SESSION;
-    const sessions = await provider.listProjectSessions(projectIdentity);
-    const batches = await Promise.all(
-        sessions.map((session) =>
-            provider.readUserMessagesSince(session.sessionId, sinceMs, capPerSession),
-        ),
-    );
-    return batches
-        .flat()
-        .sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
-        .slice(0, maxMessages)
-        .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+    try {
+        const sessions = await provider.listProjectSessions(projectIdentity);
+        const batches = await Promise.all(
+            sessions.map((session) =>
+                provider.readUserMessagesSince(session.sessionId, sinceMs, capPerSession),
+            ),
+        );
+        return batches
+            .flat()
+            .sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
+            .slice(0, maxMessages)
+            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+    } finally {
+        // Release the provider's reused DB handle (OpenCode) after the run's reads.
+        provider.dispose?.();
+    }
 }
 
 function readOpenCodeMessagesSince(
@@ -181,6 +215,14 @@ function normalizeOpenCodeMessage(args: {
     ts: number;
 }): RetrospectiveRawMessage[] {
     const rows: RetrospectiveRawMessage[] = [];
+    // PRIVACY: retrospective reads OTHER sessions' raw history. Only genuine
+    // typed USER text may carry its content into the friction window — that is
+    // the friction the user expressed. Assistant text and raw tool OUTPUT can
+    // contain file contents / secrets / paths from prior sessions, so we never
+    // emit them. Tool rows carry metadata ONLY (name + error flag), which is all
+    // the friction detectors need (repeated-call / error-burst); their `text`
+    // stays empty so no raw output can reach the prompt. (Pi already returns
+    // user-only — this keeps the two providers aligned.)
     if (args.role === "user") {
         const text = extractGenuineUserText(args.parts);
         if (text) {
@@ -192,17 +234,6 @@ function normalizeOpenCodeMessage(args: {
                 ts: args.ts,
             });
         }
-    } else if (args.role === "assistant") {
-        const text = extractPlainText(args.parts).join("\n").trim();
-        if (text) {
-            rows.push({
-                sessionId: args.sessionId,
-                ordinal: args.ordinal,
-                role: "assistant",
-                text,
-                ts: args.ts,
-            });
-        }
     }
 
     for (const tool of extractToolRows(args.parts)) {
@@ -210,7 +241,7 @@ function normalizeOpenCodeMessage(args: {
             sessionId: args.sessionId,
             ordinal: args.ordinal,
             role: "tool",
-            text: tool.text,
+            text: "",
             toolName: tool.toolName,
             isError: tool.isError,
             ts: args.ts,

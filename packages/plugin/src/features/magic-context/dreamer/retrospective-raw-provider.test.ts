@@ -149,6 +149,10 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
 
         const provider = new OpenCodeRetrospectiveRawProvider({ contextDb, opencodeDb });
 
+        // PRIVACY: only genuine typed USER text carries content. Assistant text
+        // is dropped entirely; a tool row carries metadata (name + error flag)
+        // with NO raw output text — so no cross-session secret/file content can
+        // reach the friction prompt.
         expect(provider.readUserMessagesSince("s1", 150, 10)).toEqual([
             {
                 sessionId: "s1",
@@ -160,15 +164,8 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
             {
                 sessionId: "s1",
                 ordinal: 3,
-                role: "assistant",
-                text: "I will inspect it.",
-                ts: 220,
-            },
-            {
-                sessionId: "s1",
-                ordinal: 3,
                 role: "tool",
-                text: "Error: nope",
+                text: "",
                 toolName: "bash",
                 isError: true,
                 ts: 220,

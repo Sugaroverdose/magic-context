@@ -193,6 +193,26 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--");
 	});
 
+	it("locks dreamer-retrospective to --tools ctx_search (no built-ins) and never --no-tools", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "dreamer-retrospective",
+			model: "anthropic/claude-sonnet",
+		});
+		const idx = args.indexOf("--tools");
+		expect(idx).toBeGreaterThan(-1);
+		expect(args[idx + 1]).toBe("ctx_search");
+		// --no-tools would disable EVERYTHING including ctx_search — must not appear.
+		expect(args).not.toContain("--no-tools");
+	});
+
+	it("does NOT apply a strict tool allow-list to ordinary dreamer/historian/sidekick", () => {
+		for (const agent of ["historian", "dreamer", "sidekick"]) {
+			const args = __test.buildArgs({ ...baseOptions, agent });
+			expect(args).not.toContain("--tools");
+		}
+	});
+
 	it("parses JSON event lines and normalizes parse errors", () => {
 		expect(__test.parsePiEventLine('{"type":"agent_start"}')).toEqual({
 			ok: true,
