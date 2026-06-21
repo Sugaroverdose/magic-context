@@ -130,7 +130,7 @@ Background maintenance (V2: per-task cron scheduling). A process-wide 15-min tim
 
 ## Storage & migrations
 
-`storage-db.ts` creates the schema and runs versioned migrations (`migrations.ts`, currently v1–v36). `LATEST_SUPPORTED_VERSION` is a schema fence — it MUST be bumped with every new migration (a unit test asserts it equals the highest migration), and a stale value makes the DB refuse to open after the migration applies. `ensureColumn()` + `healAllNullColumns()` backfill upgraded DBs even if a migration row is lost. New session-scoped tables must be added to `clearSession()`. A bulletproof `MAGIC_CONTEXT_TEST_DATA_DIR` guard keeps the test suite off the live DB (running `bun test` once migrated a live DB and fail-closed running binaries). SQLite binds must use SPREAD positional args, never the array form (`bun:sqlite` binds a lone array positionally; `node:sqlite` reads it as named params and throws).
+`storage-db.ts` creates the schema and runs versioned migrations (`migrations.ts`, currently v1–v44). `LATEST_SUPPORTED_VERSION` is a schema fence — it MUST be bumped with every new migration (a unit test asserts it equals the highest migration), and a stale value makes the DB refuse to open after the migration applies. `ensureColumn()` + `healAllNullColumns()` backfill upgraded DBs even if a migration row is lost. New session-scoped tables must be added to `clearSession()`. A bulletproof `MAGIC_CONTEXT_TEST_DATA_DIR` guard keeps the test suite off the live DB (running `bun test` once migrated a live DB and fail-closed running binaries). SQLite binds must use SPREAD positional args, never the array form (`bun:sqlite` binds a lone array positionally; `node:sqlite` reads it as named params and throws).
 
 ## Session modes
 

@@ -24,18 +24,17 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.26.0";
+export const ANNOUNCEMENT_VERSION = "0.27.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Faster on large sessions: per-message transform overhead is at least 2x lower on typical passes and up to ~10x lower when history summarization fires (no more multi-second pause on big sessions).",
-    "No more surprise models: the built-in fallback chain is gone. Hidden agents only use the model (and fallback_models) you configure — no confusing 'model not found' for providers you never set up. `doctor` now records every historian run so real failures are visible.",
-    "Anthropic thinking-block fix: clearing old reasoning no longer risks a stale-signature rejection on Claude / Bedrock / proxied-Claude routes. Plus fewer prompt-cache busts.",
-    "Community fixes: TUI crash on the upgrade progress panel (#168), historian.disallowed_tools for weak models that loop on tool calls (#166), and a Pi-only config key leak (#167).",
-    "New: doctor migrate-session re-homes a session (and optionally its memories) to another project, with a dry-run preview.",
+    "Dreamer V2: each maintenance task now runs on its own schedule (cron), with its own model. Configure them in setup, the dashboard, or magic-context.jsonc.",
+    "New 'classify' task: scores each memory's importance so the most relevant ones stay in context as your work shifts — fully cache-safe, runs in the background.",
+    "New 'retrospective' task: learns from the moments you had to correct or re-explain and records the durable lesson. Reads only your own typed messages; on by default, turn it off anytime.",
+    "Memory hygiene split into 'verify' (checks memories against code) and 'curate' (deduplicates and prunes the pool) so neither starves the other.",
 ];
 
 /**
