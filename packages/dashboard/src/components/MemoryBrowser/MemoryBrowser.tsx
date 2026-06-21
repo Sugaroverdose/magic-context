@@ -313,6 +313,16 @@ export default function MemoryBrowser() {
     }
   };
 
+  // Importance band → pill color, mirroring the SessionViewer compartment bands
+  // (classify-memories scores 1-100; the budget trim keeps the top, drops the
+  // bottom). The numeric score is always shown alongside.
+  const importanceBand = (importance: number): { label: string; cls: string } => {
+    if (importance >= 80) return { label: "critical", cls: "red" };
+    if (importance >= 60) return { label: "high", cls: "amber" };
+    if (importance >= 40) return { label: "medium", cls: "blue" };
+    return { label: "low", cls: "gray" };
+  };
+
   let searchTimeout: number;
   const handleSearch = (value: string) => {
     clearTimeout(searchTimeout);
@@ -572,6 +582,25 @@ export default function MemoryBrowser() {
                                     <span class={`pill ${sourcePillClass(mem.source_type)}`}>
                                       {mem.source_type}
                                     </span>
+                                    <span
+                                      class={`pill ${importanceBand(mem.importance).cls}`}
+                                      title={`importance ${mem.importance} · ${importanceBand(mem.importance).label} (classify)`}
+                                    >
+                                      imp {mem.importance}
+                                    </span>
+                                    <Show when={mem.scope !== "project"}>
+                                      <span class="pill indigo" title="memory scope (classify)">
+                                        {mem.scope}
+                                      </span>
+                                    </Show>
+                                    <Show when={mem.shareable}>
+                                      <span
+                                        class="pill green"
+                                        title="safe to share with teammates (classify)"
+                                      >
+                                        shareable
+                                      </span>
+                                    </Show>
                                     <Show
                                       when={workspaceFilter() !== "" && mem.source_display_name}
                                     >

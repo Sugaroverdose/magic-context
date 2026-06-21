@@ -163,6 +163,11 @@ pub struct Memory {
     pub superseded_by_memory_id: Option<i64>,
     pub merged_from: Option<String>,
     pub metadata_json: Option<String>,
+    /// Dreamer classify-memories outputs (v44). importance drives budget-trim
+    /// ordering; scope/shareable are advisory.
+    pub importance: i64,
+    pub scope: String,
+    pub shareable: bool,
     pub has_embedding: bool,
     /// Member `display_name` when listing memories under a workspace filter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2094,6 +2099,16 @@ pub fn get_memories(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Memory>, rusqlite::Error> {
+    // The dashboard opens the DB read-only and never migrates it (the plugin owns
+    // the schema lifecycle). A new dashboard against a pre-v44 plugin DB lacks the
+    // classify columns — select literal defaults instead so the viewer degrades
+    // rather than erroring. Mapper indices 21/22/23 stay stable either way.
+    let classify_cols = if memories_has_classify_columns(conn) {
+        "m.importance, m.scope, m.shareable,"
+    } else {
+        "50 AS importance, 'project' AS scope, 0 AS shareable,"
+    };
+
     let raw_search = search_query.unwrap_or("").trim().to_string();
     let has_search = !raw_search.is_empty();
 
@@ -2183,6 +2198,7 @@ pub fn get_memories(
                     m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+                    {classify_cols}
                     (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
              FROM memories m
              LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -2201,6 +2217,7 @@ pub fn get_memories(
                     m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+                    {classify_cols}
                     (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
              FROM memories m
              LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -2217,6 +2234,7 @@ pub fn get_memories(
                     m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+                    {classify_cols}
                     (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
              FROM memories m
              LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -2250,6 +2268,7 @@ pub fn get_memories(
                         m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
                         m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                         m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+                        {classify_cols}
                         (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
                  FROM memories m
                  LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -2295,6 +2314,7 @@ pub fn get_memories(
                         m.first_seen_at, m.created_at, m.updated_at, m.last_seen_at,
                         m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                         m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
+                        {classify_cols}
                         (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
                  FROM memories m
                  LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -2330,6 +2350,18 @@ pub fn get_memories(
     }
 }
 
+/// True when the `memories` table carries the v44 classify columns. The
+/// dashboard never migrates, so a new dashboard can face a pre-v44 plugin DB.
+fn memories_has_classify_columns(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name IN ('importance','scope','shareable')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n == 3)
+    .unwrap_or(false)
+}
+
 fn map_memory_row(row: &rusqlite::Row<'_>) -> Result<Memory, rusqlite::Error> {
     Ok(Memory {
         id: row.get(0)?,
@@ -2353,7 +2385,12 @@ fn map_memory_row(row: &rusqlite::Row<'_>) -> Result<Memory, rusqlite::Error> {
         superseded_by_memory_id: row.get(18)?,
         merged_from: row.get(19)?,
         metadata_json: row.get(20)?,
-        has_embedding: row.get::<_, i64>(21)? != 0,
+        importance: row.get::<_, Option<i64>>(21)?.unwrap_or(50),
+        scope: row
+            .get::<_, Option<String>>(22)?
+            .unwrap_or_else(|| "project".to_string()),
+        shareable: row.get::<_, Option<i64>>(23)?.unwrap_or(0) != 0,
+        has_embedding: row.get::<_, i64>(24)? != 0,
         source_display_name: None,
     })
 }
@@ -4334,9 +4371,8 @@ fn fetch_dream_memory_changes(
         return Ok(Vec::new());
     }
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let sql = format!(
-        "SELECT id, category, content, status FROM memories WHERE id IN ({placeholders})"
-    );
+    let sql =
+        format!("SELECT id, category, content, status FROM memories WHERE id IN ({placeholders})");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let params: Vec<&dyn rusqlite::ToSql> =
         ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
@@ -6089,6 +6125,47 @@ mod memory_project_filter_tests {
     }
 
     #[test]
+    fn get_memories_degrades_on_pre_v44_schema_without_classify_columns() {
+        // make_memory_db() is a PRE-v44 schema (no importance/scope/shareable).
+        // The dashboard never migrates, so get_memories must still work and
+        // return literal defaults rather than erroring on the missing columns.
+        let conn = make_memory_db();
+        assert!(!memories_has_classify_columns(&conn));
+        insert_memory(&conn, "/tmp/pre-v44", "CONSTRAINTS", "active");
+
+        let rows = get_memories(&conn, None, None, None, None, None, 100, 0)
+            .expect("get_memories must not error on a pre-v44 schema");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].importance, 50);
+        assert_eq!(rows[0].scope, "project");
+        assert!(!rows[0].shareable);
+    }
+
+    #[test]
+    fn get_memories_reads_classify_columns_on_v44_schema() {
+        let conn = make_memory_db();
+        conn.execute_batch(
+            "ALTER TABLE memories ADD COLUMN importance INTEGER NOT NULL DEFAULT 50;
+             ALTER TABLE memories ADD COLUMN scope TEXT NOT NULL DEFAULT 'project';
+             ALTER TABLE memories ADD COLUMN shareable INTEGER NOT NULL DEFAULT 0;",
+        )
+        .expect("add v44 columns");
+        assert!(memories_has_classify_columns(&conn));
+        let id = insert_memory(&conn, "/tmp/v44", "ARCHITECTURE", "active");
+        conn.execute(
+            "UPDATE memories SET importance = 88, scope = 'ecosystem', shareable = 1 WHERE id = ?1",
+            [id],
+        )
+        .expect("set classify values");
+
+        let rows = get_memories(&conn, None, None, None, None, None, 100, 0).expect("get_memories");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].importance, 88);
+        assert_eq!(rows[0].scope, "ecosystem");
+        assert!(rows[0].shareable);
+    }
+
+    #[test]
     fn get_memory_stats_with_identity_filter_returns_matching_counts() {
         // End-to-end: stats must also resolve identity → paths. Pre-fix the
         // total/active/permanent/archived/categories counts were all zero
@@ -6293,7 +6370,9 @@ mod dream_run_memory_changes_tests {
         insert_memory(&conn, 11, "archived", 1, 1);
         let run = insert_run(
             &conn,
-            Some(r#"{"written":1,"archived":1,"merged":0,"writtenIds":[10],"archivedIds":[11],"mergedIds":[]}"#),
+            Some(
+                r#"{"written":1,"archived":1,"merged":0,"writtenIds":[10],"archivedIds":[11],"mergedIds":[]}"#,
+            ),
         );
 
         let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
@@ -6311,7 +6390,9 @@ mod dream_run_memory_changes_tests {
         // id 99 referenced by the run but since deleted → silently dropped.
         let run = insert_run(
             &conn,
-            Some(r#"{"written":2,"archived":0,"merged":0,"writtenIds":[10,99],"archivedIds":[],"mergedIds":[]}"#),
+            Some(
+                r#"{"written":2,"archived":0,"merged":0,"writtenIds":[10,99],"archivedIds":[],"mergedIds":[]}"#,
+            ),
         );
         let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
         assert_eq!(detail.written.len(), 1);
@@ -6339,7 +6420,9 @@ mod dream_run_memory_changes_tests {
         insert_memory(&conn, 30, "active", 1500, 1500);
         let run = insert_run(
             &conn,
-            Some(r#"{"written":0,"archived":0,"merged":0,"writtenIds":[],"archivedIds":[],"mergedIds":[]}"#),
+            Some(
+                r#"{"written":0,"archived":0,"merged":0,"writtenIds":[],"archivedIds":[],"mergedIds":[]}"#,
+            ),
         );
         let detail = get_dream_run_memory_changes(&conn, run).expect("detail");
         assert!(detail.written.is_empty());

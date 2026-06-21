@@ -22,9 +22,17 @@ export interface Memory {
   superseded_by_memory_id: number | null;
   merged_from: string | null;
   metadata_json: string | null;
+  /** Dreamer classify-memories outputs (v44). importance (1-100) drives
+   *  budget-trim ordering; scope/shareable are advisory. Defaults 50/"project"/
+   *  false on pre-v44 plugin DBs (the dashboard never migrates). */
+  importance: number;
+  scope: MemoryScope;
+  shareable: boolean;
   has_embedding: boolean;
   source_display_name?: string | null;
 }
+
+export type MemoryScope = "project" | "ecosystem" | "universe";
 
 export type MemoryCategory =
   | "ARCHITECTURE_DECISIONS"

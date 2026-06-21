@@ -111,6 +111,20 @@ export default function MemoryDetail(props: Props) {
               <td>{props.memory.source_type}</td>
             </tr>
             <tr>
+              <td>Importance</td>
+              <td>
+                {props.memory.importance}
+                <span style={{ color: "var(--text-muted)" }}> / 100 · scored by classify</span>
+              </td>
+            </tr>
+            <tr>
+              <td>Scope</td>
+              <td>
+                {props.memory.scope}
+                {props.memory.shareable ? " · shareable with teammates" : " · private"}
+              </td>
+            </tr>
+            <tr>
               <td>Project</td>
               <td style={{ "word-break": "break-all" }}>{props.memory.project_path}</td>
             </tr>
