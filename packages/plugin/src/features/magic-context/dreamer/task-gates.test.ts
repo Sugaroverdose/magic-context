@@ -51,34 +51,41 @@ describe("evaluateTaskGate", () => {
         ).toBe(true);
     });
 
-    test("retrospective runs when a project session changed since last run", () => {
+    test("retrospective gates on the CONTENT watermark, not lastRunAt", () => {
         db = freshDb();
         const projectIdentity = "/repo/project";
         db.prepare(
             "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
         ).run("s1", "opencode", projectIdentity, 200);
 
+        // Never scanned → runs.
         expect(
             evaluateTaskGate("retrospective", {
                 db,
                 projectIdentity,
                 lastRunAt: null,
+                retrospectiveWatermarkMs: null,
                 promotionThreshold: 3,
             }),
         ).toBe(true);
+        // Session newer than watermark → runs (even if lastRunAt is newer — the
+        // session was updated mid-run, so its content hasn't been scanned).
         expect(
             evaluateTaskGate("retrospective", {
                 db,
                 projectIdentity,
-                lastRunAt: 100,
+                lastRunAt: 9999,
+                retrospectiveWatermarkMs: 100,
                 promotionThreshold: 3,
             }),
         ).toBe(true);
+        // Watermark at/after the session update → nothing new → skip.
         expect(
             evaluateTaskGate("retrospective", {
                 db,
                 projectIdentity,
-                lastRunAt: 300,
+                lastRunAt: null,
+                retrospectiveWatermarkMs: 300,
                 promotionThreshold: 3,
             }),
         ).toBe(false);

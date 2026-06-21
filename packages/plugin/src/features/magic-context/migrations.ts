@@ -1595,6 +1595,30 @@ const MIGRATIONS: Migration[] = [
             ensureColumn(db, "memories", "shareable", "INTEGER NOT NULL DEFAULT 0");
         },
     },
+    {
+        version: 45,
+        description: "retrospective content watermark and processed-window idempotence",
+        up: (db: Database) => {
+            // Content watermark for the retrospective task: the max message ts it
+            // has actually scanned, distinct from last_run_at (schedule-completion
+            // time). last_run_at as a content cutoff loses messages that arrive
+            // mid-run; this column tracks what was truly seen.
+            if (tableExists(db, "task_schedule_state")) {
+                ensureColumn(db, "task_schedule_state", "retrospective_watermark_ms", "INTEGER");
+            }
+            // Source-window idempotence: a friction window re-seen across the
+            // run-overlap must not re-extract the same learning. Key = project +
+            // a stable hash over the flagged user lines' (sessionId:ts) anchors.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS retrospective_processed_windows (
+                    project_path TEXT NOT NULL,
+                    window_key   TEXT NOT NULL,
+                    processed_at INTEGER NOT NULL,
+                    PRIMARY KEY (project_path, window_key)
+                );
+            `);
+        },
+    },
 ];
 
 /**

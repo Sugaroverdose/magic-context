@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
 import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "../../../agents/dreamer";
@@ -23,7 +24,7 @@ import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
-import { detectFrictionSignals, type FrictionSignal } from "./friction-signals";
+import type { FrictionSignal } from "./friction-signals";
 import { renewLease } from "./lease";
 import {
     enforceMaintainDocsProtectedRegions,
@@ -41,16 +42,21 @@ import {
 import {
     type RetrospectiveRawMessage,
     type RetrospectiveRawProvider,
-    readProjectRetrospectiveMessages,
+    readRetrospectiveScanWindow,
 } from "./retrospective-raw-provider";
 import { type DreamRunMemoryChanges, insertDreamRun } from "./storage-dream-runs";
-import { getTaskScheduleState } from "./storage-task-schedule";
+import {
+    getTaskScheduleState,
+    isRetrospectiveWindowProcessed,
+    recordRetrospectiveWindowProcessed,
+} from "./storage-task-schedule";
 import {
     buildDreamTaskPrompt,
     buildFrictionGatePrompt,
     buildRetrospectivePrompt,
     type ClassifyTrajectoryCompartment,
     DREAMER_SYSTEM_PROMPT,
+    FRICTION_GATE_SYSTEM_PROMPT,
     RETROSPECTIVE_SYSTEM_PROMPT,
     type RetrospectivePromptEvent,
 } from "./task-prompts";
@@ -69,12 +75,6 @@ export interface DreamTaskExecutorDeps {
         | ((db: Database, projectIdentity: string) => RetrospectiveRawProvider | null);
     /** Host-side privacy gate for route="observation" learnings. */
     userMemoryCollectionEnabled?: boolean;
-    /** Optional tiny friction classifier. Defaults to conservative no-hit. */
-    frictionGateClassifier?: (args: {
-        prompt: string;
-        userLines: string[];
-        config: DreamTaskRuntimeConfig;
-    }) => Promise<{ hit: boolean; ordinals?: number[] }>;
 }
 
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
@@ -289,7 +289,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
 
             if (config.task === "retrospective") {
                 const memoryBefore = getMemoryCountsByStatus(db, projectIdentity);
-                await runRetrospectiveTask(config, ctx, {
+                const retro = await runRetrospectiveTask(config, ctx, {
                     deps,
                     deadline,
                     parent,
@@ -298,7 +298,15 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun("completed", null, {
                     memoryChanges: computeMemoryDelta(memoryBefore),
                 });
-                return { status: "completed" };
+                // Advance the content watermark on completion (incl. clean "n"
+                // runs) so the next run only scans newer messages.
+                return {
+                    status: "completed",
+                    schedulePatch:
+                        retro.retrospectiveWatermarkMs != null
+                            ? { retrospectiveWatermarkMs: retro.retrospectiveWatermarkMs }
+                            : undefined,
+                };
             }
 
             if (config.task === "key-files") {
@@ -370,21 +378,30 @@ function renderGateUserLines(messages: RetrospectiveRawMessage[]): string[] {
         .map((message) => `${message.ordinal}: ${message.text}`);
 }
 
-function signalFromGateOrdinals(
-    ordinals: number[],
-    messages: RetrospectiveRawMessage[],
-): FrictionSignal[] {
-    const valid = new Set(messages.map((message) => message.ordinal));
-    const anchored = ordinals.filter((ordinal) => valid.has(ordinal));
-    if (anchored.length === 0) return [];
-    return [
-        {
-            kind: "frustration_marker",
-            ordinals: anchored,
-            message: "tiny gate classifier flagged user friction",
-            score: 1,
-        },
-    ];
+/** Number of user lines re-read before the watermark each run (the overlap), so
+ *  friction straddling a run boundary isn't missed. Bounded; idempotence guards
+ *  against the re-read re-extracting an already-processed window. */
+const RETROSPECTIVE_OVERLAP_USER_LINES = 12;
+
+/** Parse the gate's one-line verdict: "n" → no friction; "y: 3, 7" → flagged
+ *  ordinals. Tolerant of surrounding whitespace/prose; anything not starting
+ *  with y is a miss. */
+function parseFrictionGateVerdict(verdict: string): { hit: boolean; ordinals: number[] } {
+    const trimmed = verdict.trim().toLowerCase();
+    if (!trimmed.startsWith("y")) return { hit: false, ordinals: [] };
+    const ordinals = (verdict.match(/\d+/g) ?? []).map(Number).filter((n) => Number.isFinite(n));
+    return { hit: ordinals.length > 0, ordinals };
+}
+
+/** Stable source-window key for idempotence: a hash over the flagged user lines'
+ *  (sessionId:ts) anchors — NOT prompt ordinals (batch-local). Sorted so order
+ *  is irrelevant; the same friction window yields the same key across runs. */
+function computeRetrospectiveWindowKey(flagged: RetrospectiveRawMessage[]): string {
+    const anchors = flagged
+        .map((message) => `${message.sessionId}:${message.ts}`)
+        .sort()
+        .join("|");
+    return createHash("sha256").update(anchors).digest("hex").slice(0, 32);
 }
 
 function renderFrictionWindow(
@@ -455,56 +472,44 @@ async function runRetrospectiveTask(
         parent: string | undefined;
         invocationStartedAt: number;
     },
-): Promise<void> {
+): Promise<{ retrospectiveWatermarkMs: number | null }> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
     const { deps, deadline, parent } = helpers;
     const provider = resolveRetrospectiveProvider(deps, db, projectIdentity);
     if (!provider) {
         log("[dreamer] retrospective: no raw provider available — clean no-op");
-        return;
+        return { retrospectiveWatermarkMs: null };
     }
 
-    const lastRunAt = getTaskScheduleState(db, projectIdentity, config.task)?.lastRunAt ?? null;
-    const messages = withGlobalOrdinals(
-        await readProjectRetrospectiveMessages(provider, projectIdentity, lastRunAt ?? 0),
+    // Content watermark (max message ts actually scanned) — NOT lastRunAt, which
+    // is schedule-completion time and would skip a message that arrived mid-run.
+    const watermarkMs =
+        getTaskScheduleState(db, projectIdentity, config.task)?.retrospectiveWatermarkMs ?? 0;
+
+    const scan = await readRetrospectiveScanWindow(
+        provider,
+        projectIdentity,
+        watermarkMs,
+        RETROSPECTIVE_OVERLAP_USER_LINES,
     );
+    const messages = withGlobalOrdinals(scan.messages);
     const userMessages = messages.filter((message) => message.role === "user");
     if (userMessages.length === 0) {
-        log("[dreamer] retrospective: no new user messages");
-        return;
+        log("[dreamer] retrospective: no user messages in window");
+        return { retrospectiveWatermarkMs: scan.maxScannedTs };
     }
 
-    let signals = detectFrictionSignals(messages);
-    if (signals.length === 0) {
-        const userLines = renderGateUserLines(messages);
-        const prompt = buildFrictionGatePrompt({ userLines });
-        const gate = deps.frictionGateClassifier
-            ? await deps.frictionGateClassifier({ prompt, userLines, config })
-            : { hit: false, ordinals: [] };
-        if (!gate.hit) {
-            log("[dreamer] retrospective: no friction signal");
-            return;
-        }
-        signals = signalFromGateOrdinals(gate.ordinals ?? [], messages);
-        if (signals.length === 0) {
-            log("[dreamer] retrospective: gate hit had no valid anchors");
-            return;
-        }
+    // Only POST-watermark user lines are genuinely new; the rest are the overlap
+    // re-read. If nothing is new, the window was already handled last run.
+    const postWatermarkOrdinals = new Set(
+        userMessages
+            .filter((message) => message.ts > watermarkMs)
+            .map((message) => message.ordinal),
+    );
+    if (postWatermarkOrdinals.size === 0) {
+        log("[dreamer] retrospective: only overlap lines, nothing new");
+        return { retrospectiveWatermarkMs: scan.maxScannedTs };
     }
-
-    const frictionWindow = renderFrictionWindow(messages, signals);
-    const anchoredOrdinals = new Set(signals.flatMap((signal) => signal.ordinals));
-    const sourceSessionId =
-        messages.find((message) => anchoredOrdinals.has(message.ordinal))?.sessionId ??
-        userMessages[0]?.sessionId ??
-        "retrospective";
-    const eventSessionIds = new Set(messages.map((message) => message.sessionId));
-    const events = retrospectiveEventsForSessions(db, eventSessionIds);
-    const taskPrompt = buildRetrospectivePrompt({
-        projectPath: projectIdentity,
-        frictionWindow,
-        events,
-    });
 
     const abortController = new AbortController();
     let leaseLost = false;
@@ -532,80 +537,149 @@ async function runRetrospectiveTask(
         const created = shared.normalizeSDKResponse(
             createResponse,
             null as { id?: string } | null,
-            {
-                preferResponseOnMissingData: true,
-            },
+            { preferResponseOnMissingData: true },
         );
         childSessionId = typeof created?.id === "string" ? created.id : null;
         if (!childSessionId) throw new Error("Retrospective could not create its child session.");
         const sessionId = childSessionId;
 
-        const remainingMs = Math.max(0, deadline - Date.now());
-        const run = await shared.promptSyncWithValidatedOutputRetry(
-            deps.client,
-            {
-                path: { id: sessionId },
-                query: { directory: deps.sessionDirectory },
-                body: {
-                    agent: DREAMER_RETROSPECTIVE_AGENT,
-                    system: RETROSPECTIVE_SYSTEM_PROMPT,
-                    ...modelBodyField(config.model),
-                    parts: [{ type: "text", text: taskPrompt, synthetic: true }],
+        // One child, two turns sharing the same session — OpenCode applies the
+        // per-prompt `body.system`, so turn 1 runs the cheap gate system and turn
+        // 2 (only on a hit) runs the deepen system. fetchOutput returns the whole
+        // child branch, so recording the LAST run's output covers both turns'
+        // token usage without double counting.
+        const runChildTurn = async (system: string, userText: string) => {
+            const remainingMs = Math.max(0, deadline - Date.now());
+            return shared.promptSyncWithValidatedOutputRetry(
+                deps.client,
+                {
+                    path: { id: sessionId },
+                    query: { directory: deps.sessionDirectory },
+                    body: {
+                        agent: DREAMER_RETROSPECTIVE_AGENT,
+                        system,
+                        ...modelBodyField(config.model),
+                        parts: [{ type: "text", text: userText, synthetic: true }],
+                    },
                 },
-            },
-            {
-                timeoutMs: Math.min(remainingMs, config.timeoutMinutes * 60 * 1000),
-                signal: abortController.signal,
-                fallbackModels: config.fallbackModels,
-                callContext: "dreamer:retrospective",
-                fetchOutput: async () => {
-                    const messagesResponse = await deps.client.session.messages({
-                        path: { id: sessionId },
-                        query: { directory: deps.sessionDirectory, limit: 50 },
-                    });
-                    return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
-                        preferResponseOnMissingData: true,
-                    });
+                {
+                    timeoutMs: Math.min(remainingMs, config.timeoutMinutes * 60 * 1000),
+                    signal: abortController.signal,
+                    fallbackModels: config.fallbackModels,
+                    callContext: "dreamer:retrospective",
+                    fetchOutput: async () => {
+                        const messagesResponse = await deps.client.session.messages({
+                            path: { id: sessionId },
+                            query: { directory: deps.sessionDirectory, limit: 50 },
+                        });
+                        return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                            preferResponseOnMissingData: true,
+                        });
+                    },
+                    validateOutput: (outputMessages) => {
+                        const text = extractLatestAssistantText(outputMessages);
+                        if (!text) throw new Error("Retrospective child returned no output.");
+                        return text;
+                    },
                 },
-                validateOutput: (outputMessages) => {
-                    const text = extractLatestAssistantText(outputMessages);
-                    if (!text) throw new Error("Retrospective returned no assistant output.");
-                    return text;
-                },
-            },
+            );
+        };
+
+        const finish = (
+            run: { output: unknown[] } | null,
+            watermark: number | null,
+        ): { retrospectiveWatermarkMs: number | null } => {
+            if (parent && run) {
+                recordChildInvocation({
+                    db,
+                    parentSessionId: parent,
+                    harness: "opencode",
+                    subagent: "dreamer",
+                    task: config.task,
+                    startedAt: helpers.invocationStartedAt,
+                    status: "completed",
+                    messages: run.output,
+                });
+            }
+            return { retrospectiveWatermarkMs: watermark };
+        };
+
+        // ── Turn 1: cheap LLM gate over U: lines only ──────────────────────
+        const userLines = renderGateUserLines(messages);
+        const gateRun = await runChildTurn(
+            FRICTION_GATE_SYSTEM_PROMPT,
+            buildFrictionGatePrompt({ userLines }),
         );
-
         if (leaseLost) throw new Error("Dream lease lost during retrospective");
-
-        if (parent) {
-            recordChildInvocation({
-                db,
-                parentSessionId: parent,
-                harness: "opencode",
-                subagent: "dreamer",
-                task: config.task,
-                startedAt: helpers.invocationStartedAt,
-                status: "completed",
-                messages: run.output,
-            });
+        const gate = parseFrictionGateVerdict(gateRun.validated);
+        if (!gate.hit) {
+            log("[dreamer] retrospective: gate — no friction");
+            return finish(gateRun, scan.maxScannedTs);
         }
 
-        const learnings = parseRetrospectiveLearnings(run.validated);
-        const applied = applyRetrospectiveLearnings({
-            db,
-            projectIdentity,
-            sourceSessionId,
-            learnings,
-            userMemoryCollectionEnabled: deps.userMemoryCollectionEnabled === true,
-            // Source user lines for the near-transcription reject: a learning that
-            // echoes a long verbatim run of the user's own words is a transcription.
-            sourceUserTexts: userMessages
-                .map((message) => message.text ?? "")
-                .filter((text) => text.length > 0),
-        });
-        log(
-            `[dreamer] retrospective: signals=${signals.length} learnings=${learnings.length} memory=${applied.memoryWritten} observations=${applied.observationsInserted} dropped=${applied.observationsDropped} rejected=${applied.rejected.length}`,
+        const flagged = userMessages.filter((message) => gate.ordinals.includes(message.ordinal));
+        // Require at least one genuinely-new (post-watermark) flagged line —
+        // friction wholly inside the overlap was handled last run.
+        if (!flagged.some((message) => postWatermarkOrdinals.has(message.ordinal))) {
+            log("[dreamer] retrospective: gate hit only on overlap lines");
+            return finish(gateRun, scan.maxScannedTs);
+        }
+
+        // Source-window idempotence: a stable key over the flagged anchors
+        // (sessionId:ts) — NOT prompt ordinals, which are batch-local. If we have
+        // already deepened this exact window, skip the (expensive) second turn.
+        const windowKey = computeRetrospectiveWindowKey(flagged);
+        if (isRetrospectiveWindowProcessed(db, projectIdentity, windowKey)) {
+            log("[dreamer] retrospective: window already processed");
+            return finish(gateRun, scan.maxScannedTs);
+        }
+
+        // ── Turn 2: deepen — host renders the zoom window, LLM extracts the rule.
+        const signals: FrictionSignal[] = [
+            {
+                kind: "frustration_marker",
+                ordinals: flagged.map((message) => message.ordinal),
+                message: "llm gate flagged user friction",
+                score: 1,
+            },
+        ];
+        const frictionWindow = renderFrictionWindow(messages, signals);
+        const eventSessionIds = new Set(messages.map((message) => message.sessionId));
+        const events = retrospectiveEventsForSessions(db, eventSessionIds);
+        const deepenRun = await runChildTurn(
+            RETROSPECTIVE_SYSTEM_PROMPT,
+            buildRetrospectivePrompt({ projectPath: projectIdentity, frictionWindow, events }),
         );
+        if (leaseLost) throw new Error("Dream lease lost during retrospective");
+
+        const sourceSessionId =
+            flagged[0]?.sessionId ?? userMessages[0]?.sessionId ?? "retrospective";
+        const learnings = parseRetrospectiveLearnings(deepenRun.validated);
+        // Apply learnings AND record the processed-window key in ONE transaction
+        // so a crash between them can't leave the window un-recorded (which would
+        // re-deepen + risk a duplicate observation next run, since
+        // insertUserMemoryCandidates has no unique key). Both are plain DB writes.
+        const applied = db.transaction(() => {
+            const r = applyRetrospectiveLearnings({
+                db,
+                projectIdentity,
+                sourceSessionId,
+                learnings,
+                userMemoryCollectionEnabled: deps.userMemoryCollectionEnabled === true,
+                // Source user lines for the near-transcription reject: a learning
+                // that echoes a long verbatim run of the user's words is a
+                // transcription.
+                sourceUserTexts: userMessages
+                    .map((message) => message.text ?? "")
+                    .filter((text) => text.length > 0),
+            });
+            recordRetrospectiveWindowProcessed(db, projectIdentity, windowKey);
+            return r;
+        })();
+        log(
+            `[dreamer] retrospective: flagged=${flagged.length} learnings=${learnings.length} memory=${applied.memoryWritten} observations=${applied.observationsInserted} dropped=${applied.observationsDropped} rejected=${applied.rejected.length}`,
+        );
+        return finish(deepenRun, scan.maxScannedTs);
     } finally {
         clearInterval(leaseInterval);
         // PRIVACY: a retrospective child's prompt embeds raw cross-session user

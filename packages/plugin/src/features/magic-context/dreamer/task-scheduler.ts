@@ -44,6 +44,8 @@ export interface TaskExecOutcome {
     schedulePatch?: {
         lastCheckedCommit?: string;
         lastBroadRunAt?: number;
+        /** retrospective content watermark (max message ts scanned this run). */
+        retrospectiveWatermarkMs?: number | null;
     };
 }
 
@@ -185,11 +187,20 @@ function advanceAfterRun(
         retryCount: 0,
         lastCheckedCommit: schedulePatch?.lastCheckedCommit,
         lastBroadRunAt: schedulePatch?.lastBroadRunAt,
+        retrospectiveWatermarkMs: schedulePatch?.retrospectiveWatermarkMs,
     });
 }
 
 function readLastRunAt(db: Database, projectIdentity: string, task: DreamTaskName): number | null {
     return getTaskScheduleState(db, projectIdentity, task)?.lastRunAt ?? null;
+}
+
+function readRetrospectiveWatermark(
+    db: Database,
+    projectIdentity: string,
+    task: DreamTaskName,
+): number | null {
+    return getTaskScheduleState(db, projectIdentity, task)?.retrospectiveWatermarkMs ?? null;
 }
 
 /** Record a transient failure: keep next_due_at so it hot-retries next tick,
@@ -276,6 +287,11 @@ async function runDomainGroup(
                     db,
                     projectIdentity,
                     lastRunAt: readLastRunAt(db, projectIdentity, due.config.task),
+                    retrospectiveWatermarkMs: readRetrospectiveWatermark(
+                        db,
+                        projectIdentity,
+                        due.config.task,
+                    ),
                     promotionThreshold: due.config.promotionThreshold ?? 3,
                 });
                 if (!gatePass) {
@@ -380,6 +396,11 @@ export async function runManualDream(
             db: deps.db,
             projectIdentity: deps.projectIdentity,
             lastRunAt: readLastRunAt(deps.db, deps.projectIdentity, d.config.task),
+            retrospectiveWatermarkMs: readRetrospectiveWatermark(
+                deps.db,
+                deps.projectIdentity,
+                d.config.task,
+            ),
             promotionThreshold: d.config.promotionThreshold ?? 3,
         });
         if (pass) gated.push(d);
@@ -427,6 +448,11 @@ export async function runDueTasksForProject(deps: RunDueTasksDeps): Promise<numb
             db: deps.db,
             projectIdentity: deps.projectIdentity,
             lastRunAt: readLastRunAt(deps.db, deps.projectIdentity, d.config.task),
+            retrospectiveWatermarkMs: readRetrospectiveWatermark(
+                deps.db,
+                deps.projectIdentity,
+                d.config.task,
+            ),
             promotionThreshold: d.config.promotionThreshold ?? 3,
         });
         if (pass) {

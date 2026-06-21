@@ -81,6 +81,29 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 		sinceMs: number,
 		capPerSession: number,
 	): Promise<RetrospectiveRawMessage[]> {
+		const all = await this.loadUserEntries(sessionId);
+		return all
+			.filter((entry) => entry.ts > sinceMs)
+			.sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
+			.slice(0, Math.max(1, Math.floor(capPerSession)))
+			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+	}
+
+	async readUserMessagesBefore(
+		sessionId: string,
+		beforeMs: number,
+		count: number,
+	): Promise<RetrospectiveRawMessage[]> {
+		const all = await this.loadUserEntries(sessionId);
+		return all
+			.filter((entry) => entry.ts <= beforeMs)
+			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal)
+			.slice(-Math.max(1, Math.floor(count)));
+	}
+
+	private async loadUserEntries(
+		sessionId: string,
+	): Promise<RetrospectiveRawMessage[]> {
 		const filePath = this.sessionPathById.get(sessionId);
 		if (!filePath) return [];
 		const deps = await this.resolveDeps();
@@ -91,16 +114,9 @@ export class PiRetrospectiveRawProvider implements RetrospectiveRawProvider {
 			return [];
 		}
 		if (!Array.isArray(entries)) return [];
-
 		return entries
 			.map((entry, index) => normalizePiUserEntry(entry, sessionId, index + 1))
-			.filter(
-				(entry): entry is RetrospectiveRawMessage =>
-					entry !== null && entry.ts > sinceMs,
-			)
-			.sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
-			.slice(0, Math.max(1, Math.floor(capPerSession)))
-			.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+			.filter((entry): entry is RetrospectiveRawMessage => entry !== null);
 	}
 
 	private async resolveDeps(): Promise<

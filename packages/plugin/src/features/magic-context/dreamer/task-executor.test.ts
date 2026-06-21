@@ -169,7 +169,7 @@ describe("createDreamTaskExecutor — classify-memories", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
-    test("no signal returns completed without creating a child session", async () => {
+    test("gate returns 'n' → one gate turn, child created+deleted, watermark advances, no deepen", async () => {
         db = freshDb();
         const project = "/repo/project";
         const provider = {
@@ -183,13 +183,19 @@ describe("createDreamTaskExecutor — retrospective", () => {
                     ts: 200,
                 },
             ]),
+            readUserMessagesBefore: mock(() => []),
         };
+        let prompts = 0;
         const client = {
             session: {
                 list: mock(async () => ({ data: [] })),
-                create: mock(async () => ({ data: { id: "should-not-create" } })),
-                prompt: mock(async () => ({})),
-                messages: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "retro-child" } })),
+                prompt: mock(async () => {
+                    prompts += 1;
+                    return {};
+                }),
+                // Gate turn → verdict "n" (no friction). The deepen turn never runs.
+                messages: mock(async () => ({ data: assistantMessages("n") })),
                 delete: mock(async () => ({})),
             },
         };
@@ -211,9 +217,15 @@ describe("createDreamTaskExecutor — retrospective", () => {
             },
         );
 
-        expect(result).toEqual({ status: "completed" });
-        expect(client.session.create).not.toHaveBeenCalled();
-        expect(provider.readUserMessagesSince).toHaveBeenCalledWith("s1", 0, expect.any(Number));
+        // Completed with the content watermark advanced to the max ts scanned.
+        expect(result).toEqual({
+            status: "completed",
+            schedulePatch: { retrospectiveWatermarkMs: 200 },
+        });
+        expect(client.session.create).toHaveBeenCalled();
+        expect(prompts).toBe(1); // gate only — no deepen turn
+        expect(client.session.delete).toHaveBeenCalled(); // child always cleaned up
+        expect(getMemoriesByProject(db, project)).toHaveLength(0);
     });
 
     test("signal deepens, parses XML, host-applies memory and gated observation", async () => {
@@ -245,9 +257,12 @@ describe("createDreamTaskExecutor — retrospective", () => {
                 },
             ]),
         };
-        let capturedPrompt = "";
-        let capturedAgent = "";
-        let capturedSystem = "";
+        provider.readUserMessagesBefore = mock(() => []);
+        // The two turns share one `messages` mock — drive the response off the
+        // per-prompt system string the runner sets: gate system → "y: <ord>",
+        // deepen system → the learnings XML.
+        const captured: Array<{ agent: string; system: string; prompt: string }> = [];
+        let lastSystem = "";
         const client = {
             session: {
                 list: mock(async () => ({ data: [] })),
@@ -260,19 +275,29 @@ describe("createDreamTaskExecutor — retrospective", () => {
                             parts?: Array<{ text?: string }>;
                         };
                     }) => {
-                        capturedAgent = args.body?.agent ?? "";
-                        capturedSystem = args.body?.system ?? "";
-                        capturedPrompt = args.body?.parts?.[0]?.text ?? "";
+                        lastSystem = args.body?.system ?? "";
+                        captured.push({
+                            agent: args.body?.agent ?? "",
+                            system: lastSystem,
+                            prompt: args.body?.parts?.[0]?.text ?? "",
+                        });
                         return {};
                     },
                 ),
-                messages: mock(async () => ({
-                    data: assistantMessages(`<learnings>
+                messages: mock(async () => {
+                    const isGate = lastSystem.includes("friction detector");
+                    return {
+                        data: assistantMessages(
+                            isGate
+                                ? "y: 3"
+                                : `<learnings>
   <learning route="memory" category="PROJECT_RULES">Verify provider-executed tool availability on wire before describing it as supported.</learning>
   <learning route="observation">Prefers concise root-cause summaries before implementation details.</learning>
   <learning route="memory" category="PROJECT_RULES">On 2026-06-01 the user said &quot;wrong again&quot;.</learning>
-</learnings>`),
-                })),
+</learnings>`,
+                        ),
+                    };
+                }),
                 delete: mock(async () => ({})),
             },
         };
@@ -294,12 +319,17 @@ describe("createDreamTaskExecutor — retrospective", () => {
             },
         );
 
-        expect(result).toEqual({ status: "completed" });
-        expect(capturedAgent).toBe("dreamer-retrospective");
-        expect(capturedSystem).toContain("retrospective learning agent");
-        expect(capturedPrompt).toContain("### Friction window");
-        expect(capturedPrompt).toContain("[signal: repeated_user_message]");
-        expect(capturedPrompt).not.toContain("ctx_memory");
+        expect(result).toEqual({
+            status: "completed",
+            schedulePatch: { retrospectiveWatermarkMs: 220 },
+        });
+        // Two turns: gate (friction-detector system) then deepen (learning system).
+        expect(captured).toHaveLength(2);
+        expect(captured[0]?.system).toContain("friction detector");
+        expect(captured[1]?.agent).toBe("dreamer-retrospective");
+        expect(captured[1]?.system).toContain("retrospective learning agent");
+        expect(captured[1]?.prompt).toContain("### Friction window");
+        expect(captured[1]?.prompt).not.toContain("ctx_memory");
         const memories = getMemoriesByProject(db, project);
         expect(memories.map((memory) => memory.content)).toEqual([
             "Verify provider-executed tool availability on wire before describing it as supported.",
@@ -331,16 +361,25 @@ describe("createDreamTaskExecutor — retrospective", () => {
                     ts: 220,
                 },
             ]),
+            readUserMessagesBefore: mock(() => []),
         };
+        let lastSystem = "";
         const client = {
             session: {
                 list: mock(async () => ({ data: [] })),
                 create: mock(async () => ({ data: { id: "retro-child" } })),
-                prompt: mock(async () => ({})),
+                prompt: mock(async (args: { body?: { system?: string } }) => {
+                    lastSystem = args.body?.system ?? "";
+                    return {};
+                }),
                 messages: mock(async () => ({
-                    data: assistantMessages(`<learnings>
+                    data: assistantMessages(
+                        lastSystem.includes("friction detector")
+                            ? "y: 2"
+                            : `<learnings>
   <learning route="observation">Prefers tool claims backed by observed command output.</learning>
-</learnings>`),
+</learnings>`,
+                    ),
                 })),
                 delete: mock(async () => ({})),
             },

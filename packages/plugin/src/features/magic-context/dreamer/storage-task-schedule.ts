@@ -29,6 +29,11 @@ export interface TaskScheduleStateRow {
     lastCheckedCommit?: string | null;
     /** verify broad-pass watermark. Undefined on writes preserves existing DB value. */
     lastBroadRunAt?: number | null;
+    /** retrospective CONTENT watermark: max message ts actually scanned. Distinct
+     *  from lastRunAt (schedule-completion time) — lastRunAt as a content cutoff
+     *  loses messages that arrive mid-run. Undefined on writes preserves the DB
+     *  value. */
+    retrospectiveWatermarkMs?: number | null;
 }
 
 interface RawRow {
@@ -42,6 +47,7 @@ interface RawRow {
     retry_count: number | null;
     last_checked_commit: string | null;
     last_broad_run_at: number | null;
+    retrospective_watermark_ms: number | null;
 }
 
 function toRow(r: RawRow): TaskScheduleStateRow {
@@ -56,11 +62,12 @@ function toRow(r: RawRow): TaskScheduleStateRow {
         retryCount: r.retry_count ?? 0,
         lastCheckedCommit: r.last_checked_commit ?? null,
         lastBroadRunAt: r.last_broad_run_at ?? null,
+        retrospectiveWatermarkMs: r.retrospective_watermark_ms ?? null,
     };
 }
 
 const SELECT_COLUMNS =
-    "project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at";
+    "project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at, retrospective_watermark_ms";
 
 export function getTaskScheduleState(
     db: Database,
@@ -112,8 +119,8 @@ export function seedTaskScheduleState(
 export function writeTaskScheduleState(db: Database, row: TaskScheduleStateRow): void {
     db.prepare(
         `INSERT INTO task_schedule_state
-           (project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (project_path, task, last_run_at, next_due_at, schedule, last_status, last_error, retry_count, last_checked_commit, last_broad_run_at, retrospective_watermark_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_path, task) DO UPDATE SET
            last_run_at          = excluded.last_run_at,
            next_due_at          = excluded.next_due_at,
@@ -122,7 +129,8 @@ export function writeTaskScheduleState(db: Database, row: TaskScheduleStateRow):
            last_error           = excluded.last_error,
            retry_count          = excluded.retry_count,
            last_checked_commit  = COALESCE(excluded.last_checked_commit, task_schedule_state.last_checked_commit),
-           last_broad_run_at    = COALESCE(excluded.last_broad_run_at, task_schedule_state.last_broad_run_at)`,
+           last_broad_run_at    = COALESCE(excluded.last_broad_run_at, task_schedule_state.last_broad_run_at),
+           retrospective_watermark_ms = COALESCE(excluded.retrospective_watermark_ms, task_schedule_state.retrospective_watermark_ms)`,
     ).run(
         row.projectPath,
         row.task,
@@ -134,5 +142,36 @@ export function writeTaskScheduleState(db: Database, row: TaskScheduleStateRow):
         row.retryCount,
         row.lastCheckedCommit ?? null,
         row.lastBroadRunAt ?? null,
+        row.retrospectiveWatermarkMs ?? null,
     );
+}
+
+/**
+ * Source-window idempotence for the retrospective task. A friction window
+ * re-seen across the run-overlap (the ~12 user lines re-read before the
+ * watermark) must not re-extract the same learning. `windowKey` is a stable hash
+ * over the flagged user lines' (sessionId:ts) anchors — NOT prompt ordinals,
+ * which are batch-local and unstable.
+ */
+export function isRetrospectiveWindowProcessed(
+    db: Database,
+    projectPath: string,
+    windowKey: string,
+): boolean {
+    const row = db
+        .prepare<[string, string], { one: number }>(
+            "SELECT 1 AS one FROM retrospective_processed_windows WHERE project_path = ? AND window_key = ?",
+        )
+        .get(projectPath, windowKey);
+    return row != null;
+}
+
+export function recordRetrospectiveWindowProcessed(
+    db: Database,
+    projectPath: string,
+    windowKey: string,
+): void {
+    db.prepare(
+        "INSERT INTO retrospective_processed_windows (project_path, window_key, processed_at) VALUES (?, ?, ?) ON CONFLICT(project_path, window_key) DO NOTHING",
+    ).run(projectPath, windowKey, Date.now());
 }

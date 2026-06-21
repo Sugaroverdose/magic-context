@@ -222,6 +222,11 @@ Rules:
 3. Root cause + correction: the learning must tell a future agent what to do differently.
 4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt.`;
 
+/** Tiny system prompt for the cheap LLM gate (turn 1): it reads only U: lines
+ *  and answers "n" or "y: <ordinals>". Kept minimal so the gate is cheap. */
+export const FRICTION_GATE_SYSTEM_PROMPT =
+    "You are a conservative friction detector for a coding agent. You read recent user message lines and decide whether the user was correcting, re-explaining to, or frustrated with the assistant. Output exactly one line and nothing else.";
+
 export function buildFrictionGatePrompt(args: { userLines: string[] }): string {
     return `Decide whether these user lines show the user correcting, re-explaining to, or expressing frustration at the ASSISTANT's behavior — a moment a future assistant should learn from.
 

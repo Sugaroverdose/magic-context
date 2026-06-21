@@ -17,6 +17,10 @@ export interface TaskGateContext {
     db: Database;
     projectIdentity: string;
     lastRunAt: number | null;
+    /** retrospective content watermark (max message ts scanned). Distinct from
+     *  lastRunAt: a session updated mid-run is newer than its scanned content but
+     *  older than the run-completion time, so gating on lastRunAt would skip it. */
+    retrospectiveWatermarkMs?: number | null;
     /** review-user-memories: min candidate observations before a review is worthwhile. */
     promotionThreshold: number;
 }
@@ -87,12 +91,12 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             return countActiveMemories(db, project) > 0;
 
         case "retrospective":
-            // Cheap pre-gate: if any project session was updated since this task's
-            // last successful run, the executor's raw provider does the precise
-            // typed-user-message scan and bails before any child session if empty.
-            // Never-run falls back to "sessions exist"; first executor pass is
-            // still capped to newest-M, not all history.
-            return countProjectSessionsSince(db, project, lastRunAt) > 0;
+            // Cheap pre-gate: any project session updated since the CONTENT
+            // watermark (max message ts actually scanned), not lastRunAt — a
+            // session updated mid-run would otherwise be skipped. The executor's
+            // raw provider does the precise typed-user-message scan and bails
+            // before any child session if empty. Never-run → "sessions exist".
+            return countProjectSessionsSince(db, project, ctx.retrospectiveWatermarkMs ?? null) > 0;
 
         case "maintain-docs":
             // New compartments since the last maintain-docs run. Never-run → any exist.

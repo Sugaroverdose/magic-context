@@ -36,6 +36,13 @@ export interface RetrospectiveRawProvider {
         sinceMs: number,
         capPerSession: number,
     ): RetrospectiveRawMessage[] | Promise<RetrospectiveRawMessage[]>;
+    /** The ~`count` most recent typed USER messages at or before `beforeMs` — the
+     *  run-boundary overlap so friction spanning two runs isn't missed. */
+    readUserMessagesBefore(
+        sessionId: string,
+        beforeMs: number,
+        count: number,
+    ): RetrospectiveRawMessage[] | Promise<RetrospectiveRawMessage[]>;
     /** Release any reused resources (e.g. a pooled DB handle) after a run. */
     dispose?(): void;
 }
@@ -125,6 +132,20 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
         }
     }
 
+    readUserMessagesBefore(
+        sessionId: string,
+        beforeMs: number,
+        count: number,
+    ): RetrospectiveRawMessage[] {
+        const db = this.resolveDb();
+        if (!db) return [];
+        try {
+            return readOpenCodeUserMessagesBefore(db, sessionId, beforeMs, count);
+        } catch {
+            return [];
+        }
+    }
+
     /** Close the reused read-only handle. Safe to call multiple times. */
     dispose(): void {
         if (this.sharedDb && !this.deps.opencodeDb) {
@@ -172,6 +193,88 @@ export async function readProjectRetrospectiveMessages(
     }
 }
 
+export interface RetrospectiveScanWindow {
+    /** All scanned messages (user rows + tool metadata), oldest→newest, ordinals
+     *  reassigned globally. Includes the pre-watermark overlap (user-only). */
+    messages: RetrospectiveRawMessage[];
+    /** The max message ts ACTUALLY scanned this run (the content watermark to
+     *  persist on completion). Never less than `watermarkMs` (overlap rows are
+     *  ≤ watermark and cannot pull it back). */
+    maxScannedTs: number;
+}
+
+/**
+ * The retrospective scan window for one run: everything new since the content
+ * watermark, PLUS the ~`overlapUserCount` user lines immediately before the
+ * watermark per session (so friction straddling a run boundary isn't missed).
+ * The since portion carries user rows + tool metadata (the deepen context); the
+ * overlap portion is user-only (gate context). Ordinals are reassigned globally.
+ */
+export async function readRetrospectiveScanWindow(
+    provider: RetrospectiveRawProvider,
+    projectIdentity: string,
+    watermarkMs: number,
+    overlapUserCount: number,
+    options?: {
+        maxMessagesPerRun?: number;
+        capPerSession?: number;
+        maxSessionsPerRun?: number;
+    },
+): Promise<RetrospectiveScanWindow> {
+    const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
+    const capPerSession = options?.capPerSession ?? RETROSPECTIVE_MAX_MESSAGES_PER_SESSION;
+    const maxSessions = options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN;
+    try {
+        const sessions = (await provider.listProjectSessions(projectIdentity)).slice(
+            0,
+            maxSessions,
+        );
+        const sinceBatches = await Promise.all(
+            sessions.map((session) =>
+                provider.readUserMessagesSince(session.sessionId, watermarkMs, capPerSession),
+            ),
+        );
+        const overlapBatches =
+            overlapUserCount > 0 && watermarkMs > 0
+                ? await Promise.all(
+                      sessions.map((session) =>
+                          provider.readUserMessagesBefore(
+                              session.sessionId,
+                              watermarkMs,
+                              overlapUserCount,
+                          ),
+                      ),
+                  )
+                : [];
+
+        // maxScannedTs is computed ONLY over the since portion — overlap rows are
+        // ≤ watermark by construction and must never advance the watermark.
+        let maxScannedTs = watermarkMs;
+        for (const row of sinceBatches.flat()) {
+            if (row.ts > maxScannedTs) maxScannedTs = row.ts;
+        }
+
+        // Merge, dedupe by stable identity (sessionId + ts + role + toolName) so an
+        // overlap row that also appears in the since read isn't double-counted.
+        const seen = new Set<string>();
+        const merged: RetrospectiveRawMessage[] = [];
+        for (const row of [...sinceBatches.flat(), ...overlapBatches.flat()]) {
+            const key = `${row.sessionId}\u0000${row.ts}\u0000${row.role}\u0000${row.toolName ?? ""}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(row);
+        }
+        merged.sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+        const capped = merged
+            .sort((a, b) => b.ts - a.ts || b.ordinal - a.ordinal)
+            .slice(0, maxMessages)
+            .sort((a, b) => a.ts - b.ts || a.ordinal - b.ordinal);
+        return { messages: capped, maxScannedTs };
+    } finally {
+        provider.dispose?.();
+    }
+}
+
 function readOpenCodeMessagesSince(
     db: Database,
     sessionId: string,
@@ -189,7 +292,43 @@ function readOpenCodeMessagesSince(
         )
         .all(sessionId, sinceMs, limit)
         .reverse();
+    return normalizeOpenCodeRows(db, sessionId, rows);
+}
 
+/**
+ * The ~N most recent typed USER messages at or before `beforeMs` (the run
+ * overlap). Lets the next run re-see friction that straddles the watermark
+ * boundary. Over-reads a window of mixed rows (user/assistant/tool) then keeps
+ * the newest `count` USER rows. Returns user-only — it feeds the gate's U-line
+ * overlap, nothing else.
+ */
+function readOpenCodeUserMessagesBefore(
+    db: Database,
+    sessionId: string,
+    beforeMs: number,
+    count: number,
+): RetrospectiveRawMessage[] {
+    const want = Math.max(1, Math.floor(count));
+    const window = Math.max(want * 5, 32);
+    const rows = db
+        .prepare<[string, number, number], OpenCodeMessageRow>(
+            `SELECT id, data, time_created
+               FROM message
+              WHERE session_id = ? AND time_created <= ?
+              ORDER BY time_created DESC, id DESC
+              LIMIT ?`,
+        )
+        .all(sessionId, beforeMs, window)
+        .reverse();
+    const userRows = normalizeOpenCodeRows(db, sessionId, rows).filter((r) => r.role === "user");
+    return userRows.slice(-want);
+}
+
+function normalizeOpenCodeRows(
+    db: Database,
+    sessionId: string,
+    rows: OpenCodeMessageRow[],
+): RetrospectiveRawMessage[] {
     if (rows.length === 0) return [];
 
     // Restrict the part read to the capped message ids we actually kept, rather

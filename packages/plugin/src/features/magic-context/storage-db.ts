@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 44;
+export const LATEST_SUPPORTED_VERSION = 45;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -591,10 +591,18 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       last_error    TEXT,
       last_checked_commit TEXT,
       last_broad_run_at INTEGER,
+      retrospective_watermark_ms INTEGER,
       retry_count   INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (project_path, task)
     );
     CREATE INDEX IF NOT EXISTS idx_task_schedule_due ON task_schedule_state(next_due_at);
+
+    CREATE TABLE IF NOT EXISTS retrospective_processed_windows (
+      project_path TEXT NOT NULL,
+      window_key   TEXT NOT NULL,
+      processed_at INTEGER NOT NULL,
+      PRIMARY KEY (project_path, window_key)
+    );
 
     CREATE TABLE IF NOT EXISTS project_key_files (
       project_path           TEXT    NOT NULL,
@@ -1043,6 +1051,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "task_schedule_state", "schedule", "TEXT");
     ensureColumn(db, "task_schedule_state", "last_checked_commit", "TEXT");
     ensureColumn(db, "task_schedule_state", "last_broad_run_at", "INTEGER");
+    ensureColumn(db, "task_schedule_state", "retrospective_watermark_ms", "INTEGER");
     // Dreamer v2: parent (dreamer child) session that produced this run, so the
     // dashboard token join can scope to THIS run's invocations instead of every
     // dreamer invocation in the time window (concurrent same-name cross-project
