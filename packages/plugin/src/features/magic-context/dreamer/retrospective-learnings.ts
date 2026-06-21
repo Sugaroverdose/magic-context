@@ -64,13 +64,21 @@ export function parseRetrospectiveLearnings(text: string): ParsedRetrospectiveLe
 // memory must be the third-person LESSON, never the user's own words.)
 export const MAX_SOURCE_WORD_RUN = 7;
 export const MAX_SOURCE_WORD_RUN_RATIO = 0.5;
+// Bound the DP inputs. `longestCommonWordRun` is O(n*m); a learning is short by
+// nature, and we only need the FIRST window of a long source to detect a run, so
+// cap both sides. (A learning > this many words is itself suspicious; we compare
+// against the source's leading window — a transcription echoes a contiguous run,
+// which a leading window still catches for the common case.)
+export const MAX_OVERLAP_LEARNING_WORDS = 200;
+export const MAX_OVERLAP_SOURCE_WORDS = 400;
 
-function toWords(text: string): string[] {
-    return text
+function toWords(text: string, cap: number): string[] {
+    const words = text
         .toLowerCase()
         .replace(/[^\p{L}\p{N}\s]/gu, " ")
         .split(/\s+/)
         .filter((word) => word.length > 0);
+    return words.length > cap ? words.slice(0, cap) : words;
 }
 
 /** Longest run of CONSECUTIVE shared words between two word sequences. */
@@ -99,14 +107,14 @@ function longestCommonWordRun(a: string[], b: string[]): number {
  * lightly-reworded user sentence that would otherwise pass.
  */
 export function hasHighSourceOverlap(content: string, sourceUserTexts: string[]): boolean {
-    const learningWords = toWords(content);
+    const learningWords = toWords(content, MAX_OVERLAP_LEARNING_WORDS);
     if (learningWords.length === 0) return false;
     const runCap = Math.min(
         MAX_SOURCE_WORD_RUN,
         Math.max(3, Math.ceil(learningWords.length * MAX_SOURCE_WORD_RUN_RATIO)),
     );
     for (const source of sourceUserTexts) {
-        const run = longestCommonWordRun(learningWords, toWords(source));
+        const run = longestCommonWordRun(learningWords, toWords(source, MAX_OVERLAP_SOURCE_WORDS));
         if (run >= runCap) return true;
     }
     return false;

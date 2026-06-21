@@ -79,6 +79,31 @@ describe("hidden-agent registration drift guard", () => {
         expect(cfg.permission.ctx_search).toBe("allow");
     });
 
+    test("a user dreamer tools override cannot re-enable a tool on the locked agent", () => {
+        const cfg = buildHiddenAgentConfig(
+            "prompt",
+            DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
+            40,
+            { tools: { bash: true, edit: true, ctx_memory: true } },
+            DREAMER_RETROSPECTIVE_AGENT,
+            true,
+        ) as { tools?: Record<string, boolean> };
+        // The user `tools` map is dropped entirely under lockPermissions.
+        expect(cfg.tools).toBeUndefined();
+    });
+
+    test("an UNLOCKED agent keeps its user tools override", () => {
+        const cfg = buildHiddenAgentConfig(
+            "prompt",
+            ["ctx_search", "ctx_memory"],
+            40,
+            { tools: { aft_search: false } },
+            DREAMER_AGENT,
+            false,
+        ) as { tools?: Record<string, boolean> };
+        expect(cfg.tools).toEqual({ aft_search: false });
+    });
+
     test("sidekick inline allow-list matches canonical SIDEKICK_ALLOWED_TOOLS", () => {
         expect(byId(SIDEKICK_AGENT)?.allowedTools).toEqual([...SIDEKICK_ALLOWED_TOOLS]);
     });

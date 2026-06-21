@@ -156,10 +156,24 @@ export function buildHiddenAgentConfig(
     agentLabel?: string,
     lockPermissions = false,
 ) {
-    const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
+    const {
+        permission: overridePermission,
+        tools: overrideTools,
+        ...rest
+    } = (overrides ?? {}) as {
         permission?: Record<string, unknown>;
+        tools?: Record<string, boolean>;
         [key: string]: unknown;
     };
+    // When locked (privacy-critical agents), the user `tools` enable/disable map
+    // is ALSO dropped — it is a privilege-escalation surface (a user
+    // `dreamer.tools: { bash: true }` would otherwise re-enable a denied tool on
+    // the retrospective agent). Unlocked agents keep their `tools` override.
+    const restOverrides = lockPermissions
+        ? rest
+        : overrideTools !== undefined
+          ? { ...rest, tools: overrideTools }
+          : rest;
     const basePermission = buildAllowOnlyPermission(allowedTools, agentLabel);
     return {
         prompt,

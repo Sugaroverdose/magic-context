@@ -132,12 +132,20 @@ export async function readProjectRetrospectiveMessages(
     options?: {
         maxMessagesPerRun?: number;
         capPerSession?: number;
+        maxSessionsPerRun?: number;
     },
 ): Promise<RetrospectiveRawMessage[]> {
     const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
     const capPerSession = options?.capPerSession ?? RETROSPECTIVE_MAX_MESSAGES_PER_SESSION;
+    const maxSessions = options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN;
     try {
-        const sessions = await provider.listProjectSessions(projectIdentity);
+        // Cap the session count HERE (newest-first) so EVERY provider is bounded,
+        // not just the OpenCode one — a provider that lists every project session
+        // (e.g. Pi's JSONL enumeration) must not fan out unbounded reads.
+        const sessions = (await provider.listProjectSessions(projectIdentity)).slice(
+            0,
+            maxSessions,
+        );
         const batches = await Promise.all(
             sessions.map((session) =>
                 provider.readUserMessagesSince(session.sessionId, sinceMs, capPerSession),
@@ -174,14 +182,19 @@ function readOpenCodeMessagesSince(
 
     if (rows.length === 0) return [];
 
+    // Restrict the part read to the capped message ids we actually kept, rather
+    // than every part in the session — a long session has far more parts than
+    // the newest-`capPerSession` messages we render.
+    const messageIds = rows.map((row) => row.id);
+    const placeholders = messageIds.map(() => "?").join(", ");
     const partRows = db
-        .prepare<[string], OpenCodePartRow>(
+        .prepare<string[], OpenCodePartRow>(
             `SELECT message_id, data
                FROM part
-              WHERE session_id = ?
+              WHERE session_id = ? AND message_id IN (${placeholders})
               ORDER BY time_created ASC, id ASC`,
         )
-        .all(sessionId);
+        .all(sessionId, ...messageIds);
     const partsByMessageId = new Map<string, unknown[]>();
     for (const row of partRows) {
         const parts = partsByMessageId.get(row.message_id) ?? [];

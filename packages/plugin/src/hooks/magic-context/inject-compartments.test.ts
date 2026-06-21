@@ -836,19 +836,21 @@ describe("m[0]/m[1] materialization", () => {
         expect(renderedText(third[0])).not.toContain("HIGH_PRIORITY_MEMORY");
     });
 
-    it("classify writes do NOT pressure-refold m[0] on a cache-busting pass with a non-empty m[1]", () => {
+    it("MANY classify writes do NOT cross the memoryUpdateCount>40 pressure-refold threshold", () => {
         db = makeDb();
-        const high = insertMemory(db, {
-            projectPath: PROJECT_PATH,
-            category: "PROJECT_RULES",
-            content: "HIGH_PRIORITY_MEMORY: Always run focused tests before shipping.",
-            importance: 90,
-        });
-
-        // Materialize m[0], then add a NEW memory so m[1] has real content (the
-        // <new-memories> delta). A classify write to the EXISTING memory must not
-        // trigger the pressure-refold on a subsequent cache-busting pass.
-        const budget = 4000;
+        // Materialize m[0] over a pool of 50 existing memories.
+        const ids: number[] = [];
+        for (let i = 0; i < 50; i++) {
+            ids.push(
+                insertMemory(db, {
+                    projectPath: PROJECT_PATH,
+                    category: "PROJECT_RULES",
+                    content: `POOL_MEMORY_${i}: a durable project rule number ${i}.`,
+                    importance: 50,
+                }).id,
+            );
+        }
+        const budget = 8000;
         const state = readStateFromMeta();
         const hardV1 = {
             systemHash: "sys-v1",
@@ -856,32 +858,32 @@ describe("m[0]/m[1] materialization", () => {
             cacheExpired: false,
             lastResponseTime: 0,
         };
-        const first = [userMessage("m1", "hello")];
         injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages: first,
+            messages: [userMessage("m1", "hello")],
             state,
             projectPath: PROJECT_PATH,
             memoryInjectionBudgetTokens: budget,
             hardSignals: hardV1,
         });
-        insertMemory(db, {
-            projectPath: PROJECT_PATH,
-            category: "PROJECT_RULES",
-            content: "NEW_DELTA_MEMORY: m[1] delta content keeps m[1] non-empty.",
-            importance: 80,
-        });
 
-        // A column-only classify write to the EXISTING memory.
-        expect(setMemoryClassification(db, high.id, { importance: 5 })).toBe(true);
+        // Classify ALL 50 existing memories (> the 40 mutation-count threshold).
+        // The pressure-refold counts <memory-updates> mutation-log rows; classify
+        // is column-only and logs NONE, so memoryUpdateCount stays 0 and the
+        // >40 trigger never fires — even though 50 importances changed.
+        for (let i = 0; i < ids.length; i++) {
+            // 1..49 — always differs from the seeded importance of 50, so every
+            // write is a real change (the no-op guard would otherwise skip it).
+            expect(setMemoryClassification(db, ids[i], { importance: (i % 49) + 1 })).toBe(true);
+        }
 
-        // Cache-busting pass (soft refresh recomputes m[1]) — must NOT fold m[0].
-        const second = [userMessage("m2", "cache-busting soft pass")];
+        // Cache-busting pass (soft refresh recomputes m[1]) — must NOT fold m[0]:
+        // classify writes don't count toward the mutation-drift refold.
         const soft = injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages: second,
+            messages: [userMessage("m2", "cache-busting soft pass")],
             state,
             projectPath: PROJECT_PATH,
             memoryInjectionBudgetTokens: budget,
