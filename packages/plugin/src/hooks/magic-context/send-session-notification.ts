@@ -8,16 +8,6 @@ export interface NotificationParams {
     modelId?: string;
     /** TUI toast lifetime in milliseconds (default: 5000). */
     toastDurationMs?: number;
-    /**
-     * Whether to pin the session's most-recent prompt context (agent + model +
-     * variant) onto this ignored message so it doesn't switch the model on the
-     * user's next real turn (default: true). Set false for STARTUP notices
-     * (e.g. the config warning) where the only resolvable "last turn" is the
-     * resumed session's stale pre-restart context — pinning that can itself
-     * cause a ModelSwitched on the user's actual first turn. Mirrors AFT's
-     * `includeAgent: false` for config warnings.
-     */
-    pinContext?: boolean;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "skipped" | "failed";
@@ -149,7 +139,7 @@ export async function sendIgnoredMessage(
         params.providerId && params.modelId
             ? { providerID: params.providerId, modelID: params.modelId }
             : undefined;
-    if (params.pinContext !== false && (!agent || !model || !variant)) {
+    if (!agent || !model || !variant) {
         try {
             const { resolvePromptContext } = await import("../../shared/prompt-context");
             const resolved = await resolvePromptContext(client, sessionId);

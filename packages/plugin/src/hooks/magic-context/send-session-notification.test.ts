@@ -71,18 +71,18 @@ describe("sendIgnoredMessage", () => {
         expect(body.noReply).toBe(true);
     });
 
-    it("does NOT resolve/pin context when pinContext:false (startup config warning)", async () => {
+    it("pins the session's last turn for a startup config warning too (no pinContext opt-out)", async () => {
+        // The config warning previously opted out of pinning, which made OpenCode
+        // record the DEFAULT agent/model — mis-attributing the notice and
+        // switching the model on the user's next turn. It now pins like any other
+        // notification.
         const session = titledClientWithLastTurn();
-        const result = await sendIgnoredMessage({ session }, "ses-titled", "config warning", {
-            pinContext: false,
-        });
+        const result = await sendIgnoredMessage({ session }, "ses-titled", "config warning", {});
         expect(result).toBe("sent");
-        // resolvePromptContext must not even be consulted.
-        expect(session.messages).not.toHaveBeenCalled();
         const body = lastPromptBody(session.prompt);
-        expect(body.agent).toBeUndefined();
-        expect(body.model).toBeUndefined();
-        expect(body.variant).toBeUndefined();
+        expect(body.agent).toBe("build");
+        expect(body.model).toEqual({ providerID: "anthropic", modelID: "claude-opus-4-8" });
+        expect(body.variant).toBe("thinking");
     });
 
     it("caller-supplied model/agent win over resolution", async () => {

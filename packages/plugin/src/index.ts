@@ -92,15 +92,15 @@ const server: Plugin = async (ctx) => {
                 const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
                 const sessionId = sessionList?.[0]?.id;
                 if (sessionId) {
-                    // Startup warning: opt OUT of prompt-context pinning. At
-                    // startup the only resolvable "last turn" is the resumed
-                    // session's stale pre-restart context; pinning that onto the
-                    // warning can itself cause a ModelSwitched on the user's
-                    // actual first turn (mirrors AFT's includeAgent:false for
-                    // config warnings).
-                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {
-                        pinContext: false,
-                    });
+                    // Pin the session's last real turn (agent + model + variant)
+                    // onto the warning. Passing nothing makes OpenCode record the
+                    // DEFAULT agent/model on this ignored message — which both
+                    // mis-attributes the notice (shows the default agent, not the
+                    // session's) AND switches the model on the user's next turn,
+                    // busting the prefix cache. resolvePromptContext reads from
+                    // real session messages and returns null on a fresh/empty
+                    // session, so this degrades safely there.
+                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
                 }
             } catch {
                 // Intentional: config warning delivery must not crash startup
