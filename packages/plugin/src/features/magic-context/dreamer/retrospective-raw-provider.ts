@@ -77,12 +77,22 @@ export class OpenCodeRetrospectiveRawProvider implements RetrospectiveRawProvide
     }
 
     listProjectSessions(projectIdentity: string): RetrospectiveProjectSession[] {
+        // ROOT sessions only. The retrospective learns from USER friction, but a
+        // subagent child (oracle / mason / historian / dreamer) has no user — its
+        // "user messages" are agent-authored task prompts whose audit/spec wording
+        // ("fail", "error", "wrong", "no padding") trips the frustration regex and
+        // whose tool fan-out trips repeated-tool-call. In a delegation-heavy period
+        // children also outnumber roots ~30:1, so the newest-first session cap is
+        // entirely consumed by them and the real user session is never scanned.
+        // is_subagent lives in session_meta (same DB); missing meta → treat as root.
         const rows = this.deps.contextDb
             .prepare<[string, number], SessionProjectRow>(
-                `SELECT session_id, updated_at
-                   FROM session_projects
-                  WHERE project_path = ? AND harness = 'opencode'
-                  ORDER BY updated_at DESC, session_id DESC
+                `SELECT sp.session_id, sp.updated_at
+                   FROM session_projects sp
+                   LEFT JOIN session_meta m ON m.session_id = sp.session_id
+                  WHERE sp.project_path = ? AND sp.harness = 'opencode'
+                    AND COALESCE(m.is_subagent, 0) = 0
+                  ORDER BY sp.updated_at DESC, sp.session_id DESC
                   LIMIT ?`,
             )
             .all(projectIdentity, RETROSPECTIVE_MAX_SESSIONS_PER_RUN);

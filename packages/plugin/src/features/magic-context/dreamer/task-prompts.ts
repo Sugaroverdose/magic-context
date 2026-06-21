@@ -171,12 +171,18 @@ export function buildClassifyPrompt(args: {
 Classify EVERY active/permanent memory below by writing metadata only with \`ctx_memory(action="classify", ... )\`. Do not rewrite, merge, archive, verify, or create memories in this task. Do not inspect the codebase; use the memory content and the recent trajectory below.
 
 ### How to score importance (1–100)
+Importance decides which memories survive when the injected memory block is over budget: high scores stay in context, low scores drop first. So the score is only useful if it **discriminates** — if most memories land in the same band, you have not classified them, you have just labelled them.
+
 Use LLM judgment, not a formula. Blend:
 - **Durability / decay-rate value:** Will this fact still matter weeks from now, across sessions?
 - **Current trajectory:** Is it relevant to what the project has recently been doing?
 - **Operational impact:** Would missing this fact cause wrong code, wasted time, broken workflows, or violated constraints?
 
-Guidance: transient observations belong low (1–30), helpful project facts around 40–70, and load-bearing rules/architecture/constraints around 70–100. CONSTRAINTS with real must/never/always external limits should usually have a floor around 60 unless they are obsolete or trivial.
+Most memories are ordinary working facts — they belong in the middle, not the top. Reserve the high band for the genuinely load-bearing handful a teammate would be sunk without; push routine observations, one-off details, and now-obvious facts down. A "real, true fact" is not automatically important — truth is not importance.
+
+Rough anchors (not quotas — spread naturally within them): transient/obvious observations 1–30, ordinary helpful project facts 40–65, load-bearing rules/architecture/constraints 70–100. A constraint that is a genuine must/never/always rule the project actively depends on floors around 60; but not every memory in a category is load-bearing — a niche, dated, or narrowly-scoped external quirk (a minor upstream behavior, a harness detail) can sit lower even if it is a "constraint". Score the fact, not the label.
+
+Before you finish: if you find you assigned most of the pool to one band, re-read and differentiate — the spread should reflect that some facts genuinely matter far more than others.
 
 ### Scope
 - \`project\` — only meaningful inside this repository/product (default when uncertain).
@@ -184,7 +190,7 @@ Guidance: transient observations belong low (1–30), helpful project facts arou
 - \`universe\` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.
 
 ### Shareability
-Private by default. Set \`shareable=true\` only for non-sensitive, project-useful facts that are safe to show to a team. Never mark personal paths, usernames, secrets/tokens, private endpoints, credentials, customer data, or proprietary/private-user details as shareable. The tool also fails closed and will force sensitive text to private.
+Default is private. Most memories — including ordinary architecture and config facts — stay private; \`shareable=true\` is the rare exception. The test is NOT "is this safe and useful" (almost everything passes that, so it lets everything through). The test is: **would this fact still be true and useful for a DIFFERENT team working on a SIMILAR but separate project?** Only durable, transferable knowledge clears that bar — a hard-won external-system constraint, a cross-project convention, a protocol gotcha. Anything specific to THIS repo's internals, files, structure, or current state stays private even though it is non-sensitive. Never share: personal paths, usernames, secrets/tokens, private/local endpoints (e.g. localhost), credentials, customer data, machine-specific or personal-preference details. When unsure, private — wrongly sharing leaks; wrongly withholding only means a teammate re-derives a fact. The tool also fails closed and forces sensitive text to private regardless.
 
 Batch ids when they receive the same metadata. Otherwise classify individually. A memory is complete only after you call \`ctx_memory(action="classify", ids=[...], importance=..., scope="...", shareable=...)\` for it.
 
@@ -215,8 +221,12 @@ Rules:
 4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt.`;
 
 export function buildFrictionGatePrompt(args: { userLines: string[] }): string {
-    return `Decide whether these recent user lines show friction, re-explaining, or correction.
-Return exactly one line: "n" or "y: <line numbers>". Be conservative; a normal request or polite one-off clarification is n.
+    return `Decide whether these user lines show the user correcting, re-explaining to, or expressing frustration at the ASSISTANT's behavior — a moment a future assistant should learn from.
+
+Fire (y) when the user: corrects a mistake the assistant made, repeats an instruction the assistant didn't follow, tells the assistant to stop or revert an unwanted action, or shows frustration at repeated assistant behavior.
+Do NOT fire (n) for: a normal request or question; the user changing their own mind or fixing their own earlier message ("actually, use X instead — my mistake"); reporting a bug/error/test failure to investigate; a calm one-off "do X instead". The words "no", "not", "error", "fail", "wrong" inside an otherwise-normal sentence are not friction.
+
+Return exactly one line: "n", or "y: <line numbers>". Be conservative.
 
 ${args.userLines.join("\n")}`;
 }
@@ -254,6 +264,7 @@ ${renderRetrospectiveEvents(args.events)}
 - Extract only durable, recurring learnings. A single annoyed/corrective message is noise.
 - Write actionable present-tense corrections for future agents.
 - Do NOT quote the user, include dates, or preserve anger/frustration wording.
+- Write in plain prose with NO quotation marks at all — not around the user's words, and not around illustrative trigger words. Describe trigger conditions directly (write: when the user asks you to investigate or diagnose without requesting a fix — not: when the user says "investigate"). A learning containing any quotation marks is rejected.
 - Use route="memory" for project-specific agent behavior/rules, with category one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.
 - Use route="observation" only for recurring user workflow/preferences that belong in the global user profile.
 - Zero learnings is acceptable and should be represented by an empty learnings block.

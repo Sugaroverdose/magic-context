@@ -26,8 +26,16 @@ function setupContextDb(): Database {
             project_path TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE session_meta (
+            session_id TEXT PRIMARY KEY,
+            is_subagent INTEGER DEFAULT 0
+        );
     `);
     return db;
+}
+
+function markSubagent(db: Database, sessionId: string): void {
+    db.prepare("INSERT INTO session_meta (session_id, is_subagent) VALUES (?, 1)").run(sessionId);
 }
 
 function setupOpenCodeDb(): Database {
@@ -113,6 +121,28 @@ describe("OpenCodeRetrospectiveRawProvider", () => {
 
         expect(provider.listProjectSessions("project-a")).toEqual([
             { sessionId: "s1", updatedAt: 20 },
+        ]);
+    });
+
+    it("excludes subagent (is_subagent=1) sessions — retrospective learns only from real user friction", () => {
+        const contextDb = setupContextDb();
+        const insert = contextDb.prepare(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
+        );
+        insert.run("root1", "opencode", "project-a", 50);
+        insert.run("sub1", "opencode", "project-a", 60); // newer, but a subagent child
+        insert.run("root2", "opencode", "project-a", 40);
+        markSubagent(contextDb, "sub1");
+
+        const provider = new OpenCodeRetrospectiveRawProvider({
+            contextDb,
+            openOpenCodeDb: () => null,
+        });
+
+        // sub1 is filtered out despite being newest; roots returned newest-first.
+        expect(provider.listProjectSessions("project-a")).toEqual([
+            { sessionId: "root1", updatedAt: 50 },
+            { sessionId: "root2", updatedAt: 40 },
         ]);
     });
 
