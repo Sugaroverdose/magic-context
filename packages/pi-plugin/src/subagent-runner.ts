@@ -113,9 +113,14 @@ const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
 	"dreamer",
 	"magic-context-dreamer",
 ]);
+const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
+	"sidekick",
+	"dreamer-retrospective",
+]);
 
 function inferAccountingSubagent(agent: string): SubagentKind {
 	if (agent.includes("sidekick")) return "sidekick";
+	if (agent.includes("retrospective")) return "dreamer";
 	if (agent.includes("dreamer")) return "dreamer";
 	if (agent.includes("compressor")) return "compressor";
 	if (agent.includes("recomp")) return "recomp";
@@ -909,7 +914,8 @@ export function buildArgs(
 	// free. Tool-using agents (sidekick/dreamer) still receive the lean entry.
 	const shouldLoadSubagentExtension =
 		SUBAGENT_ENTRY_PATH &&
-		(options.agent === "sidekick" || DREAMER_ACTION_AGENTS.has(options.agent));
+		(SEARCH_ONLY_SUBAGENT_TOOL_AGENTS.has(options.agent) ||
+			DREAMER_ACTION_AGENTS.has(options.agent));
 	if (shouldLoadSubagentExtension) {
 		args.push("--extension", SUBAGENT_ENTRY_PATH);
 

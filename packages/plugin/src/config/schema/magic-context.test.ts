@@ -143,11 +143,13 @@ describe("MagicContextConfigSchema", () => {
             expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
             expect(result.dreamer?.tasks["key-files"].schedule).toBe("0 * * * *");
             expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
+            expect(result.dreamer?.tasks.retrospective.schedule).toBe("0 5 * * *");
         });
 
-        it("defaults classify-memories on daily in dreamer task schema", () => {
+        it("defaults classify-memories and retrospective on daily in dreamer task schema", () => {
             const result = MagicContextConfigSchema.parse({ dreamer: { model: "x/y" } });
             expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
+            expect(result.dreamer?.tasks.retrospective.schedule).toBe("0 5 * * *");
         });
 
         it("accepts optional auto_update user preference", () => {

@@ -12,6 +12,7 @@ export const CANONICAL_DREAM_TASKS = [
     "verify",
     "curate",
     "classify-memories",
+    "retrospective",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
@@ -51,6 +52,7 @@ export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "verify",
     "curate",
     "classify-memories",
+    "retrospective",
 ];
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);

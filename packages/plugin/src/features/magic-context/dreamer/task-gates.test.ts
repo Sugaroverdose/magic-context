@@ -50,4 +50,37 @@ describe("evaluateTaskGate", () => {
             }),
         ).toBe(true);
     });
+
+    test("retrospective runs when a project session changed since last run", () => {
+        db = freshDb();
+        const projectIdentity = "/repo/project";
+        db.prepare(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
+        ).run("s1", "opencode", projectIdentity, 200);
+
+        expect(
+            evaluateTaskGate("retrospective", {
+                db,
+                projectIdentity,
+                lastRunAt: null,
+                promotionThreshold: 3,
+            }),
+        ).toBe(true);
+        expect(
+            evaluateTaskGate("retrospective", {
+                db,
+                projectIdentity,
+                lastRunAt: 100,
+                promotionThreshold: 3,
+            }),
+        ).toBe(true);
+        expect(
+            evaluateTaskGate("retrospective", {
+                db,
+                projectIdentity,
+                lastRunAt: 300,
+                promotionThreshold: 3,
+            }),
+        ).toBe(false);
+    });
 });

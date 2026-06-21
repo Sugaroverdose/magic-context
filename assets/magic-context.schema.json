@@ -360,6 +360,10 @@
               "schedule": "0 6 * * *",
               "timeout_minutes": 20
             },
+            "retrospective": {
+              "schedule": "0 5 * * *",
+              "timeout_minutes": 20
+            },
             "maintain-docs": {
               "schedule": "",
               "timeout_minutes": 20
@@ -493,6 +497,56 @@
             "classify-memories": {
               "default": {
                 "schedule": "0 6 * * *",
+                "timeout_minutes": 20
+              },
+              "type": "object",
+              "properties": {
+                "schedule": {
+                  "default": "",
+                  "type": "string",
+                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
+                },
+                "model": {
+                  "description": "Per-task model override (inherits dreamer.model)",
+                  "type": "string"
+                },
+                "fallback_models": {
+                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "thinking_level": {
+                  "description": "Pi only: per-task thinking level",
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                "timeout_minutes": {
+                  "default": 20,
+                  "description": "Minutes allowed for this task before it is aborted",
+                  "type": "number",
+                  "minimum": 5
+                }
+              }
+            },
+            "retrospective": {
+              "default": {
+                "schedule": "0 5 * * *",
                 "timeout_minutes": 20
               },
               "type": "object",

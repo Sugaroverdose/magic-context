@@ -118,6 +118,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     verify: "0 3 * * *",
     curate: "0 4 * * 0",
     "classify-memories": "0 6 * * *",
+    retrospective: "0 5 * * *",
     "maintain-docs": "",
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
@@ -150,6 +151,9 @@ export const DreamTasksSchema = z
         ),
         "classify-memories": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("classify-memories")),
+        ),
+        retrospective: DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("retrospective")),
         ),
         "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),

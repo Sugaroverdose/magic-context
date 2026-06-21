@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { DREAMER_AGENT } from "./agents/dreamer";
+import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "./agents/dreamer";
 import { buildHiddenAgentRegistrations } from "./agents/hidden-agent-registrations";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
     DREAMER_ALLOWED_TOOLS,
+    DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
     SIDEKICK_ALLOWED_TOOLS,
 } from "./agents/permissions";
@@ -31,14 +32,26 @@ describe("hidden-agent registration drift guard", () => {
     });
     const byId = (id: string) => regs.find((r) => r.id === id);
 
-    test("registers exactly the four hidden agents with canonical ids", () => {
+    test("registers hidden agents with canonical ids", () => {
         expect(regs.map((r) => r.id).sort()).toEqual(
-            [DREAMER_AGENT, HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT, SIDEKICK_AGENT].sort(),
+            [
+                DREAMER_AGENT,
+                DREAMER_RETROSPECTIVE_AGENT,
+                HISTORIAN_AGENT,
+                HISTORIAN_EDITOR_AGENT,
+                SIDEKICK_AGENT,
+            ].sort(),
         );
     });
 
     test("dreamer inline allow-list matches canonical DREAMER_ALLOWED_TOOLS", () => {
         expect(byId(DREAMER_AGENT)?.allowedTools).toEqual([...DREAMER_ALLOWED_TOOLS]);
+    });
+
+    test("retrospective inline allow-list is ctx_search only", () => {
+        expect(byId(DREAMER_RETROSPECTIVE_AGENT)?.allowedTools).toEqual([
+            ...DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
+        ]);
     });
 
     test("sidekick inline allow-list matches canonical SIDEKICK_ALLOWED_TOOLS", () => {
@@ -75,6 +88,7 @@ describe("hidden-agent registration drift guard", () => {
 
     test("step caps match the documented values", () => {
         expect(byId(DREAMER_AGENT)?.maxSteps).toBe(150);
+        expect(byId(DREAMER_RETROSPECTIVE_AGENT)?.maxSteps).toBe(40);
         expect(byId(HISTORIAN_AGENT)?.maxSteps).toBe(40);
         expect(byId(HISTORIAN_EDITOR_AGENT)?.maxSteps).toBe(40);
         expect(byId(SIDEKICK_AGENT)?.maxSteps).toBe(40);
@@ -95,7 +109,13 @@ describe("hidden-agent registration drift guard", () => {
         // ...but the ids and allow-lists are STILL present (the whole point —
         // they don't depend on module-init timing).
         expect(noPrompts.map((r) => r.id).sort()).toEqual(
-            [DREAMER_AGENT, HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT, SIDEKICK_AGENT].sort(),
+            [
+                DREAMER_AGENT,
+                DREAMER_RETROSPECTIVE_AGENT,
+                HISTORIAN_AGENT,
+                HISTORIAN_EDITOR_AGENT,
+                SIDEKICK_AGENT,
+            ].sort(),
         );
     });
 });

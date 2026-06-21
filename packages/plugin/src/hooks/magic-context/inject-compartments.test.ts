@@ -560,6 +560,39 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe(false);
     });
 
+    it("mustMaterialize does NOT materialize m[0] on a retrospective memory write", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const state = readStateFromMeta();
+
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "PROJECT_RULES",
+            content:
+                "Verify provider-executed tool availability before describing it as supported.",
+            sourceSessionId: SESSION_ID,
+            sourceType: "dreamer",
+            metadataJson: JSON.stringify({ source: "retrospective" }),
+        });
+
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }).value,
+        ).toBe(false);
+    });
+
     it("mustMaterialize does NOT materialize m[0] on the FIRST compartment (sequence 0)", () => {
         // The first compartment (sequence 0) is also a SOFT m[1] delta — the
         // EMPTY_MAX_COMPARTMENT_SEQ=-1 sentinel makes readNewCompartments(-1)

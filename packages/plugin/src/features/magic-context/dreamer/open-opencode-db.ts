@@ -1,14 +1,8 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { getDataDir } from "../../../shared/data-path";
 import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import { Database } from "../../../shared/sqlite";
-
-/** Path to OpenCode's own SQLite DB (raw transcripts / read history). */
-export function getOpenCodeDbPath(): string {
-    return join(getDataDir(), "opencode", "opencode.db");
-}
+import { getOpenCodeDbPath } from "../compaction-marker";
 
 /**
  * Open OpenCode's DB read-only (used by the key-files task's read-history scan).

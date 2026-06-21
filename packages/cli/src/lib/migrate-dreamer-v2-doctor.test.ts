@@ -32,6 +32,7 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect(t.curate.schedule).toBe("0 2 * * *");
         expect(t.verify.schedule).toBe("");
         expect(t["classify-memories"].schedule).toBe("0 6 * * *");
+        expect(t.retrospective.schedule).toBe("0 5 * * *");
         expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
@@ -84,21 +85,24 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect(t.verify.broad_interval_days).toBe(7);
         expect(t.curate.schedule).toBe("0 * * * *");
         expect(t["classify-memories"].schedule).toBe("0 6 * * *");
+        expect(t.retrospective.schedule).toBe("0 5 * * *");
         expect(t.improve).toBeUndefined();
     });
 
-    it("defaults classify-memories on daily unless dreamer is disabled", () => {
+    it("defaults classify-memories and retrospective on daily unless dreamer is disabled", () => {
         const cfg: Record<string, unknown> = {
             dreamer: { schedule: "02:00-06:00", tasks: [] },
         };
         expect(migrateDreamerV2ForDoctor(cfg)).toBe(true);
         expect(tasksOf(cfg)["classify-memories"].schedule).toBe("0 6 * * *");
+        expect(tasksOf(cfg).retrospective.schedule).toBe("0 5 * * *");
 
         const disabled: Record<string, unknown> = {
             dreamer: { disable: true, schedule: "02:00-06:00" },
         };
         expect(migrateDreamerV2ForDoctor(disabled)).toBe(true);
         expect(tasksOf(disabled)["classify-memories"].schedule).toBe("");
+        expect(tasksOf(disabled).retrospective.schedule).toBe("");
     });
 
     it("maps object-shaped maintain-memory to verify + curate", () => {

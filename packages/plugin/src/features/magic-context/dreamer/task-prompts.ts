@@ -195,6 +195,76 @@ ${renderTrajectory(args.trajectory)}
 ${renderClassifyMemoryList(args.memories)}`;
 }
 
+// ── Retrospective ───────────────────────────────────────────────────────────
+
+export interface RetrospectivePromptEvent {
+    sessionId: string;
+    kind: string;
+    fields: Record<string, string>;
+    createdAt: number;
+}
+
+export const RETROSPECTIVE_SYSTEM_PROMPT = `You are a retrospective learning agent for Magic Context.
+
+You learn only from recurring user-friction moments where the user had to correct, re-explain, or recover from the assistant's repeated behavior. You receive a pre-rendered friction window from the host and may use ctx_search to look for corroborating prior patterns.
+
+Rules:
+1. Pattern, not one-off: extract only recurring behavior that is likely to happen again. Zero learnings is fine.
+2. Distill, do not transcribe: never quote the user, never include dates, and never preserve session-local anger.
+3. Root cause + correction: the learning must tell a future agent what to do differently.
+4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt.`;
+
+export function buildFrictionGatePrompt(args: { userLines: string[] }): string {
+    return `Decide whether these recent user lines show friction, re-explaining, or correction.
+Return exactly one line: "n" or "y: <line numbers>". Be conservative; a normal request or polite one-off clarification is n.
+
+${args.userLines.join("\n")}`;
+}
+
+function renderRetrospectiveEvents(events: RetrospectivePromptEvent[]): string {
+    if (events.length === 0) return "(no corroborating historian events)";
+    return events
+        .map((event) => {
+            const fields = Object.entries(event.fields)
+                .map(([key, value]) => `${key}: ${value}`)
+                .join("; ");
+            return `- ${new Date(event.createdAt).toISOString()} session=${event.sessionId} kind=${event.kind}${fields ? ` — ${fields}` : ""}`;
+        })
+        .join("\n");
+}
+
+export function buildRetrospectivePrompt(args: {
+    projectPath: string;
+    frictionWindow: string;
+    events: RetrospectivePromptEvent[];
+}): string {
+    return `## Task: Retrospective Learning
+
+**Project:** ${args.projectPath}
+
+The host detected possible user friction in the pre-rendered window below. Use it plus ctx_search (if helpful) to decide whether there is a recurring root cause and recurring assistant behavior worth remembering.
+
+### Friction window
+${args.frictionWindow}
+
+### Corroborating historian events
+${renderRetrospectiveEvents(args.events)}
+
+### Extraction rules
+- Extract only durable, recurring learnings. A single annoyed/corrective message is noise.
+- Write actionable present-tense corrections for future agents.
+- Do NOT quote the user, include dates, or preserve anger/frustration wording.
+- Use route="memory" for project-specific agent behavior/rules, with category one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING.
+- Use route="observation" only for recurring user workflow/preferences that belong in the global user profile.
+- Zero learnings is acceptable and should be represented by an empty learnings block.
+
+Return only XML in this exact shape:
+<learnings>
+  <learning route="memory" category="PROJECT_RULES">one durable actionable correction</learning>
+  <learning route="observation">one recurring user preference</learning>
+</learnings>`;
+}
+
 // ── Maintain Docs ──────────────────────────────────────────────────────────
 
 export function buildMaintainDocsPrompt(

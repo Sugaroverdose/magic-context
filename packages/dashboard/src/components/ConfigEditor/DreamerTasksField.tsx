@@ -52,6 +52,11 @@ const TASKS: TaskMeta[] = [
     defaultSchedule: "0 6 * * *",
   },
   {
+    name: "retrospective",
+    description: "Learns from moments you had to correct or re-explain, and records the lesson",
+    defaultSchedule: "0 5 * * *",
+  },
+  {
     name: "maintain-docs",
     description: "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
     defaultSchedule: "",

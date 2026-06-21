@@ -67,7 +67,7 @@ export function generatePartId(timestampMs: number, counter = 0n): string {
 
 // ── DB Access ────────────────────────────────────────────────────
 
-function getOpenCodeDbPath(): string {
+export function getOpenCodeDbPath(): string {
     return join(getDataDir(), "opencode", "opencode.db");
 }
 

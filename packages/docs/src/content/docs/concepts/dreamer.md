@@ -25,20 +25,26 @@ The dreamer pairs well with local or inexpensive models. Nobody is waiting — i
 
 ## The tasks
 
-The dreamer has six tasks, each independently scheduled:
+The dreamer has eight tasks, each independently scheduled:
 
 | Task | Default | What it does |
 |------|---------|-------------|
 | **verify** | nightly | Incrementally verify memories against backing files and fix or remove stale facts. |
 | **curate** | weekly | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
+| **classify-memories** | daily | Score memory importance, scope, and shareability so recall stays focused. |
+| **retrospective** | daily | Learn from moments you had to correct or re-explain, and record the durable lesson. |
 | **maintain-docs** | off | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at the project root synchronized with codebase changes. |
 | **review-user-memories** | nightly | Promote recurring behavioral observations into your `<user-profile>` (privacy-sensitive — see below). |
 | **key-files** | off | Pin frequently-read project files into a `<key-files>` block injected into the conversation. |
 | **evaluate-smart-notes** | nightly | Check whether any smart-note conditions (`ctx_note` with a surface condition) have come true and surface the ready ones. |
 
-Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `verify` and `curate` share the per-project memory lease; the others run independently.
+Each task has its own schedule, an optional per-task model override (falling back to the dreamer-level model), and a timeout (default: 20 minutes). `verify`, `curate`, `classify-memories`, and `retrospective` share the per-project memory lease; the others run independently.
 
 Configure all of this under `dreamer.tasks` in `magic-context.jsonc`, or visually in the dashboard config editor.
+
+## Privacy: retrospective learning
+
+The **retrospective** task is default-on but cheap: it first scans only new typed user messages since its last successful run for correction/re-explanation patterns. If there is no friction signal, it records a clean run without starting a child session. On a hit, a ctx_search-only child agent analyzes the host-rendered window and emits XML learnings; the host validates and applies them. Project lessons become normal project memories, and user-behavior observations are only collected when `review-user-memories` is scheduled.
 
 ## Privacy: user-memory review
 

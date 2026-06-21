@@ -207,4 +207,7 @@ export const DREAMER_ALLOWED_TOOLS = [
  *
  * Still denied: spawning subagents, edits, bash, web fetches.
  */
+
+export const DREAMER_RETROSPECTIVE_ALLOWED_TOOLS = ["ctx_search"] as const;
+
 export const SIDEKICK_ALLOWED_TOOLS = ["ctx_search", "aft_outline", "aft_zoom"] as const;

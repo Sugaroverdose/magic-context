@@ -3,7 +3,10 @@ import type {
 	EmbeddingConfig,
 } from "@magic-context/core/config/schema/magic-context";
 import { openOpenCodeDb } from "@magic-context/core/features/magic-context/dreamer/open-opencode-db";
-import { buildDreamTaskRuntimeConfigs } from "@magic-context/core/features/magic-context/dreamer/task-config";
+import {
+	buildDreamTaskRuntimeConfigs,
+	userMemoryCollectionEnabled,
+} from "@magic-context/core/features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "@magic-context/core/features/magic-context/dreamer/task-executor";
 import type { DreamTaskName } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import {
@@ -14,6 +17,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
+import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
 
 export interface PiDreamerOptions {
 	db: ContextDatabase;
@@ -168,6 +172,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				client: client as never,
 				sessionDirectory: opts.projectDir,
 				openOpenCodeDb,
+				retrospectiveRawProvider: new PiRetrospectiveRawProvider({
+					projectCwd: opts.projectDir,
+				}),
+				userMemoryCollectionEnabled: userMemoryCollectionEnabled(opts.config),
 			}),
 			task,
 		});
@@ -265,8 +273,9 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 			// fallbackModels: undefined; passing the dreamer-level chain here would
 			// double-iterate and override a task's own (possibly empty) chain.
 			const perTaskModel = extractBodyModel(args) ?? model;
+			const requestedAgent = extractBodyAgent(args) ?? "magic-context-dreamer";
 			const runPromise = runner.run({
-				agent: "magic-context-dreamer",
+				agent: requestedAgent,
 				systemPrompt,
 				userMessage,
 				model: perTaskModel,
@@ -385,6 +394,13 @@ function extractBodyModel(args: { body?: unknown }): string | undefined {
 		return `${providerID}/${modelID}`;
 	}
 	return undefined;
+}
+
+function extractBodyAgent(args: { body?: unknown }): string | undefined {
+	const body = args.body;
+	if (typeof body !== "object" || body === null) return undefined;
+	const agent = (body as { agent?: unknown }).agent;
+	return typeof agent === "string" && agent.length > 0 ? agent : undefined;
 }
 
 function makeMessage(

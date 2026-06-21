@@ -107,6 +107,13 @@ export function buildHiddenAgentRegistrations(args: {
             overrides: args.dreamerOverrides,
         },
         {
+            id: "dreamer-retrospective",
+            prompt: args.dreamerPrompt,
+            allowedTools: ["ctx_search"],
+            maxSteps: 40,
+            overrides: args.dreamerOverrides,
+        },
+        {
             id: "historian",
             prompt: args.historianPrompt,
             allowedTools: historianAllowedTools,

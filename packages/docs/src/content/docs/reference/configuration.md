@@ -156,6 +156,11 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.tasks.classify-memories.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
 | `dreamer.tasks.classify-memories.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
 | `dreamer.tasks.classify-memories.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.retrospective.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.retrospective.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.retrospective.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.retrospective.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.retrospective.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
 | `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.maintain-docs.model` | string | — | Per-task model override (inherits dreamer.model) |
 | `dreamer.tasks.maintain-docs.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |

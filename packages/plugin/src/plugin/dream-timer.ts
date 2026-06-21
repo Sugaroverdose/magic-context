@@ -1,6 +1,10 @@
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
-import { buildDreamTaskRuntimeConfigs } from "../features/magic-context/dreamer/task-config";
+import { OpenCodeRetrospectiveRawProvider } from "../features/magic-context/dreamer/retrospective-raw-provider";
+import {
+    buildDreamTaskRuntimeConfigs,
+    userMemoryCollectionEnabled,
+} from "../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../features/magic-context/dreamer/task-executor";
 import { runDueTasksForProject } from "../features/magic-context/dreamer/task-scheduler";
 import {
@@ -230,6 +234,9 @@ async function sweepProject(
             client: reg.client,
             sessionDirectory: reg.directory,
             openOpenCodeDb,
+            retrospectiveRawProvider: (db) =>
+                new OpenCodeRetrospectiveRawProvider({ contextDb: db, openOpenCodeDb }),
+            userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
         });
         const ran = await runDueTasksForProject({
             db,

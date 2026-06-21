@@ -43,6 +43,26 @@ function countCompartmentsSince(db: Database, projectPath: string, since: number
     return row?.cnt ?? 0;
 }
 
+function countProjectSessionsSince(
+    db: Database,
+    projectPath: string,
+    since: number | null,
+): number {
+    const row =
+        since === null
+            ? db
+                  .prepare<[string], { cnt: number }>(
+                      "SELECT COUNT(*) AS cnt FROM session_projects WHERE project_path = ?",
+                  )
+                  .get(projectPath)
+            : db
+                  .prepare<[string, number], { cnt: number }>(
+                      "SELECT COUNT(*) AS cnt FROM session_projects WHERE project_path = ? AND updated_at > ?",
+                  )
+                  .get(projectPath, since);
+    return row?.cnt ?? 0;
+}
+
 /**
  * Evaluate a task's activity gate. Returns true if the task has work to do.
  * Throwing DB errors propagate to the caller (a gate that can't read is a real
@@ -65,6 +85,14 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             // Classification scores the active project memory pool directly. It has
             // no file gate, watermark, or completeness prerequisites.
             return countActiveMemories(db, project) > 0;
+
+        case "retrospective":
+            // Cheap pre-gate: if any project session was updated since this task's
+            // last successful run, the executor's raw provider does the precise
+            // typed-user-message scan and bails before any child session if empty.
+            // Never-run falls back to "sessions exist"; first executor pass is
+            // still capped to newest-M, not all history.
+            return countProjectSessionsSince(db, project, lastRunAt) > 0;
 
         case "maintain-docs":
             // New compartments since the last maintain-docs run. Never-run → any exist.

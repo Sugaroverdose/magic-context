@@ -4,10 +4,10 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { appendCompartments } from "../compartment-storage";
-import { insertMemory, recordMemoryVerifications } from "../memory";
+import { getMemoriesByProject, insertMemory, recordMemoryVerifications } from "../memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
-import { insertUserMemory } from "../user-memory/storage-user-memory";
+import { getUserMemoryCandidates, insertUserMemory } from "../user-memory/storage-user-memory";
 import { createDreamTaskExecutor } from "./task-executor";
 import { leaseKeyFor } from "./task-registry";
 import type { DreamTaskRuntimeConfig } from "./task-scheduler";
@@ -165,5 +165,204 @@ describe("createDreamTaskExecutor — classify-memories", () => {
         expect(capturedPrompt).toContain("trajectory p1 35");
         expect(capturedPrompt).toContain("compartment 6");
         expect(capturedPrompt).not.toContain("compartment 5");
+    });
+});
+
+describe("createDreamTaskExecutor — retrospective", () => {
+    test("no signal returns completed without creating a child session", async () => {
+        db = freshDb();
+        const project = "/repo/project";
+        const provider = {
+            listProjectSessions: mock(() => [{ sessionId: "s1" }]),
+            readUserMessagesSince: mock(() => [
+                {
+                    sessionId: "s1",
+                    ordinal: 1,
+                    role: "user" as const,
+                    text: "Please add a focused migration test for the new config key.",
+                    ts: 200,
+                },
+            ]),
+        };
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "should-not-create" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({ data: [] })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+            userMemoryCollectionEnabled: true,
+        });
+
+        const result = await executor(
+            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-retro-clean",
+                leaseKey: leaseKeyFor("retrospective", project),
+            },
+        );
+
+        expect(result).toEqual({ status: "completed" });
+        expect(client.session.create).not.toHaveBeenCalled();
+        expect(provider.readUserMessagesSince).toHaveBeenCalledWith("s1", 0, expect.any(Number));
+    });
+
+    test("signal deepens, parses XML, host-applies memory and gated observation", async () => {
+        db = freshDb();
+        const project = "/repo/project";
+        const provider = {
+            listProjectSessions: mock(() => [{ sessionId: "s1" }]),
+            readUserMessagesSince: mock(() => [
+                {
+                    sessionId: "s1",
+                    ordinal: 1,
+                    role: "user" as const,
+                    text: "Please verify provider-executed tools on the wire before saying they work.",
+                    ts: 200,
+                },
+                {
+                    sessionId: "s1",
+                    ordinal: 2,
+                    role: "assistant" as const,
+                    text: "It should work.",
+                    ts: 210,
+                },
+                {
+                    sessionId: "s1",
+                    ordinal: 3,
+                    role: "user" as const,
+                    text: "Please verify provider executed tools on wire before saying they work.",
+                    ts: 220,
+                },
+            ]),
+        };
+        let capturedPrompt = "";
+        let capturedAgent = "";
+        let capturedSystem = "";
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "retro-child" } })),
+                prompt: mock(
+                    async (args: {
+                        body?: {
+                            agent?: string;
+                            system?: string;
+                            parts?: Array<{ text?: string }>;
+                        };
+                    }) => {
+                        capturedAgent = args.body?.agent ?? "";
+                        capturedSystem = args.body?.system ?? "";
+                        capturedPrompt = args.body?.parts?.[0]?.text ?? "";
+                        return {};
+                    },
+                ),
+                messages: mock(async () => ({
+                    data: assistantMessages(`<learnings>
+  <learning route="memory" category="PROJECT_RULES">Verify provider-executed tool availability on wire before describing it as supported.</learning>
+  <learning route="observation">Prefers concise root-cause summaries before implementation details.</learning>
+  <learning route="memory" category="PROJECT_RULES">On 2026-06-01 the user said &quot;wrong again&quot;.</learning>
+</learnings>`),
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+            userMemoryCollectionEnabled: true,
+        });
+
+        const result = await executor(
+            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-retro-hit",
+                leaseKey: leaseKeyFor("retrospective", project),
+            },
+        );
+
+        expect(result).toEqual({ status: "completed" });
+        expect(capturedAgent).toBe("dreamer-retrospective");
+        expect(capturedSystem).toContain("retrospective learning agent");
+        expect(capturedPrompt).toContain("### Friction window");
+        expect(capturedPrompt).toContain("[signal: repeated_user_message]");
+        expect(capturedPrompt).not.toContain("ctx_memory");
+        const memories = getMemoriesByProject(db, project);
+        expect(memories.map((memory) => memory.content)).toEqual([
+            "Verify provider-executed tool availability on wire before describing it as supported.",
+        ]);
+        expect(memories[0]?.sourceType).toBe("dreamer");
+        expect(getUserMemoryCandidates(db).map((candidate) => candidate.content)).toEqual([
+            "Prefers concise root-cause summaries before implementation details.",
+        ]);
+    });
+
+    test("drops observation learnings when user-memory collection is disabled", async () => {
+        db = freshDb();
+        const project = "/repo/project";
+        const provider = {
+            listProjectSessions: mock(() => [{ sessionId: "s1" }]),
+            readUserMessagesSince: mock(() => [
+                {
+                    sessionId: "s1",
+                    ordinal: 1,
+                    role: "user" as const,
+                    text: "Please stop assuming CLI commands work without checking the actual output.",
+                    ts: 200,
+                },
+                {
+                    sessionId: "s1",
+                    ordinal: 2,
+                    role: "user" as const,
+                    text: "Please stop assuming CLI commands work without checking actual output.",
+                    ts: 220,
+                },
+            ]),
+        };
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "retro-child" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: assistantMessages(`<learnings>
+  <learning route="observation">Prefers tool claims backed by observed command output.</learning>
+</learnings>`),
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+            retrospectiveRawProvider: provider,
+            userMemoryCollectionEnabled: false,
+        });
+
+        await executor(
+            { task: "retrospective", schedule: "0 5 * * *", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-retro-observation-off",
+                leaseKey: leaseKeyFor("retrospective", project),
+            },
+        );
+
+        expect(getUserMemoryCandidates(db)).toEqual([]);
     });
 });

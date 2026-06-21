@@ -330,6 +330,8 @@ Each dreamer task is **independently scheduled** with its own cron expression. T
     "tasks": {
       "verify": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
       "curate": { "schedule": "0 4 * * 0" },
+      "classify-memories": { "schedule": "0 6 * * *" },
+      "retrospective": { "schedule": "0 5 * * *" },
       "maintain-docs": { "schedule": "" },
       "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
       "evaluate-smart-notes": { "schedule": "0 3 * * *" },
@@ -373,17 +375,23 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 |------|------------------|-------------|
 | `verify` | `0 3 * * *` | Incrementally verify memories against backing files and fix or remove stale facts. |
 | `curate` | `0 4 * * 0` | Curate the whole active memory pool: consolidate duplicates, tighten wording, and archive low-value or redundant entries. |
+| `classify-memories` | `0 6 * * *` | Score memory importance, scope, and shareability so recall stays focused. |
+| `retrospective` | `0 5 * * *` | Learn from moments you had to correct or re-explain, and record the durable lesson. |
 | `maintain-docs` | `""` (off) | Keep `ARCHITECTURE.md` and `STRUCTURE.md` at project root synchronized with the codebase. |
 | `key-files` | `""` (off) | Pin frequently-read project files into a `<key-files>` block. Requires AFT (see above). |
 | `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |
 | `review-user-memories` | `0 3 * * *` | Promote recurring behavioral observations into the `<user-profile>` block (privacy-sensitive). |
+
+### Retrospective privacy
+
+`retrospective` is default-on but cheap. It scans only new typed user messages since its last successful run; if there is no correction/re-explanation signal, it exits without a child session. On a signal, a ctx_search-only child emits XML learnings and the host validates/applies them. Project learnings become normal project memories; observation learnings are dropped unless `review-user-memories` is scheduled.
 
 ### How scheduling works
 
 A process-wide 15-minute timer checks every task's `next_due_at` regardless of user activity, so scheduled tasks trigger even when you aren't chatting:
 
 1. The timer evaluates each task's cron schedule and collects the tasks that are due.
-2. Due tasks pass their activity gate (e.g. memory tasks only run when there are memories to maintain), then run grouped by lease domain. `verify` and `curate` share the memory lease; docs, key-files, smart notes, and user-memory review use their own domains.
+2. Due tasks pass their activity gate (e.g. memory tasks only run when there are memories to maintain), then run grouped by lease domain. `verify`, `curate`, `classify-memories`, and `retrospective` share the memory lease; docs, key-files, smart notes, and user-memory review use their own domains.
 3. Each task runs in its own ephemeral child session and advances its own `next_due_at`.
 4. `/ctx-dream` runs every enabled task now (honoring gates); `/ctx-dream <task>` force-runs one task immediately, ignoring its gate.
 
@@ -633,6 +641,8 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "tasks": {
       "verify": { "schedule": "0 3 * * *", "broad_interval_days": 7 },
       "curate": { "schedule": "0 4 * * 0" },
+      "classify-memories": { "schedule": "0 6 * * *" },
+      "retrospective": { "schedule": "0 5 * * *" },
       "maintain-docs": { "schedule": "" },
       "key-files": { "schedule": "", "token_budget": 10000, "min_reads": 4 },
       "evaluate-smart-notes": { "schedule": "0 3 * * *" },

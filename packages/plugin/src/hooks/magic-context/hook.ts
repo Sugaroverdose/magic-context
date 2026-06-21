@@ -11,6 +11,7 @@ import {
 } from "../../config/schema/magic-context";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
+import { OpenCodeRetrospectiveRawProvider } from "../../features/magic-context/dreamer/retrospective-raw-provider";
 import {
     buildDreamTaskRuntimeConfigs,
     keyFilesEnabled,
@@ -688,6 +689,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             // checkout resolved from the shared git:<sha> identity map.
             sessionDirectory: deps.directory,
             openOpenCodeDb,
+            retrospectiveRawProvider: (providerDb) =>
+                new OpenCodeRetrospectiveRawProvider({
+                    contextDb: providerDb,
+                    openOpenCodeDb,
+                }),
+            userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreaming),
         });
         void runDueTasksForProject({
             db,
@@ -785,6 +792,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               client: deps.client,
                               sessionDirectory: deps.directory,
                               openOpenCodeDb,
+                              retrospectiveRawProvider: (providerDb) =>
+                                  new OpenCodeRetrospectiveRawProvider({
+                                      contextDb: providerDb,
+                                      openOpenCodeDb,
+                                  }),
+                              userMemoryCollectionEnabled:
+                                  userMemoryCollectionEnabled(dreamerConfig),
                           }),
                           task,
                       }),

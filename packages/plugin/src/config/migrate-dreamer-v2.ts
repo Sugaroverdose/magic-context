@@ -40,6 +40,7 @@ const CANONICAL = [
     "verify",
     "curate",
     "classify-memories",
+    "retrospective",
     "maintain-docs",
     "key-files",
     "evaluate-smart-notes",
@@ -47,6 +48,7 @@ const CANONICAL = [
 ] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *"; // matches the historical "02:00-06:00" default window start
 const DEFAULT_CLASSIFY_CRON = "0 6 * * *";
+const DEFAULT_RETROSPECTIVE_CRON = "0 5 * * *";
 
 /** "02:00-06:00" → "0 2 * * *". Falls back to the default base cron on any
  *  unparseable window (never throws — config migration is fail-open). */
@@ -133,6 +135,7 @@ export function migrateDreamerV2(
     const withTimeout = <T extends Record<string, unknown>>(entry: T): T =>
         timeout !== undefined ? { ...entry, timeout_minutes: timeout } : entry;
     const classifySchedule = dreamer.disable === true ? "" : DEFAULT_CLASSIFY_CRON;
+    const retrospectiveSchedule = dreamer.disable === true ? "" : DEFAULT_RETROSPECTIVE_CRON;
 
     const tasks: Record<string, Record<string, unknown>> = {};
 
@@ -197,9 +200,11 @@ export function migrateDreamerV2(
                         ? ""
                         : task === "classify-memories"
                           ? classifySchedule
-                          : task === "maintain-docs" || task === "key-files"
-                            ? ""
-                            : baseCron;
+                          : task === "retrospective"
+                            ? retrospectiveSchedule
+                            : task === "maintain-docs" || task === "key-files"
+                              ? ""
+                              : baseCron;
                 tasks[task] = withTimeout({
                     schedule,
                     ...(task === "verify" ? { broad_interval_days: 7 } : {}),
@@ -226,6 +231,9 @@ export function migrateDreamerV2(
         });
         tasks["classify-memories"] = withTimeout({
             schedule: classifySchedule,
+        });
+        tasks.retrospective = withTimeout({
+            schedule: retrospectiveSchedule,
         });
         tasks["maintain-docs"] = withTimeout({
             schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",
