@@ -88,17 +88,12 @@ export default function DreamerProjectConfigPanel(props: {
   };
 
   return (
-    <div class="slide-panel-overlay">
-      <button
-        type="button"
-        class="slide-panel-backdrop"
-        aria-label="Close"
-        onClick={props.onClose}
-      />
-      <div class="slide-panel dreamer-config-panel">
-        <div class="slide-panel-header">
-          <div>
-            <div class="slide-panel-title">{props.project.label}</div>
+    <div class="modal-overlay">
+      <button type="button" class="modal-backdrop" aria-label="Close" onClick={props.onClose} />
+      <div class="modal-card dreamer-config-modal">
+        <div class="modal-header">
+          <div class="modal-header-text">
+            <div class="modal-title">{props.project.label}</div>
             <div class="card-meta mono">{props.project.config_path ?? worktree()}</div>
           </div>
           <button type="button" class="btn sm" onClick={props.onClose}>
@@ -106,42 +101,47 @@ export default function DreamerProjectConfigPanel(props: {
           </button>
         </div>
 
-        <Show when={!props.project.worktree}>
-          <div class="empty-state" style={{ padding: "16px 0" }}>
-            No resolvable directory for this project — per-project config can't be written. It
-            inherits the global dreamer config.
-          </div>
-        </Show>
-
-        <Show when={props.project.worktree}>
-          <Show when={!configFile.loading} fallback={<div class="empty-state">Loading…</div>}>
-            <p class="config-field-desc" style={{ "margin-bottom": "12px" }}>
-              These settings override the global dreamer config for this project only, and are saved
-              to the project's <code>magic-context.jsonc</code> (version-controllable — they travel
-              to teammates' clones).
-            </p>
-            <DreamerTasksField
-              value={effectiveTasks()}
-              models={props.models}
-              onChange={(next) => {
-                setTasks(next);
-                setDirty(true);
-              }}
-            />
-            <div class="dreamer-config-actions">
-              <button type="button" class="btn primary sm" disabled={!dirty()} onClick={handleSave}>
-                Save
-              </button>
-              <Show when={props.project.has_project_config}>
-                <button type="button" class="btn sm" onClick={revertToInherited}>
-                  Revert to inherited
-                </button>
-              </Show>
-              <Show when={saveStatus()}>
-                <span class="dreamer-config-status">{saveStatus()}</span>
-              </Show>
+        <div class="modal-body">
+          <Show when={!props.project.worktree}>
+            <div class="empty-state" style={{ padding: "16px 0" }}>
+              No resolvable directory for this project — per-project config can't be written. It
+              inherits the global dreamer config.
             </div>
           </Show>
+
+          <Show when={props.project.worktree}>
+            <Show when={!configFile.loading} fallback={<div class="empty-state">Loading…</div>}>
+              <p class="config-field-desc" style={{ "margin-bottom": "12px" }}>
+                These settings override the global dreamer config for this project only, and are
+                saved to the project's <code>magic-context.jsonc</code> (version-controllable — they
+                travel to teammates' clones).
+              </p>
+              <DreamerTasksField
+                value={effectiveTasks()}
+                models={props.models}
+                onChange={(next) => {
+                  setTasks(next);
+                  setDirty(true);
+                }}
+              />
+            </Show>
+          </Show>
+        </div>
+
+        <Show when={props.project.worktree && !configFile.loading}>
+          <div class="modal-footer dreamer-config-actions">
+            <button type="button" class="btn primary sm" disabled={!dirty()} onClick={handleSave}>
+              Save
+            </button>
+            <Show when={props.project.has_project_config}>
+              <button type="button" class="btn sm" onClick={revertToInherited}>
+                Revert to inherited
+              </button>
+            </Show>
+            <Show when={saveStatus()}>
+              <span class="dreamer-config-status">{saveStatus()}</span>
+            </Show>
+          </div>
         </Show>
       </div>
     </div>

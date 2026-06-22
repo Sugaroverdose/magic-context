@@ -784,6 +784,80 @@ body {
   flex-wrap: wrap;
 }
 
+/* ── Centered modal ──────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  border: none;
+  cursor: pointer;
+}
+
+.modal-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 640px;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: modal-in 160ms ease-out;
+  overflow: hidden;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header-text {
+  min-width: 0;
+}
+
+.modal-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.modal-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+}
+
 /* ── Slide-over panel ────────────────────────────────── */
 .slide-panel-overlay {
   position: fixed;
@@ -1434,29 +1508,11 @@ body {
   min-width: 40px;
 }
 
-/* ── Per-project dreamer config panel ────────────────────────── */
-.slide-panel-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.slide-panel-title {
-  font-weight: 600;
-  font-size: 15px;
-}
-
-.dreamer-config-panel {
-  width: 540px;
-}
-
+/* ── Per-project dreamer config modal ────────────────────────── */
 .dreamer-config-actions {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 14px;
   flex-wrap: wrap;
 }
 
