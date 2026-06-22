@@ -211,6 +211,22 @@ export const DREAMER_ALLOWED_TOOLS = [
 export const DREAMER_RETROSPECTIVE_ALLOWED_TOOLS = ["ctx_search"] as const;
 
 /**
+ * The refresh-primers code investigator: read + navigate + search the CURRENT
+ * source to answer a primer question. NO write/edit/bash (could corrupt user
+ * source) and NO ctx_memory/ctx_note (a ctx_memory mutation bumps the project
+ * memory epoch → busts m[0], breaking the primers cache-neutral contract).
+ */
+export const DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "aft_outline",
+    "aft_zoom",
+    "aft_search",
+    "ctx_search",
+] as const;
+
+/**
  * The smart-note compiler consumes untrusted note text and emits code that will
  * later run in the QuickJS sandbox. It must not have ambient tools: all I/O is
  * performed only when the compiled check runs through the host capability API.

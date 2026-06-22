@@ -122,6 +122,24 @@ export function buildHiddenAgentRegistrations(args: {
             lockPermissions: true,
         },
         {
+            id: "dreamer-primer-investigator",
+            prompt: args.dreamerPrompt,
+            // Read-only code investigation: read/navigate/search the CURRENT
+            // source to answer a primer. Deliberately NO write/edit/bash (could
+            // corrupt user source) and NO ctx_memory/ctx_note (ctx_memory
+            // update/archive/merge bumps the project memory epoch → busts m[0],
+            // violating the primers cache-neutral contract).
+            allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search", "ctx_search"],
+            // Tight read-only-lookup budget — NOT the dreamer's 150. A single
+            // primer is a targeted investigation, not a whole-pool maintenance
+            // loop; it also bounds the per-primer cost of an unsupervised run.
+            maxSteps: 40,
+            overrides: args.dreamerOverrides,
+            // A user dreamer `permission`/`tools` override must never re-grant the
+            // denied write/bash/ctx_memory surface to this unsupervised agent.
+            lockPermissions: true,
+        },
+        {
             id: "smart-note-compiler",
             prompt: args.smartNoteCompilerPrompt ?? args.dreamerPrompt,
             allowedTools: [],

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "./agents/dreamer";
+import {
+    DREAMER_AGENT,
+    DREAMER_PRIMER_INVESTIGATOR_AGENT,
+    DREAMER_RETROSPECTIVE_AGENT,
+} from "./agents/dreamer";
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -11,6 +15,7 @@ import {
 } from "./agents/historian";
 import {
     DREAMER_ALLOWED_TOOLS,
+    DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS,
     DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
     SIDEKICK_ALLOWED_TOOLS,
@@ -47,6 +52,7 @@ describe("hidden-agent registration drift guard", () => {
             [
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
+                DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
@@ -66,6 +72,19 @@ describe("hidden-agent registration drift guard", () => {
         ]);
     });
 
+    test("primer investigator inline allow-list matches canonical (read-only, no write/ctx_memory)", () => {
+        expect(byId(DREAMER_PRIMER_INVESTIGATOR_AGENT)?.allowedTools).toEqual([
+            ...DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS,
+        ]);
+        // The whole point: the cache-neutral / source-safety guarantee.
+        const tools = byId(DREAMER_PRIMER_INVESTIGATOR_AGENT)?.allowedTools ?? [];
+        for (const denied of ["write", "edit", "bash", "ctx_memory", "ctx_note"]) {
+            expect(tools).not.toContain(denied);
+        }
+        expect(byId(DREAMER_PRIMER_INVESTIGATOR_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_PRIMER_INVESTIGATOR_AGENT)?.maxSteps).toBe(40);
+    });
+
     test("smart-note compiler has no tools and locked permissions", () => {
         expect(byId(SMART_NOTE_COMPILER_AGENT)?.allowedTools).toEqual([
             ...SMART_NOTE_COMPILER_ALLOWED_TOOLS,
@@ -76,7 +95,9 @@ describe("hidden-agent registration drift guard", () => {
     test("only privacy/security-critical agents lock permissions", () => {
         for (const reg of regs) {
             expect(reg.lockPermissions === true).toBe(
-                reg.id === DREAMER_RETROSPECTIVE_AGENT || reg.id === SMART_NOTE_COMPILER_AGENT,
+                reg.id === DREAMER_RETROSPECTIVE_AGENT ||
+                    reg.id === SMART_NOTE_COMPILER_AGENT ||
+                    reg.id === DREAMER_PRIMER_INVESTIGATOR_AGENT,
             );
         }
     });
@@ -182,6 +203,7 @@ describe("hidden-agent registration drift guard", () => {
             [
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
+                DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
