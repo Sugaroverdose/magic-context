@@ -81,3 +81,21 @@ describe("dream-timer git commit backlog drain (static)", () => {
         expect(source).toContain("backlogDrained");
     });
 });
+
+describe("dream-timer dead-directory guard (static)", () => {
+    const source = readFileSync(join(import.meta.dir, "dream-timer.ts"), "utf8");
+
+    test("sweepProject skips + unregisters when the directory is gone", () => {
+        expect(source).toContain("directoryStillExists(reg.directory)");
+        expect(source).toContain("registeredProjects.delete(reg.directory)");
+    });
+
+    test("only a dir: identity GCs its schedule rows (git: is shared, must not)", () => {
+        // The GC call must be gated behind the dir:-prefix check so a single dead
+        // worktree never deletes a shared git: project's schedule.
+        const gcIdx = source.indexOf("deleteTaskScheduleRowsForProject(db, reg.projectIdentity)");
+        const guardIdx = source.indexOf('reg.projectIdentity.startsWith("dir:")');
+        expect(guardIdx).toBeGreaterThan(0);
+        expect(gcIdx).toBeGreaterThan(guardIdx);
+    });
+});

@@ -98,6 +98,43 @@ export function getTaskScheduleStatesForProject(
 }
 
 /**
+ * Delete task_schedule_state rows for a project whose `task` is NOT in the given
+ * keep-set. Used to garbage-collect RETIRED task names (e.g. the v1
+ * improve/consolidate/archive-stale rows superseded by the verify/curate split):
+ * reconcile adds/updates canonical tasks but never removed obsolete rows, so they
+ * lingered forever as perpetually-"due" garbage that polluted the dashboard.
+ * Returns the number of rows deleted.
+ */
+export function pruneNonCanonicalTaskRows(
+    db: Database,
+    projectPath: string,
+    canonicalTasks: readonly string[],
+): number {
+    if (canonicalTasks.length === 0) return 0;
+    const placeholders = canonicalTasks.map(() => "?").join(", ");
+    const result = db
+        .prepare(
+            `DELETE FROM task_schedule_state WHERE project_path = ? AND task NOT IN (${placeholders})`,
+        )
+        .run(projectPath, ...canonicalTasks);
+    return Number(result.changes ?? 0);
+}
+
+/**
+ * Delete ALL task_schedule_state rows for a project. Used to GC a fully-orphaned
+ * project — a `dir:<md5>` identity whose backing directory is gone (e.g. a
+ * finalized mason worktree). NEVER call this for a `git:` identity: that is
+ * shared across worktrees/clones of the same repo, so a single dead worktree
+ * must not delete the shared project's schedule. Returns rows deleted.
+ */
+export function deleteTaskScheduleRowsForProject(db: Database, projectPath: string): number {
+    const result = db
+        .prepare("DELETE FROM task_schedule_state WHERE project_path = ?")
+        .run(projectPath);
+    return Number(result.changes ?? 0);
+}
+
+/**
  * Idempotent first-seed: insert the row only if absent. Concurrent processes can
  * both call this safely — ON CONFLICT DO NOTHING means the first writer wins and
  * the second is a no-op (both compute the same next_due_at from the same cron).

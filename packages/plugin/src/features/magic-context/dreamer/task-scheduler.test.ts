@@ -8,7 +8,11 @@ import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { acquireLease } from "./lease";
 import { setDreamState } from "./storage-dream-state";
-import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
+import {
+    deleteTaskScheduleRowsForProject,
+    getTaskScheduleState,
+    writeTaskScheduleState,
+} from "./storage-task-schedule";
 import { leaseKeyFor } from "./task-registry";
 import {
     type DreamTaskRuntimeConfig,
@@ -69,6 +73,58 @@ describe("task-scheduler — planDueTasks", () => {
         setDreamState(db, `last_dream_at:${PROJECT}`, "555000");
         planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], Date.now());
         expect(getTaskScheduleState(db, PROJECT, "verify")?.lastRunAt).toBe(555000);
+    });
+
+    it("prunes retired task rows (v1 names) not in the canonical config set", () => {
+        db = freshDb();
+        // Simulate stale v1 rows left by the verify/curate split.
+        for (const task of ["improve", "consolidate", "archive-stale"] as const) {
+            writeTaskScheduleState(db, {
+                projectPath: PROJECT,
+                task,
+                lastRunAt: null,
+                nextDueAt: Date.now() - 1000,
+                schedule: "0 3 * * *",
+                lastStatus: "skipped",
+                lastError: null,
+                retryCount: 0,
+                lastCheckedCommit: null,
+                retrospectiveWatermarkMs: null,
+            });
+        }
+        // A plan pass with the canonical config set must delete them.
+        planDueTasks(
+            db,
+            PROJECT,
+            [cfg("verify", "0 3 * * *"), cfg("curate", "0 4 * * 0")],
+            Date.now(),
+        );
+        for (const task of ["improve", "consolidate", "archive-stale"] as const) {
+            expect(getTaskScheduleState(db, PROJECT, task)).toBeNull();
+        }
+        // Canonical tasks survive.
+        expect(getTaskScheduleState(db, PROJECT, "verify")).not.toBeNull();
+        expect(getTaskScheduleState(db, PROJECT, "curate")).not.toBeNull();
+    });
+
+    it("deleteTaskScheduleRowsForProject removes ALL rows for an orphaned project only", () => {
+        db = freshDb();
+        const orphan = "dir:deadworktree";
+        planDueTasks(
+            db,
+            orphan,
+            [cfg("verify", "0 3 * * *"), cfg("curate", "0 4 * * 0")],
+            Date.now(),
+        );
+        planDueTasks(db, PROJECT, [cfg("verify", "0 3 * * *")], Date.now());
+        expect(getTaskScheduleState(db, orphan, "verify")).not.toBeNull();
+
+        const removed = deleteTaskScheduleRowsForProject(db, orphan);
+        expect(removed).toBe(2);
+        expect(getTaskScheduleState(db, orphan, "verify")).toBeNull();
+        expect(getTaskScheduleState(db, orphan, "curate")).toBeNull();
+        // The unrelated project is untouched.
+        expect(getTaskScheduleState(db, PROJECT, "verify")).not.toBeNull();
     });
 
     it("disabled schedule ('') seeds a NULL-due row that is never due", () => {

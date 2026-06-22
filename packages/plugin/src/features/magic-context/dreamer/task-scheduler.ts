@@ -6,6 +6,7 @@ import { acquireLease, releaseLease } from "./lease";
 import { getDreamState } from "./storage-dream-state";
 import {
     getTaskScheduleState,
+    pruneNonCanonicalTaskRows,
     seedTaskScheduleState,
     setTaskCommitWatermark,
     writeTaskScheduleState,
@@ -148,6 +149,18 @@ export function planDueTasks(
     tasks: readonly DreamTaskRuntimeConfig[],
     now: number,
 ): DueTask[] {
+    // GC retired task rows (e.g. v1 improve/consolidate/archive-stale superseded
+    // by the verify/curate split). `tasks` is always the full canonical config
+    // set, so any stored row outside it is obsolete. Cheap + idempotent.
+    const pruned = pruneNonCanonicalTaskRows(
+        db,
+        projectIdentity,
+        tasks.map((t) => t.task),
+    );
+    if (pruned > 0) {
+        log(`[dreamer] pruned ${pruned} retired task row(s) for ${projectIdentity}`);
+    }
+
     const due: DueTask[] = [];
     for (const config of tasks) {
         // Reconcile (not just seed) so the live config schedule is authoritative:

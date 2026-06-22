@@ -163,6 +163,49 @@ export default function DreamerPanel() {
     (schedules() ?? [])
       .filter((s) => s.next_due_at != null)
       .sort((a, b) => (a.next_due_at ?? 0) - (b.next_due_at ?? 0));
+
+  // Group scheduled tasks by project so the section is navigable (one project
+  // can have ~9 tasks; a flat list of every (project, task) is unusable). Each
+  // group is collapsible; the soonest-due project sorts first.
+  type ScheduleGroup = {
+    projectPath: string;
+    project: ProjectInfo | undefined;
+    entries: TaskScheduleEntry[];
+    soonestDue: number;
+    overdueCount: number;
+    failedCount: number;
+  };
+  const scheduleGroups = createMemo<ScheduleGroup[]>(() => {
+    const projectMap = new Map((projects() ?? []).map((p) => [p.identity, p]));
+    const groups = new Map<string, TaskScheduleEntry[]>();
+    for (const entry of upcomingSchedules()) {
+      const list = groups.get(entry.project_path);
+      if (list) list.push(entry);
+      else groups.set(entry.project_path, [entry]);
+    }
+    const now = Date.now();
+    return [...groups.entries()]
+      .map(([projectPath, entries]) => ({
+        projectPath,
+        project: projectMap.get(projectPath),
+        entries: entries.sort((a, b) => (a.next_due_at ?? 0) - (b.next_due_at ?? 0)),
+        soonestDue: Math.min(...entries.map((e) => e.next_due_at ?? Number.POSITIVE_INFINITY)),
+        overdueCount: entries.filter((e) => (e.next_due_at ?? 0) > 0 && (e.next_due_at ?? 0) < now)
+          .length,
+        failedCount: entries.filter((e) => e.last_status === "failed").length,
+      }))
+      .sort((a, b) => a.soonestDue - b.soonestDue);
+  });
+  const [expandedSchedules, setExpandedSchedules] = createSignal<Set<string>>(new Set());
+  const toggleScheduleGroup = (projectPath: string) => {
+    setExpandedSchedules((previous) => {
+      const next = new Set(previous);
+      if (next.has(projectPath)) next.delete(projectPath);
+      else next.add(projectPath);
+      return next;
+    });
+  };
+  const isScheduleExpanded = (projectPath: string) => expandedSchedules().has(projectPath);
   const latestRecordedRun = createMemo(() => {
     const allRuns = runs() ?? [];
     return allRuns.length > 0 ? allRuns[0] : null;
@@ -260,52 +303,100 @@ export default function DreamerPanel() {
       </div>
 
       <div class="scroll-area">
-        <Show when={upcomingSchedules().length > 0}>
+        <Show when={scheduleGroups().length > 0}>
           <div class="category-header">
-            Scheduled Tasks <span class="category-count">({upcomingSchedules().length})</span>
+            Scheduled Tasks{" "}
+            <span class="category-count">
+              ({upcomingSchedules().length} across {scheduleGroups().length} project
+              {scheduleGroups().length === 1 ? "" : "s"})
+            </span>
           </div>
           <div class="list-gap" style={{ "margin-bottom": "16px" }}>
-            <For each={upcomingSchedules()}>
-              {(entry: TaskScheduleEntry) => {
-                const project = (projects() ?? []).find((p) => p.identity === entry.project_path);
-                const due = entry.next_due_at ?? 0;
-                const overdue = due > 0 && due < Date.now();
+            <For each={scheduleGroups()}>
+              {(group) => {
+                const now = Date.now();
                 return (
-                  <div class="card">
-                    <div
-                      class="card-title"
-                      style={{
-                        display: "flex",
-                        "justify-content": "space-between",
-                        "align-items": "center",
-                      }}
+                  <div class="card dream-run-card">
+                    <button
+                      type="button"
+                      class="dream-run-header"
+                      onClick={() => toggleScheduleGroup(group.projectPath)}
                     >
-                      <span>
-                        <span class={`pill ${overdue ? "amber" : "blue"}`}>
-                          {overdue ? "due" : "scheduled"}
-                        </span>
-                        <span style={{ "margin-left": "8px" }}>{formatTaskLabel(entry.task)}</span>
+                      <div>
+                        <div class="dream-run-title-row">
+                          <span class="card-title" style={{ margin: 0 }}>
+                            {getProjectLabel(group.project, group.projectPath)}
+                          </span>
+                          <span class={`pill ${group.overdueCount > 0 ? "amber" : "blue"}`}>
+                            {group.entries.length} task{group.entries.length === 1 ? "" : "s"}
+                          </span>
+                          <Show when={group.failedCount > 0}>
+                            <span class="pill red">{group.failedCount} failed</span>
+                          </Show>
+                        </div>
+                        <div class="card-meta" style={{ "margin-top": "4px" }}>
+                          <span>
+                            {group.overdueCount > 0
+                              ? `${group.overdueCount} due now`
+                              : `Next: ${formatRelativeTime(group.soonestDue)}`}
+                          </span>
+                          <Show
+                            when={
+                              group.projectPath !==
+                              getProjectLabel(group.project, group.projectPath)
+                            }
+                          >
+                            <span>·</span>
+                            <span class="mono">{group.projectPath}</span>
+                          </Show>
+                        </div>
+                      </div>
+                      <span class="dream-run-chevron">
+                        {isScheduleExpanded(group.projectPath) ? "▾" : "▸"}
                       </span>
-                      <Show when={entry.last_status === "failed"}>
-                        <span class="pill red">last failed</span>
-                      </Show>
-                    </div>
-                    <div class="card-meta">
-                      <span>Project: {getProjectLabel(project, entry.project_path)}</span>
-                      <span>·</span>
-                      <span>
-                        {overdue ? "Due" : "Next"}: {formatRelativeTime(due)}
-                      </span>
-                      <Show when={entry.last_run_at != null}>
-                        <span>· Last run: {formatRelativeTime(entry.last_run_at ?? 0)}</span>
-                      </Show>
-                      <Show when={entry.retry_count > 0}>
-                        <span>· Retries: {entry.retry_count}</span>
-                      </Show>
-                    </div>
-                    <Show when={entry.last_error}>
-                      <div class="card-meta" style={{ color: "var(--red)" }}>
-                        {entry.last_error}
+                    </button>
+
+                    <Show when={isScheduleExpanded(group.projectPath)}>
+                      <div class="dream-run-history">
+                        <For each={group.entries}>
+                          {(entry) => {
+                            const due = entry.next_due_at ?? 0;
+                            const overdue = due > 0 && due < now;
+                            return (
+                              <div class="dream-schedule-row">
+                                <div class="dream-schedule-row-main">
+                                  <span class={`pill ${overdue ? "amber" : "blue"}`}>
+                                    {overdue ? "due" : "scheduled"}
+                                  </span>
+                                  <span style={{ "margin-left": "8px" }}>
+                                    {formatTaskLabel(entry.task)}
+                                  </span>
+                                  <span class="card-meta" style={{ "margin-left": "8px" }}>
+                                    {overdue ? "Due" : "Next"}: {formatRelativeTime(due)}
+                                    <Show when={entry.last_run_at != null}>
+                                      {" · Last run: "}
+                                      {formatRelativeTime(entry.last_run_at ?? 0)}
+                                    </Show>
+                                    <Show when={entry.retry_count > 0}>
+                                      {" · Retries: "}
+                                      {entry.retry_count}
+                                    </Show>
+                                  </span>
+                                  <Show when={entry.last_status === "failed"}>
+                                    <span class="pill red" style={{ "margin-left": "8px" }}>
+                                      last failed
+                                    </span>
+                                  </Show>
+                                </div>
+                                <Show when={entry.last_error}>
+                                  <div class="card-meta" style={{ color: "var(--red)" }}>
+                                    {entry.last_error}
+                                  </div>
+                                </Show>
+                              </div>
+                            );
+                          }}
+                        </For>
                       </div>
                     </Show>
                   </div>

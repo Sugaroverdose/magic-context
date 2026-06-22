@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+
 import type { DreamerConfig } from "../config/schema/magic-context";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
 import {
@@ -8,6 +10,7 @@ import {
     OpenCodeRetrospectiveRawProvider,
     type RetrospectiveRawProvider,
 } from "../features/magic-context/dreamer/retrospective-raw-provider";
+import { deleteTaskScheduleRowsForProject } from "../features/magic-context/dreamer/storage-task-schedule";
 import {
     buildDreamTaskRuntimeConfigs,
     userMemoryCollectionEnabled,
@@ -70,6 +73,17 @@ interface ProjectRegistration {
 
 /** Singleton timer state. */
 let activeTimer: ReturnType<typeof setInterval> | null = null;
+
+/** True when `directory` exists and is a directory. Any stat error (gone,
+ *  permission, ENOENT) → false: a directory we can't read is treated as gone for
+ *  the dead-directory guard. */
+function directoryStillExists(directory: string): boolean {
+    try {
+        return statSync(directory).isDirectory();
+    } catch {
+        return false;
+    }
+}
 
 /**
  * Open the shared DB for timer work, returning null (with one clear log) when
@@ -226,6 +240,33 @@ async function sweepProject(
     db: Database,
     gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
 ): Promise<void> {
+    // Dead-directory guard: a registration whose directory no longer exists
+    // (e.g. a finalized mason worktree) can't have meaningful dreamer work —
+    // git indexing + key-files/verify would ENOENT reading from the gone path.
+    // Skip it and unregister so it stops being swept. For a `dir:` identity
+    // (path-unique → truly orphaned once the path is gone) also GC its schedule
+    // rows; a `git:` identity is SHARED across worktrees/clones, so a single dead
+    // worktree must NOT delete the shared project's schedule.
+    if (!directoryStillExists(reg.directory)) {
+        log(
+            `[dreamer] project directory no longer exists (${reg.projectIdentity}); skipping + unregistering`,
+        );
+        if (reg.projectIdentity.startsWith("dir:")) {
+            try {
+                const removed = deleteTaskScheduleRowsForProject(db, reg.projectIdentity);
+                if (removed > 0) {
+                    log(
+                        `[dreamer] GC'd ${removed} orphaned schedule row(s) for ${reg.projectIdentity}`,
+                    );
+                }
+            } catch (error) {
+                log(`[dreamer] orphan schedule GC failed for ${reg.projectIdentity}:`, error);
+            }
+        }
+        registeredProjects.delete(reg.directory);
+        return;
+    }
+
     const dreamerConfig = reg.dreamerConfig;
     const dreamingEnabled = Boolean(dreamerConfig && dreamerConfig.disable !== true);
     if (gitCommitEnabled && reg.gitCommitIndexing) {

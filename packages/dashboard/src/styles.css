@@ -1250,6 +1250,19 @@ body {
   gap: 12px;
 }
 
+.dream-schedule-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-base);
+  padding: 8px 12px;
+}
+
+.dream-schedule-row-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .dream-run-detail {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
