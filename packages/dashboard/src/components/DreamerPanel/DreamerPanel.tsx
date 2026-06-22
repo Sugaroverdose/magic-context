@@ -2,21 +2,25 @@ import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import {
   formatDateTime,
   formatRelativeTime,
+  getAvailableModels,
+  getDreamerProjects,
   getDreamRunMemoryChanges,
   getDreamRuns,
   getDreamState,
   getProjects,
-  getTaskScheduleState,
 } from "../../lib/api";
+import { describeCron } from "../../lib/cron";
 import type {
+  DreamerProject,
+  DreamerProjectTask,
   DreamMemoryChange,
   DreamRun,
   DreamRunMemoryChanges,
   DreamRunMemoryDetail,
   DreamRunTask,
   ProjectInfo,
-  TaskScheduleEntry,
 } from "../../lib/types";
+import DreamerProjectConfigPanel from "./DreamerProjectConfigPanel";
 
 type ProjectRunGroup = {
   project: ProjectInfo | undefined;
@@ -90,11 +94,15 @@ function hasMemoryChanges(changes: DreamRunMemoryChanges | null): changes is Dre
 }
 
 export default function DreamerPanel() {
-  const [schedules, { refetch: refetchSchedules }] = createResource(getTaskScheduleState);
+  const [dreamerProjects, { refetch: refetchDreamerProjects }] = createResource(getDreamerProjects);
   const [state, { refetch: refetchState }] = createResource(getDreamState);
   const [projects] = createResource(getProjects);
+  const [models] = createResource(getAvailableModels);
   const [runs, { refetch: refetchRuns }] = createResource(() => getDreamRuns(undefined, 50));
   const [expandedProjects, setExpandedProjects] = createSignal<Set<string>>(new Set());
+  // Which project cards are expanded (task list), and which has the gear dialog open.
+  const [expandedCards, setExpandedCards] = createSignal<Set<string>>(new Set());
+  const [configProject, setConfigProject] = createSignal<DreamerProject | null>(null);
 
   // Lazy per-run memory-change detail (which memories were written/archived/
   // merged), fetched on first expand and cached by run id. The run row stores
@@ -143,7 +151,7 @@ export default function DreamerPanel() {
   };
 
   const refreshAll = () => {
-    refetchSchedules();
+    refetchDreamerProjects();
     refetchState();
     refetchRuns();
   };
@@ -158,54 +166,56 @@ export default function DreamerPanel() {
     };
   };
 
-  // Upcoming = scheduled tasks (next_due_at set), soonest first.
-  const upcomingSchedules = () =>
-    (schedules() ?? [])
-      .filter((s) => s.next_due_at != null)
-      .sort((a, b) => (a.next_due_at ?? 0) - (b.next_due_at ?? 0));
+  // Project cards: every tracked project with at least one scheduled task,
+  // sorted by name. Enabled tasks (schedule set) come first within a card.
+  const cards = createMemo<DreamerProject[]>(() =>
+    [...(dreamerProjects() ?? [])].sort((a, b) => a.label.localeCompare(b.label)),
+  );
 
-  // Group scheduled tasks by project so the section is navigable (one project
-  // can have ~9 tasks; a flat list of every (project, task) is unusable). Each
-  // group is collapsible; the soonest-due project sorts first.
-  type ScheduleGroup = {
-    projectPath: string;
-    project: ProjectInfo | undefined;
-    entries: TaskScheduleEntry[];
-    soonestDue: number;
-    overdueCount: number;
-    failedCount: number;
+  const isTaskEnabled = (t: DreamerProjectTask) => (t.schedule ?? "").trim() !== "";
+  const enabledTasks = (p: DreamerProject) => p.tasks.filter(isTaskEnabled);
+
+  // Traffic-light for a task's last run: green ok, red failed, gray never-run /
+  // disabled. Amber = scheduled+enabled but not yet run, or retrying.
+  type Light = "green" | "amber" | "red" | "gray";
+  const taskLight = (t: DreamerProjectTask): Light => {
+    if (t.last_status === "failed") return "red";
+    if (t.last_status === "completed") return "green";
+    if (t.last_status === "skipped") return "gray";
+    if (isTaskEnabled(t) && t.last_run_at == null) return "amber";
+    return "gray";
   };
-  const scheduleGroups = createMemo<ScheduleGroup[]>(() => {
-    const projectMap = new Map((projects() ?? []).map((p) => [p.identity, p]));
-    const groups = new Map<string, TaskScheduleEntry[]>();
-    for (const entry of upcomingSchedules()) {
-      const list = groups.get(entry.project_path);
-      if (list) list.push(entry);
-      else groups.set(entry.project_path, [entry]);
-    }
-    const now = Date.now();
-    return [...groups.entries()]
-      .map(([projectPath, entries]) => ({
-        projectPath,
-        project: projectMap.get(projectPath),
-        entries: entries.sort((a, b) => (a.next_due_at ?? 0) - (b.next_due_at ?? 0)),
-        soonestDue: Math.min(...entries.map((e) => e.next_due_at ?? Number.POSITIVE_INFINITY)),
-        overdueCount: entries.filter((e) => (e.next_due_at ?? 0) > 0 && (e.next_due_at ?? 0) < now)
-          .length,
-        failedCount: entries.filter((e) => e.last_status === "failed").length,
-      }))
-      .sort((a, b) => a.soonestDue - b.soonestDue);
-  });
-  const [expandedSchedules, setExpandedSchedules] = createSignal<Set<string>>(new Set());
-  const toggleScheduleGroup = (projectPath: string) => {
-    setExpandedSchedules((previous) => {
+
+  // Card-level health: red if any enabled task last failed, amber if any enabled
+  // task hasn't run yet, green if all enabled tasks succeeded, gray if none on.
+  const cardHealth = (p: DreamerProject): Light => {
+    const on = enabledTasks(p);
+    if (on.length === 0) return "gray";
+    if (on.some((t) => t.last_status === "failed")) return "red";
+    if (on.some((t) => t.last_run_at == null && t.last_status == null)) return "amber";
+    if (on.some((t) => t.last_status === "completed")) return "green";
+    return "gray";
+  };
+
+  const failedCount = (p: DreamerProject) =>
+    p.tasks.filter((t) => t.last_status === "failed").length;
+
+  const toggleCard = (identity: string) => {
+    setExpandedCards((previous) => {
       const next = new Set(previous);
-      if (next.has(projectPath)) next.delete(projectPath);
-      else next.add(projectPath);
+      if (next.has(identity)) next.delete(identity);
+      else next.add(identity);
       return next;
     });
   };
-  const isScheduleExpanded = (projectPath: string) => expandedSchedules().has(projectPath);
+  const isCardExpanded = (identity: string) => expandedCards().has(identity);
+
+  const lightTitle = (t: DreamerProjectTask): string => {
+    const when = t.last_run_at != null ? formatRelativeTime(t.last_run_at) : "never run";
+    const status = t.last_status ?? (isTaskEnabled(t) ? "pending" : "disabled");
+    const err = t.last_error ? ` — ${t.last_error}` : "";
+    return `${status} · ${when}${err}`;
+  };
   const latestRecordedRun = createMemo(() => {
     const allRuns = runs() ?? [];
     return allRuns.length > 0 ? allRuns[0] : null;
@@ -292,116 +302,97 @@ export default function DreamerPanel() {
             </div>
           </Show>
           <div class="stat-item">
-            <span class="stat-label">Scheduled</span>
-            <span class="stat-value">{upcomingSchedules().length} tasks</span>
+            <span class="stat-label">Tracked</span>
+            <span class="stat-value">{cards().length} projects</span>
           </div>
           <div class="stat-item">
-            <span class="stat-label">Projects</span>
-            <span class="stat-value">{groupedRuns().length}</span>
+            <span class="stat-label">Scheduled</span>
+            <span class="stat-value">
+              {cards().reduce((n, p) => n + enabledTasks(p).length, 0)} tasks
+            </span>
           </div>
         </div>
       </div>
 
       <div class="scroll-area">
-        <Show when={scheduleGroups().length > 0}>
+        <Show when={cards().length > 0}>
           <div class="category-header">
-            Scheduled Tasks{" "}
-            <span class="category-count">
-              ({upcomingSchedules().length} across {scheduleGroups().length} project
-              {scheduleGroups().length === 1 ? "" : "s"})
-            </span>
+            Tracked Projects <span class="category-count">({cards().length})</span>
           </div>
-          <div class="list-gap" style={{ "margin-bottom": "16px" }}>
-            <For each={scheduleGroups()}>
-              {(group) => {
-                const now = Date.now();
-                return (
-                  <div class="card dream-run-card">
+          <div class="dreamer-project-grid">
+            <For each={cards()}>
+              {(project) => (
+                <div class="card dreamer-project-card">
+                  <div class="dreamer-project-head">
                     <button
                       type="button"
-                      class="dream-run-header"
-                      onClick={() => toggleScheduleGroup(group.projectPath)}
+                      class="dreamer-project-toggle"
+                      onClick={() => toggleCard(project.identity)}
                     >
-                      <div>
-                        <div class="dream-run-title-row">
-                          <span class="card-title" style={{ margin: 0 }}>
-                            {getProjectLabel(group.project, group.projectPath)}
-                          </span>
-                          <span class={`pill ${group.overdueCount > 0 ? "amber" : "blue"}`}>
-                            {group.entries.length} task{group.entries.length === 1 ? "" : "s"}
-                          </span>
-                          <Show when={group.failedCount > 0}>
-                            <span class="pill red">{group.failedCount} failed</span>
-                          </Show>
-                        </div>
-                        <div class="card-meta" style={{ "margin-top": "4px" }}>
-                          <span>
-                            {group.overdueCount > 0
-                              ? `${group.overdueCount} due now`
-                              : `Next: ${formatRelativeTime(group.soonestDue)}`}
-                          </span>
-                          <Show
-                            when={
-                              group.projectPath !==
-                              getProjectLabel(group.project, group.projectPath)
-                            }
-                          >
-                            <span>·</span>
-                            <span class="mono">{group.projectPath}</span>
-                          </Show>
-                        </div>
-                      </div>
-                      <span class="dream-run-chevron">
-                        {isScheduleExpanded(group.projectPath) ? "▾" : "▸"}
+                      <span class={`status-dot ${cardHealth(project)}`} />
+                      <span class="dreamer-project-name">{project.label}</span>
+                      <span class="pill blue">{enabledTasks(project).length} on</span>
+                      <Show when={failedCount(project) > 0}>
+                        <span class="pill red">{failedCount(project)} failed</span>
+                      </Show>
+                      <span class="dreamer-project-chevron">
+                        {isCardExpanded(project.identity) ? "▾" : "▸"}
                       </span>
                     </button>
-
-                    <Show when={isScheduleExpanded(group.projectPath)}>
-                      <div class="dream-run-history">
-                        <For each={group.entries}>
-                          {(entry) => {
-                            const due = entry.next_due_at ?? 0;
-                            const overdue = due > 0 && due < now;
-                            return (
-                              <div class="dream-schedule-row">
-                                <div class="dream-schedule-row-main">
-                                  <span class={`pill ${overdue ? "amber" : "blue"}`}>
-                                    {overdue ? "due" : "scheduled"}
-                                  </span>
-                                  <span style={{ "margin-left": "8px" }}>
-                                    {formatTaskLabel(entry.task)}
-                                  </span>
-                                  <span class="card-meta" style={{ "margin-left": "8px" }}>
-                                    {overdue ? "Due" : "Next"}: {formatRelativeTime(due)}
-                                    <Show when={entry.last_run_at != null}>
-                                      {" · Last run: "}
-                                      {formatRelativeTime(entry.last_run_at ?? 0)}
-                                    </Show>
-                                    <Show when={entry.retry_count > 0}>
-                                      {" · Retries: "}
-                                      {entry.retry_count}
-                                    </Show>
-                                  </span>
-                                  <Show when={entry.last_status === "failed"}>
-                                    <span class="pill red" style={{ "margin-left": "8px" }}>
-                                      last failed
-                                    </span>
-                                  </Show>
-                                </div>
-                                <Show when={entry.last_error}>
-                                  <div class="card-meta" style={{ color: "var(--red)" }}>
-                                    {entry.last_error}
-                                  </div>
-                                </Show>
-                              </div>
-                            );
-                          }}
-                        </For>
-                      </div>
-                    </Show>
+                    <button
+                      type="button"
+                      class="dreamer-gear"
+                      title="Configure dreamer for this project"
+                      disabled={!project.worktree}
+                      onClick={() => setConfigProject(project)}
+                    >
+                      ⚙
+                    </button>
                   </div>
-                );
-              }}
+                  <div class="dreamer-project-sub">
+                    <span
+                      class={`pill ${project.has_project_config ? "indigo" : "gray"}`}
+                      title={
+                        project.has_project_config
+                          ? "This project has its own dreamer config"
+                          : "Inherits the global dreamer config"
+                      }
+                    >
+                      {project.has_project_config ? "per-project" : "inherited"}
+                    </span>
+                    <span class="mono dreamer-project-identity">{project.identity}</span>
+                  </div>
+
+                  <Show when={isCardExpanded(project.identity)}>
+                    <div class="dreamer-task-list">
+                      <For each={project.tasks}>
+                        {(task) => (
+                          <div class="dreamer-task-line">
+                            <span
+                              class={`status-dot ${taskLight(task)}`}
+                              title={lightTitle(task)}
+                            />
+                            <span class="dreamer-task-name">{formatTaskLabel(task.task)}</span>
+                            <span class="dreamer-task-sched">
+                              {isTaskEnabled(task) ? describeCron(task.schedule ?? "") : "disabled"}
+                            </span>
+                            <Show when={isTaskEnabled(task) && task.next_due_at != null}>
+                              <span class="card-meta">
+                                · next {formatRelativeTime(task.next_due_at ?? 0)}
+                              </span>
+                            </Show>
+                            <Show when={task.last_error}>
+                              <span class="dreamer-task-err" title={task.last_error ?? ""}>
+                                {task.last_error}
+                              </span>
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              )}
             </For>
           </div>
         </Show>
@@ -654,11 +645,7 @@ export default function DreamerPanel() {
         </Show>
 
         <Show
-          when={
-            (schedules() ?? []).length === 0 &&
-            (state() ?? []).length === 0 &&
-            (runs() ?? []).length === 0
-          }
+          when={cards().length === 0 && (state() ?? []).length === 0 && (runs() ?? []).length === 0}
         >
           <div class="empty-state">
             <span class="empty-state-icon">🌙</span>
@@ -669,6 +656,17 @@ export default function DreamerPanel() {
           </div>
         </Show>
       </div>
+
+      <Show when={configProject()}>
+        {(project) => (
+          <DreamerProjectConfigPanel
+            project={project()}
+            models={models() ?? []}
+            onClose={() => setConfigProject(null)}
+            onSaved={() => refetchDreamerProjects()}
+          />
+        )}
+      </Show>
     </>
   );
 }

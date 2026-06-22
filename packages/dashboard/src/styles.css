@@ -1263,6 +1263,191 @@ body {
   flex-wrap: wrap;
 }
 
+/* ── Dreamer project cards (2-column grid) ───────────────────── */
+.dreamer-project-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Cards size to their own content — an expanded card grows without stretching
+     its row-neighbor into a tall empty box. */
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+  .dreamer-project-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dreamer-project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.dreamer-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dreamer-project-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.dreamer-project-name {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dreamer-project-chevron {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.dreamer-gear {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary, var(--text-primary));
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.dreamer-gear:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.dreamer-gear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dreamer-project-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dreamer-project-identity {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Traffic-light status dot */
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.status-dot.green {
+  background: var(--green, #30a46c);
+}
+
+.status-dot.amber {
+  background: var(--amber, #f5a623);
+}
+
+.status-dot.red {
+  background: var(--red, #e5484d);
+}
+
+.status-dot.gray {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+.dreamer-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.dreamer-task-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dreamer-task-name {
+  min-width: 130px;
+}
+
+.dreamer-task-sched {
+  color: var(--text-muted);
+}
+
+.dreamer-task-err {
+  color: var(--red, #e5484d);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ── Per-project dreamer config panel ────────────────────────── */
+.slide-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.slide-panel-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.dreamer-config-panel {
+  width: 540px;
+}
+
+.dreamer-config-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.dreamer-config-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .dream-run-detail {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

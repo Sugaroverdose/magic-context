@@ -296,6 +296,27 @@ export interface DreamStateEntry {
   value: string;
 }
 
+export interface DreamerProjectTask {
+  task: string;
+  schedule: string | null;
+  last_run_at: number | null;
+  next_due_at: number | null;
+  last_status: "completed" | "failed" | "skipped" | null;
+  last_error: string | null;
+  retry_count: number;
+}
+
+export interface DreamerProject {
+  identity: string;
+  label: string;
+  /** Worktree dir for per-project config read/write; null when unresolvable. */
+  worktree: string | null;
+  config_path: string | null;
+  /** True when this project declares its own `dreamer` block (vs inherits global). */
+  has_project_config: boolean;
+  tasks: DreamerProjectTask[];
+}
+
 export interface DreamRunTask {
   name: string;
   durationMs: number;

@@ -329,6 +329,10 @@ export async function getDreamState(): Promise<DreamStateEntry[]> {
   return invoke("get_dream_state");
 }
 
+export async function getDreamerProjects(): Promise<import("./types").DreamerProject[]> {
+  return invoke("get_dreamer_projects");
+}
+
 export async function getDreamRuns(projectPath?: string, limit?: number): Promise<DreamRun[]> {
   return invoke("get_dream_runs", {
     projectPath: projectPath ?? null,
@@ -441,6 +445,18 @@ export function formatTimestamp(ts: number): string {
 export function formatRelativeTime(ts: number): string {
   const now = Date.now();
   const diff = now - ts;
+  // Future timestamp (e.g. a not-yet-due schedule) → "in X" rather than a
+  // nonsensical negative "-72912s ago".
+  if (diff < 0) {
+    const seconds = Math.floor(-diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    if (days > 0) return `in ${days}d`;
+    if (hours > 0) return `in ${hours}h`;
+    if (minutes > 0) return `in ${minutes}m`;
+    return `in ${seconds}s`;
+  }
   const seconds = Math.floor(diff / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);

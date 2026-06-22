@@ -431,6 +431,34 @@ pub struct DreamStateEntry {
     pub value: String,
 }
 
+/// One dreamer task's scheduled state for a project, as the dashboard project
+/// card renders it. `schedule` is the active reconciled cron (the plugin writes
+/// it each sweep from the effective merged config).
+#[derive(Debug, Serialize, Clone)]
+pub struct DreamerProjectTask {
+    pub task: String,
+    pub schedule: Option<String>,
+    pub last_run_at: Option<i64>,
+    pub next_due_at: Option<i64>,
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    pub retry_count: i64,
+}
+
+/// A tracked project for the dreamer page: its identity + friendly label, the
+/// worktree directory used to read/write a per-project config (when resolvable),
+/// whether it carries a per-project `dreamer` override (vs inheriting global),
+/// and the per-task schedule state.
+#[derive(Debug, Serialize, Clone)]
+pub struct DreamerProject {
+    pub identity: String,
+    pub label: String,
+    pub worktree: Option<String>,
+    pub config_path: Option<String>,
+    pub has_project_config: bool,
+    pub tasks: Vec<DreamerProjectTask>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct DreamRun {
     pub id: i64,
@@ -4219,6 +4247,86 @@ pub fn get_task_schedule_state(
         })
     })?;
     rows.collect()
+}
+
+/// Assemble the dreamer page's project-card view: group task_schedule_state by
+/// project, resolve each identity to a worktree + per-project config status, and
+/// attach the per-task schedule rows. Projects with NO worktree mapping (e.g. a
+/// stale identity) still appear (worktree=None) so their schedule is visible —
+/// the per-project gear is simply disabled for them.
+pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, rusqlite::Error> {
+    // 1. Per-task rows, grouped by stored project_path.
+    let mut stmt = conn.prepare(
+        "SELECT project_path, task, schedule, last_run_at, next_due_at, last_status, last_error, retry_count
+         FROM task_schedule_state ORDER BY project_path, task",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            DreamerProjectTask {
+                task: row.get(1)?,
+                schedule: row.get(2)?,
+                last_run_at: row.get(3)?,
+                next_due_at: row.get(4)?,
+                last_status: row.get(5)?,
+                last_error: row.get(6)?,
+                retry_count: row.get(7)?,
+            },
+        ))
+    })?;
+
+    let mut by_identity: std::collections::BTreeMap<String, Vec<DreamerProjectTask>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let (stored_path, task) = row?;
+        let identity = normalize_stored_project_path(&stored_path);
+        if identity.is_empty() {
+            continue;
+        }
+        by_identity.entry(identity).or_default().push(task);
+    }
+
+    // 2. identity → (label, worktree) via the same enumeration the picker uses.
+    let identity_to_row: HashMap<String, ProjectRow> = enumerate_projects_filtered(None)
+        .into_iter()
+        .map(|row| (row.identity.clone(), row))
+        .collect();
+
+    let projects = by_identity
+        .into_iter()
+        .map(|(identity, tasks)| {
+            let row = identity_to_row.get(&identity);
+            let label = match row {
+                Some(r) => r.display_name.clone(),
+                None if identity.starts_with("git:") => {
+                    format!("git:{}…", &identity[4..std::cmp::min(identity.len(), 14)])
+                }
+                None => identity.clone(),
+            };
+            // A worktree is usable for config read/write only if it still exists.
+            let worktree = row
+                .map(|r| r.primary_path.clone())
+                .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir());
+            let (config_path, has_project_config) = match &worktree {
+                Some(wt) => {
+                    let path = crate::config::resolve_project_config_path(wt);
+                    let has = crate::jsonc::config_has_dreamer_block(&path);
+                    (Some(path.to_string_lossy().to_string()), has)
+                }
+                None => (None, false),
+            };
+            DreamerProject {
+                identity,
+                label,
+                worktree,
+                config_path,
+                has_project_config,
+                tasks,
+            }
+        })
+        .collect();
+
+    Ok(projects)
 }
 
 pub fn get_dream_state(conn: &Connection) -> Result<Vec<DreamStateEntry>, rusqlite::Error> {
