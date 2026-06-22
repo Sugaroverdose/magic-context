@@ -37,10 +37,11 @@ export interface ParsedEvent {
 
 export interface ParsedPrimerCandidate {
     question: string;
-    /** The `start` ordinal of the compartment the question was extracted from
-     *  (`<primer at_compartment="N">`). Undefined for the legacy bullet form,
-     *  in which case emission falls back to the chunk span. */
-    originCompartmentStart?: number;
+    /** 1-based index into the publish's emitted compartments
+     *  (`<primer at_compartment="N">`), matching the SAME convention as
+     *  `<events>` anchoring. Undefined for the legacy bullet form, in which case
+     *  emission falls back to the chunk span. */
+    originCompartmentIndex?: number;
 }
 
 export interface ParsedCompartmentOutput {
@@ -220,7 +221,7 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
             if (question) {
                 primerCandidates.push({
                     question,
-                    originCompartmentStart: Number.parseInt(el[1], 10),
+                    originCompartmentIndex: Number.parseInt(el[1], 10),
                 });
             }
         }

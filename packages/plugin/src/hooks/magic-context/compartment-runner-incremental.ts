@@ -835,14 +835,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 const [candidate] = validatedPass.primerCandidates;
                 // Origin-tag: narrow the source to the SPECIFIC compartment the
                 // question came from (refresh-primers seeds its investigation from
-                // that compartment's raw chunk). Fall back to the chunk span when
-                // the historian didn't tag an origin or it matches no emitted
-                // compartment (loose but non-fatal — never fail the pass).
+                // that compartment's raw chunk). `originCompartmentIndex` is 1-based
+                // into the emitted list — the SAME convention as <events>
+                // at_compartment. Fall back to the chunk span when untagged or
+                // out of range (loose but non-fatal — never fail the pass).
+                const idx = candidate.originCompartmentIndex;
                 const origin =
-                    typeof candidate.originCompartmentStart === "number"
-                        ? newCompartments.find(
-                              (c) => c.startMessage === candidate.originCompartmentStart,
-                          )
+                    typeof idx === "number" && idx >= 1 && idx <= newCompartments.length
+                        ? newCompartments[idx - 1]
                         : undefined;
                 const startC = origin ?? firstNew;
                 const endC = origin ?? lastNew;

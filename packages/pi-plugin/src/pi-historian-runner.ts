@@ -1060,14 +1060,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					// origin-compartment tag is the single tagged origin).
 					const [candidate] = validatedPass.primerCandidates;
 					// Origin-tag (mirrors OpenCode): narrow the source to the SPECIFIC
-					// compartment the question came from, with chunk-span fallback when
-					// untagged or unmatched (non-fatal).
+					// compartment the question came from. originCompartmentIndex is
+					// 1-based into the emitted list (same convention as <events>);
+					// chunk-span fallback when untagged or out of range (non-fatal).
+					const idx = candidate.originCompartmentIndex;
 					const origin =
-						typeof candidate.originCompartmentStart === "number"
-							? newCompartments.find(
-									(c) =>
-										c.startMessage === candidate.originCompartmentStart,
-								)
+						typeof idx === "number" &&
+						idx >= 1 &&
+						idx <= newCompartments.length
+							? newCompartments[idx - 1]
 							: undefined;
 					const startC = origin ?? firstNew;
 					const endC = origin ?? lastNew;

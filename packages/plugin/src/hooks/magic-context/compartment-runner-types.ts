@@ -166,10 +166,10 @@ export type ValidatedHistorianPassResult =
           facts: Array<{ category: string; content: string }>;
           userObservations?: string[];
           /** Durable standing-question candidates for Primers v1 (stored side-table only).
-           *  `originCompartmentStart` is the `start` ordinal of the compartment the
-           *  question came from (origin-tag); undefined → emission falls back to
-           *  the chunk span. */
-          primerCandidates?: Array<{ question: string; originCompartmentStart?: number }>;
+           *  `originCompartmentIndex` is the 1-based index into THIS publish's
+           *  emitted compartments (same convention as `<events>` at_compartment);
+           *  undefined → emission falls back to the chunk span. */
+          primerCandidates?: Array<{ question: string; originCompartmentIndex?: number }>;
           /** v2: historian-extracted events (stored, not rendered). */
           events?: ParsedEvent[];
           /**

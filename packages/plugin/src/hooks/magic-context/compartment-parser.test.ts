@@ -274,12 +274,12 @@ describe("parseCompartmentOutput — primer_candidates", () => {
             "How does the materialization cache avoid busts?",
         ]);
         // Legacy bullet form carries no origin tag.
-        expect(parsed.primerCandidates.every((c) => c.originCompartmentStart === undefined)).toBe(
+        expect(parsed.primerCandidates.every((c) => c.originCompartmentIndex === undefined)).toBe(
             true,
         );
     });
 
-    it("parses the origin-tagged <primer at_compartment> form", () => {
+    it("parses the origin-tagged <primer at_compartment> form (1-based index, same as events)", () => {
         const parsed = parseCompartmentOutput(`
 <output>
 <compartments>
@@ -288,13 +288,15 @@ describe("parseCompartmentOutput — primer_candidates", () => {
 </compartment>
 </compartments>
 <primer_candidates>
-<primer at_compartment="5">How does the m[0]/m[1] cache split work?</primer>
+<primer at_compartment="1">How does the m[0]/m[1] cache split work?</primer>
 </primer_candidates>
 <meta><messages_processed>5-9</messages_processed><unprocessed_from>10</unprocessed_from></meta>
 </output>`);
 
+        // at_compartment is the 1-based index into the emitted compartments, NOT
+        // the start ordinal — so "1" → the first (and only) compartment here.
         expect(parsed.primerCandidates).toEqual([
-            { question: "How does the m[0]/m[1] cache split work?", originCompartmentStart: 5 },
+            { question: "How does the m[0]/m[1] cache split work?", originCompartmentIndex: 1 },
         ]);
     });
 
@@ -312,7 +314,7 @@ describe("parseCompartmentOutput — primer_candidates", () => {
 <meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
 </output>`);
         expect(parsed.primerCandidates).toHaveLength(1);
-        expect(parsed.primerCandidates[0].originCompartmentStart).toBe(1);
+        expect(parsed.primerCandidates[0].originCompartmentIndex).toBe(1);
     });
 });
 
