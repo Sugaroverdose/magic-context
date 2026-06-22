@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 
 import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "../../../agents/dreamer";
 import type { DreamingTask } from "../../../config/schema/magic-context";
+import { type RawMessageProvider } from '../../../hooks/magic-context/read-session-chunk';
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -78,6 +79,13 @@ export interface DreamTaskExecutorDeps {
     userMemoryCollectionEnabled?: boolean;
     /** Ensure the project embedding provider is registered before primer clustering embeds candidates. */
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void> | void;
+    /**
+     * Pi only: builds a RawMessageProvider for an arbitrary historical session id
+     * so refresh-primers can render the orientation seed from Pi JSONL. OpenCode
+     * leaves this undefined (the seed read falls to the read-only opencode.db
+     * path). Returning null for a session → refresh falls back to closed-book.
+     */
+    primerRawProviderFactory?: (sessionId: string) => RawMessageProvider | null;
 }
 
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
@@ -301,6 +309,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     deadline,
                     model: config.model,
                     fallbackModels: config.fallbackModels,
+                    rawProviderFactory: deps.primerRawProviderFactory,
                 });
                 recordRun("completed", null);
                 log(

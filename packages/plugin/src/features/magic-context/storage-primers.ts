@@ -249,6 +249,15 @@ export function updatePrimerCandidateEmbedding(
     ).run(vectorBlob(vector), modelId, candidateId);
 }
 
+export function getPrimerCandidatesByIds(db: Database, ids: number[]): PrimerCandidate[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db
+        .prepare(`SELECT * FROM primer_candidates WHERE id IN (${placeholders})`)
+        .all(...ids) as CandidateRow[];
+    return rows.map(toCandidate);
+}
+
 export function getPrimerCandidatesForProject(
     db: Database,
     projectPath: string,
