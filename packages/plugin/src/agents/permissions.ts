@@ -210,4 +210,11 @@ export const DREAMER_ALLOWED_TOOLS = [
 
 export const DREAMER_RETROSPECTIVE_ALLOWED_TOOLS = ["ctx_search"] as const;
 
+/**
+ * The smart-note compiler consumes untrusted note text and emits code that will
+ * later run in the QuickJS sandbox. It must not have ambient tools: all I/O is
+ * performed only when the compiled check runs through the host capability API.
+ */
+export const SMART_NOTE_COMPILER_ALLOWED_TOOLS = [] as const;
+
 export const SIDEKICK_ALLOWED_TOOLS = ["ctx_search", "aft_outline", "aft_zoom"] as const;

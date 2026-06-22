@@ -45,6 +45,7 @@
 		"@opencode-ai/sdk": "^1.15.13",
 		"ai-tokenizer": "^1.0.6",
 		"comment-json": "^4.2.5",
+		"quickjs-emscripten": "^0.32.0",
 		"zod": "^4.1.8"
 	},
 	"devDependencies": {

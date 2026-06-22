@@ -14,8 +14,10 @@ import {
     DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
     SIDEKICK_ALLOWED_TOOLS,
+    SMART_NOTE_COMPILER_ALLOWED_TOOLS,
 } from "./agents/permissions";
 import { SIDEKICK_AGENT } from "./agents/sidekick";
+import { SMART_NOTE_COMPILER_AGENT } from "./agents/smart-note-compiler";
 
 /**
  * `buildHiddenAgentRegistrations` deliberately uses INLINE literals for the
@@ -45,6 +47,7 @@ describe("hidden-agent registration drift guard", () => {
             [
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
+                SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
                 HISTORIAN_RECOMP_AGENT,
@@ -63,9 +66,18 @@ describe("hidden-agent registration drift guard", () => {
         ]);
     });
 
-    test("retrospective is the only lockPermissions agent (privacy-critical)", () => {
+    test("smart-note compiler has no tools and locked permissions", () => {
+        expect(byId(SMART_NOTE_COMPILER_AGENT)?.allowedTools).toEqual([
+            ...SMART_NOTE_COMPILER_ALLOWED_TOOLS,
+        ]);
+        expect(byId(SMART_NOTE_COMPILER_AGENT)?.lockPermissions).toBe(true);
+    });
+
+    test("only privacy/security-critical agents lock permissions", () => {
         for (const reg of regs) {
-            expect(reg.lockPermissions === true).toBe(reg.id === DREAMER_RETROSPECTIVE_AGENT);
+            expect(reg.lockPermissions === true).toBe(
+                reg.id === DREAMER_RETROSPECTIVE_AGENT || reg.id === SMART_NOTE_COMPILER_AGENT,
+            );
         }
     });
 
@@ -146,6 +158,7 @@ describe("hidden-agent registration drift guard", () => {
     test("step caps match the documented values", () => {
         expect(byId(DREAMER_AGENT)?.maxSteps).toBe(150);
         expect(byId(DREAMER_RETROSPECTIVE_AGENT)?.maxSteps).toBe(40);
+        expect(byId(SMART_NOTE_COMPILER_AGENT)?.maxSteps).toBe(8);
         expect(byId(HISTORIAN_AGENT)?.maxSteps).toBe(40);
         expect(byId(HISTORIAN_EDITOR_AGENT)?.maxSteps).toBe(40);
         expect(byId(SIDEKICK_AGENT)?.maxSteps).toBe(40);
@@ -169,6 +182,7 @@ describe("hidden-agent registration drift guard", () => {
             [
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
+                SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
                 HISTORIAN_RECOMP_AGENT,

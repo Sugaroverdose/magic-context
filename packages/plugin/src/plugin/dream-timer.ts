@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 
 import type { DreamerConfig } from "../config/schema/magic-context";
+import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
 import {
     retrospectiveOrphanStaleMs,
@@ -16,6 +17,7 @@ import {
     userMemoryCollectionEnabled,
 } from "../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../features/magic-context/dreamer/task-executor";
+import { leaseKeyFor } from "../features/magic-context/dreamer/task-registry";
 import { runDueTasksForProject } from "../features/magic-context/dreamer/task-scheduler";
 import {
     acquireGitSweepLease,
@@ -31,6 +33,7 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
 import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
+import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
@@ -283,6 +286,8 @@ async function sweepProject(
     }
 
     try {
+        await runCompiledSmartNoteSweep(reg, db);
+
         // Dreamer v2: per-task cron scheduling. The scheduler seeds/reads
         // task_schedule_state, evaluates each task's cron + activity gate, and
         // runs due tasks grouped by conflict-domain under keyed leases. The
@@ -335,6 +340,26 @@ async function sweepProject(
         }
     } catch (error) {
         log(`[dreamer] timer-triggered task scheduling failed for ${reg.projectIdentity}:`, error);
+    }
+}
+
+async function runCompiledSmartNoteSweep(reg: ProjectRegistration, db: Database): Promise<void> {
+    const leaseKey = leaseKeyFor("evaluate-smart-notes", reg.projectIdentity);
+    const holderId = crypto.randomUUID();
+    if (!acquireLease(db, holderId, leaseKey)) return;
+    try {
+        const result = await runDueCompiledSmartNoteChecks({
+            db,
+            projectIdentity: reg.projectIdentity,
+            projectRoot: reg.directory,
+        });
+        if (result.ran > 0) {
+            log(
+                `[dreamer] compiled smart-note sweep ${reg.projectIdentity}: ran=${result.ran} surfaced=${result.surfaced} logic_failed=${result.failed} network_failed=${result.networkFailed}`,
+            );
+        }
+    } finally {
+        releaseLease(db, holderId, leaseKey);
     }
 }
 

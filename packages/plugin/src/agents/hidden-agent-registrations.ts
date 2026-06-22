@@ -73,6 +73,7 @@ export interface HiddenAgentRegistration {
  */
 export function buildHiddenAgentRegistrations(args: {
     dreamerPrompt: string | undefined;
+    smartNoteCompilerPrompt?: string | undefined;
     historianPrompt: string | undefined;
     historianRecompPrompt?: string | undefined;
     historianEditorPrompt: string | undefined;
@@ -118,6 +119,16 @@ export function buildHiddenAgentRegistrations(args: {
             // Privacy-critical: this child reads OTHER sessions' raw user text.
             // Lock it to ctx_search-only — a user dreamer `permission` override
             // must never broaden it.
+            lockPermissions: true,
+        },
+        {
+            id: "smart-note-compiler",
+            prompt: args.smartNoteCompilerPrompt ?? args.dreamerPrompt,
+            allowedTools: [],
+            maxSteps: 8,
+            overrides: args.dreamerOverrides,
+            // Security-critical: condition text is untrusted prompt data; never
+            // let user dreamer overrides grant tools to the compiler.
             lockPermissions: true,
         },
         {

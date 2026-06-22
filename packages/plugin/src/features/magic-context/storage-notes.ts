@@ -3,6 +3,7 @@ import type { Database } from "../../shared/sqlite";
 
 export type NoteType = "session" | "smart";
 export type NoteStatus = "active" | "pending" | "ready" | "dismissed";
+export type NoteCheckStatus = "uncompiled" | "compiled" | "failing" | "fallback";
 
 export interface Note {
     id: number;
@@ -23,6 +24,20 @@ export interface Note {
      *  via ctx_expand at its own discretion. Null for notes written before this
      *  was tracked, or when the session had no indexed messages yet. */
     anchorOrdinal: number | null;
+    compiledCheck: string | null;
+    manifestJson: string | null;
+    checkHash: string | null;
+    checkCron: string | null;
+    checkVersion: number | null;
+    checkStatus: NoteCheckStatus | null;
+    checkFailureCount: number;
+    checkNetworkFailureCount: number;
+    checkQuarantinedUntil: number | null;
+    checkNextDueAt: number | null;
+    checkCompiledAt: number | null;
+    checkFalseSinceAt: number | null;
+    checkLastLivenessAt: number | null;
+    policyVersion: number | null;
 }
 
 export interface GetNotesOptions {
@@ -62,6 +77,20 @@ interface NoteRow {
     ready_at: number | null;
     ready_reason: string | null;
     anchor_ordinal?: number | null;
+    compiled_check?: string | null;
+    manifest_json?: string | null;
+    check_hash?: string | null;
+    check_cron?: string | null;
+    check_version?: number | null;
+    check_status?: string | null;
+    check_failure_count?: number | null;
+    check_network_failure_count?: number | null;
+    check_quarantined_until?: number | null;
+    check_next_due_at?: number | null;
+    check_compiled_at?: number | null;
+    check_false_since_at?: number | null;
+    check_last_liveness_at?: number | null;
+    policy_version?: number | null;
 }
 
 interface SessionNoteInput {
@@ -80,6 +109,12 @@ interface SmartNoteInput {
 
 const NOTE_TYPES = new Set<NoteType>(["session", "smart"]);
 const NOTE_STATUSES = new Set<NoteStatus>(["active", "pending", "ready", "dismissed"]);
+const NOTE_CHECK_STATUSES = new Set<NoteCheckStatus>([
+    "uncompiled",
+    "compiled",
+    "failing",
+    "fallback",
+]);
 const DEFAULT_SMART_STATUSES: NoteStatus[] = ["pending", "ready"];
 
 function toNullableString(value: unknown): string | null {
@@ -126,7 +161,34 @@ function toNote(row: NoteRow): Note {
         readyAt: toNullableNumber(row.ready_at),
         readyReason: toNullableString(row.ready_reason),
         anchorOrdinal: toNullableNumber(row.anchor_ordinal),
+        compiledCheck: toNullableString(row.compiled_check),
+        manifestJson: toNullableString(row.manifest_json),
+        checkHash: toNullableString(row.check_hash),
+        checkCron: toNullableString(row.check_cron),
+        checkVersion: toNullableNumber(row.check_version),
+        checkStatus:
+            typeof row.check_status === "string" &&
+            NOTE_CHECK_STATUSES.has(row.check_status as NoteCheckStatus)
+                ? (row.check_status as NoteCheckStatus)
+                : null,
+        checkFailureCount: toNullableNumber(row.check_failure_count) ?? 0,
+        checkNetworkFailureCount: toNullableNumber(row.check_network_failure_count) ?? 0,
+        checkQuarantinedUntil: toNullableNumber(row.check_quarantined_until),
+        checkNextDueAt: toNullableNumber(row.check_next_due_at),
+        checkCompiledAt: toNullableNumber(row.check_compiled_at),
+        checkFalseSinceAt: toNullableNumber(row.check_false_since_at),
+        checkLastLivenessAt: toNullableNumber(row.check_last_liveness_at),
+        policyVersion: toNullableNumber(row.policy_version),
     };
+}
+
+function noteCheckColumnsExist(db: Database): boolean {
+    try {
+        const rows = db.prepare("PRAGMA table_info(notes)").all() as Array<{ name?: string }>;
+        return rows.some((row) => row.name === "compiled_check");
+    } catch {
+        return false;
+    }
 }
 
 function getNoteById(db: Database, noteId: number): Note | null {
@@ -308,6 +370,23 @@ export function updateNote(
                 "ready_at = NULL",
                 "ready_reason = NULL",
             );
+            if (noteCheckColumnsExist(db)) {
+                sets.push(
+                    "compiled_check = NULL",
+                    "manifest_json = NULL",
+                    "check_hash = NULL",
+                    "check_cron = NULL",
+                    "check_version = 0",
+                    "check_status = 'uncompiled'",
+                    "check_failure_count = 0",
+                    "check_network_failure_count = 0",
+                    "check_quarantined_until = NULL",
+                    "check_next_due_at = NULL",
+                    "check_compiled_at = NULL",
+                    "check_false_since_at = NULL",
+                    "check_last_liveness_at = NULL",
+                );
+            }
         } else {
             if (updates.lastCheckedAt !== undefined) {
                 sets.push("last_checked_at = ?");

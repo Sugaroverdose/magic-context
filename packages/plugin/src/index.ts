@@ -9,6 +9,7 @@ import { getMagicContextBuiltinCommands } from "./features/builtin-commands/comm
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
+import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "./features/magic-context/smart-notes/compiler-prompt";
 import {
     getSchemaFenceRejection,
     isDatabasePersisted,
@@ -514,6 +515,7 @@ const server: Plugin = async (ctx) => {
                 // rather than register a broken agent.
                 const registrations = buildHiddenAgentRegistrations({
                     dreamerPrompt: DREAMER_SYSTEM_PROMPT,
+                    smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
                     // v2: the v8.7.3 historian prompt always describes the
                     // <user_observations> output; observations are simply not
                     // promoted to user-profile when user_memories is disabled

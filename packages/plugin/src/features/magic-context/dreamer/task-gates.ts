@@ -1,4 +1,8 @@
 import type { Database } from "../../../shared/sqlite";
+import {
+    getSmartNotesNeedingCompilation,
+    getStaleCompiledSmartNotes,
+} from "../smart-notes/storage";
 import { getPendingSmartNotes } from "../storage-notes";
 import { countPrimerCandidatesForProject, getActivePrimers } from "../storage-primers";
 import { getUserMemoryCandidates } from "../user-memory/storage-user-memory";
@@ -109,7 +113,11 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             return countCompartmentsSince(db, project, lastRunAt ?? 0) > 0;
 
         case "evaluate-smart-notes":
-            return getPendingSmartNotes(db, project).length > 0;
+            return (
+                getSmartNotesNeedingCompilation(db, project, 1).length > 0 ||
+                getStaleCompiledSmartNotes(db, project, Date.now(), 1).length > 0 ||
+                getPendingSmartNotes(db, project).some((note) => note.checkStatus === "fallback")
+            );
 
         case "review-user-memories":
             // Candidate observations are GLOBAL (cross-project user profile).

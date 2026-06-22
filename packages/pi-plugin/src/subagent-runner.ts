@@ -131,6 +131,7 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
  */
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
 	["dreamer-retrospective", ["ctx_search"]],
+	["smart-note-compiler", []],
 ]);
 
 function inferAccountingSubagent(agent: string): SubagentKind {
@@ -948,8 +949,12 @@ export function buildArgs(
 	// even if the lean extension exposed more, only the named tools survive. NOT
 	// `--no-tools` (that disables EVERYTHING, including the ctx_search we need).
 	const strictTools = STRICT_TOOL_ALLOWLIST.get(options.agent);
-	if (strictTools && strictTools.length > 0) {
-		args.push("--tools", strictTools.join(","));
+	if (strictTools) {
+		if (strictTools.length > 0) {
+			args.push("--tools", strictTools.join(","));
+		} else {
+			args.push("--no-tools");
+		}
 	}
 
 	if (options.systemPrompt && options.systemPrompt.length > 0) {

@@ -1693,6 +1693,35 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 47,
+        description: "compiled smart-note checks and runtime policy state",
+        up: (db: Database) => {
+            if (!tableExists(db, "notes")) return;
+            ensureColumn(db, "notes", "compiled_check", "TEXT");
+            ensureColumn(db, "notes", "manifest_json", "TEXT");
+            ensureColumn(db, "notes", "check_hash", "TEXT");
+            ensureColumn(db, "notes", "check_cron", "TEXT");
+            ensureColumn(db, "notes", "check_version", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(db, "notes", "check_status", "TEXT NOT NULL DEFAULT 'uncompiled'");
+            ensureColumn(db, "notes", "check_failure_count", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(db, "notes", "check_network_failure_count", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(db, "notes", "check_quarantined_until", "INTEGER");
+            ensureColumn(db, "notes", "check_next_due_at", "INTEGER");
+            ensureColumn(db, "notes", "check_compiled_at", "INTEGER");
+            ensureColumn(db, "notes", "check_false_since_at", "INTEGER");
+            ensureColumn(db, "notes", "check_last_liveness_at", "INTEGER");
+            ensureColumn(db, "notes", "policy_version", "INTEGER NOT NULL DEFAULT 1");
+            db.exec(`
+                CREATE INDEX IF NOT EXISTS idx_notes_smart_checks_due
+                    ON notes(project_path, check_status, check_next_due_at)
+                    WHERE type = 'smart' AND status = 'pending';
+                CREATE INDEX IF NOT EXISTS idx_notes_smart_checks_liveness
+                    ON notes(project_path, check_false_since_at, check_last_liveness_at)
+                    WHERE type = 'smart' AND status = 'pending';
+            `);
+        },
+    },
 ];
 
 /**
