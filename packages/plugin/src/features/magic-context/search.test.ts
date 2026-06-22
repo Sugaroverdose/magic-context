@@ -21,6 +21,7 @@ import { ensureMessagesIndexed } from "./message-index";
 import { runMigrations } from "./migrations";
 import { unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
+import { createPrimer } from "./storage-primers";
 
 const readMessages = (sessionId: string) => rawMessagesBySession.get(sessionId) ?? [];
 const embedQuery = async (text: string) => {
@@ -95,6 +96,32 @@ describe("unifiedSearch", () => {
 
     afterEach(() => {
         closeQuietly(db);
+    });
+
+    it("returns promoted Primers through explicit recall search", async () => {
+        createPrimer(db, {
+            projectPath: "git:test",
+            question: "How does the cache system work?",
+            answer: "The prompt cache stays stable because Primers are recall-only.",
+            totalSupport: 2,
+            lastObservedAt: Date.UTC(2026, 0, 8),
+            sourceCandidateIds: [1, 2],
+        });
+
+        const results = await unifiedSearch(db, "session-1", "git:test", "cache system primers", {
+            sources: ["primer"],
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: false,
+            gitCommitsEnabled: false,
+        });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].source).toBe("primer");
+        if (results[0].source === "primer") {
+            expect(results[0].question).toBe("How does the cache system work?");
+            expect(results[0].support).toBe(2);
+        }
     });
 
     it("returns ranked results across memories and messages (no facts)", async () => {

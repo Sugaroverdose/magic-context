@@ -71,6 +71,7 @@ import {
 	tallyFactsByCategory,
 } from "@magic-context/core/features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
+import { insertPrimerCandidates } from "@magic-context/core/features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
 import {
@@ -112,6 +113,7 @@ import type {
 	SubagentRunner,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import {
 	convertEntriesToRawMessages,
@@ -124,6 +126,17 @@ const DEFAULT_HISTORIAN_TIMEOUT_MS = 120_000;
 /** Keep historian alert noise to once per minute per session. */
 const HISTORIAN_ALERT_COOLDOWN_MS = 60 * 1000;
 const lastHistorianAlertBySession = new Map<string, number>();
+
+function parseSourceMessageTime(value: unknown): number | null {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string") {
+		const numeric = Number(value);
+		if (Number.isFinite(numeric) && numeric > 0) return numeric;
+		const parsed = Date.parse(value);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return null;
+}
 
 function truncateHistorianInputIfNeeded(text: string, budget: number): string {
 	if (estimateTokens(text) <= budget) return text;
@@ -1031,6 +1044,52 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				}
 			}
 
+			// Primers v1 are recall-only side-table writes (dashboard + ctx_search),
+			// never prompt injection. They share the same !discardedLast gate as facts
+			// and observations so provisional tails do not double-emit evidence.
+			if (
+				!discardedLast &&
+				validatedPass.primerCandidates?.length &&
+				projectPath
+			) {
+				try {
+					const firstNew = newCompartments[0];
+					const lastNew = newCompartments[newCompartments.length - 1];
+					const sourceStartMessageId =
+						firstNew?.startMessageId ||
+						`ordinal:${firstNew?.startMessage ?? chunk.startIndex}`;
+					const sourceEndMessageId =
+						lastNew?.endMessageId ||
+						`ordinal:${lastNew?.endMessage ?? lastNewEnd}`;
+					const sourceMessage =
+						provider.readMessageById?.(sourceStartMessageId);
+					const sourceMessageTime =
+						parseSourceMessageTime(sourceMessage?.version) ?? Date.now();
+					// Stable occurrence key intentionally excludes question text, so a
+					// source chunk stores at most one candidate occurrence.
+					const [candidate] = validatedPass.primerCandidates;
+					const stored = insertPrimerCandidates(db, [
+						{
+							projectPath,
+							harness: "pi",
+							sessionId,
+							question: candidate.question,
+							sourceCompartmentStart: firstNew?.startMessage,
+							sourceCompartmentEnd: lastNew?.endMessage,
+							sourceStartMessageId,
+							sourceEndMessageId,
+							sourceMessageTime,
+						},
+					]);
+					sessionLog(
+						sessionId,
+						`stored ${stored.length} primer candidate occurrence(s)${validatedPass.primerCandidates.length > 1 ? " (stable occurrence key kept the first candidate)" : ""}`,
+					);
+				} catch (error) {
+					sessionLog(sessionId, "failed to store primer candidates:", error);
+				}
+			}
+
 			// Raw chunk embeddings: the ctx_search semantic substrate over session
 			// history. Fire-and-forget, best-effort, memory-gated.
 			if (embeddingActive) {
@@ -1185,6 +1244,13 @@ type ValidationOutcome =
 					: never
 				: never;
 			userObservations?: string[];
+			primerCandidates?: ReturnType<
+				typeof validateHistorianOutput
+			> extends infer T
+				? T extends { ok: true; primerCandidates?: infer P }
+					? P
+					: never
+				: never;
 			events?: ReturnType<typeof validateHistorianOutput> extends infer T
 				? T extends { ok: true; events?: infer E }
 					? E
@@ -1226,6 +1292,7 @@ async function validateHistorianResult(
 			compartments: validation.compartments,
 			facts: validation.facts,
 			userObservations: validation.userObservations,
+			primerCandidates: validation.primerCandidates,
 			events: validation.events,
 		};
 	}

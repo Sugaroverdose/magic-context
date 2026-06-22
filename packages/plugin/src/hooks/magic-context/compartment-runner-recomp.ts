@@ -1,3 +1,4 @@
+import { HISTORIAN_RECOMP_AGENT } from "../../agents/historian";
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
 import {
@@ -388,6 +389,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 // Suppress the <facts> section so the model doesn't waste output
                 // tokens on facts we'd discard anyway.
                 memoryEnabled: false,
+                extractionFree: true,
             });
 
             await sendIgnoredMessage(
@@ -414,6 +416,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 fallbackModels: deps.fallbackModels,
                 twoPass: deps.historianTwoPass,
                 subagentKind: "recomp",
+                agentId: HISTORIAN_RECOMP_AGENT,
                 callbacks: {
                     onRepairRetry: async (error) => {
                         emitProgress(`Repair retry (pass ${passCount + 1})…`);

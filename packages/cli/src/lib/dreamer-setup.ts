@@ -33,6 +33,8 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
     "key-files": "Pin frequently-read files into the system prompt",
     "evaluate-smart-notes": "Surface smart notes whose conditions are now met",
     "review-user-memories": "Promote recurring behaviors into your user profile",
+    "promote-primers": "Promote recurring project questions into Primers",
+    "refresh-primers": "Refresh answers for active project Primers",
 };
 
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
@@ -46,6 +48,8 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
     "review-user-memories": "0 3 * * *",
+    "promote-primers": "0 3 * * *",
+    "refresh-primers": "0 3 * * *",
 };
 
 const PRESET_CUSTOM = "__custom__";

@@ -185,6 +185,21 @@ pub struct MemoryStats {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct Primer {
+    pub id: i64,
+    pub project_path: String,
+    pub question: String,
+    pub answer: String,
+    pub status: String,
+    pub total_support: i64,
+    pub last_observed_at: Option<i64>,
+    pub answer_refreshed_at: Option<i64>,
+    pub source_candidate_ids: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct CategoryCount {
     pub category: String,
     pub count: i64,
@@ -2416,6 +2431,51 @@ pub fn get_memories(
     }
 }
 
+pub fn get_primers(
+    conn: &Connection,
+    project: Option<&str>,
+) -> Result<Vec<Primer>, rusqlite::Error> {
+    let has_primers: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'primers'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_primers == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = if project.is_some() {
+        "SELECT id, project_path, question, answer, status, total_support, last_observed_at, answer_refreshed_at, source_candidate_ids, created_at, updated_at
+         FROM primers
+         WHERE project_path = ?1
+         ORDER BY status ASC, COALESCE(last_observed_at, created_at) DESC, id ASC"
+    } else {
+        "SELECT id, project_path, question, answer, status, total_support, last_observed_at, answer_refreshed_at, source_candidate_ids, created_at, updated_at
+         FROM primers
+         ORDER BY project_path ASC, status ASC, COALESCE(last_observed_at, created_at) DESC, id ASC"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> Result<Primer, rusqlite::Error> {
+        Ok(Primer {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            question: row.get(2)?,
+            answer: row.get(3)?,
+            status: row.get(4)?,
+            total_support: row.get(5)?,
+            last_observed_at: row.get(6)?,
+            answer_refreshed_at: row.get(7)?,
+            source_candidate_ids: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+        })
+    };
+    if let Some(project) = project {
+        stmt.query_map(params![project], map_row)?.collect()
+    } else {
+        stmt.query_map([], map_row)?.collect()
+    }
+}
+
 /// True when the `memories` table carries the v44 classify columns. The
 /// dashboard never migrates, so a new dashboard can face a pre-v44 plugin DB.
 fn memories_has_classify_columns(conn: &Connection) -> bool {
@@ -4330,8 +4390,10 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
         ))
     })?;
 
-    let mut state_by_identity: std::collections::BTreeMap<String, HashMap<String, StoredTaskState>> =
-        std::collections::BTreeMap::new();
+    let mut state_by_identity: std::collections::BTreeMap<
+        String,
+        HashMap<String, StoredTaskState>,
+    > = std::collections::BTreeMap::new();
     for row in rows {
         let (stored_path, task, state) = row?;
         let identity = normalize_stored_project_path(&stored_path);

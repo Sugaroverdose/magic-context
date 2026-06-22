@@ -196,6 +196,7 @@ export {
     queuePendingOp,
     removePendingOp,
 } from "./storage-ops";
+export * from "./storage-primers";
 export {
     bumpProjectMemoryEpoch,
     bumpProjectUserProfileVersion,

@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { clearEmergencyRecovery } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
+import { COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import {
 	type PartialRecompRange,
@@ -141,7 +141,7 @@ export function registerCtxRecompCommand(
 							client: createPiHistorianClient({
 								runner: deps.runner,
 								model: deps.historianModel as string,
-								systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+								systemPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
 								fallbackModels: deps.historianFallbacks,
 								timeoutMs: deps.historianTimeoutMs,
 								thinkingLevel: deps.historianThinkingLevel,

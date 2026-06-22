@@ -1619,6 +1619,80 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 46,
+        description: "Primers v1 candidate and promoted primer storage",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS primer_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_path TEXT NOT NULL,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    session_id TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    normalized_question TEXT NOT NULL,
+                    source_compartment_start INTEGER,
+                    source_compartment_end INTEGER,
+                    source_start_message_id TEXT NOT NULL DEFAULT '',
+                    source_end_message_id TEXT NOT NULL DEFAULT '',
+                    source_message_time INTEGER NOT NULL,
+                    question_embedding BLOB,
+                    question_embedding_model_id TEXT,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(project_path, harness, session_id, source_start_message_id, source_end_message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_primer_candidates_project_time
+                    ON primer_candidates(project_path, source_message_time);
+                CREATE INDEX IF NOT EXISTS idx_primer_candidates_session
+                    ON primer_candidates(session_id, harness);
+                CREATE INDEX IF NOT EXISTS idx_primer_candidates_embedding_model
+                    ON primer_candidates(project_path, question_embedding_model_id);
+
+                CREATE TABLE IF NOT EXISTS primers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_path TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    question_embedding BLOB,
+                    question_embedding_model_id TEXT,
+                    answer TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
+                    total_support INTEGER NOT NULL DEFAULT 0,
+                    last_observed_at INTEGER,
+                    answer_refreshed_at INTEGER,
+                    source_candidate_ids TEXT NOT NULL DEFAULT '[]',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_primers_project_status_observed
+                    ON primers(project_path, status, last_observed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_primers_embedding_model
+                    ON primers(project_path, question_embedding_model_id);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS primers_fts USING fts5(
+                    question,
+                    answer,
+                    project_path UNINDEXED,
+                    content='primers',
+                    content_rowid='id',
+                    tokenize='porter unicode61'
+                );
+                CREATE TRIGGER IF NOT EXISTS primers_ai AFTER INSERT ON primers BEGIN
+                    INSERT INTO primers_fts(rowid, question, answer, project_path)
+                    VALUES (new.id, new.question, new.answer, new.project_path);
+                END;
+                CREATE TRIGGER IF NOT EXISTS primers_ad AFTER DELETE ON primers BEGIN
+                    INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+                    VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+                END;
+                CREATE TRIGGER IF NOT EXISTS primers_au AFTER UPDATE ON primers BEGIN
+                    INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+                    VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+                    INSERT INTO primers_fts(rowid, question, answer, project_path)
+                    VALUES (new.id, new.question, new.answer, new.project_path);
+                END;
+            `);
+        },
+    },
 ];
 
 /**

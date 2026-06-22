@@ -57,6 +57,20 @@ export interface MemoryStats {
   categories: CategoryCount[];
 }
 
+export interface Primer {
+  id: number;
+  project_path: string;
+  question: string;
+  answer: string;
+  status: "active" | "archived";
+  total_support: number;
+  last_observed_at: number | null;
+  answer_refreshed_at: number | null;
+  source_candidate_ids: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface CategoryCount {
   category: string;
   count: number;
@@ -504,6 +518,7 @@ export interface WorkspaceSummary {
 
 export type NavSection =
   | "memories"
+  | "primers"
   | "sessions"
   | "workspaces"
   | "cache"

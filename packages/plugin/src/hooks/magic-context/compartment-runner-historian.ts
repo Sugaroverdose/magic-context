@@ -71,10 +71,12 @@ export async function runValidatedHistorianPass(args: {
      *  validation fails, falls back to the draft (first-pass) result. */
     twoPass?: boolean;
     subagentKind?: SubagentKind;
+    agentId?: string;
 }): Promise<ValidatedHistorianPassResult> {
     const firstRun = await runHistorianPrompt({
         ...args,
         dumpLabel: `${args.dumpLabelBase}-initial`,
+        agentId: args.agentId,
     });
     if (!firstRun.ok || !firstRun.result) {
         return runFallbackHistorianPass({
@@ -116,6 +118,7 @@ export async function runValidatedHistorianPass(args: {
         ...args,
         prompt: repairPrompt,
         dumpLabel: `${args.dumpLabelBase}-repair`,
+        agentId: args.agentId,
     });
     if (!repairRun.ok || !repairRun.result) {
         return runFallbackHistorianPass({
@@ -469,6 +472,7 @@ async function runFallbackHistorianPass(args: {
      */
     fallbackModelId?: string;
     callbacks?: HistorianProgressCallbacks;
+    agentId?: string;
     error: string;
     dumpPaths: Array<string | undefined>;
 }): Promise<ValidatedHistorianPassResult> {
@@ -514,6 +518,7 @@ async function runFallbackHistorianPass(args: {
             timeoutMs: args.timeoutMs,
             dumpLabel: `${args.dumpLabelBase}-fallback-${i + 1}`,
             modelOverride,
+            agentId: args.agentId,
         });
         if (!fallbackRun.ok || !fallbackRun.result) {
             lastError = fallbackRun.error ?? lastError;

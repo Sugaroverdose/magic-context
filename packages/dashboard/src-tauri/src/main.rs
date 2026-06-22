@@ -31,6 +31,7 @@ fn main() {
             commands::get_projects,
             commands::get_memories,
             commands::get_memory_stats,
+            commands::get_primers,
             commands::update_memory_status,
             commands::update_memory_content,
             commands::update_memory_category,

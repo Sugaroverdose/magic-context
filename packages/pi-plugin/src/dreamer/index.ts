@@ -182,6 +182,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 					projectCwd: opts.projectDir,
 				}),
 				userMemoryCollectionEnabled: userMemoryCollectionEnabled(opts.config),
+				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 			}),
 			task,
 		});

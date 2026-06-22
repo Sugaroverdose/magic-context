@@ -25,6 +25,8 @@ const CANONICAL = [
     "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
+    "promote-primers",
+    "refresh-primers",
 ] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *";
 const DEFAULT_CLASSIFY_CRON = "0 6 * * *";

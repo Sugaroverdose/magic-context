@@ -178,6 +178,7 @@ export function clearSession(db: Database, sessionId: string): void {
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM user_memory_candidates WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM primer_candidates WHERE session_id = ?").run(sessionId);
         // v2: m[0]/m[1] delta log + historian-extracted events are session-scoped
         // and must be cleared on session deletion (both have session_id). Without
         // this they leak orphaned rows when a session is deleted.

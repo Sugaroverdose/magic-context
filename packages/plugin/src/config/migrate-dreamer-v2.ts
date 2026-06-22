@@ -46,6 +46,8 @@ const CANONICAL = [
     "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
+    "promote-primers",
+    "refresh-primers",
 ] as const;
 const DEFAULT_BASE_CRON = "0 2 * * *"; // matches the historical "02:00-06:00" default window start
 const DEFAULT_CLASSIFY_CRON = "0 6 * * *";

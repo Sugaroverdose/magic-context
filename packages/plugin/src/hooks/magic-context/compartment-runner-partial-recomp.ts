@@ -1,3 +1,4 @@
+import { HISTORIAN_RECOMP_AGENT } from "../../agents/historian";
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import type {
     Compartment,
@@ -418,6 +419,7 @@ export async function executePartialRecompInternal(
                 // Partial recomp is structural-only — never emit facts (locked
                 // rule: no re-promotion into the curated memory store).
                 memoryEnabled: false,
+                extractionFree: true,
             });
 
             await sendIgnoredMessage(
@@ -440,6 +442,8 @@ export async function executePartialRecompInternal(
                 fallbackModelId: deps.fallbackModelId,
                 fallbackModels: deps.fallbackModels,
                 twoPass: deps.historianTwoPass,
+                subagentKind: "recomp",
+                agentId: HISTORIAN_RECOMP_AGENT,
                 callbacks: {
                     onRepairRetry: async (error) => {
                         await sendIgnoredMessage(

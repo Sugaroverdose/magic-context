@@ -76,6 +76,29 @@ describe("runAutoSearchHintForPi", () => {
 		}
 	});
 
+	it("excludes Primers from transform-time auto-search hints", async () => {
+		const db = createTestDb();
+		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+			async () => [],
+		);
+		try {
+			await runAutoSearchHintForPi({
+				sessionId: "ses-auto",
+				db,
+				messages: [
+					userMessage("explain how durable primer questions are maintained", 1),
+				],
+				options: baseOptions,
+			});
+
+			const options = spy.mock.calls[0]?.[4];
+			expect(options?.sources).toEqual(["memory", "message", "git_commit"]);
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
 	it("replays persisted hints but skips fresh decisions when strict entry ids fail", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(

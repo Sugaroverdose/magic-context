@@ -34,6 +34,8 @@ import {
     type MaintainMemoryGateResult,
     partitionMaintainMemoryScope,
 } from "./maintain-memory-gate";
+import { promotePrimers } from "./promote-primers";
+import { refreshPrimers } from "./refresh-primers";
 import {
     applyRetrospectiveLearnings,
     parseRetrospectiveLearnings,
@@ -74,6 +76,8 @@ export interface DreamTaskExecutorDeps {
         | ((db: Database, projectIdentity: string) => RetrospectiveRawProvider | null);
     /** Host-side privacy gate for route="observation" learnings. */
     userMemoryCollectionEnabled?: boolean;
+    /** Ensure the project embedding provider is registered before primer clustering embeds candidates. */
+    ensureProjectRegistered?: (directory: string, db: Database) => Promise<void> | void;
 }
 
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
@@ -262,6 +266,45 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun("completed", null);
                 log(
                     `[dreamer] review-user-memories: promoted=${result.promoted} merged=${result.merged} dismissed=${result.dismissed}`,
+                );
+                return { status: "completed" };
+            }
+
+            if (config.task === "promote-primers") {
+                const result = await promotePrimers({
+                    db,
+                    client: deps.client,
+                    projectIdentity,
+                    sessionDirectory: deps.sessionDirectory,
+                    holderId,
+                    leaseKey,
+                    deadline,
+                    promotionThreshold: config.promotionThreshold ?? 2,
+                    ensureProjectRegistered: deps.ensureProjectRegistered,
+                });
+                recordRun("completed", null);
+                log(
+                    `[dreamer] promote-primers: promoted=${result.promoted} updated=${result.updated} candidates=${result.candidates}`,
+                );
+                return { status: "completed" };
+            }
+
+            if (config.task === "refresh-primers") {
+                const result = await refreshPrimers({
+                    db,
+                    client: deps.client,
+                    projectIdentity,
+                    parentSessionId: parent,
+                    sessionDirectory: deps.sessionDirectory,
+                    holderId,
+                    leaseKey,
+                    deadline,
+                    model: config.model,
+                    fallbackModels: config.fallbackModels,
+                });
+                recordRun("completed", null);
+                log(
+                    `[dreamer] refresh-primers: refreshed=${result.refreshed} skipped=${result.skipped}`,
                 );
                 return { status: "completed" };
             }

@@ -165,6 +165,8 @@ export type ValidatedHistorianPassResult =
           compartments: CandidateCompartment[];
           facts: Array<{ category: string; content: string }>;
           userObservations?: string[];
+          /** Durable standing-question candidates for Primers v1 (stored side-table only). */
+          primerCandidates?: Array<{ question: string }>;
           /** v2: historian-extracted events (stored, not rendered). */
           events?: ParsedEvent[];
           /**

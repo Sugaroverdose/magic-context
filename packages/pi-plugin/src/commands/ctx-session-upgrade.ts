@@ -3,7 +3,7 @@ import { getCompartments } from "@magic-context/core/features/magic-context/comp
 import { isMemoryMigrationDone } from "@magic-context/core/features/magic-context/memory/memory-migration";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
+import { COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { executeContextRecompWithResult } from "@magic-context/core/hooks/magic-context/compartment-runner";
 import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import {
@@ -221,7 +221,7 @@ export function registerCtxSessionUpgradeCommand(
 								thinkingLevel: deps.historianThinkingLevel,
 								directory: ctx.cwd,
 								accountingSessionId: sessionId,
-								systemPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+								systemPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
 								notify: (text) =>
 									sendCtxStatusMessage(pi, {
 										title: "/ctx-session-upgrade",

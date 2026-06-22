@@ -2,6 +2,7 @@ import type { NavSection } from "../../lib/types";
 
 const NAV_ITEMS: { id: NavSection; icon: string; label: string }[] = [
   { id: "memories", icon: "🧠", label: "Mem" },
+  { id: "primers", icon: "❓", label: "Prime" },
   { id: "sessions", icon: "📜", label: "Hist" },
   { id: "cache", icon: "📊", label: "Cache" },
   { id: "workspaces", icon: "🗂️", label: "Space" },

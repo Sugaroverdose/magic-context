@@ -13,7 +13,12 @@ import {
 } from "./constants";
 import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
 
-const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set(["memory", "message", "git_commit"]);
+const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set([
+    "memory",
+    "message",
+    "git_commit",
+    "primer",
+]);
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
@@ -74,6 +79,13 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
         ].join("\n");
     }
 
+    if (result.source === "primer") {
+        return [
+            `[${index}] [primer] score=${result.score.toFixed(2)} id=${result.primerId} support=${result.support} match=${result.matchType}`,
+            result.content,
+        ].join("\n");
+    }
+
     if (result.source === "compartment") {
         return [
             `[${index}] [message] score=${result.score.toFixed(2)} compartment_id=${result.compartmentId} range=${result.startOrdinal}-${result.endOrdinal} match=${result.matchType} title=${result.title}`,
@@ -91,7 +103,7 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
 
 function formatSearchResults(query: string, results: UnifiedSearchResult[]): string {
     if (results.length === 0) {
-        return `No results found for "${query}" across memories, git commits, or message history.`;
+        return `No results found for "${query}" across memories, primers, git commits, or message history.`;
     }
 
     const bodyParts = results.map((result, index) => formatResult(result, index + 1));
@@ -111,17 +123,17 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             query: tool.schema
                 .string()
                 .describe(
-                    "Search query. Matches against memory content, git commit messages, and raw user/assistant message text.",
+                    "Search query. Matches against memory content, Primers, git commit messages, and raw user/assistant message text.",
                 ),
             limit: tool.schema
                 .number()
                 .optional()
                 .describe("Maximum results to return (default: 10)"),
             sources: tool.schema
-                .array(tool.schema.enum(["memory", "message", "git_commit"]))
+                .array(tool.schema.enum(["memory", "message", "git_commit", "primer"]))
                 .optional()
                 .describe(
-                    'Optional. Restrict to specific sources. Examples: ["git_commit"] for "when did we change X", ["memory"] for naming conventions, ["message"] for "did we discuss this earlier", ["git_commit","message"] for regression hunts. Omit for a broad search across all enabled sources.',
+                    'Optional. Restrict to specific sources. Examples: ["primer"] for standing project explanations, ["git_commit"] for "when did we change X", ["memory"] for naming conventions, ["message"] for "did we discuss this earlier", ["git_commit","message"] for regression hunts. Omit for a broad search across all enabled sources.',
                 ),
         },
         async execute(args: CtxSearchArgs, toolContext) {

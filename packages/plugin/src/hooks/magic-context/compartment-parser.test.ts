@@ -253,6 +253,29 @@ describe("parseCompartmentOutput — user_observations", () => {
     });
 });
 
+describe("parseCompartmentOutput — primer_candidates", () => {
+    it("parses optional primer candidate questions", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="cache" episode_type="debug" importance="50">
+<p1>Cache work.</p1><p2>Cache.</p2><p3>Cache.</p3><p4>cache</p4>
+</compartment>
+</compartments>
+<primer_candidates>
+* How does prompt caching work?
+- How does the materialization cache avoid busts?
+</primer_candidates>
+<meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
+</output>`);
+
+        expect(parsed.primerCandidates.map((candidate) => candidate.question)).toEqual([
+            "How does prompt caching work?",
+            "How does the materialization cache avoid busts?",
+        ]);
+    });
+});
+
 describe("parseCompartmentOutput — fact scoping (audit Fix 6)", () => {
     it("does NOT misread a category tag inside <events> as a promotable fact", () => {
         // A causal_incident's field text legitimately contains a 5-cat tag name.

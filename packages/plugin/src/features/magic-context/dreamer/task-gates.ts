@@ -1,5 +1,6 @@
 import type { Database } from "../../../shared/sqlite";
 import { getPendingSmartNotes } from "../storage-notes";
+import { countPrimerCandidatesForProject, getActivePrimers } from "../storage-primers";
 import { getUserMemoryCandidates } from "../user-memory/storage-user-memory";
 import type { DreamTaskName } from "./task-registry";
 
@@ -113,6 +114,17 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
         case "review-user-memories":
             // Candidate observations are GLOBAL (cross-project user profile).
             return getUserMemoryCandidates(db).length >= ctx.promotionThreshold;
+
+        case "promote-primers":
+            return countPrimerCandidatesForProject(db, project) >= (ctx.promotionThreshold ?? 2);
+
+        case "refresh-primers":
+            return getActivePrimers(db, project).some(
+                (primer) =>
+                    !primer.answer.trim() ||
+                    primer.answerRefreshedAt == null ||
+                    (primer.lastObservedAt ?? 0) > primer.answerRefreshedAt,
+            );
 
         case "key-files":
             // Permissive: the candidate scan needs the OpenCode DB (too heavy for a

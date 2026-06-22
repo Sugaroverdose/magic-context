@@ -42,6 +42,45 @@ Do NOT change:
 
 Output the cleaned version as valid XML matching the original structure. Preserve all XML tags, compartment ranges, meta, and facts.`;
 
+export const COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT = `# Historian (structural recomp)
+
+You are Historian — the hippocampus of a long-running coding agent. In this mode you are rebuilding the session's compartment structure only.
+
+Your only job: turn the provided raw message slice into ordered, contiguous <compartment> blocks with four progressive paraphrase tiers (<p1>-<p4>), episode_type, importance, and <meta>.
+
+Do NOT extract or emit any side-channel memory dimensions in this mode:
+- no <facts>
+- no <events>
+- no <user_observations>
+- no <primer_candidates>
+
+This extraction-free recomp mode is used for /ctx-recomp and session upgrade. It must not rewrite durable project memories, user memories, events, or Primers. Spend all output budget on high-quality compartments.
+
+Output valid XML only:
+
+<output>
+<compartments>
+<compartment start="FIRST" end="LAST" title="short title" episode_type="..." importance="N">
+<p1>[Most verbose paraphrase: full narrative, anchors, important user constraints inline.]</p1>
+<p2>[Condensed narrative with canonical anchors.]</p2>
+<p3>[Outcome + key decision.]</p3>
+<p4>Anchor-only fragment or one compact sentence.</p4>
+</compartment>
+</compartments>
+<meta>
+<messages_processed>FIRST-LAST</messages_processed>
+<unprocessed_from>INDEX</unprocessed_from>
+</meta>
+</output>
+
+Rules:
+- Compartments must be ordered, contiguous for the ranges they cover, and non-overlapping.
+- Every compartment must include start/end message ordinals, title, episode_type, importance, and all four p1-p4 tiers.
+- Boundaries are pivots in objective, not changes in activity type. Keep coherent arcs together.
+- Importance is decay rate (1-100): high means this compartment should stay detailed longer.
+- Preserve hard user constraints and source-of-truth corrections; drop low-signal chatter.
+- Never output facts, events, user observations, primer candidates, markdown fences, or prose outside <output>.`;
+
 export function buildHistorianEditorPrompt(draft: string): string {
     return [
         "This is a historian draft. Clean it up following the rules in your system prompt.",
@@ -67,6 +106,8 @@ export interface CompartmentPromptInputs {
      *  disabled there is no fact store, so emitting facts is pure waste
      *  (and they would never be rendered). Defaults to enabled. */
     memoryEnabled?: boolean;
+    /** Recomp/session-upgrade structural rebuilds must use the extraction-free prompt. */
+    extractionFree?: boolean;
 }
 
 /**
@@ -84,6 +125,11 @@ export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): st
     if (inputs.seedExamples) parts.push(inputs.seedExamples);
     if (inputs.sessionReferences) parts.push(inputs.sessionReferences);
     if (inputs.projectMemory) parts.push(inputs.projectMemory);
+    if (inputs.extractionFree) {
+        parts.push(
+            "<extraction>disabled</extraction>\nStructural recomp mode: emit compartments and <meta> only. Do NOT emit <facts>, <events>, <user_observations>, or <primer_candidates>.",
+        );
+    }
     if (inputs.memoryEnabled === false) {
         // Memory disabled → no fact store exists. Tell the historian to skip
         // the <facts> section so it spends its budget on compartments only.

@@ -334,9 +334,9 @@ export async function runAutoSearchHint(args: {
             // unifiedSearch applies this during memory merging so ranking
             // can't be distorted by already-visible hits.
             visibleMemoryIds: options.visibleMemoryIds ?? null,
-            // Don't restrict by last compartment end — auto-search should see
-            // everything available, including raw-history FTS. unifiedSearch
-            // already defaults to searching all sources.
+            // Primers v1 are cache-neutral: they surface via explicit ctx_search
+            // and dashboard only, never transform-time auto-search prompt hints.
+            sources: ["memory", "message", "git_commit"],
         };
         results = await unifiedSearchWithTimeout(
             db,

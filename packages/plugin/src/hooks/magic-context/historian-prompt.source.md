@@ -22,12 +22,13 @@ The primary agent retains two tools — `ctx_search` (find a compartment by cont
 
 ## What you produce
 
-For each pass, you emit four things:
+For each pass, you emit five things:
 
 1. **Compartments** — completed logical work units from the raw history you just received. Each compartment is stored at four progressive verbosity tiers (`<p1>`/`<p2>`/`<p3>`/`<p4>`) and carries an `importance` score. The decay system renders a different tier depending on how the compartment has aged and how important it is.
 2. **Facts** — durable cross-cutting **world knowledge** that survives past any single compartment: stable rules, defaults, constraints, naming choices.
 3. **Events** *(optional)* — specific anchor moments worth extracting from compartment narrative: causal incidents (something broke, was investigated, got resolved) and trajectory corrections (a strategy was abandoned for another).
 4. **User observations** *(optional)* — universal behavioral patterns about the human user, fed to a separate dreamer review pipeline that promotes recurring patterns into stable user-profile memories.
+5. **Primer candidates** *(optional)* — durable standing questions about how the project works that this chunk helps answer, fed to a separate dreamer review pipeline that promotes recurring project primers.
 
 You also receive two reference blocks — `<compartment_examples_from_other_projects>` for calibration and `<session_references>` for continuity with your prior work in this session. Read both before producing your output.
 
@@ -672,6 +673,26 @@ If no observations, omit the `<user_observations>` section entirely.
 
 ---
 
+## Primer candidates (optional)
+
+After outputting compartments, facts, events, and user observations, also output a `<primer_candidates>` section IF the chunk provides evidence for a durable standing question about how the project works.
+
+- Primer candidates are QUESTIONS, not answers. They should sound like a future agent's lookup query: "How does the cache materialization flow work?"
+- Good candidates: recurring subsystem explanations, operational invariants, architecture flows, feature lifecycles, migration/versioning mechanics, scheduler/lease behavior.
+- Bad candidates (DO NOT emit): one-off task questions, questions about the human user, questions answerable only by today's transient state, bug-specific questions with no durable subsystem value.
+- Emit at most two questions; most chunks should emit zero. Prefer the single strongest candidate when the chunk has one clear durable topic.
+- Keep each question concise, stable, and project-scoped. Do not include dates, session-local wording, or quoted user text.
+- The output shape gains an additional section:
+```
+<primer_candidates>
+* How does the Dreamer task lease system serialize memory mutations?
+* How does ctx_search combine memory, message, and commit results?
+</primer_candidates>
+```
+If no candidates, omit the `<primer_candidates>` section entirely.
+
+---
+
 ## Output
 
 Output valid XML only in this shape:
@@ -731,6 +752,9 @@ Output valid XML only in this shape:
 <user_observations>
 * Observation text
 </user_observations>
+<primer_candidates>
+* How does subsystem X work?
+</primer_candidates>
 <meta>
 <messages_processed>FIRST-LAST</messages_processed>
 <unprocessed_from>INDEX</unprocessed_from>
@@ -742,6 +766,7 @@ Rules:
 - Omit empty fact categories.
 - Omit `<events>` section entirely if no events were extracted (this is the normal case for most compartments).
 - Omit `<user_observations>` section entirely if no observations were extracted.
+- Omit `<primer_candidates>` section entirely if no primer candidates were extracted.
 - Compartments must be ordered, contiguous for the ranges they cover, and non-overlapping.
 - All four `<p1>`/`<p2>`/`<p3>`/`<p4>` elements must appear in every compartment, in that order. P4 may be self-closed, an anchor-only fragment, or one sentence depending on what makes the compartment recognizable (see P4 section).
 - `episode_type` may be a single activity or a comma-separated list of activities the compartment spans (e.g. `episode_type="design,feature,release"`). Multiple activities do not split a compartment — they describe one arc that touched multiple activity types.

@@ -387,6 +387,9 @@ export async function runAutoSearchHintForPi(args: {
 			},
 			isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
 			visibleMemoryIds: options.visibleMemoryIds ?? null,
+			// Primers v1 are cache-neutral: explicit ctx_search/dashboard only,
+			// never transform-time auto-search prompt hints.
+			sources: ["memory", "message", "git_commit"],
 		};
 		results = await unifiedSearchWithTimeout(
 			db,

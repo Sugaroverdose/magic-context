@@ -7,6 +7,7 @@ import Sidebar from "./components/Layout/Sidebar";
 import StatusBar from "./components/Layout/StatusBar";
 import LogViewer from "./components/LogViewer/LogViewer";
 import MemoryBrowser from "./components/MemoryBrowser/MemoryBrowser";
+import Primers from "./components/Primers/Primers";
 import SessionViewer from "./components/SessionViewer/SessionViewer";
 import UserMemories from "./components/UserMemories/UserMemories";
 import WorkspacesPanel from "./components/WorkspacesPanel/WorkspacesPanel";
@@ -151,6 +152,9 @@ export default function App() {
         >
           <Show when={activeSection() === "memories"}>
             <MemoryBrowser />
+          </Show>
+          <Show when={activeSection() === "primers"}>
+            <Primers />
           </Show>
           <Show when={activeSection() === "sessions"}>
             <SessionViewer />

@@ -299,6 +299,7 @@ async function sweepProject(
                 reg.retrospectiveRawProvider ??
                 ((db) => new OpenCodeRetrospectiveRawProvider({ contextDb: db, openOpenCodeDb })),
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
+            ensureProjectRegistered: reg.ensureRegistered,
         });
         const ran = await runDueTasksForProject({
             db,

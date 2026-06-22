@@ -20,6 +20,7 @@ import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-ba
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
+    COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./hooks/magic-context/compartment-prompt";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
@@ -519,6 +520,7 @@ const server: Plugin = async (ctx) => {
                     // (gated in the runner). Keeping the system prompt constant
                     // preserves prompt-cache byte stability.
                     historianPrompt: COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                    historianRecompPrompt: COMPARTMENT_STRUCTURAL_SYSTEM_PROMPT,
                     historianEditorPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
                     sidekickPrompt: SIDEKICK_SYSTEM_PROMPT,
                     dreamerOverrides: dreamerAgentOverrides,

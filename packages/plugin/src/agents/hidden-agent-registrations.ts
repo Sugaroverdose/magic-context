@@ -74,6 +74,7 @@ export interface HiddenAgentRegistration {
 export function buildHiddenAgentRegistrations(args: {
     dreamerPrompt: string | undefined;
     historianPrompt: string | undefined;
+    historianRecompPrompt?: string | undefined;
     historianEditorPrompt: string | undefined;
     sidekickPrompt: string | undefined;
     dreamerOverrides?: Record<string, unknown>;
@@ -122,6 +123,13 @@ export function buildHiddenAgentRegistrations(args: {
         {
             id: "historian",
             prompt: args.historianPrompt,
+            allowedTools: historianAllowedTools,
+            maxSteps: 40,
+            overrides: args.historianOverrides,
+        },
+        {
+            id: "historian-recomp",
+            prompt: args.historianRecompPrompt ?? args.historianPrompt,
             allowedTools: historianAllowedTools,
             maxSteps: 40,
             overrides: args.historianOverrides,

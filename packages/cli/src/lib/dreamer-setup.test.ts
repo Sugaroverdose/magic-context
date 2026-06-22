@@ -73,19 +73,21 @@ describe("runDreamerSetup", () => {
     });
 
     it("declining defaults runs the per-task loop and writes every task's schedule", async () => {
-        // useRecommendedSchedules = NO, then 8 preset selects (all "Nightly").
+        // useRecommendedSchedules = NO, then one preset select per task (all "Nightly").
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: Array(9).fill("cron:0 3 * * *"),
+            selects: Array(11).fill("cron:0 3 * * *"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks).toBeDefined();
-        expect(Object.keys(result.tasks ?? {}).length).toBe(9);
+        expect(Object.keys(result.tasks ?? {}).length).toBe(11);
         expect(result.tasks?.verify.schedule).toBe("0 3 * * *");
         expect(result.tasks?.curate.schedule).toBe("0 3 * * *");
         expect(result.tasks?.["classify-memories"].schedule).toBe("0 3 * * *");
         expect(result.tasks?.retrospective.schedule).toBe("0 3 * * *");
+        expect(result.tasks?.["promote-primers"].schedule).toBe("0 3 * * *");
+        expect(result.tasks?.["refresh-primers"].schedule).toBe("0 3 * * *");
     });
 
     it("Disabled preset writes an empty schedule", async () => {
@@ -93,7 +95,7 @@ describe("runDreamerSetup", () => {
             confirms: [false],
             autos: ["x/y"],
             // all disabled
-            selects: Array(8).fill("cron:"),
+            selects: Array(11).fill("cron:"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks?.verify.schedule).toBe("");
@@ -106,7 +108,7 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: ["__custom__", ...Array(7).fill("cron:0 3 * * *")],
+            selects: ["__custom__", ...Array(10).fill("cron:0 3 * * *")],
             texts: ["30 4 * * 1"],
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);

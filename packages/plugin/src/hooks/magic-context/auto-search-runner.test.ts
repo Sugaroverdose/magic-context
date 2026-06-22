@@ -82,6 +82,30 @@ describe("auto-search-runner", () => {
         }
     });
 
+    test("excludes Primers from transform-time auto-search hints", async () => {
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(async () => []);
+        try {
+            const messages: MessageLike[] = [
+                makeUserMsg(
+                    "u1",
+                    "please explain how durable project primer questions are maintained",
+                ),
+            ];
+
+            await runAutoSearchHint({
+                sessionId: "s-primer-neutral",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            const options = spy.mock.calls[0]?.[4];
+            expect(options?.sources).toEqual(["memory", "message", "git_commit"]);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
     test("caches no-hint decision on below-threshold score", async () => {
         const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
             async () =>

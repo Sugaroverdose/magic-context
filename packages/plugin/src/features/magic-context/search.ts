@@ -20,6 +20,7 @@ import {
 import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, getProjectEmbeddingSnapshot, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
+import { getActivePrimers, type Primer } from "./storage-primers";
 import {
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
@@ -46,6 +47,7 @@ const RESULT_PREVIEW_LIMIT = 220;
 const MEMORY_SOURCE_BOOST = 1.3;
 const MESSAGE_SOURCE_BOOST = 1.15;
 const GIT_COMMIT_SOURCE_BOOST = 1.2;
+const PRIMER_SOURCE_BOOST = 1.25;
 
 interface MessageSearchRow {
     messageOrdinal?: number | string;
@@ -57,7 +59,7 @@ interface MessageSearchRow {
 const messageSearchStatements = new WeakMap<Database, PreparedStatement>();
 const messageSearchStatementsWithCutoff = new WeakMap<Database, PreparedStatement>();
 
-export type SearchSource = "memory" | "message" | "git_commit";
+export type SearchSource = "memory" | "message" | "git_commit" | "primer";
 
 export interface UnifiedSearchOptions {
     limit?: number;
@@ -148,11 +150,23 @@ export interface GitCommitSearchResult {
     matchType: "semantic" | "fts" | "hybrid";
 }
 
+export interface PrimerSearchResult {
+    source: "primer";
+    content: string;
+    score: number;
+    primerId: number;
+    question: string;
+    support: number;
+    lastObservedAt: number | null;
+    matchType: "semantic" | "fts" | "hybrid";
+}
+
 export type UnifiedSearchResult =
     | MemorySearchResult
     | MessageSearchResult
     | CompartmentSearchResult
-    | GitCommitSearchResult;
+    | GitCommitSearchResult
+    | PrimerSearchResult;
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
@@ -959,6 +973,8 @@ function getSourceBoost(result: UnifiedSearchResult): number {
             return MESSAGE_SOURCE_BOOST;
         case "git_commit":
             return GIT_COMMIT_SOURCE_BOOST;
+        case "primer":
+            return PRIMER_SOURCE_BOOST;
     }
 }
 
@@ -985,6 +1001,10 @@ function compareUnifiedResults(left: UnifiedSearchResult, right: UnifiedSearchRe
     if (left.source === "git_commit" && right.source === "git_commit") {
         // Newer commits win ties.
         return right.committedAtMs - left.committedAtMs;
+    }
+
+    if (left.source === "primer" && right.source === "primer") {
+        return right.support - left.support || left.primerId - right.primerId;
     }
 
     return 0;
@@ -1022,16 +1042,86 @@ function searchGitCommits(args: {
     return hits.map(toGitCommitResult);
 }
 
+function primerText(primer: Primer): string {
+    const answer = primer.answer.trim();
+    return answer ? `Q: ${primer.question}\nA: ${answer}` : `Q: ${primer.question}`;
+}
+
+function searchPrimers(args: {
+    db: Database;
+    projectPath: string;
+    query: string;
+    limit: number;
+    queryEmbedding: Float32Array | null;
+    queryModelId: string | null;
+}): PrimerSearchResult[] {
+    const primers = getActivePrimers(args.db, args.projectPath);
+    if (primers.length === 0 || args.limit <= 0) return [];
+    const ftsQuery = sanitizeFtsQuery(args.query);
+    const ftsRanks = new Map<number, number>();
+    if (ftsQuery) {
+        const rows = args.db
+            .prepare(
+                `SELECT p.id AS id, bm25(primers_fts) AS rank
+                 FROM primers_fts
+                 JOIN primers p ON p.id = primers_fts.rowid
+                 WHERE primers_fts MATCH ? AND p.project_path = ? AND p.status = 'active'
+                 ORDER BY rank ASC
+                 LIMIT ?`,
+            )
+            .all(ftsQuery, args.projectPath, args.limit * 3) as Array<{ id: number; rank: number }>;
+        rows.forEach((row, index) => {
+            ftsRanks.set(row.id, linearDecayScore(index, rows.length));
+        });
+    }
+    const scored = primers
+        .map((primer) => {
+            const semantic =
+                args.queryEmbedding &&
+                primer.questionEmbedding &&
+                primer.questionEmbeddingModelId === args.queryModelId
+                    ? normalizeCosineScore(
+                          cosineSimilarity(args.queryEmbedding, primer.questionEmbedding),
+                      )
+                    : 0;
+            const fts = ftsRanks.get(primer.id) ?? 0;
+            if (semantic <= 0 && fts <= 0) return null;
+            const score =
+                semantic > 0 && fts > 0
+                    ? semantic * SEMANTIC_WEIGHT + fts * FTS_WEIGHT
+                    : Math.max(semantic, fts);
+            return {
+                source: "primer" as const,
+                content: previewText(primerText(primer)),
+                score,
+                primerId: primer.id,
+                question: primer.question,
+                support: primer.totalSupport,
+                lastObservedAt: primer.lastObservedAt,
+                matchType: semantic > 0 && fts > 0 ? "hybrid" : semantic > 0 ? "semantic" : "fts",
+            } satisfies PrimerSearchResult;
+        })
+        .filter((result): result is PrimerSearchResult => result !== null)
+        .sort((a, b) => b.score - a.score || b.support - a.support || a.primerId - b.primerId)
+        .slice(0, args.limit);
+    return scored;
+}
+
 function resolveSources(sources: SearchSource[] | undefined): Set<SearchSource> {
     if (sources === undefined) {
-        // Default: search all three sources. Facts are deliberately NOT a
+        // Default: search all recall sources. Facts are deliberately NOT a
         // source — they're always rendered in <session-history> so searching
         // them returns content the agent already sees.
-        return new Set<SearchSource>(["memory", "message", "git_commit"]);
+        return new Set<SearchSource>(["memory", "message", "git_commit", "primer"]);
     }
     const set = new Set<SearchSource>();
     for (const source of sources) {
-        if (source === "memory" || source === "message" || source === "git_commit") {
+        if (
+            source === "memory" ||
+            source === "message" ||
+            source === "git_commit" ||
+            source === "primer"
+        ) {
             set.add(source);
         }
     }
@@ -1063,6 +1153,7 @@ export async function unifiedSearch(
     const runMemory = activeSources.has("memory") && memoryFeatureEnabled;
     const runMessages = activeSources.has("message");
     const runGitCommits = activeSources.has("git_commit") && gitCommitsEnabled;
+    const runPrimers = activeSources.has("primer") && memoryFeatureEnabled;
     const runCompartmentChunks = runMessages && memoryFeatureEnabled && embeddingEnabled;
 
     // Embed the query ONCE at the top — both memory and git-commit searches
@@ -1082,7 +1173,7 @@ export async function unifiedSearch(
     // that BEFORE the embed call meant the embed fetch couldn't start
     // until indexing finished.
     const needsEmbedding =
-        (runMemory || runGitCommits || runCompartmentChunks) &&
+        (runMemory || runGitCommits || runCompartmentChunks || runPrimers) &&
         embeddingEnabled &&
         isEmbeddingRuntimeEnabled();
 
@@ -1145,7 +1236,7 @@ export async function unifiedSearch(
         limit: tierLimit,
     });
 
-    const [memoryResults, gitCommitResults] = await Promise.all([
+    const [memoryResults, gitCommitResults, primerResults] = await Promise.all([
         runMemory
             ? searchMemories({
                   db,
@@ -1171,9 +1262,22 @@ export async function unifiedSearch(
                   }),
               )
             : Promise.resolve([] as GitCommitSearchResult[]),
+        runPrimers
+            ? Promise.resolve(
+                  searchPrimers({
+                      db,
+                      projectPath,
+                      query: trimmedQuery,
+                      limit: tierLimit,
+                      queryEmbedding,
+                      queryModelId:
+                          embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
+                  }),
+              )
+            : Promise.resolve([] as PrimerSearchResult[]),
     ]);
 
-    const results = [...memoryResults, ...messageLikeResults, ...gitCommitResults]
+    const results = [...memoryResults, ...primerResults, ...messageLikeResults, ...gitCommitResults]
         .sort(compareUnifiedResults)
         .slice(0, limit);
 

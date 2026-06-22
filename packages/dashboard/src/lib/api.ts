@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+
 import type {
   CacheEvent,
   Compartment,
@@ -16,6 +17,7 @@ import type {
   MemoryStats,
   Note,
   PagedSessions,
+  Primer,
   ProjectRow,
   SessionDetail,
   SessionFact,
@@ -68,6 +70,10 @@ export async function getMemoryStats(params?: {
     project: params?.project ?? null,
     workspaceId: params?.workspaceId ?? null,
   });
+}
+
+export async function getPrimers(project?: string): Promise<Primer[]> {
+  return invoke("get_primers", { project: project ?? null });
 }
 
 export async function workspaceSchemaReady(): Promise<boolean> {

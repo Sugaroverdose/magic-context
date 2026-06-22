@@ -38,7 +38,7 @@ export function getSchemaFenceRejection(): {
     return lastSchemaFenceRejection;
 }
 
-export const LATEST_SUPPORTED_VERSION = 45;
+export const LATEST_SUPPORTED_VERSION = 46;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -485,6 +485,76 @@ export function initializeDatabase(db: Database): void {
       updated_at INTEGER NOT NULL,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
+
+    CREATE TABLE IF NOT EXISTS primer_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
+      session_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      normalized_question TEXT NOT NULL,
+      source_compartment_start INTEGER,
+      source_compartment_end INTEGER,
+      source_start_message_id TEXT NOT NULL DEFAULT '',
+      source_end_message_id TEXT NOT NULL DEFAULT '',
+      source_message_time INTEGER NOT NULL,
+      question_embedding BLOB,
+      question_embedding_model_id TEXT,
+      created_at INTEGER NOT NULL,
+      UNIQUE(project_path, harness, session_id, source_start_message_id, source_end_message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_primer_candidates_project_time
+      ON primer_candidates(project_path, source_message_time);
+    CREATE INDEX IF NOT EXISTS idx_primer_candidates_session
+      ON primer_candidates(session_id, harness);
+    CREATE INDEX IF NOT EXISTS idx_primer_candidates_embedding_model
+      ON primer_candidates(project_path, question_embedding_model_id);
+
+    CREATE TABLE IF NOT EXISTS primers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      question TEXT NOT NULL,
+      question_embedding BLOB,
+      question_embedding_model_id TEXT,
+      answer TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'archived')),
+      total_support INTEGER NOT NULL DEFAULT 0,
+      last_observed_at INTEGER,
+      answer_refreshed_at INTEGER,
+      source_candidate_ids TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_primers_project_status_observed
+      ON primers(project_path, status, last_observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_primers_embedding_model
+      ON primers(project_path, question_embedding_model_id);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS primers_fts USING fts5(
+      question,
+      answer,
+      project_path UNINDEXED,
+      content='primers',
+      content_rowid='id',
+      tokenize='porter unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS primers_ai AFTER INSERT ON primers BEGIN
+      INSERT INTO primers_fts(rowid, question, answer, project_path)
+      VALUES (new.id, new.question, new.answer, new.project_path);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS primers_ad AFTER DELETE ON primers BEGIN
+      INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+      VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS primers_au AFTER UPDATE ON primers BEGIN
+      INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+      VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+      INSERT INTO primers_fts(rowid, question, answer, project_path)
+      VALUES (new.id, new.question, new.answer, new.project_path);
+    END;
 
     -- session_notes and smart_notes were merged into the unified notes table
     -- by migration v1 (see features/magic-context/migrations.ts). The old tables
@@ -943,6 +1013,49 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_memories_project_category_hash ON memories(project_path, category, normalized_hash);
     CREATE INDEX IF NOT EXISTS idx_message_history_index_updated_at ON message_history_index(updated_at);
   `);
+
+    ensureColumn(db, "primer_candidates", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "primer_candidates", "source_start_message_id", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "primer_candidates", "source_end_message_id", "TEXT NOT NULL DEFAULT ''");
+    ensureColumn(db, "primer_candidates", "question_embedding", "BLOB");
+    ensureColumn(db, "primer_candidates", "question_embedding_model_id", "TEXT");
+    ensureColumn(db, "primers", "question_embedding_model_id", "TEXT");
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_primer_candidates_occurrence
+        ON primer_candidates(project_path, harness, session_id, source_start_message_id, source_end_message_id);
+      CREATE INDEX IF NOT EXISTS idx_primer_candidates_project_time
+        ON primer_candidates(project_path, source_message_time);
+      CREATE INDEX IF NOT EXISTS idx_primer_candidates_session
+        ON primer_candidates(session_id, harness);
+      CREATE INDEX IF NOT EXISTS idx_primer_candidates_embedding_model
+        ON primer_candidates(project_path, question_embedding_model_id);
+      CREATE INDEX IF NOT EXISTS idx_primers_project_status_observed
+        ON primers(project_path, status, last_observed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_primers_embedding_model
+        ON primers(project_path, question_embedding_model_id);
+      CREATE VIRTUAL TABLE IF NOT EXISTS primers_fts USING fts5(
+        question,
+        answer,
+        project_path UNINDEXED,
+        content='primers',
+        content_rowid='id',
+        tokenize='porter unicode61'
+      );
+      CREATE TRIGGER IF NOT EXISTS primers_ai AFTER INSERT ON primers BEGIN
+        INSERT INTO primers_fts(rowid, question, answer, project_path)
+        VALUES (new.id, new.question, new.answer, new.project_path);
+      END;
+      CREATE TRIGGER IF NOT EXISTS primers_ad AFTER DELETE ON primers BEGIN
+        INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+        VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+      END;
+      CREATE TRIGGER IF NOT EXISTS primers_au AFTER UPDATE ON primers BEGIN
+        INSERT INTO primers_fts(primers_fts, rowid, question, answer, project_path)
+        VALUES ('delete', old.id, old.question, old.answer, old.project_path);
+        INSERT INTO primers_fts(rowid, question, answer, project_path)
+        VALUES (new.id, new.question, new.answer, new.project_path);
+      END;
+    `);
 
     ensureColumn(db, "session_meta", "last_nudge_band", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "last_nudge_undropped", "INTEGER DEFAULT 0");

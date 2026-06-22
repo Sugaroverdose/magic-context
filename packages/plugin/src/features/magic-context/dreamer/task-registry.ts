@@ -18,6 +18,8 @@ export const CANONICAL_DREAM_TASKS = [
     "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
+    "promote-primers",
+    "refresh-primers",
 ] as const;
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
@@ -56,6 +58,8 @@ export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
     "curate",
     "classify-memories",
     "retrospective",
+    "promote-primers",
+    "refresh-primers",
 ];
 
 const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);
@@ -77,6 +81,9 @@ export function leaseKindFor(task: DreamTaskName): LeaseKind {
     switch (task) {
         case "review-user-memories":
             return "user-memories";
+        case "promote-primers":
+        case "refresh-primers":
+            return "memory";
         case "maintain-docs":
             return "maintain-docs";
         case "key-files":

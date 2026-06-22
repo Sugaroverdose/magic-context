@@ -62,6 +62,16 @@ pub fn get_memory_stats(
 }
 
 #[tauri::command(async)]
+pub fn get_primers(
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<Vec<db::Primer>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::get_primers(&conn, project.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
 pub fn workspace_schema_ready(state: State<'_, AppState>) -> Result<bool, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
@@ -440,9 +450,7 @@ pub fn get_dream_state(state: State<'_, AppState>) -> Result<Vec<db::DreamStateE
 }
 
 #[tauri::command(async)]
-pub fn get_dreamer_projects(
-    state: State<'_, AppState>,
-) -> Result<Vec<db::DreamerProject>, String> {
+pub fn get_dreamer_projects(state: State<'_, AppState>) -> Result<Vec<db::DreamerProject>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::get_dreamer_projects(&conn).map_err(|e| e.to_string())

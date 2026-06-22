@@ -35,12 +35,17 @@ export interface ParsedEvent {
     fields: Record<string, string>;
 }
 
+export interface ParsedPrimerCandidate {
+    question: string;
+}
+
 export interface ParsedCompartmentOutput {
     compartments: ParsedCompartment[];
     facts: ParsedFact[];
     events: ParsedEvent[];
     unprocessedFrom: number | null;
     userObservations: string[];
+    primerCandidates: ParsedPrimerCandidate[];
 }
 
 // Open tag captured separately from body so attributes (start/end/title/
@@ -67,6 +72,8 @@ const FACT_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
 const UNPROCESSED_REGEX = /<unprocessed_from>(\d+)<\/unprocessed_from>/;
 const USER_OBSERVATIONS_REGEX = /<user_observations>(.*?)<\/user_observations>/s;
 const USER_OBS_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
+const PRIMER_CANDIDATES_REGEX = /<primer_candidates>(.*?)<\/primer_candidates>/s;
+const PRIMER_ITEM_REGEX = /^\s*(?:\*|-|\d+\.)\s*(.+)$/gm;
 
 // Events: scan the <events>…</events> block (if any) for event elements. Kinds
 // are parsed kind-agnostically — any element with an `at_compartment` attr is an
@@ -192,11 +199,20 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
         }
     }
 
+    const primerCandidates: ParsedPrimerCandidate[] = [];
+    const primerMatch = text.match(PRIMER_CANDIDATES_REGEX);
+    if (primerMatch) {
+        for (const itemMatch of primerMatch[1].matchAll(PRIMER_ITEM_REGEX)) {
+            const question = unescapeXml(itemMatch[1].trim());
+            if (question) primerCandidates.push({ question });
+        }
+    }
+
     const events = parseEvents(text);
 
     compartments.sort((a, b) => a.startMessage - b.startMessage);
 
-    return { compartments, facts, events, unprocessedFrom, userObservations };
+    return { compartments, facts, events, unprocessedFrom, userObservations, primerCandidates };
 }
 
 /**

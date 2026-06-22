@@ -12,9 +12,7 @@ describe("hasShareabilitySensitiveText", () => {
             ),
         ).toBe(false);
         expect(
-            hasShareabilitySensitiveText(
-                "Migration v45 adds the retrospective watermark column.",
-            ),
+            hasShareabilitySensitiveText("Migration v45 adds the retrospective watermark column."),
         ).toBe(false);
     });
 

@@ -72,6 +72,14 @@ const PromotionThresholdSchema = z
     .describe(
         "review-user-memories: min candidate observations before promotion is considered (default: 3)",
     );
+const PrimerPromotionThresholdSchema = z
+    .number()
+    .min(2)
+    .max(20)
+    .optional()
+    .describe(
+        "promote-primers: min recurring source days before promotion is considered (default: 2)",
+    );
 const TokenBudgetSchema = z
     .number()
     .min(2000)
@@ -96,6 +104,9 @@ const KeyFilesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
 const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     promotion_threshold: PromotionThresholdSchema,
 });
+const PromotePrimersTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
+    promotion_threshold: PrimerPromotionThresholdSchema,
+});
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
 /** Default schedule per task. Preserves v1 behavior: verify runs nightly;
@@ -113,11 +124,14 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
     "review-user-memories": "0 3 * * *",
+    "promote-primers": "0 3 * * *",
+    "refresh-primers": "0 3 * * *",
 };
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
     if (task === "review-user-memories") base.promotion_threshold = 3;
+    if (task === "promote-primers") base.promotion_threshold = 2;
     if (task === "key-files") {
         base.token_budget = 10000;
         base.min_reads = 4;
@@ -158,6 +172,12 @@ export const DreamTasksSchema = z
         ),
         "review-user-memories": ReviewUserMemoriesTaskConfigSchema.default(() =>
             ReviewUserMemoriesTaskConfigSchema.parse(defaultTaskConfig("review-user-memories")),
+        ),
+        "promote-primers": PromotePrimersTaskConfigSchema.default(() =>
+            PromotePrimersTaskConfigSchema.parse(defaultTaskConfig("promote-primers")),
+        ),
+        "refresh-primers": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("refresh-primers")),
         ),
     })
     .describe(

@@ -43,6 +43,7 @@ import {
     tallyFactsByCategory,
 } from "../../features/magic-context/storage-historian-runs";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
+import { insertPrimerCandidates } from "../../features/magic-context/storage-primers";
 import { getLatestHistorianInvocationId } from "../../features/magic-context/storage-subagent-invocations";
 import { insertUserMemoryCandidates } from "../../features/magic-context/user-memory/storage-user-memory";
 import { normalizeSDKResponse } from "../../shared";
@@ -69,6 +70,7 @@ import {
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
 import { readSessionChunk } from "./read-session-chunk";
+import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -812,6 +814,50 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 );
             } catch (error) {
                 sessionLog(sessionId, "failed to store user memory candidates:", error);
+            }
+        }
+
+        // Primers v1 are recall-only side-table writes (dashboard + ctx_search),
+        // never prompt injection. Keep the same !discardedLast gate as facts and
+        // observations so a provisional tail does not double-emit evidence.
+        if (
+            !discardedLast &&
+            promotionProjectIdentity &&
+            validatedPass.primerCandidates &&
+            validatedPass.primerCandidates.length > 0
+        ) {
+            try {
+                const firstNew = newCompartments[0];
+                const lastNew = newCompartments[newCompartments.length - 1];
+                const sourceStartMessageId =
+                    firstNew?.startMessageId ||
+                    `ordinal:${firstNew?.startMessage ?? chunk.startIndex}`;
+                const sourceEndMessageId =
+                    lastNew?.endMessageId || `ordinal:${lastNew?.endMessage ?? lastCompartmentEnd}`;
+                const times = getMessageTimesFromOpenCodeDb(sessionId, [sourceStartMessageId]);
+                const sourceMessageTime = times.get(sourceStartMessageId) ?? Date.now();
+                // The stable occurrence key intentionally excludes question text;
+                // therefore a source chunk stores at most one candidate occurrence.
+                const [candidate] = validatedPass.primerCandidates;
+                const stored = insertPrimerCandidates(db, [
+                    {
+                        projectPath: promotionProjectIdentity,
+                        harness: "opencode",
+                        sessionId,
+                        question: candidate.question,
+                        sourceCompartmentStart: firstNew?.startMessage,
+                        sourceCompartmentEnd: lastNew?.endMessage,
+                        sourceStartMessageId,
+                        sourceEndMessageId,
+                        sourceMessageTime,
+                    },
+                ]);
+                sessionLog(
+                    sessionId,
+                    `stored ${stored.length} primer candidate occurrence(s)${validatedPass.primerCandidates.length > 1 ? " (stable occurrence key kept the first candidate)" : ""}`,
+                );
+            } catch (error) {
+                sessionLog(sessionId, "failed to store primer candidates:", error);
             }
         }
     } catch (error: unknown) {

@@ -1,7 +1,12 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, test } from "bun:test";
-import { CANONICAL_DREAM_TASKS, isCanonicalDreamTask, MEMORY_DOMAIN_TASKS } from "./task-registry";
+import {
+    CANONICAL_DREAM_TASKS,
+    isAgenticTask,
+    isCanonicalDreamTask,
+    MEMORY_DOMAIN_TASKS,
+} from "./task-registry";
 
 describe("dreamer task registry", () => {
     test("classify-memories is canonical, memory-domain, and ordered after curate", () => {
@@ -13,7 +18,11 @@ describe("dreamer task registry", () => {
             "curate",
             "classify-memories",
             "retrospective",
+            "promote-primers",
+            "refresh-primers",
         ]);
+        expect(isAgenticTask("promote-primers")).toBe(false);
+        expect(isAgenticTask("refresh-primers")).toBe(false);
         expect(CANONICAL_DREAM_TASKS.indexOf("classify-memories")).toBe(
             CANONICAL_DREAM_TASKS.indexOf("curate") + 1,
         );

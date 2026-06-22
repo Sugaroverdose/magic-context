@@ -4,7 +4,11 @@ import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
 } from "./agents/hidden-agent-registrations";
-import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
+import {
+    HISTORIAN_AGENT,
+    HISTORIAN_EDITOR_AGENT,
+    HISTORIAN_RECOMP_AGENT,
+} from "./agents/historian";
 import {
     DREAMER_ALLOWED_TOOLS,
     DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
@@ -29,6 +33,7 @@ describe("hidden-agent registration drift guard", () => {
     const regs = buildHiddenAgentRegistrations({
         dreamerPrompt: "dreamer-prompt",
         historianPrompt: "historian-prompt",
+        historianRecompPrompt: "historian-recomp-prompt",
         historianEditorPrompt: "historian-editor-prompt",
         sidekickPrompt: "sidekick-prompt",
         historianDisallowed: [],
@@ -42,6 +47,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_RETROSPECTIVE_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
+                HISTORIAN_RECOMP_AGENT,
                 SIDEKICK_AGENT,
             ].sort(),
         );
@@ -110,6 +116,7 @@ describe("hidden-agent registration drift guard", () => {
 
     test("historian + editor inline allow-list matches canonical HISTORIAN_ALLOWED_TOOLS (no disallowed)", () => {
         expect(byId(HISTORIAN_AGENT)?.allowedTools).toEqual([...HISTORIAN_ALLOWED_TOOLS]);
+        expect(byId(HISTORIAN_RECOMP_AGENT)?.allowedTools).toEqual([...HISTORIAN_ALLOWED_TOOLS]);
         expect(byId(HISTORIAN_EDITOR_AGENT)?.allowedTools).toEqual([...HISTORIAN_ALLOWED_TOOLS]);
     });
 
@@ -164,6 +171,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_RETROSPECTIVE_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
+                HISTORIAN_RECOMP_AGENT,
                 SIDEKICK_AGENT,
             ].sort(),
         );
