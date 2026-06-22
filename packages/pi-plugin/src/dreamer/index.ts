@@ -17,6 +17,7 @@ import type { ContextDatabase } from "@magic-context/core/features/magic-context
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
+import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
 
 export interface PiDreamerOptions {
@@ -181,6 +182,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 				retrospectiveRawProvider: new PiRetrospectiveRawProvider({
 					projectCwd: opts.projectDir,
 				}),
+				primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 				userMemoryCollectionEnabled: userMemoryCollectionEnabled(opts.config),
 				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 			}),

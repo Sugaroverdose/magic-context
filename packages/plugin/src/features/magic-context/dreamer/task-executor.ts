@@ -85,7 +85,9 @@ export interface DreamTaskExecutorDeps {
      * leaves this undefined (the seed read falls to the read-only opencode.db
      * path). Returning null for a session → refresh falls back to closed-book.
      */
-    primerRawProviderFactory?: (sessionId: string) => RawMessageProvider | null;
+    primerRawProviderFactory?: (
+        sessionId: string,
+    ) => Promise<RawMessageProvider | null> | RawMessageProvider | null;
 }
 
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
