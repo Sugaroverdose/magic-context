@@ -1,4 +1,5 @@
-import { Index, Show } from "solid-js";
+import { createSignal, Index, Show } from "solid-js";
+import { describeCron, isValidCronShape } from "../../lib/cron";
 import ModelSelect from "./ModelSelect";
 
 /**
@@ -92,15 +93,8 @@ const PRESETS: { label: string; cron: string }[] = [
 ];
 const CUSTOM = "__custom__";
 
-/** A 5-field cron expression check for inline UI feedback only. */
-function looksLikeCron(value: string): boolean {
-  const v = value.trim();
-  if (v === "") return true; // empty = disabled, valid
-  return v.split(/\s+/).length === 5;
-}
-
-function presetForCron(cron: string): string {
-  return PRESETS.some((p) => p.cron === cron) ? cron : CUSTOM;
+function isPresetCron(cron: string): boolean {
+  return PRESETS.some((p) => p.cron === cron);
 }
 
 interface DreamerTasksFieldProps {
@@ -110,6 +104,26 @@ interface DreamerTasksFieldProps {
 }
 
 export default function DreamerTasksField(props: DreamerTasksFieldProps) {
+  // Explicit "custom cron" mode per task. Derived-from-value snapped the dropdown
+  // back to a preset the instant Custom seeded a preset-shaped cron, so the input
+  // never appeared. This signal makes Custom a sticky, user-chosen mode.
+  const [customMode, setCustomMode] = createSignal<Set<string>>(
+    new Set(
+      TASKS.filter((meta) => {
+        const s = props.value?.[meta.name]?.schedule ?? meta.defaultSchedule;
+        return s.trim() !== "" && !isPresetCron(s);
+      }).map((meta) => meta.name),
+    ),
+  );
+  const inCustomMode = (name: string) => customMode().has(name);
+  const setTaskCustom = (name: string, on: boolean) =>
+    setCustomMode((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+
   // Resolve a task's effective config for DISPLAY (stored override, else schema
   // defaults). Only reads the fields the UI renders — never used as the basis for
   // what gets persisted (see `update`, which preserves the full stored object).
@@ -162,8 +176,13 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
         {(meta) => {
           const cfg = () => taskCfg(meta());
           const schedule = () => cfg().schedule ?? "";
-          const preset = () => presetForCron(schedule());
           const enabled = () => schedule().trim() !== "";
+          // The dropdown shows CUSTOM when the user picked custom mode OR the
+          // stored cron isn't a preset (and isn't empty). Custom mode is sticky.
+          const selectValue = () =>
+            inCustomMode(meta().name) || (schedule().trim() !== "" && !isPresetCron(schedule()))
+              ? CUSTOM
+              : schedule();
           return (
             <div class="dreamer-task-row">
               <div class="dreamer-task-head">
@@ -171,35 +190,31 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                 <span class="config-field-desc">{meta().description}</span>
               </div>
               <div class="dreamer-task-controls">
-                <select
-                  class="config-input"
-                  value={preset()}
-                  onChange={(e) => {
-                    const v = e.currentTarget.value;
-                    if (v === CUSTOM) {
-                      // Switch to custom: seed with current schedule so the
-                      // text field is populated.
-                      update(meta().name, { schedule: schedule() || "0 3 * * *" });
-                    } else {
-                      update(meta().name, { schedule: v });
-                    }
-                  }}
-                >
-                  <Index each={PRESETS}>
-                    {(p) => <option value={p().cron}>{p().label}</option>}
-                  </Index>
-                  <option value={CUSTOM}>Custom cron…</option>
-                </select>
-                <Show when={preset() === CUSTOM}>
-                  <input
-                    class="config-input"
-                    classList={{ "config-input-invalid": !looksLikeCron(schedule()) }}
-                    type="text"
-                    value={schedule()}
-                    placeholder="0 3 * * *"
-                    onInput={(e) => update(meta().name, { schedule: e.currentTarget.value })}
-                  />
-                </Show>
+                <div class="select-wrap">
+                  <select
+                    class="config-input config-select"
+                    value={selectValue()}
+                    onChange={(e) => {
+                      const v = e.currentTarget.value;
+                      if (v === CUSTOM) {
+                        // Enter sticky custom mode; seed the input with the
+                        // current cron (or a sane default) so it's never blank.
+                        setTaskCustom(meta().name, true);
+                        if (schedule().trim() === "") {
+                          update(meta().name, { schedule: "0 3 * * *" });
+                        }
+                      } else {
+                        setTaskCustom(meta().name, false);
+                        update(meta().name, { schedule: v });
+                      }
+                    }}
+                  >
+                    <Index each={PRESETS}>
+                      {(p) => <option value={p().cron}>{p().label}</option>}
+                    </Index>
+                    <option value={CUSTOM}>Custom cron…</option>
+                  </select>
+                </div>
                 <ModelSelect
                   models={props.models}
                   value={cfg().model}
@@ -207,6 +222,26 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                   placeholder="— inherit dreamer model —"
                 />
               </div>
+              <Show when={selectValue() === CUSTOM}>
+                <div class="dreamer-cron-custom">
+                  <input
+                    class="config-input"
+                    classList={{ "config-input-invalid": !isValidCronShape(schedule()) }}
+                    type="text"
+                    value={schedule()}
+                    placeholder="0 3 * * *  (min hour day month weekday)"
+                    onInput={(e) => update(meta().name, { schedule: e.currentTarget.value })}
+                  />
+                  <span
+                    class="dreamer-cron-human"
+                    classList={{ invalid: !isValidCronShape(schedule()) }}
+                  >
+                    {isValidCronShape(schedule())
+                      ? describeCron(schedule())
+                      : "Invalid cron — need 5 fields: min hour day month weekday"}
+                  </span>
+                </div>
+              </Show>
               {/* Task-specific params, shown only when scheduled. */}
               <Show when={enabled() && meta().name === "review-user-memories"}>
                 <div class="dreamer-task-param">

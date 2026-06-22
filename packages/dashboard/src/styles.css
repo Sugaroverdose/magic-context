@@ -1616,8 +1616,57 @@ select.config-input {
   cursor: pointer;
 }
 
+/* Styled select: strip the native OS chrome and draw our own caret so the
+   dropdown matches the rest of the dark-theme inputs. */
+.select-wrap {
+  position: relative;
+  display: inline-flex;
+  max-width: 200px;
+  width: 100%;
+}
+
+.config-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 28px;
+  cursor: pointer;
+}
+
+.select-wrap::after {
+  content: "▾";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .config-input-invalid {
   border-color: var(--danger, #e5484d);
+}
+
+/* Custom cron row: raw cron input + a live human-readable description. */
+.dreamer-cron-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.dreamer-cron-custom .config-input {
+  max-width: 240px;
+}
+
+.dreamer-cron-human {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dreamer-cron-human.invalid {
+  color: var(--danger, #e5484d);
 }
 
 /* Dreamer v2 per-task schedule editor */
