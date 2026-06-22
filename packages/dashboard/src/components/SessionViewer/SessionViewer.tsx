@@ -18,7 +18,6 @@ import {
   formatRelativeTime,
   getProjectKeyFiles,
   getProjects,
-  getSessionCacheEvents,
   getSessionDetail,
   getSessionMessages,
   getSmartNotes,
@@ -29,10 +28,8 @@ import {
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
-import { severityColorClass } from "../../lib/cache-format";
 import type {
   Compartment,
-  DbCacheEvent,
   Harness,
   SessionFact,
   SessionFilter,
@@ -40,7 +37,6 @@ import type {
   SessionRow,
 } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
-import CacheTimeline from "../shared/CacheTimeline";
 import FilterSelect from "../shared/FilterSelect";
 
 const PROJECT_FILTER_KEY = "mc_sessions_project_filter";
@@ -146,8 +142,7 @@ type ActiveTab =
   | "notes"
   | "historian"
   | "tokens"
-  | "keyFiles"
-  | "cache";
+  | "keyFiles";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
@@ -346,24 +341,14 @@ export default function SessionViewer() {
   // → Messages doesn't refetch. Both flags reset whenever `selectedSession`
   // changes.
   const [messagesActivated, setMessagesActivated] = createSignal(false);
-  const [cacheActivated, setCacheActivated] = createSignal(false);
-  // Cap the Cache Hit Timeline to the most-recent N events so long sessions
-  // don't render an unreadable wall of hairline bars. Selectable 200/400/600.
-  // NOTE: the cacheTimelineBars memo lives AFTER the cacheEvents resource is
-  // declared — createMemo runs eagerly on creation, so referencing the
-  // `const [cacheEvents] = createResource(...)` from above the declaration hits
-  // the temporal dead zone ("Cannot access 'cacheEvents' before initialization").
-  const [cacheTimelineLimit, setCacheTimelineLimit] = createSignal(200);
   createEffect(() => {
     // Reset activation state whenever the selected session changes (or is
     // cleared). Re-running depends on `selectedSession()` reactivity.
     selectedSession();
     setMessagesActivated(false);
-    setCacheActivated(false);
   });
   createEffect(() => {
     if (activeTab() === "messages") setMessagesActivated(true);
-    else if (activeTab() === "cache") setCacheActivated(true);
   });
 
   // The resource source returns `null` until the tab has been activated for
@@ -381,24 +366,6 @@ export default function SessionViewer() {
       return getSessionMessages(selected.harness, selected.sessionId);
     },
   );
-
-  const cacheSource = createMemo<SelectedSession | null>(() => {
-    const selected = selectedSession();
-    return selected && cacheActivated() ? selected : null;
-  });
-  const [cacheEvents] = createResource<DbCacheEvent[], SelectedSession | null>(
-    cacheSource,
-    async (selected) => {
-      if (!selected) return [];
-      return getSessionCacheEvents(selected.harness, selected.sessionId);
-    },
-  );
-  // Most-recent N events for the timeline (see cacheTimelineLimit above).
-  const cacheTimelineBars = createMemo(() => {
-    const all = cacheEvents() ?? [];
-    const limit = cacheTimelineLimit();
-    return all.length > limit ? all.slice(-limit) : all;
-  });
 
   const [subagentInvocations] = createResource(detailKey, async (selected) => {
     if (!selected) return [];
@@ -433,7 +400,6 @@ export default function SessionViewer() {
   // to the loaded list length once the user has activated the tab, in case
   // the count was missing (e.g. older backend without the field).
   const messagesCount = () => sessionDetail()?.messages_count ?? messagesResource()?.length ?? 0;
-  const cacheEventsCount = () => sessionDetail()?.cache_events_count ?? cacheEvents()?.length ?? 0;
   const compartments = () => sessionDetail()?.compartments ?? [];
   const facts = () => sessionDetail()?.facts ?? [];
   const notes = () => sessionDetail()?.notes ?? [];
@@ -640,44 +606,6 @@ export default function SessionViewer() {
   // number to display — not the old single-row read/total ratio, which falsely
   // flagged any step that merely added uncached input (a big tool result / file
   // read) as a warning.
-  const cacheRetention = (event: DbCacheEvent) => event.hit_ratio;
-
-  const severityIcon = (severity: string) => {
-    switch (severity) {
-      case "stable":
-        return "🟢";
-      case "info":
-        return "🔵";
-      case "warning":
-        return "🟡";
-      case "bust":
-        return "🔴";
-      case "full_bust":
-        return "⚫";
-      case "unknown":
-        return "⚪";
-      default:
-        return "⚪";
-    }
-  };
-
-  // Colors follow severity (the backend's cross-step classification) directly.
-  const barFraction = (event: DbCacheEvent): number => {
-    if (event.severity === "unknown" || event.severity === "info") return 1;
-    return Math.min(1, Math.max(0, event.hit_ratio));
-  };
-
-  // Clicking a timeline bar selects + scrolls to its event card in the list.
-  const [selectedCacheStepId, setSelectedCacheStepId] = createSignal<string | null>(null);
-  const focusCacheStep = (event: DbCacheEvent) => {
-    setSelectedCacheStepId(event.message_id);
-    requestAnimationFrame(() => {
-      document
-        .getElementById(`sv-cache-step-${event.message_id}`)
-        ?.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
-  };
-
   const refetchFacts = () => refetchSessionDetail();
   const refetchNotes = () => refetchSessionDetail();
 
@@ -969,13 +897,6 @@ export default function SessionViewer() {
             onClick={() => setActiveTab("keyFiles")}
           >
             Key files ({keyFiles()?.length ?? 0})
-          </button>
-          <button
-            type="button"
-            class={`tab-pill ${activeTab() === "cache" ? "active" : ""}`}
-            onClick={() => setActiveTab("cache")}
-          >
-            Cache ({cacheEventsCount()})
           </button>
         </div>
 
@@ -2320,149 +2241,6 @@ export default function SessionViewer() {
             </Show>
           </Show>
 
-          {/* Cache tab */}
-          <Show when={activeTab() === "cache"}>
-            <Show
-              when={!cacheEvents.loading}
-              fallback={<div class="empty-state">Loading cache events...</div>}
-            >
-              <Show
-                when={(cacheEvents() ?? []).length > 0}
-                fallback={
-                  <div class="empty-state">
-                    <span class="empty-state-icon">📊</span>
-                    <span>No cache data yet</span>
-                  </div>
-                }
-              >
-                <div class="list-gap">
-                  <div class="chart-container">
-                    <div
-                      style={{
-                        "font-size": "11px",
-                        color: "var(--text-secondary)",
-                        "margin-bottom": "8px",
-                        display: "flex",
-                        "justify-content": "space-between",
-                      }}
-                    >
-                      <span>Cache Hit Timeline</span>
-                      <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
-                        <span>
-                          {(cacheEvents()?.length ?? 0) > cacheTimelineBars().length
-                            ? `last ${cacheTimelineBars().length} of ${cacheEvents()?.length ?? 0} events`
-                            : `${cacheTimelineBars().length} events`}
-                        </span>
-                        <select
-                          value={String(cacheTimelineLimit())}
-                          onChange={(e) => setCacheTimelineLimit(Number(e.currentTarget.value))}
-                          style={{
-                            "font-size": "11px",
-                            background: "var(--bg-secondary)",
-                            color: "var(--text-secondary)",
-                            border: "1px solid var(--border)",
-                            "border-radius": "4px",
-                            padding: "1px 4px",
-                            cursor: "pointer",
-                          }}
-                          title="Number of most-recent events to show"
-                        >
-                          <For each={[200, 400, 600]}>
-                            {(n) => <option value={String(n)}>{n}</option>}
-                          </For>
-                        </select>
-                      </div>
-                    </div>
-                    <CacheTimeline
-                      events={cacheTimelineBars()}
-                      selectedStepId={selectedCacheStepId()}
-                      onBarClick={focusCacheStep}
-                    />
-                  </div>
-
-                  <For each={[...(cacheEvents() ?? [])].reverse()}>
-                    {(event) => {
-                      const retention = cacheRetention(event);
-                      const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
-                      return (
-                        <div
-                          id={`sv-cache-step-${event.message_id}`}
-                          class={`card ${selectedCacheStepId() === event.message_id ? "cache-step-selected" : ""}`}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              "align-items": "center",
-                              gap: "8px",
-                              "margin-bottom": "4px",
-                            }}
-                          >
-                            <span>{severityIcon(event.severity)}</span>
-                            <span
-                              class="mono"
-                              style={{ "font-size": "11px", color: "var(--text-secondary)" }}
-                            >
-                              {formatDateTime(event.timestamp)}
-                            </span>
-                            <span class={`pill ${severityColorClass(event.severity)}`}>
-                              {event.severity === "full_bust"
-                                ? "FULL BUST"
-                                : event.severity === "info"
-                                  ? "NEW SESSION"
-                                  : event.severity === "unknown"
-                                    ? "NO CACHE DATA"
-                                    : event.severity.toUpperCase()}
-                            </span>
-                          </div>
-                          <div class="card-meta" style={{ gap: "12px" }}>
-                            <Show
-                              when={event.severity !== "unknown"}
-                              fallback={
-                                <span class="mono" style={{ color: "var(--text-muted)" }}>
-                                  no cache data
-                                </span>
-                              }
-                            >
-                              <span
-                                class="mono"
-                                style={{
-                                  color: `var(--${severityColorClass(event.severity)})`,
-                                  "font-weight": "600",
-                                }}
-                                title="Cache retention vs the previous step's expected prefix"
-                              >
-                                {(retention * 100).toFixed(1)}%
-                              </span>
-                            </Show>
-                            <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
-                            <span class="mono">cached={event.cache_read.toLocaleString()}</span>
-                            <span class="mono">new={event.cache_write.toLocaleString()}</span>
-                            <div class="cache-bar">
-                              <div
-                                class={`cache-bar-fill ${severityColorClass(event.severity)}`}
-                                style={{ width: `${barFraction(event) * 100}%` }}
-                              />
-                            </div>
-                          </div>
-                          <Show when={event.cause}>
-                            <div
-                              style={{
-                                "margin-top": "6px",
-                                "font-size": "11px",
-                                color: "var(--amber)",
-                              }}
-                            >
-                              Cause: {event.cause}
-                            </div>
-                          </Show>
-                        </div>
-                      );
-                    }}
-                  </For>
-                </div>
-              </Show>
-            </Show>
-          </Show>
         </div>
       </Show>
     </>
