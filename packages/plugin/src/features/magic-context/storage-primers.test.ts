@@ -5,10 +5,13 @@ import { Database } from "../../shared/sqlite";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import { clearSession } from "./storage-meta-session";
+import { bumpProjectMemoryEpoch, getProjectState } from "./storage-project-state";
 import {
+    createPrimer,
     getPrimerCandidatesForProject,
     insertPrimerCandidates,
     primerOccurrenceUtcDay,
+    updatePrimerAnswer,
 } from "./storage-primers";
 
 function freshDb(): Database {
@@ -69,5 +72,32 @@ describe("primer candidate storage", () => {
     it("uses fixed UTC calendar days for recurrence", () => {
         expect(primerOccurrenceUtcDay(Date.UTC(2026, 0, 1, 23, 59))).toBe("2026-01-01");
         expect(primerOccurrenceUtcDay(Date.UTC(2026, 0, 2, 0, 1))).toBe("2026-01-02");
+    });
+
+    it("updatePrimerAnswer is cache-neutral: no epoch bump, no mutation-log row", () => {
+        const db = freshDb();
+        // Seed an epoch row so a bump would be observable.
+        bumpProjectMemoryEpoch(db, "git:abc");
+        const epochBefore = getProjectState(db, "git:abc")?.project_memory_epoch ?? 0;
+        const mutationsBefore = (
+            db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get() as { n: number }
+        ).n;
+
+        const primerId = createPrimer(db, {
+            projectPath: "git:abc",
+            question: "How does the cache split work?",
+            totalSupport: 2,
+            lastObservedAt: Date.UTC(2026, 0, 8),
+            sourceCandidateIds: [1, 2],
+        });
+        updatePrimerAnswer(db, primerId, "An answer grounded in current source.");
+
+        // The whole reason refresh-primers must use the locked no-ctx_memory
+        // investigator: a primer answer write must NEVER touch the project memory
+        // epoch (which busts m[0]) or the supersede-delta mutation log (m[1]).
+        expect(getProjectState(db, "git:abc")?.project_memory_epoch ?? 0).toBe(epochBefore);
+        expect(
+            (db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get() as { n: number }).n,
+        ).toBe(mutationsBefore);
     });
 });

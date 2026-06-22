@@ -543,6 +543,38 @@ channel) — it reflects `task_schedule_state` read-only.
 
 ---
 
+## 20. Refresh-primers investigation toolset: OpenCode has `aft_*`, Pi does not
+
+The open-book `refresh-primers` task runs a locked, read-only code-investigation
+agent (`dreamer-primer-investigator`) that digs into the CURRENT source to ground
+a primer's answer. The agent is intentionally read-only — no `write`/`edit`/
+`bash` (source safety) and no `ctx_memory`/`ctx_note` (a `ctx_memory` mutation
+bumps the project memory epoch and busts m[0], breaking the primers cache-neutral
+contract).
+
+The investigation TOOLSET differs by harness, and this is a deliberate,
+documented divergence — NOT a parity bug:
+
+- **OpenCode** allow-list: `read, grep, glob, aft_outline, aft_zoom, aft_search,
+  ctx_search` — including AST-aware navigation (`aft_*`).
+- **Pi** strict `--tools` allow-list: `read, grep, find, ls, ctx_search` — Pi's
+  own canonical read-only built-in set (`createReadOnlyToolDefinitions`) plus
+  `ctx_search`. The `aft_*` tools are OpenCode-only and are never registered in
+  Pi; adding them to the lean child extension would also risk the documented
+  Bun/Node native-module collision that keeps historian out of the extension.
+
+So Pi's investigation is structurally weaker (no AST-aware navigation) but
+equally safe (same read-only + cache-neutral guarantee, enforced by the
+registry-build allow-list). The agent is in `SEARCH_ONLY_SUBAGENT_TOOL_AGENTS`
+(loads the lean extension so `ctx_search` is registered) but NOT in
+`DREAMER_ACTION_AGENTS` (which would add `ctx_memory`).
+
+Origin-tag emission (the historian tagging each primer candidate with its origin
+compartment) IS mirrored across both harness historian runners — that part is
+true parity.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

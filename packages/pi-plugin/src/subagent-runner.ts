@@ -116,6 +116,12 @@ const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
 const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
 	"sidekick",
 	"dreamer-retrospective",
+	// Loads the lean extension so ctx_search is REGISTERED (the strict allow-list
+	// only gates an existing registration). Deliberately NOT in
+	// DREAMER_ACTION_AGENTS — that would add ctx_memory, whose mutations bump the
+	// project memory epoch and bust m[0], breaking the primers cache-neutral
+	// contract.
+	"dreamer-primer-investigator",
 ]);
 
 /**
@@ -132,6 +138,13 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
 	["dreamer-retrospective", ["ctx_search"]],
 	["smart-note-compiler", []],
+	// refresh-primers code investigator: read-only investigation of the CURRENT
+	// source. Pi's own canonical read-only set is exactly {read, grep, find, ls}
+	// (createReadOnlyToolDefinitions) — NO bash/edit/write — plus our ctx_search.
+	// NO aft_* (OpenCode-only; never registered in Pi). The allow-list strips
+	// every built-in not named here, so this is the structural source-safety +
+	// cache-neutrality guarantee (no write, no ctx_memory) on the Pi side.
+	["dreamer-primer-investigator", ["read", "grep", "find", "ls", "ctx_search"]],
 ]);
 
 function inferAccountingSubagent(agent: string): SubagentKind {

@@ -213,6 +213,27 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
+	it("locks dreamer-primer-investigator to read-only {read,grep,find,ls,ctx_search} with no write/ctx_memory", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "dreamer-primer-investigator",
+			model: "anthropic/claude-sonnet",
+		});
+		const idx = args.indexOf("--tools");
+		expect(idx).toBeGreaterThan(-1);
+		expect(args[idx + 1]).toBe("read,grep,find,ls,ctx_search");
+		expect(args).not.toContain("--no-tools");
+		// Source-safety + cache-neutrality: no write/edit/bash, and crucially no
+		// ctx_memory (its mutations bump the project memory epoch → bust m[0]).
+		const toolList = args[idx + 1];
+		for (const denied of ["write", "edit", "bash", "ctx_memory", "ctx_note", "aft_search"]) {
+			expect(toolList).not.toContain(denied);
+		}
+		// The lean extension loads (so ctx_search is registered to be gated), but
+		// the dreamer-actions flag (which adds ctx_memory) must NOT be present.
+		expect(args).not.toContain("--magic-context-dreamer-actions");
+	});
+
 	it("parses JSON event lines and normalizes parse errors", () => {
 		expect(__test.parsePiEventLine('{"type":"agent_start"}')).toEqual({
 			ok: true,

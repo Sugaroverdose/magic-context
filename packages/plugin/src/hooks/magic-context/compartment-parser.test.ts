@@ -273,6 +273,46 @@ describe("parseCompartmentOutput — primer_candidates", () => {
             "How does prompt caching work?",
             "How does the materialization cache avoid busts?",
         ]);
+        // Legacy bullet form carries no origin tag.
+        expect(parsed.primerCandidates.every((c) => c.originCompartmentStart === undefined)).toBe(
+            true,
+        );
+    });
+
+    it("parses the origin-tagged <primer at_compartment> form", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="5" end="9" title="cache" episode_type="debug" importance="50">
+<p1>Cache work.</p1><p2>Cache.</p2><p3>Cache.</p3><p4>cache</p4>
+</compartment>
+</compartments>
+<primer_candidates>
+<primer at_compartment="5">How does the m[0]/m[1] cache split work?</primer>
+</primer_candidates>
+<meta><messages_processed>5-9</messages_processed><unprocessed_from>10</unprocessed_from></meta>
+</output>`);
+
+        expect(parsed.primerCandidates).toEqual([
+            { question: "How does the m[0]/m[1] cache split work?", originCompartmentStart: 5 },
+        ]);
+    });
+
+    it("does NOT double-capture an element-form question as a legacy bullet", () => {
+        const parsed = parseCompartmentOutput(`
+<output>
+<compartments>
+<compartment start="1" end="2" title="x" episode_type="debug" importance="50">
+<p1>x</p1><p2>x</p2><p3>x</p3><p4>x</p4>
+</compartment>
+</compartments>
+<primer_candidates>
+<primer at_compartment="1">How does X work?</primer>
+</primer_candidates>
+<meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
+</output>`);
+        expect(parsed.primerCandidates).toHaveLength(1);
+        expect(parsed.primerCandidates[0].originCompartmentStart).toBe(1);
     });
 });
 
