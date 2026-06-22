@@ -4249,22 +4249,39 @@ pub fn get_task_schedule_state(
     rows.collect()
 }
 
-/// Assemble the dreamer page's project-card view: group task_schedule_state by
-/// project, resolve each identity to a worktree + per-project config status, and
-/// attach the per-task schedule rows. Projects with NO worktree mapping (e.g. a
-/// stale identity) still appear (worktree=None) so their schedule is visible —
-/// the per-project gear is simply disabled for them.
+/// One project's stored scheduler state, keyed by task. Used for last-run status
+/// only — NOT for the displayed schedule (which comes from the effective config).
+struct StoredTaskState {
+    schedule: Option<String>,
+    last_run_at: Option<i64>,
+    next_due_at: Option<i64>,
+    last_status: Option<String>,
+    last_error: Option<String>,
+    retry_count: i64,
+}
+
+/// Assemble the dreamer page's project-card view.
+///
+/// CRITICAL: the displayed schedule is the EFFECTIVE CONFIGURED schedule (global
+/// config merged with any per-project override), NOT the per-project
+/// task_schedule_state snapshot. The snapshot is written only when a project is
+/// actively swept, so a dormant project carries a STALE schedule from whenever it
+/// was last touched (e.g. an old 6-task `0 2 * * *` era) — which made inherited
+/// projects show different task counts and stale "next" times. We render the
+/// canonical task set with effective schedules (consistent across all inherited
+/// projects) and use the snapshot purely for last-run status + a next-due that we
+/// only trust when the snapshot's schedule still matches what we display.
 pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, rusqlite::Error> {
-    // 1. Per-task rows, grouped by stored project_path.
+    // 1. Stored scheduler state, grouped identity → task → state.
     let mut stmt = conn.prepare(
         "SELECT project_path, task, schedule, last_run_at, next_due_at, last_status, last_error, retry_count
-         FROM task_schedule_state ORDER BY project_path, task",
+         FROM task_schedule_state",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            DreamerProjectTask {
-                task: row.get(1)?,
+            row.get::<_, String>(1)?,
+            StoredTaskState {
                 schedule: row.get(2)?,
                 last_run_at: row.get(3)?,
                 next_due_at: row.get(4)?,
@@ -4275,15 +4292,18 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
         ))
     })?;
 
-    let mut by_identity: std::collections::BTreeMap<String, Vec<DreamerProjectTask>> =
+    let mut state_by_identity: std::collections::BTreeMap<String, HashMap<String, StoredTaskState>> =
         std::collections::BTreeMap::new();
     for row in rows {
-        let (stored_path, task) = row?;
+        let (stored_path, task, state) = row?;
         let identity = normalize_stored_project_path(&stored_path);
         if identity.is_empty() {
             continue;
         }
-        by_identity.entry(identity).or_default().push(task);
+        state_by_identity
+            .entry(identity)
+            .or_default()
+            .insert(task, state);
     }
 
     // 2. identity → (label, worktree) via the same enumeration the picker uses.
@@ -4292,9 +4312,13 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
         .map(|row| (row.identity.clone(), row))
         .collect();
 
-    let projects = by_identity
+    // 3. Global (user) dreamer schedules — the baseline every project inherits.
+    let global_schedules =
+        crate::jsonc::read_dreamer_task_schedules(&crate::config::resolve_user_config_path());
+
+    let projects = state_by_identity
         .into_iter()
-        .map(|(identity, tasks)| {
+        .map(|(identity, states)| {
             let row = identity_to_row.get(&identity);
             let label = match row {
                 Some(r) => r.display_name.clone(),
@@ -4307,14 +4331,53 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
             let worktree = row
                 .map(|r| r.primary_path.clone())
                 .filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir());
-            let (config_path, has_project_config) = match &worktree {
+            let (config_path, has_project_config, project_schedules) = match &worktree {
                 Some(wt) => {
                     let path = crate::config::resolve_project_config_path(wt);
                     let has = crate::jsonc::config_has_dreamer_block(&path);
-                    (Some(path.to_string_lossy().to_string()), has)
+                    let sched = if has {
+                        crate::jsonc::read_dreamer_task_schedules(&path)
+                    } else {
+                        HashMap::new()
+                    };
+                    (Some(path.to_string_lossy().to_string()), has, sched)
                 }
-                None => (None, false),
+                None => (None, false, HashMap::new()),
             };
+
+            // Effective schedule per canonical task: project override → global →
+            // built-in default. Identical for every project that only inherits.
+            let tasks = crate::config::CANONICAL_DREAM_TASKS
+                .iter()
+                .map(|&task| {
+                    let effective = project_schedules
+                        .get(task)
+                        .or_else(|| global_schedules.get(task))
+                        .cloned()
+                        .unwrap_or_else(|| crate::config::default_task_schedule(task).to_string());
+                    let state = states.get(task);
+                    // Trust the stored next-due only when the snapshot still
+                    // reflects the schedule we're displaying; otherwise it's a
+                    // stale artifact of an old schedule → omit (no "next 5h ago").
+                    let next_due_at = state.and_then(|s| {
+                        if s.schedule.as_deref() == Some(effective.as_str()) {
+                            s.next_due_at
+                        } else {
+                            None
+                        }
+                    });
+                    DreamerProjectTask {
+                        task: task.to_string(),
+                        schedule: Some(effective),
+                        last_run_at: state.and_then(|s| s.last_run_at),
+                        next_due_at,
+                        last_status: state.and_then(|s| s.last_status.clone()),
+                        last_error: state.and_then(|s| s.last_error.clone()),
+                        retry_count: state.map(|s| s.retry_count).unwrap_or(0),
+                    }
+                })
+                .collect();
+
             DreamerProject {
                 identity,
                 label,

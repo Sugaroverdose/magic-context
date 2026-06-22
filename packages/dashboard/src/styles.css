@@ -1274,7 +1274,10 @@ body {
   margin-bottom: 16px;
 }
 
-@media (max-width: 900px) {
+/* Fall back to a single column well before the cards get cramped: an expanded
+   card's task rows (name + schedule + next-due + error) need real width, so two
+   columns only make sense on a genuinely wide window. */
+@media (max-width: 1280px) {
   .dreamer-project-grid {
     grid-template-columns: 1fr;
   }
@@ -1403,18 +1406,32 @@ body {
 
 .dreamer-task-name {
   min-width: 130px;
+  flex-shrink: 0;
 }
 
 .dreamer-task-sched {
   color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
+/* next-due: pinned, never wraps or shrinks (its own class so it doesn't inherit
+   generic card-meta shrink behavior and push the schedule onto two lines). */
+.dreamer-task-next {
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* The error is the ONLY flexible cell: it absorbs the remaining width and
+   truncates with an ellipsis (full text on hover) instead of wrapping the row. */
 .dreamer-task-err {
   color: var(--red, #e5484d);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 40px;
 }
 
 /* ── Per-project dreamer config panel ────────────────────────── */

@@ -377,8 +377,10 @@ export default function DreamerPanel() {
                               {isTaskEnabled(task) ? describeCron(task.schedule ?? "") : "disabled"}
                             </span>
                             <Show when={isTaskEnabled(task) && task.next_due_at != null}>
-                              <span class="card-meta">
-                                · next {formatRelativeTime(task.next_due_at ?? 0)}
+                              <span class="dreamer-task-next">
+                                {(task.next_due_at ?? 0) > Date.now()
+                                  ? `· ${formatRelativeTime(task.next_due_at ?? 0)}`
+                                  : "· overdue"}
                               </span>
                             </Show>
                             <Show when={task.last_error}>

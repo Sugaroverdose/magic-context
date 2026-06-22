@@ -44,6 +44,38 @@ pub fn resolve_project_config_path(project_path: &str) -> PathBuf {
     root_config
 }
 
+/// Canonical dreamer task names (mirrors the plugin's task registry and the
+/// frontend DreamerTasksField list). The dashboard renders this fixed set so
+/// every project shows the same tasks regardless of its (possibly stale) per-
+/// project scheduler snapshot in task_schedule_state.
+pub const CANONICAL_DREAM_TASKS: [&str; 9] = [
+    "verify",
+    "verify-broad",
+    "curate",
+    "classify-memories",
+    "retrospective",
+    "maintain-docs",
+    "key-files",
+    "evaluate-smart-notes",
+    "review-user-memories",
+];
+
+/// Default cron per task (mirrors DEFAULT_TASK_SCHEDULES in the plugin schema and
+/// the frontend). Applied when neither the project nor the global config sets a
+/// schedule. maintain-docs + key-files default OFF (empty).
+pub fn default_task_schedule(task: &str) -> &'static str {
+    match task {
+        "verify" => "0 3 * * *",
+        "verify-broad" => "0 4 * * 0",
+        "curate" => "0 4 * * 0",
+        "classify-memories" => "0 6 * * *",
+        "retrospective" => "0 5 * * *",
+        "evaluate-smart-notes" => "0 3 * * *",
+        "review-user-memories" => "0 3 * * *",
+        _ => "",
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConfigFile {
     pub path: String,

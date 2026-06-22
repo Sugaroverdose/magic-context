@@ -102,9 +102,54 @@ pub fn config_has_dreamer_block(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse a config file's `dreamer.tasks` into a task→schedule map. Any read or
+/// parse failure, or a missing block, yields an empty map (caller falls back to
+/// global/default schedules). Used to compute the EFFECTIVE configured schedule
+/// for a project rather than its (possibly stale) scheduler snapshot.
+pub fn read_dreamer_task_schedules(
+    path: &Path,
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let raw = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return map,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&strip_jsonc(&raw)) {
+        Ok(parsed) => parsed,
+        Err(_) => return map,
+    };
+    if let Some(tasks) = value
+        .get("dreamer")
+        .and_then(|d| d.get("tasks"))
+        .and_then(|t| t.as_object())
+    {
+        for (task, cfg) in tasks {
+            if let Some(sched) = cfg.get("schedule").and_then(|s| s.as_str()) {
+                map.insert(task.clone(), sched.to_string());
+            }
+        }
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_dreamer_task_schedules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.jsonc");
+        std::fs::write(
+            &path,
+            "{ \"dreamer\": { \"tasks\": { \"verify\": { \"schedule\": \"0 3 * * *\" }, \"curate\": { \"schedule\": \"\" } } } }",
+        )
+        .unwrap();
+        let map = read_dreamer_task_schedules(&path);
+        assert_eq!(map.get("verify").map(String::as_str), Some("0 3 * * *"));
+        assert_eq!(map.get("curate").map(String::as_str), Some(""));
+        assert_eq!(map.get("missing"), None);
+    }
 
     #[test]
     fn strips_comments_and_trailing_commas() {
