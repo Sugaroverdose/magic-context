@@ -83,6 +83,12 @@ jobs:
       - name: Smoke (node:sqlite backend)
         run: node packages/plugin/scripts/smoke-node-sqlite.ts
 
+      # Smart-note QuickJS sandbox: verify the WASM is embedded in the BUNDLE
+      # (not a sibling .wasm file the build never emits — bun test runs from src
+      # and cannot see this).
+      - name: Smoke (smart-note wasm bundle)
+        run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
+
   test-pi:
     name: Test (pi-plugin)
     runs-on: ubuntu-latest

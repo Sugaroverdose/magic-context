@@ -1,7 +1,32 @@
-import { newAsyncContext, type QuickJSAsyncContext, type QuickJSHandle } from "quickjs-emscripten";
+// The SINGLEFILE variant embeds the WASM as binary INSIDE the JS module, so it
+// survives bundling into dist/index.js. The default wasmfile variant loads a
+// sibling `emscripten-module.wasm` via `new URL(..., import.meta.url)`, which
+// resolves to `dist/emscripten-module.wasm` in the bundle — a file the build
+// never emits, so every sandbox run fails with ENOENT. (Documented fix:
+// emscriptenInclusion=singlefile is "for missing .wasm files when bundling".)
+// We use the ASYNCIFY variant because the capability API (readFile/httpGet/git)
+// is async and the sandbox installs async host functions.
+import singlefileAsyncifyVariant from "@jitl/quickjs-singlefile-cjs-release-asyncify";
+import {
+    newQuickJSAsyncWASMModuleFromVariant,
+    type QuickJSAsyncContext,
+    type QuickJSAsyncWASMModule,
+    type QuickJSHandle,
+} from "quickjs-emscripten";
 
 import type { SmartNoteCapabilityApi } from "./capabilities";
 import { isSmartNoteNetworkError, type SmartNoteCheckResult } from "./types";
+
+/**
+ * The WASM module is expensive to instantiate (~1MB compile) but reusable across
+ * checks — each check gets its own disposable CONTEXT off the shared module. Cache
+ * the module promise process-wide so we compile once, not per check.
+ */
+let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
+function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
+    asyncModulePromise ??= newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+    return asyncModulePromise;
+}
 
 export interface RunCompiledSmartNoteCheckOptions {
     compiledCheck: string;
@@ -44,7 +69,8 @@ export async function runCompiledSmartNoteCheck(
     );
     try {
         const deadline = Date.now() + timeoutMs;
-        const context = await newAsyncContext();
+        const quickjs = await getAsyncModule();
+        const context = quickjs.newContext();
         try {
             context.runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
             context.runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);

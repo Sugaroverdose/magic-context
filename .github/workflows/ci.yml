@@ -66,6 +66,13 @@ jobs:
       - name: Smoke (node:sqlite backend)
         run: node packages/plugin/scripts/smoke-node-sqlite.ts
 
+      # The smart-note QuickJS sandbox loads a ~1MB WASM. `bun test` runs it from
+      # src (wasm resolves via node_modules), so it cannot catch a BUNDLING break
+      # where the wasm isn't embedded in dist. This bundles sandbox-runner exactly
+      # like the package build and runs a real check against the bundle.
+      - name: Smoke (smart-note wasm bundle)
+        run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
+
   check-pi-plugin:
     name: Check (pi-plugin)
     runs-on: ubuntu-latest

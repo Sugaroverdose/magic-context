@@ -71,6 +71,7 @@
       "version": "0.26.0",
       "dependencies": {
         "@huggingface/transformers": "^4.1.0",
+        "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
         "ai-tokenizer": "^1.0.6",
         "comment-json": "^4.2.5",
         "quickjs-emscripten": "^0.32.0",
@@ -96,6 +97,7 @@
       "version": "0.26.0",
       "dependencies": {
         "@huggingface/transformers": "^4.1.0",
+        "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
         "@opencode-ai/plugin": "^1.15.13",
         "@opencode-ai/sdk": "^1.15.13",
         "ai-tokenizer": "^1.0.6",
@@ -428,6 +430,8 @@
     "@img/sharp-win32-x64": ["@img/sharp-win32-x64@0.34.5", "", { "os": "win32", "cpu": "x64" }, "sha512-+29YMsqY2/9eFEiW93eqWnuLcWcufowXewwSNIT6UwZdUUCrM3oFjMWH/Z6/TMmb4hlFenmfAVbpWeup2jryCw=="],
 
     "@jitl/quickjs-ffi-types": ["@jitl/quickjs-ffi-types@0.32.0", "", {}, "sha512-v9T+GQpmk43VDJ7d72sf0Nexhk+ArvtUihW27dy7lqAl0zBObFKtSBBIm5RBjwIhE8VwsPPm9PNuvPvNqLWUEg=="],
+
+    "@jitl/quickjs-singlefile-cjs-release-asyncify": ["@jitl/quickjs-singlefile-cjs-release-asyncify@0.32.0", "", { "dependencies": { "@jitl/quickjs-ffi-types": "0.32.0" } }, "sha512-vUkn62Rw8+0haSYZhNqmWmkZ2hlHAu6zBHjW9lSrVD5Bk3GLgfmQIOT24G/U+3W+nZ+dTgJ9W/Rv8iN6YuLCLA=="],
 
     "@jitl/quickjs-wasmfile-debug-asyncify": ["@jitl/quickjs-wasmfile-debug-asyncify@0.32.0", "", { "dependencies": { "@jitl/quickjs-ffi-types": "0.32.0" } }, "sha512-EX8zbXwGqCgAE764M+qvkHtyXDi/FUoMBea0JnES7vCM3P7a2+EOZOjGv85wtZ2sJhI1oJ+nekmqpOODFDY+hw=="],
 
