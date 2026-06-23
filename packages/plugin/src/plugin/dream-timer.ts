@@ -35,7 +35,7 @@ import {
 import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
 import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
-import { getErrorMessage } from '../shared/error-message';
+import { getErrorMessage } from "../shared/error-message";
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
@@ -105,9 +105,7 @@ function openTimerDatabaseOrNull(context: string): Database | null {
     try {
         db = openDatabase();
     } catch (error) {
-        log(
-            `[dreamer] storage fatal; skipping ${context}: ${getErrorMessage(error)}`,
-        );
+        log(`[dreamer] storage fatal; skipping ${context}: ${getErrorMessage(error)}`);
         return null;
     }
     if (!db) {
