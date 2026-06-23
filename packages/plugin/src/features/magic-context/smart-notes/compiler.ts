@@ -145,7 +145,9 @@ Remember: output only the JSON object described by the system prompt.`;
         const response = run.validated;
         const compiledCheck = normalizeCompiledCheck(response.compiled_check);
         const manifest = normalizeManifest(response.manifest);
-        validateManifestAgainstCode(compiledCheck, manifest);
+        for (const warning of manifestAdvisoryWarnings(compiledCheck, manifest)) {
+            log(`[dreamer] smart note #${args.note.id}: manifest advisory — ${warning}`);
+        }
         const dryRun = await runCompiledSmartNoteCheck({
             compiledCheck,
             capabilities: args.capabilities,
@@ -221,34 +223,42 @@ export function normalizeManifest(manifest: SmartNoteCheckManifest): SmartNoteCh
     };
 }
 
-export function validateManifestAgainstCode(code: string, manifest: SmartNoteCheckManifest): void {
+/**
+ * Best-effort manifest drift notes for audit visibility only. Runtime guards in
+ * the capability implementations are the security boundary; this check must not
+ * accept or reject code.
+ */
+export function manifestAdvisoryWarnings(code: string, manifest: SmartNoteCheckManifest): string[] {
+    const warnings: string[] = [];
     const declared = new Set(manifest.capabilities);
     const used = capabilityUses(code);
     for (const cap of used) {
-        if (!declared.has(cap)) throw new Error(`manifest missing capability ${cap}`);
+        if (!declared.has(cap)) warnings.push(`manifest omits capability ${cap}`);
     }
 
     const readFiles = literalCalls(code, "readFile");
-    if (used.has("readFile") && readFiles.length === 0) {
-        throw new Error("readFile calls must use literal paths");
-    }
     for (const file of readFiles) {
         if (!manifest.readFiles?.includes(file))
-            throw new Error(`manifest missing readFile path ${file}`);
+            warnings.push(`manifest omits readFile path ${file}`);
     }
 
     const urls = literalCalls(code, "httpGet");
-    if (used.has("httpGet") && urls.length === 0) {
-        throw new Error("httpGet calls must use literal https URLs");
-    }
     for (const url of urls) {
-        const parsed = new URL(url);
-        if (parsed.protocol !== "https:") throw new Error("httpGet URL must be https");
-        if (!manifest.urls?.includes(url)) throw new Error(`manifest missing URL ${url}`);
-        if (!manifest.hosts?.includes(parsed.hostname.toLowerCase())) {
-            throw new Error(`manifest missing host ${parsed.hostname}`);
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol !== "https:") {
+                warnings.push(`manifest records non-https URL ${url}`);
+                continue;
+            }
+            if (!manifest.urls?.includes(url)) warnings.push(`manifest omits URL ${url}`);
+            if (!manifest.hosts?.includes(parsed.hostname.toLowerCase())) {
+                warnings.push(`manifest omits host ${parsed.hostname}`);
+            }
+        } catch {
+            warnings.push(`manifest records invalid URL ${url}`);
         }
     }
+    return warnings;
 }
 
 export function hashCheck(

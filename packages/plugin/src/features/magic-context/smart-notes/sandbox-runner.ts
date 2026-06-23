@@ -161,13 +161,20 @@ async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): P
 "use strict";
 const module = { exports: {} };
 const exports = module.exports;
-const __mcCap = Object.freeze({
-  readFile(path) { return __mcHostCap.__readFile(String(path)); },
-  httpGet(url) { return JSON.parse(__mcHostCap.__httpGet(String(url))); },
-  gitHeadSha() { return __mcHostCap.__gitHeadSha(); },
-  gitTag() { return __mcHostCap.__gitTag(); },
-  gitLog(opts) { return JSON.parse(__mcHostCap.__gitLog(JSON.stringify(opts || {}))); },
-});
+const __mcCap = (() => {
+  const hostCap = __mcHostCap;
+  delete globalThis.__mcHostCap;
+  if (Object.prototype.hasOwnProperty.call(globalThis, "__mcHostCap")) {
+    globalThis.__mcHostCap = undefined;
+  }
+  return Object.freeze({
+    readFile(path) { return hostCap.__readFile(String(path)); },
+    httpGet(url) { return JSON.parse(hostCap.__httpGet(String(url))); },
+    gitHeadSha() { return hostCap.__gitHeadSha(); },
+    gitTag() { return hostCap.__gitTag(); },
+    gitLog(opts) { return JSON.parse(hostCap.__gitLog(JSON.stringify(opts || {}))); },
+  });
+})();
 ${compiledCheck}
 const __check = typeof check === "function" ? check : module.exports.check;
 if (typeof __check !== "function") throw new Error("compiled check must define check(cap)");
