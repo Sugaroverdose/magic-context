@@ -74,7 +74,7 @@ The wizard auto-detects which harnesses you have (OpenCode, Pi, or both), adds t
 
 > **Why disable built-in compaction?** Magic Context manages context itself. The host's compaction would interfere with its cache-aware deferred operations and double-compress.
 
-**Manual setup** (OpenCode): add the plugin and turn compaction off in `opencode.json`, then drop a `magic-context.jsonc` in your project root. See the [configuration reference](./CONFIGURATION.md).
+**Manual setup** (OpenCode): add the plugin and turn compaction off in `opencode.json`, then drop a `magic-context.jsonc` in `<project>/.cortexkit/` (or `~/.config/cortexkit/` for user-wide defaults). See the [configuration reference](./CONFIGURATION.md).
 
 ```jsonc
 {
@@ -242,10 +242,11 @@ It reads directly from Magic Context's SQLite database. No extra server, no API.
 
 Settings live in `magic-context.jsonc`. Everything has sensible defaults; project config merges on top of user-wide settings. For the full reference — cache TTL tuning, per-model execute thresholds, historian and dreamer model selection, embedding providers, and memory settings — see **[CONFIGURATION.md](./CONFIGURATION.md)** or the **[configuration reference on docs.cortexkit.io](https://docs.cortexkit.io/magic-context/reference/configuration/)**.
 
-**Config locations** (merged in order, project overrides user):
-1. `<project-root>/magic-context.jsonc`
-2. `<project-root>/.opencode/magic-context.jsonc`
-3. `~/.config/opencode/magic-context.jsonc`
+**Config locations** (one shared CortexKit location, project overrides user):
+1. `<project-root>/.cortexkit/magic-context.jsonc`
+2. `~/.config/cortexkit/magic-context.jsonc`
+
+Upgrading from an earlier version? Your existing config is moved here automatically on first run (a `.MOVED_READPLEASE` breadcrumb is left at the old path).
 
 ---
 

@@ -7,11 +7,12 @@ description: Every magic-context.jsonc key, with types, defaults, and where to p
     packages/plugin/src/config/schema/magic-context.ts; regenerate with
     `bun packages/plugin/scripts/build-config-docs.ts`. -->
 
-Magic Context reads `magic-context.jsonc` (or `.json`). Project config overrides user config, key by key.
+Magic Context reads `magic-context.jsonc` (or `.json`) from one shared CortexKit location, the same for both harnesses. Project config overrides user config, key by key.
 
-**OpenCode** — project: `<project>/magic-context.jsonc` or `<project>/.opencode/magic-context.jsonc`; user: `~/.config/opencode/magic-context.jsonc`.
+- **Project** — `<project>/.cortexkit/magic-context.jsonc`
+- **User-wide** — `~/.config/cortexkit/magic-context.jsonc`
 
-**Pi** — project: `<project>/.pi/magic-context.jsonc`; user: `~/.pi/agent/magic-context.jsonc`.
+Upgrading from an earlier version moves your existing config here automatically on first run (a `.MOVED_READPLEASE` breadcrumb is left at the old per-harness path).
 
 Add the schema line for editor validation and autocomplete:
 

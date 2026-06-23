@@ -47,23 +47,22 @@ Setup adds the plugin to your `opencode.json` and turns off compaction:
 }
 ```
 
-It also creates a `magic-context.jsonc` config file. Config locations (merged in order, project overrides user):
+It also creates a `magic-context.jsonc` config file in the shared CortexKit location (the same for both harnesses; project overrides user):
 
 | Path | Scope |
 |---|---|
-| `<project>/magic-context.jsonc` | Project root |
-| `<project>/.opencode/magic-context.jsonc` | Project, alternate location |
-| `~/.config/opencode/magic-context.jsonc` | User-wide defaults |
+| `<project>/.cortexkit/magic-context.jsonc` | Project |
+| `~/.config/cortexkit/magic-context.jsonc` | User-wide defaults |
 
 </TabItem>
 <TabItem label="Pi">
 
-Setup adds the extension to Pi's settings and creates a `magic-context.jsonc` config file. Config locations:
+Setup adds the extension to Pi's settings and creates a `magic-context.jsonc` config file in the shared CortexKit location (the same for both harnesses; project overrides user):
 
 | Path | Scope |
 |---|---|
-| `<project>/.pi/magic-context.jsonc` | Project root |
-| `~/.pi/agent/magic-context.jsonc` | User-wide defaults |
+| `<project>/.cortexkit/magic-context.jsonc` | Project |
+| `~/.config/cortexkit/magic-context.jsonc` | User-wide defaults |
 
 :::note
 Pi setup prompts for `thinking_level` if you pick a `github-copilot/*` reasoning model — Copilot requires it and rejects the default value Pi would send otherwise. The wizard handles this for you.

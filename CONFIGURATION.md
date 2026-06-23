@@ -4,22 +4,16 @@ All settings are flat top-level keys in `magic-context.jsonc`. The schema is **s
 
 ### Configuration locations
 
-**OpenCode** reads (in priority order, project overrides user):
+Magic Context reads config from **one shared CortexKit location**, the same for both harnesses (project overrides user):
 
 | Path | Scope |
 |---|---|
-| `<project>/magic-context.jsonc` | Project root |
-| `<project>/.opencode/magic-context.jsonc` | Project, alternate location |
-| `~/.config/opencode/magic-context.jsonc` | User-wide defaults |
+| `<project>/.cortexkit/magic-context.jsonc` | Project |
+| `~/.config/cortexkit/magic-context.jsonc` | User-wide defaults |
 
-**Pi** reads (in priority order, project overrides user):
+Project config always merges on top of user config. The unified setup wizard (`npx @cortexkit/magic-context@latest setup`) writes the user-level file with sensible defaults.
 
-| Path | Scope |
-|---|---|
-| `<project>/.pi/magic-context.jsonc` | Project root |
-| `~/.pi/agent/magic-context.jsonc` | User-wide defaults |
-
-Project config always merges on top of user config in both harnesses. The unified setup wizard (`npx @cortexkit/magic-context@latest setup`) auto-detects which harnesses you have installed and writes the user-level file for each with sensible defaults; pass `--harness opencode` or `--harness pi` to target one.
+> **Migrating from an earlier version?** Config used to live in per-harness paths (`~/.config/opencode/`, `~/.pi/agent/`, `<project>/.opencode/`, `<project>/.pi/`, or the project root). On first run after upgrading, Magic Context moves your existing config to the CortexKit location automatically and leaves a `<old-name>.MOVED_READPLEASE` breadcrumb (preserving your original settings) at each old path. If two old locations held *different* settings it won't guess — it leaves both in place and warns you to consolidate by hand.
 
 ### Cross-harness scoping
 
