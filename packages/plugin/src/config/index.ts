@@ -1,9 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 import { detectConfigFile, parseJsonc } from "../shared/jsonc-parser";
 import { migrateLegacyAgentEnabledInMemory } from "./agent-disable";
+import {
+    cortexKitProjectConfigBasePath,
+    cortexKitUserConfigBasePath,
+} from "./migrate-config-location";
 import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
 import {
@@ -28,15 +30,16 @@ export interface MagicContextPluginConfig extends MagicContextConfig {
     >;
 }
 
-const CONFIG_FILE_BASENAME = "magic-context";
-
+// Config is read ONLY from the shared CortexKit location (hard cutover). The
+// legacy per-harness paths are touched only by the location migrator
+// (migrate-config-location.ts), which runs at plugin init and moves them to the
+// CortexKit path before the loader runs. They are never a read-fallback.
 function getUserConfigBasePath(): string {
-    const configRoot = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config");
-    return join(configRoot, "opencode", CONFIG_FILE_BASENAME);
+    return cortexKitUserConfigBasePath();
 }
 
 function getProjectConfigBasePath(directory: string): string {
-    return join(directory, ".opencode", CONFIG_FILE_BASENAME);
+    return cortexKitProjectConfigBasePath(directory);
 }
 
 interface LoadedConfigFile {
@@ -381,11 +384,11 @@ function parsePluginConfig(
 export function loadPluginConfig(
     directory: string,
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
+    // Hard cutover: user + project config come ONLY from the shared CortexKit
+    // location. The pre-cutover root / .opencode / .pi fallbacks are handled by
+    // the location migrator at init, not read here.
     const userDetected = detectConfigFile(getUserConfigBasePath());
-    // Check project root first, then .opencode/ — root takes precedence
-    const rootDetected = detectConfigFile(join(directory, CONFIG_FILE_BASENAME));
-    const dotOpenCodeDetected = detectConfigFile(getProjectConfigBasePath(directory));
-    const projectDetected = rootDetected.format !== "none" ? rootDetected : dotOpenCodeDetected;
+    const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
 
     const userLoaded = userDetected.format === "none" ? null : loadConfigFile(userDetected.path);
     const projectLoaded =
@@ -507,10 +510,9 @@ function combinedOutcome(args: {
 }
 
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
+    // Hard cutover — CortexKit paths only (see loadPluginConfig).
     const userDetected = detectConfigFile(getUserConfigBasePath());
-    const rootDetected = detectConfigFile(join(directory, CONFIG_FILE_BASENAME));
-    const dotOpenCodeDetected = detectConfigFile(getProjectConfigBasePath(directory));
-    const projectDetected = rootDetected.format !== "none" ? rootDetected : dotOpenCodeDetected;
+    const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
 
     const userLoaded =
         userDetected.format === "none" ? null : loadConfigFileDetailed(userDetected.path, "user");

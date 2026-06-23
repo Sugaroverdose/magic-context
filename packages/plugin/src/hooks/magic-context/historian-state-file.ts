@@ -1,6 +1,9 @@
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getProjectMagicContextHistorianDir } from "../../shared/data-path";
+import {
+    ensureCortexKitArtifactGitignore,
+    getProjectMagicContextHistorianDir,
+} from "../../shared/data-path";
 
 /**
  * Historian state-file offloading.
@@ -51,6 +54,8 @@ export function maybeWriteHistorianStateFile(
     try {
         const dir = getProjectMagicContextHistorianDir(directory);
         mkdirSync(dir, { recursive: true });
+        // Keep the transient dump dir out of the user's git status.
+        ensureCortexKitArtifactGitignore(directory);
         const path = join(dir, `state-${sessionId}-${Date.now()}.xml`);
         writeFileSync(path, existingState, "utf8");
         return path;

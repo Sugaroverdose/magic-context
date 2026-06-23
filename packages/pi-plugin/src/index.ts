@@ -23,6 +23,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isDreamerRunnable } from "@magic-context/core/config/agent-disable";
+import { migrateMagicContextConfigLocations } from "@magic-context/core/config/migrate-config-location";
 import type {
 	DreamerConfig,
 	HistorianConfig,
@@ -181,6 +182,20 @@ function info(message: string, data?: unknown): void {
 
 function warn(message: string, data?: unknown): void {
 	log(`${PREFIX} WARN ${message}`, data);
+}
+
+// Migrate config from the legacy per-harness locations to the shared CortexKit
+// location BEFORE any loadPiConfig (hard cutover: the loader reads only
+// CortexKit). Memoized per directory so the per-cwd switch sites don't re-run
+// the (idempotent, lock-guarded) migration on every pass. Fails open.
+const migratedConfigDirs = new Set<string>();
+function ensureConfigLocationsMigrated(dir: string): void {
+	if (migratedConfigDirs.has(dir)) return;
+	migratedConfigDirs.add(dir);
+	migrateMagicContextConfigLocations(dir, {
+		warn: (m) => warn(m),
+		info: (m) => info(m),
+	});
 }
 
 function formatTokens(value: number): string {
@@ -505,6 +520,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// We surface warnings via the standard `warn()` channel so users see
 	// them in the magic-context log. Loading never throws — bad config
 	// gracefully degrades to defaults.
+	ensureConfigLocationsMigrated(projectDir);
 	const { config, warnings, loadedFromPaths } = loadPiConfig({
 		cwd: projectDir,
 	});
@@ -656,6 +672,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		// A different checkout: re-resolve config + historian/auto-search from
 		// the new cwd. The launch dir is pre-seeded below so this branch only
 		// runs for genuine switches.
+		ensureConfigLocationsMigrated(dir);
 		const switchedConfig = loadPiConfig({ cwd: dir }).config;
 		const switchedHistorian = resolveHistorianFromConfig(switchedConfig);
 		if (switchedHistorian) {
@@ -892,6 +909,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// `dreamer.disable`). Reusing the boot config would silently run the
 			// dreamer in the new checkout with the old project's settings.
 			const switchedProject = currentProject.projectDir !== projectDir;
+			if (switchedProject)
+				ensureConfigLocationsMigrated(currentProject.projectDir);
 			const effectiveConfig = switchedProject
 				? loadPiConfig({ cwd: currentProject.projectDir }).config
 				: config;

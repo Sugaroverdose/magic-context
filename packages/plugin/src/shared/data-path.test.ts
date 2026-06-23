@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+    ensureCortexKitArtifactGitignore,
     getCacheDir,
     getDataDir,
     getLegacyOpenCodeMagicContextStorageDir,
@@ -121,20 +123,20 @@ describe("data-path", () => {
         expect(shared).toContain("cortexkit");
     });
 
-    test("getProjectMagicContextDir composes <project>/.opencode/magic-context", () => {
+    test("getProjectMagicContextDir composes <project>/.cortexkit/magic-context", () => {
         // Project-local artifacts (historian state file, failure dumps) live
         // inside the project so OpenCode's external_directory permission system
         // treats them as project-internal. Without this, historian's Read tool
         // would trigger a permission prompt on every run when artifacts lived
-        // under os.tmpdir().
+        // under os.tmpdir(). Moved from .opencode/ to the shared .cortexkit/.
         expect(getProjectMagicContextDir("/Users/me/Work/proj")).toBe(
-            path.join("/Users/me/Work/proj", ".opencode", "magic-context"),
+            path.join("/Users/me/Work/proj", ".cortexkit", "magic-context"),
         );
     });
 
     test("getProjectMagicContextHistorianDir appends historian/", () => {
         expect(getProjectMagicContextHistorianDir("/Users/me/Work/proj")).toBe(
-            path.join("/Users/me/Work/proj", ".opencode", "magic-context", "historian"),
+            path.join("/Users/me/Work/proj", ".cortexkit", "magic-context", "historian"),
         );
     });
 
@@ -145,7 +147,7 @@ describe("data-path", () => {
         // project-local historian dir.
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getProjectMagicContextDir("/some/project")).toBe(
-            path.join("/some/project", ".opencode", "magic-context"),
+            path.join("/some/project", ".cortexkit", "magic-context"),
         );
     });
 
@@ -153,7 +155,69 @@ describe("data-path", () => {
         // path.join normalizes redundant separators so callers don't need to
         // worry about how the project directory was constructed.
         expect(getProjectMagicContextDir("/some/project/")).toBe(
-            path.join("/some/project/", ".opencode", "magic-context"),
+            path.join("/some/project/", ".cortexkit", "magic-context"),
         );
+    });
+});
+
+describe("ensureCortexKitArtifactGitignore", () => {
+    test("creates .cortexkit/.gitignore with a fenced magic-context block", () => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "mc-gi-"));
+        try {
+            ensureCortexKitArtifactGitignore(dir);
+            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
+            expect(gi).toContain("# >>> cortexkit:magic-context");
+            expect(gi).toContain("magic-context/");
+            expect(gi).toContain("# <<< cortexkit:magic-context");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("is idempotent — a second call does not duplicate the block", () => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "mc-gi-"));
+        try {
+            ensureCortexKitArtifactGitignore(dir);
+            ensureCortexKitArtifactGitignore(dir);
+            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
+            const occurrences = gi.split("# >>> cortexkit:magic-context").length - 1;
+            expect(occurrences).toBe(1);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("preserves a sibling module's existing entries (appends, never clobbers)", () => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "mc-gi-"));
+        try {
+            const ckDir = path.join(dir, ".cortexkit");
+            mkdirSync(ckDir, { recursive: true });
+            // Simulate a sibling (e.g. AFT) already owning a fenced block.
+            writeFileSync(
+                path.join(ckDir, ".gitignore"),
+                "# >>> cortexkit:aft\naft/scratch/\n# <<< cortexkit:aft\n",
+            );
+            ensureCortexKitArtifactGitignore(dir);
+            const gi = readFileSync(path.join(ckDir, ".gitignore"), "utf8");
+            expect(gi).toContain("# >>> cortexkit:aft");
+            expect(gi).toContain("aft/scratch/");
+            expect(gi).toContain("# >>> cortexkit:magic-context");
+            expect(gi).toContain("magic-context/");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    test("does not ignore the project config — only the artifact dir", () => {
+        const dir = mkdtempSync(path.join(os.tmpdir(), "mc-gi-"));
+        try {
+            ensureCortexKitArtifactGitignore(dir);
+            const gi = readFileSync(path.join(dir, ".cortexkit", ".gitignore"), "utf8");
+            // The config file stays tracked: it must NOT appear as an ignore.
+            expect(gi).not.toContain("magic-context.jsonc");
+            expect(gi).not.toContain("*.jsonc");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

@@ -6,6 +6,7 @@ import {
 } from "./agents/hidden-agent-registrations";
 import { loadPluginConfig } from "./config";
 import { isDreamerRunnable } from "./config/agent-disable";
+import { migrateMagicContextConfigLocations } from "./config/migrate-config-location";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
@@ -43,7 +44,21 @@ import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
 const server: Plugin = async (ctx) => {
+    // Move config from the legacy per-harness locations to the shared CortexKit
+    // location BEFORE loading (hard cutover: the loader reads only CortexKit).
+    // Idempotent + lock-guarded for Desktop multi-instance; fails open. Warnings
+    // (conflicts / partial failures) are surfaced via the config-warning path.
+    const configMigrationWarnings = migrateMagicContextConfigLocations(ctx.directory, {
+        warn: (m) => log(`[magic-context] ${m}`),
+        info: (m) => log(`[magic-context] ${m}`),
+    });
     const pluginConfig = loadPluginConfig(ctx.directory);
+    if (configMigrationWarnings.length > 0) {
+        pluginConfig.configWarnings = [
+            ...configMigrationWarnings,
+            ...(pluginConfig.configWarnings ?? []),
+        ];
+    }
     // Apply SQLite connection tuning before the first openDatabase() below.
     setSqlitePragmaConfig({
         cacheSizeMb: pluginConfig.sqlite.cache_size_mb,

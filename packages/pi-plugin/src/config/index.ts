@@ -1,7 +1,9 @@
+import {
+	cortexKitProjectConfigBasePath,
+	cortexKitUserConfigBasePath,
+} from "@magic-context/core/config/migrate-config-location";
 import "@magic-context/core/config/prune-config-leaf";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
@@ -57,16 +59,19 @@ interface LoadedConfigFile {
 	loadOutcome: LoadOutcome;
 }
 
-const CONFIG_FILE_NAME = "magic-context";
-
+// Hard cutover: config is read ONLY from the shared CortexKit location. The
+// legacy Pi paths (~/.pi/agent/, <root>/.pi/) are touched only by the location
+// migrator (migrateMagicContextConfigLocations), which runs at Pi init before
+// the loader and moves them to the CortexKit path. They are never a read
+// fallback. The CortexKit target normalizes to .jsonc; we still detect a
+// pre-existing .json at the target for resilience.
 function getProjectConfigPaths(cwd: string): string[] {
-	const basePath = join(cwd, ".pi", CONFIG_FILE_NAME);
+	const basePath = cortexKitProjectConfigBasePath(cwd);
 	return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 
 function getUserConfigPaths(): string[] {
-	const home = process.env.HOME ?? homedir();
-	const basePath = join(home, ".pi", "agent", CONFIG_FILE_NAME);
+	const basePath = cortexKitUserConfigBasePath();
 	return [`${basePath}.jsonc`, `${basePath}.json`];
 }
 

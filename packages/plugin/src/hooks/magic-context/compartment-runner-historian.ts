@@ -8,7 +8,10 @@ import { recordChildInvocation } from "../../features/magic-context/subagent-tok
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
-import { getProjectMagicContextHistorianDir } from "../../shared/data-path";
+import {
+    ensureCortexKitArtifactGitignore,
+    getProjectMagicContextHistorianDir,
+} from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import { shouldKeepSubagents } from "../../shared/keep-subagents";
 import { buildHistorianEditorPrompt } from "./compartment-prompt";
@@ -623,6 +626,8 @@ function dumpHistorianResponse(
     try {
         const dumpDir = historianResponseDumpDir(directory);
         mkdirSync(dumpDir, { recursive: true });
+        // Keep the transient dump dir out of the user's git status.
+        ensureCortexKitArtifactGitignore(directory);
         const safeSessionId = sanitizeDumpName(sessionId);
         const safeLabel = sanitizeDumpName(label);
         const dumpPath = join(dumpDir, `${safeSessionId}-${safeLabel}-${Date.now()}.xml`);

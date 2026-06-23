@@ -24,12 +24,17 @@ function writeConfig(path: string, text: string): void {
 	writeFileSync(path, text, "utf-8");
 }
 
+// Hard cutover: both harnesses read config from the shared CortexKit location.
+// Project config: <cwd>/.cortexkit/magic-context.*
+// User config:    <configHome>/cortexkit/magic-context.* where configHome is
+//                 XDG_CONFIG_HOME ?? <HOME>/.config (XDG_CONFIG_HOME is unset in
+//                 the test env, so it resolves under the temp HOME below).
 function writeProjectConfig(
 	cwd: string,
 	text: string,
 	extension: "jsonc" | "json" = "jsonc",
 ): string {
-	const path = join(cwd, ".pi", `magic-context.${extension}`);
+	const path = join(cwd, ".cortexkit", `magic-context.${extension}`);
 	writeConfig(path, text);
 	return path;
 }
@@ -39,7 +44,7 @@ function writeUserConfig(
 	text: string,
 	extension: "jsonc" | "json" = "jsonc",
 ): string {
-	const path = join(home, ".pi", "agent", `magic-context.${extension}`);
+	const path = join(home, ".config", "cortexkit", `magic-context.${extension}`);
 	writeConfig(path, text);
 	return path;
 }

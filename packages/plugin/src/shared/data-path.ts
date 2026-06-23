@@ -1,3 +1,4 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getHarness, type HarnessId } from "./harness";
@@ -62,28 +63,69 @@ export function getMagicContextHistorianDir(harness: HarnessId = getHarness()): 
 /**
  * Project-local magic-context artifact directory.
  *
- * Layout: `<project-directory>/.opencode/magic-context/`
+ * Layout: `<project-directory>/.cortexkit/magic-context/`
  *
  * Used for artifacts that the historian/recomp pipeline writes during a run
  * and that the model is asked to read via its native Read tool. OpenCode's
  * `external_directory` permission system asks the user before reading any
  * file outside the project directory or its worktree, which interrupts every
  * historian run when artifacts live under `os.tmpdir()`. Writing under the
- * project's own `.opencode/` subtree falls inside the project boundary and
+ * project's own `.cortexkit/` subtree falls inside the project boundary and
  * never triggers a permission prompt.
  *
- * The `.opencode/` parent dir is OpenCode's own per-project convention (used
- * for project-local config, plans, dumps, plugin installs). Anchoring
- * magic-context artifacts under `.opencode/magic-context/` keeps them
- * co-located with related OpenCode metadata and makes them easy for users to
- * locate when debugging.
+ * `.cortexkit/` is the shared CortexKit per-project dir (also holds the
+ * project config `magic-context.jsonc`). Because these artifacts are transient
+ * debug dumps that shouldn't dirty the user's repo, the first write also drops
+ * a fenced-block `.gitignore` entry ignoring this subdir (see
+ * ensureCortexKitArtifactGitignore) while leaving `*.jsonc` config tracked.
+ *
+ * Migration note: artifacts used to live under `.opencode/magic-context/`. We
+ * cut the write path forward only — old transient dumps are git-ignored and
+ * regenerated, so they are intentionally NOT migrated (left to be cleaned).
  *
  * Logger does NOT use this — log files stay in the per-harness tmp subtree
  * because they are written by the plugin process itself (no model-side Read
  * tool call, no permission prompt) and span sessions/projects.
  */
 export function getProjectMagicContextDir(directory: string): string {
-    return path.join(directory, ".opencode", "magic-context");
+    return path.join(directory, ".cortexkit", "magic-context");
+}
+
+const GITIGNORE_GUARD_OPEN = "# >>> cortexkit:magic-context";
+const GITIGNORE_GUARD_CLOSE = "# <<< cortexkit:magic-context";
+
+/**
+ * Ensure `<project>/.cortexkit/.gitignore` ignores Magic Context's transient
+ * artifact subdir (`magic-context/`) without touching anything else in the
+ * shared `.cortexkit/` dir — the project config `magic-context.jsonc` stays
+ * tracked, and any sibling module's (e.g. AFT's) entries are preserved.
+ *
+ * Uses the shared CortexKit fenced-block convention: each module owns exactly
+ * its `# >>> cortexkit:<module>` … `# <<< cortexkit:<module>` block and appends
+ * it idempotently (no-op when its own guard line is already present). This lets
+ * multiple cortexkit modules coexist in one `.gitignore` without clobbering.
+ *
+ * Best-effort: a write failure never blocks an artifact write (the caller
+ * already degrades gracefully on its own write failures).
+ */
+export function ensureCortexKitArtifactGitignore(directory: string): void {
+    try {
+        const cortexKitDir = path.join(directory, ".cortexkit");
+        const gitignorePath = path.join(cortexKitDir, ".gitignore");
+        let existing = "";
+        if (existsSync(gitignorePath)) {
+            existing = readFileSync(gitignorePath, "utf8");
+            // Already fenced by us — nothing to do.
+            if (existing.includes(GITIGNORE_GUARD_OPEN)) return;
+        }
+        const block = `${GITIGNORE_GUARD_OPEN}\nmagic-context/\n${GITIGNORE_GUARD_CLOSE}\n`;
+        const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
+        const next = existing + (needsLeadingNewline ? "\n" : "") + block;
+        mkdirSync(cortexKitDir, { recursive: true });
+        writeFileSync(gitignorePath, next, "utf8");
+    } catch {
+        // best-effort — never block an artifact write on the gitignore.
+    }
 }
 
 /**

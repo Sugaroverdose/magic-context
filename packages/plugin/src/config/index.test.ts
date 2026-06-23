@@ -14,7 +14,8 @@ import { loadPluginConfig } from "./index";
  */
 function loadWithUserConfig(configText: string, extraEnv: Record<string, string> = {}) {
     const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
-    const configDir = join(xdg, "opencode");
+    // Hard cutover: the loader reads user config from <XDG>/cortexkit/.
+    const configDir = join(xdg, "cortexkit");
     const fs = require("node:fs") as typeof import("node:fs");
     fs.mkdirSync(configDir, { recursive: true });
     writeFileSync(join(configDir, "magic-context.jsonc"), configText, "utf-8");
@@ -63,11 +64,12 @@ function loadWithUserAndProjectConfig(
     const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
     const projectDir = mkdtempSync(join(tmpdir(), "mc-config-proj-"));
     const fs = require("node:fs") as typeof import("node:fs");
-    const configDir = join(xdg, "opencode");
+    // Hard cutover: user config at <XDG>/cortexkit/, project at <root>/.cortexkit/.
+    const configDir = join(xdg, "cortexkit");
     fs.mkdirSync(configDir, { recursive: true });
-    fs.mkdirSync(join(projectDir, ".opencode"), { recursive: true });
+    fs.mkdirSync(join(projectDir, ".cortexkit"), { recursive: true });
     writeFileSync(join(configDir, "magic-context.jsonc"), userConfigText, "utf-8");
-    writeFileSync(join(projectDir, ".opencode", "magic-context.jsonc"), projectConfigText, "utf-8");
+    writeFileSync(join(projectDir, ".cortexkit", "magic-context.jsonc"), projectConfigText, "utf-8");
 
     const origXdg = process.env.XDG_CONFIG_HOME;
     const savedEnv: Record<string, string | undefined> = {};
