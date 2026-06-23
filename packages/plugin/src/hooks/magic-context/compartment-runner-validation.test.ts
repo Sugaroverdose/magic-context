@@ -215,3 +215,30 @@ describe("healCompartmentGaps via validateHistorianOutput", () => {
         });
     });
 });
+
+describe("validateHistorianOutput primer candidate contract", () => {
+    test("keeps at most one primer candidate per historian pass", () => {
+        const xml = `
+<output>
+<compartments>
+<compartment start="1" end="2" title="cache" episode_type="debug" importance="50">
+<p1>Cache work.</p1><p2>Cache.</p2><p3>Cache.</p3><p4>cache</p4>
+</compartment>
+</compartments>
+<primer_candidates>
+<primer at_compartment="1">How does the cache materialization flow work?</primer>
+<primer at_compartment="1">How does ctx_search combine result types?</primer>
+</primer_candidates>
+<meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
+</output>`;
+
+        const result = validateHistorianOutput(xml, "ses-test", buildChunk(1, 2), [], 0);
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect(result.primerCandidates?.map((candidate) => candidate.question)).toEqual([
+                "How does the cache materialization flow work?",
+            ]);
+        }
+    });
+});
