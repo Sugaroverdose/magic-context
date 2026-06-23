@@ -91,6 +91,31 @@ export function buildHiddenAgentRegistrations(args: {
         {
             id: "dreamer",
             prompt: args.dreamerPrompt,
+            // CURATE-ONLY now. Curate edits the memory store via ctx_memory and
+            // never reads code (a separate verify task owns memory-vs-code
+            // correctness), so it needs only ctx_memory — not the former
+            // bash/write/edit/read/aft/ctx_search/ctx_note surface. maintain-docs
+            // and review-user-memories moved to their own scoped agents below.
+            // (Inline literal — kept byte-identical to DREAMER_CURATE_ALLOWED_TOOLS
+            // by agent-registration-drift.test.ts; see the module header for why
+            // these are not const imports.)
+            allowedTools: ["ctx_memory"],
+            // Curate is a genuine multi-step whole-pool hygiene loop, so it keeps a
+            // high cap.
+            maxSteps: 150,
+            overrides: args.dreamerOverrides,
+            // Lock the curate tool surface: a user dreamer `tools`/`permission`
+            // override must not re-grant bash/write/edit to this unsupervised
+            // memory-hygiene agent. Model/temperature overrides still apply.
+            lockPermissions: true,
+        },
+        {
+            id: "dreamer-docs",
+            prompt: args.dreamerPrompt,
+            // maintain-docs: explore code + write/edit ARCHITECTURE.md/STRUCTURE.md
+            // + bash (git log, find). NO ctx_memory/ctx_search/ctx_note — it edits
+            // docs, never the memory store. (Inline literal — kept byte-identical to
+            // DREAMER_DOCS_ALLOWED_TOOLS by agent-registration-drift.test.ts.)
             allowedTools: [
                 "read",
                 "grep",
@@ -101,14 +126,24 @@ export function buildHiddenAgentRegistrations(args: {
                 "aft_outline",
                 "aft_zoom",
                 "aft_search",
-                "ctx_memory",
-                "ctx_search",
-                "ctx_note",
             ],
-            // The dreamer is a genuine multi-step maintenance loop (~60-72 model
-            // turns observed), so it needs a high cap.
-            maxSteps: 150,
+            // Docs maintenance reads the tree and writes two files — a bounded loop,
+            // not the whole-pool 150.
+            maxSteps: 60,
             overrides: args.dreamerOverrides,
+            // Lock so a user override can't add the memory surface back.
+            lockPermissions: true,
+        },
+        {
+            id: "dreamer-reviewer",
+            prompt: args.dreamerPrompt,
+            // review-user-memories: a pure JSON reviewer of behavioral observations.
+            // It calls NO tools — the host applies its verdict — so zero tools,
+            // locked (mirrors dreamer-classifier).
+            allowedTools: [],
+            maxSteps: 4,
+            overrides: args.dreamerOverrides,
+            lockPermissions: true,
         },
         {
             id: "dreamer-retrospective",

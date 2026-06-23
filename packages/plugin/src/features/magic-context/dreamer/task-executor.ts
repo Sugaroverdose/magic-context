@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 
-import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "../../../agents/dreamer";
+import {
+    DREAMER_AGENT,
+    DREAMER_DOCS_AGENT,
+    DREAMER_RETROSPECTIVE_AGENT,
+} from "../../../agents/dreamer";
 import type { DreamingTask } from "../../../config/schema/magic-context";
 import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
 import type { PluginContext } from "../../../plugin/types";
@@ -880,10 +884,12 @@ async function runAgenticTask(
                 path: { id: sessionId },
                 query: { directory: docsDir },
                 body: {
-                    agent: DREAMER_AGENT,
-                    // Each agentic task gets its OWN system prompt so it never sees
-                    // another task's tools/rules (curate has no codebase framing;
-                    // maintain-docs has no memory machinery).
+                    // Each agentic task gets its OWN scoped agent + system prompt so
+                    // it never sees another task's tools/rules: curate runs on the
+                    // base `dreamer` (ctx_memory only, no codebase tools);
+                    // maintain-docs runs on `dreamer-docs` (file read/write/bash, no
+                    // memory machinery).
+                    agent: task === "maintain-docs" ? DREAMER_DOCS_AGENT : DREAMER_AGENT,
                     system:
                         task === "maintain-docs"
                             ? MAINTAIN_DOCS_SYSTEM_PROMPT

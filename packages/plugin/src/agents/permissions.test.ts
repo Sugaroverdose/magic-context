@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { DREAMER_CURATE_ALLOWED_TOOLS, DREAMER_DOCS_ALLOWED_TOOLS } from "./dreamer";
 import {
     applyDisallowedTools,
     buildAllowOnlyPermission,
-    DREAMER_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
     SIDEKICK_ALLOWED_TOOLS,
 } from "./permissions";
@@ -125,52 +125,52 @@ describe("applyDisallowedTools", () => {
     });
 });
 
-describe("DREAMER_ALLOWED_TOOLS", () => {
-    it("includes read + grep + glob + bash for local-repo exploration", () => {
-        // Verify task prompt explicitly tells the model to grep schema
-        // files, read source, glob/find for project structure inventory,
-        // and run `git log --oneline --since=...`. Smart-note evaluation
-        // routinely needs `gh` / `git` / `curl` via bash. Live DB shows
-        // >100 bash invocations across dreamer task variants.
-        expect(DREAMER_ALLOWED_TOOLS).toContain("read");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("grep");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("glob");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("bash");
+describe("DREAMER_CURATE_ALLOWED_TOOLS (base dreamer = curate only)", () => {
+    it("is ctx_memory ONLY — curate edits the memory store and reads no code", () => {
+        // A separate verify task owns memory-vs-code correctness; curate is
+        // pure pool hygiene, so it has no read/grep/bash/write/edit surface.
+        expect([...DREAMER_CURATE_ALLOWED_TOOLS]).toEqual(["ctx_memory"]);
     });
 
-    it("includes ctx_memory + ctx_search + ctx_note for memory operations", () => {
-        // Dreamer's canonical job: maintain memories (`ctx_memory`),
-        // and dismiss / surface smart
-        // notes (`ctx_note`). `ctx_search` for retrieval-count and
-        // smart-note evidence lookup.
-        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_memory");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_search");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("ctx_note");
+    it("does NOT include any codebase / shell / file-write tool", () => {
+        for (const denied of [
+            "read",
+            "grep",
+            "glob",
+            "bash",
+            "write",
+            "edit",
+            "aft_search",
+            "ctx_search",
+            "ctx_note",
+            "task",
+        ]) {
+            expect(DREAMER_CURATE_ALLOWED_TOOLS).not.toContain(denied);
+        }
+    });
+});
+
+describe("DREAMER_DOCS_ALLOWED_TOOLS (maintain-docs)", () => {
+    it("includes read/grep/glob/bash + write/edit + aft for doc maintenance", () => {
+        for (const tool of [
+            "read",
+            "grep",
+            "glob",
+            "bash",
+            "write",
+            "edit",
+            "aft_outline",
+            "aft_zoom",
+            "aft_search",
+        ]) {
+            expect(DREAMER_DOCS_ALLOWED_TOOLS).toContain(tool);
+        }
     });
 
-    it("includes `write` + `edit` for the maintain-docs task", () => {
-        // The maintain-docs task prompt explicitly instructs the model to
-        // "Write or update using the Write tool" to keep ARCHITECTURE.md /
-        // STRUCTURE.md synchronized. Without these the dreamer was forced to
-        // emit docs through bash heredocs/sed.
-        expect(DREAMER_ALLOWED_TOOLS).toContain("write");
-        expect(DREAMER_ALLOWED_TOOLS).toContain("edit");
-    });
-
-    it("includes `aft_search` for code search across verify/curate/maintain-docs", () => {
-        expect(DREAMER_ALLOWED_TOOLS).toContain("aft_search");
-    });
-
-    it("does NOT include `task` (no subagent fanout from dreamer)", () => {
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("task");
-    });
-
-    it("does NOT include `webfetch` or `websearch` (use bash + curl instead)", () => {
-        // External URL fetches in smart-note conditions go through
-        // `bash` + `curl` so dreamer has one consistent shell surface
-        // instead of two redundant network tools.
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("webfetch");
-        expect(DREAMER_ALLOWED_TOOLS).not.toContain("websearch");
+    it("does NOT include memory tools (it edits docs, not the memory store)", () => {
+        for (const denied of ["ctx_memory", "ctx_search", "ctx_note", "task"]) {
+            expect(DREAMER_DOCS_ALLOWED_TOOLS).not.toContain(denied);
+        }
     });
 });
 
@@ -216,8 +216,16 @@ describe("integration: full hidden-agent permission shape", () => {
         });
     });
 
-    it("dreamer permission object: `*` denied + repo-exploration + write/edit + ctx_* + aft_* allowed", () => {
-        const perm = buildAllowOnlyPermission(DREAMER_ALLOWED_TOOLS);
+    it("base dreamer (curate) permission object: `*` denied + ctx_memory only", () => {
+        const perm = buildAllowOnlyPermission(DREAMER_CURATE_ALLOWED_TOOLS);
+        expect(perm).toEqual({
+            "*": "deny",
+            ctx_memory: "allow",
+        });
+    });
+
+    it("dreamer-docs permission object: `*` denied + repo-exploration + write/edit + aft_* (no memory)", () => {
+        const perm = buildAllowOnlyPermission(DREAMER_DOCS_ALLOWED_TOOLS);
         expect(perm).toEqual({
             "*": "deny",
             read: "allow",
@@ -229,9 +237,6 @@ describe("integration: full hidden-agent permission shape", () => {
             aft_outline: "allow",
             aft_zoom: "allow",
             aft_search: "allow",
-            ctx_memory: "allow",
-            ctx_search: "allow",
-            ctx_note: "allow",
         });
     });
 

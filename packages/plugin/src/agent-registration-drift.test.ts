@@ -2,10 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
     DREAMER_AGENT,
     DREAMER_CLASSIFIER_AGENT,
+    DREAMER_CURATE_ALLOWED_TOOLS,
+    DREAMER_DOCS_AGENT,
+    DREAMER_DOCS_ALLOWED_TOOLS,
     DREAMER_MEMORY_MAPPER_AGENT,
     DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
     DREAMER_PRIMER_INVESTIGATOR_AGENT,
     DREAMER_RETROSPECTIVE_AGENT,
+    DREAMER_REVIEWER_AGENT,
 } from "./agents/dreamer";
 import {
     buildHiddenAgentConfig,
@@ -17,7 +21,6 @@ import {
     HISTORIAN_RECOMP_AGENT,
 } from "./agents/historian";
 import {
-    DREAMER_ALLOWED_TOOLS,
     DREAMER_PRIMER_INVESTIGATOR_ALLOWED_TOOLS,
     DREAMER_RETROSPECTIVE_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
@@ -54,6 +57,8 @@ describe("hidden-agent registration drift guard", () => {
         expect(regs.map((r) => r.id).sort()).toEqual(
             [
                 DREAMER_AGENT,
+                DREAMER_DOCS_AGENT,
+                DREAMER_REVIEWER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 DREAMER_MEMORY_MAPPER_AGENT,
@@ -73,6 +78,29 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(DREAMER_CLASSIFIER_AGENT)?.maxSteps).toBe(4);
     });
 
+    test("base dreamer (curate) is ctx_memory-only and locked", () => {
+        expect(byId(DREAMER_AGENT)?.allowedTools).toEqual([...DREAMER_CURATE_ALLOWED_TOOLS]);
+        expect(byId(DREAMER_AGENT)?.allowedTools).toEqual(["ctx_memory"]);
+        expect(byId(DREAMER_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_AGENT)?.maxSteps).toBe(150);
+    });
+
+    test("dreamer-docs inline allow-list matches canonical (file read/write/bash, no memory) and is locked", () => {
+        expect(byId(DREAMER_DOCS_AGENT)?.allowedTools).toEqual([...DREAMER_DOCS_ALLOWED_TOOLS]);
+        const tools = byId(DREAMER_DOCS_AGENT)?.allowedTools ?? [];
+        for (const denied of ["ctx_memory", "ctx_search", "ctx_note", "task"]) {
+            expect(tools).not.toContain(denied);
+        }
+        expect(byId(DREAMER_DOCS_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_DOCS_AGENT)?.maxSteps).toBe(60);
+    });
+
+    test("dreamer-reviewer is a zero-tool locked JSON reviewer", () => {
+        expect(byId(DREAMER_REVIEWER_AGENT)?.allowedTools).toEqual([]);
+        expect(byId(DREAMER_REVIEWER_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_REVIEWER_AGENT)?.maxSteps).toBe(4);
+    });
+
     test("memory mapper inline allow-list matches canonical (read-only, no write/ctx_memory/ctx_search)", () => {
         expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.allowedTools).toEqual([
             ...DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
@@ -83,10 +111,6 @@ describe("hidden-agent registration drift guard", () => {
         }
         expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.lockPermissions).toBe(true);
         expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.maxSteps).toBe(60);
-    });
-
-    test("dreamer inline allow-list matches canonical DREAMER_ALLOWED_TOOLS", () => {
-        expect(byId(DREAMER_AGENT)?.allowedTools).toEqual([...DREAMER_ALLOWED_TOOLS]);
     });
 
     test("retrospective inline allow-list is ctx_search only", () => {
@@ -115,15 +139,23 @@ describe("hidden-agent registration drift guard", () => {
         expect(byId(SMART_NOTE_COMPILER_AGENT)?.lockPermissions).toBe(true);
     });
 
-    test("only privacy/security-critical agents lock permissions", () => {
+    test("every scoped dreamer task agent locks permissions; historian/sidekick do not", () => {
+        // All dreamer task agents run unsupervised on a per-task tool budget, so a
+        // user `dreamer.tools`/`permission` override must not be able to broaden
+        // them. The historian/sidekick/editor are not locked (they take their
+        // allow-list as-is and have no per-task scoping to protect).
+        const lockedDreamerAgents = new Set<string>([
+            DREAMER_AGENT,
+            DREAMER_DOCS_AGENT,
+            DREAMER_REVIEWER_AGENT,
+            DREAMER_RETROSPECTIVE_AGENT,
+            DREAMER_PRIMER_INVESTIGATOR_AGENT,
+            DREAMER_MEMORY_MAPPER_AGENT,
+            DREAMER_CLASSIFIER_AGENT,
+            SMART_NOTE_COMPILER_AGENT,
+        ]);
         for (const reg of regs) {
-            expect(reg.lockPermissions === true).toBe(
-                reg.id === DREAMER_RETROSPECTIVE_AGENT ||
-                    reg.id === SMART_NOTE_COMPILER_AGENT ||
-                    reg.id === DREAMER_PRIMER_INVESTIGATOR_AGENT ||
-                    reg.id === DREAMER_MEMORY_MAPPER_AGENT ||
-                    reg.id === DREAMER_CLASSIFIER_AGENT,
-            );
+            expect(reg.lockPermissions === true).toBe(lockedDreamerAgents.has(reg.id));
         }
     });
 
@@ -227,6 +259,8 @@ describe("hidden-agent registration drift guard", () => {
         expect(noPrompts.map((r) => r.id).sort()).toEqual(
             [
                 DREAMER_AGENT,
+                DREAMER_DOCS_AGENT,
+                DREAMER_REVIEWER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 DREAMER_MEMORY_MAPPER_AGENT,

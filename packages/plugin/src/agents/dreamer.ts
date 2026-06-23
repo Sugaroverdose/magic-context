@@ -32,3 +32,37 @@ export const DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS = [
 // (no code inspection), and the host applies the column writes — so the agent
 // needs no tools at all. Locked so a user override can't grant any.
 export const DREAMER_CLASSIFIER_AGENT = "dreamer-classifier";
+
+// Docs maintainer for the maintain-docs task: explores the codebase and writes
+// ARCHITECTURE.md / STRUCTURE.md. Needs file read + write/edit + bash (git log,
+// find) + aft navigation, but deliberately NO ctx_memory/ctx_search/ctx_note —
+// it touches docs, never the memory store. Locked so a user override can't add
+// the memory surface back.
+export const DREAMER_DOCS_AGENT = "dreamer-docs";
+
+/** Codebase-read + doc-write tool profile for the docs maintainer. No memory
+ *  tools (it edits docs, not the memory store). */
+export const DREAMER_DOCS_ALLOWED_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "bash",
+    "write",
+    "edit",
+    "aft_outline",
+    "aft_zoom",
+    "aft_search",
+] as const;
+
+// Pure JSON reviewer for the review-user-memories task: reads the candidate
+// observations the host renders and returns a JSON verdict the host applies. It
+// calls NO tools (zero), so it gets the empty allow-list, locked.
+export const DREAMER_REVIEWER_AGENT = "dreamer-reviewer";
+
+/** Tool profile for the base `dreamer` agent, now CURATE-ONLY (memory-pool
+ *  hygiene). Curate edits the memory store through ctx_memory and never reads
+ *  code (a separate verify task owns memory-vs-code correctness), so it needs
+ *  only ctx_memory — not the former bash/write/edit/read/aft/ctx_search/ctx_note
+ *  kitchen sink. Kept on the `dreamer` id so the ctx_memory dreamer-action gate
+ *  (toolContext.agent === DREAMER_AGENT) still recognizes it. */
+export const DREAMER_CURATE_ALLOWED_TOOLS = ["ctx_memory"] as const;

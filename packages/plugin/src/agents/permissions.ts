@@ -138,61 +138,11 @@ export function applyDisallowedTools(
     return defaults.filter((t) => !disallowed.includes(t));
 }
 
-/**
- * Tools the dreamer agent needs. This is the broadest hidden-agent
- * surface because dreamer's tasks legitimately require local-repo
- * exploration plus external command execution:
- *
- *   - `ctx_memory` / `ctx_search` / `ctx_note` — the canonical memory
- *     CRUD and retrieval path for verify / curate and smart-note dismissal.
- *   - `read` / `grep` / `glob` — the verify task prompt
- *     (`task-prompts.ts`) explicitly tells the model to grep schema
- *     files for default values, read source to confirm claimed
- *     behavior, and use glob for project structure inventory.
- *   - `bash` — required for smart-note condition evaluation (the
- *     prompt explicitly mentions `gh` / `git` / `curl` / file reads),
- *     for the verify task's code checks, and for the maintain-docs task's
- *     `find` / `grep` directory inventory. The
- *     live OpenCode DB shows over 100 `bash` invocations across
- *     verify / curate / maintain-docs / smart-notes
- *     dreamer child sessions, so removing it would regress real,
- *     documented dreamer behavior.
- *   - `write` / `edit` — the maintain-docs task (`task-prompts.ts`)
- *     explicitly instructs the model to "Write or update using the
- *     Write tool" to keep `ARCHITECTURE.md` / `STRUCTURE.md` at the
- *     project root synchronized. Without these tools the dreamer was
- *     forced to emit docs through `bash` heredocs/`sed` — fragile and
- *     hard to review. Granting `write` + `edit` lets it use the proper
- *     file tools (which back up + validate) instead.
- *   - `aft_search` — primary read-only code search for the verify /
- *     improve / maintain-docs tasks; finds the symbols and call sites a
- *     doc/memory rewrite must describe, more precisely than raw `grep`.
- *
- * Deliberately NOT allowed:
- *   - `task` — no subagent fanout from dreamer
- *   - `webfetch` / `websearch` — out of scope; smart-note URL fetches
- *     go through `bash` + `curl` instead
- *
- * Note: `write` / `edit` grant general file-write capability (the
- * permission gate is tool-level, not path-level). Dreamer is a trusted
- * hidden agent whose prompts scope writes to docs + memory; the
- * task-prompts still say "Do not commit changes," so it edits the
- * working tree but never commits.
- */
-export const DREAMER_ALLOWED_TOOLS = [
-    "read",
-    "grep",
-    "glob",
-    "bash",
-    "write",
-    "edit",
-    "aft_outline",
-    "aft_zoom",
-    "aft_search",
-    "ctx_memory",
-    "ctx_search",
-    "ctx_note",
-] as const;
+// The old kitchen-sink DREAMER_ALLOWED_TOOLS is retired: each dreamer task now
+// runs on its own scoped agent. Curate uses DREAMER_CURATE_ALLOWED_TOOLS
+// (ctx_memory only) and maintain-docs uses DREAMER_DOCS_ALLOWED_TOOLS (file
+// read/write/bash, no memory) — both in `dreamer.ts` alongside the other
+// per-task allow-lists (mapper/classifier/etc).
 
 /**
  * Tools the sidekick agent needs. Sidekick is a read-only memory

@@ -206,11 +206,66 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).not.toContain("--no-tools");
 	});
 
-	it("does NOT apply a strict tool allow-list to ordinary dreamer/historian/sidekick", () => {
-		for (const agent of ["historian", "dreamer", "sidekick"]) {
+	it("does NOT apply a strict tool allow-list to historian/sidekick", () => {
+		for (const agent of ["historian", "sidekick"]) {
 			const args = __test.buildArgs({ ...baseOptions, agent });
 			expect(args).not.toContain("--tools");
 		}
+	});
+
+	it("locks base dreamer (curate) to --tools ctx_memory, stripping all built-ins", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "dreamer",
+			model: "anthropic/claude-sonnet",
+		});
+		const idx = args.indexOf("--tools");
+		expect(idx).toBeGreaterThan(-1);
+		expect(args[idx + 1]).toBe("ctx_memory");
+		expect(args).not.toContain("--no-tools");
+		// No codebase/shell built-ins survive the allow-list. (ctx_memory itself is
+		// registered by the lean extension when a real bundle path is present; in
+		// this dev/test env SUBAGENT_ENTRY_PATH is undefined so --extension and the
+		// dreamer-actions flag are absent — the strict allow-list is independent.)
+		const toolList = args[idx + 1];
+		for (const denied of [
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"bash",
+			"write",
+			"edit",
+		]) {
+			expect(toolList).not.toContain(denied);
+		}
+	});
+
+	it("locks dreamer-docs to {read,grep,find,ls,write,edit,bash} with no ctx_memory and no extension", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "dreamer-docs",
+			model: "anthropic/claude-sonnet",
+		});
+		const idx = args.indexOf("--tools");
+		expect(idx).toBeGreaterThan(-1);
+		expect(args[idx + 1]).toBe("read,grep,find,ls,write,edit,bash");
+		expect(args).not.toContain("--no-tools");
+		// Edits docs, never the memory store: no ctx_memory, and the lean extension
+		// (which would register it) is not loaded for this agent.
+		expect(args[idx + 1]).not.toContain("ctx_memory");
+		expect(args).not.toContain("--magic-context-dreamer-actions");
+	});
+
+	it("locks dreamer-reviewer to --no-tools (pure JSON reviewer, zero tools)", () => {
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "dreamer-reviewer",
+			model: "anthropic/claude-sonnet",
+		});
+		expect(args).toContain("--no-tools");
+		expect(args).not.toContain("--tools");
+		expect(args).not.toContain("--magic-context-dreamer-actions");
 	});
 
 	it("locks dreamer-primer-investigator to read-only {read,grep,find,ls,ctx_search} with no write/ctx_memory", () => {
@@ -639,7 +694,10 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 
 		const resultPromise = runner.run({
 			...baseOptions,
-			agent: "dreamer",
+			// historian takes no strict tool allow-list, so this asserts the plain
+			// spawn plumbing (model/cwd/prompt passthrough) without the per-task
+			// --tools noise that scoped dreamer agents now add.
+			agent: "historian",
 			model: "anthropic/primary",
 			fallbackModels: ["openai/fallback"],
 			cwd: "/workspace/project",

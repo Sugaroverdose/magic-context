@@ -1,4 +1,4 @@
-import { DREAMER_AGENT } from "../../../agents/dreamer";
+import { DREAMER_REVIEWER_AGENT } from "../../../agents/dreamer";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -196,7 +196,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 path: { id: childSessionId },
                 query: { directory: args.sessionDirectory },
                 body: {
-                    agent: DREAMER_AGENT,
+                    agent: DREAMER_REVIEWER_AGENT,
                     system: REVIEW_USER_MEMORIES_SYSTEM_PROMPT,
                     ...modelBodyField(args.model),
                     // synthetic: true hides the user-memory review prompt from the TUI
