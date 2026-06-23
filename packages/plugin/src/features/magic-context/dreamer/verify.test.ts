@@ -9,10 +9,12 @@ import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
     getProjectEmbeddings,
+    insertMemory,
+    loadAllEmbeddings,
     peekProjectEmbeddings,
     resetEmbeddingCacheForTests,
+    saveEmbedding,
 } from "../memory";
-import { insertMemory, loadAllEmbeddings, saveEmbedding } from "../memory";
 import { getMemoryById } from "../memory/storage-memory";
 import {
     getMemoryVerifications,

@@ -6,9 +6,9 @@ import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
     RETROSPECTIVE_CHILD_TITLE,
-    USER_MEMORIES_CHILD_TITLE,
     retrospectiveOrphanStaleMs,
     sweepOrphanedRetrospectiveChildren,
+    USER_MEMORIES_CHILD_TITLE,
 } from "./retrospective-orphan-sweep";
 
 let db: Database | null = null;

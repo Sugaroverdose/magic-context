@@ -3,8 +3,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
-import { insertUserMemoryCandidates } from "./storage-user-memory";
 import { reviewUserMemories } from "./review-user-memories";
+import { insertUserMemoryCandidates } from "./storage-user-memory";
 
 function freshDb(): Database {
     const db = new Database(":memory:");

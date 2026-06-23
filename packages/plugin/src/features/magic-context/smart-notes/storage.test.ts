@@ -11,8 +11,8 @@ import { evaluateSmartNotes } from "../dreamer/evaluate-smart-notes";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { addNote, getPendingSmartNotes } from "../storage-notes";
-import { SMART_NOTE_CHECK_POLICY_VERSION } from "./types";
 import { getSmartNotesNeedingCompilation } from "./storage";
+import { SMART_NOTE_CHECK_POLICY_VERSION } from "./types";
 
 const PROJECT = "git:test";
 const tempDirs: string[] = [];

@@ -1,4 +1,5 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin";
+
 import {
     buildHiddenAgentConfig,
     buildHiddenAgentRegistrations,
@@ -28,9 +29,9 @@ import { createLiveSessionState } from "./hooks/magic-context/live-session-state
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./plugin/embedding-bootstrap";
-import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooks } from "./plugin/hooks/create-session-hooks";
+import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
