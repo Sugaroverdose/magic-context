@@ -9,9 +9,11 @@ import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import {
     archiveMemory,
+    clearMemoryVerifications,
     getMemoryById,
     hasMemoryClassifiedAtColumn,
     hasMemoryShareableColumn,
+    invalidateMemory,
     type Memory,
     normalizeVerificationFiles,
     recordMemoryVerifications,
@@ -219,15 +221,17 @@ async function verifyOneBatch(
 
 /**
  * Apply the manifest host-side. Only ids that were IN this batch are touched.
- * - verified/update: re-record the (normalized) backing files with verified_at =
- *   now (banks the per-memory verify progress, even on a pure VERIFIED).
- * - update: also rewrite the memory content via the cache-neutral mutation log.
+ * - verified: re-record the (normalized) backing files with verified_at = now
+ *   (banks the per-memory verify progress).
+ * - update: rewrite the memory content via the cache-neutral mutation log, then
+ *   clear old file mappings and embeddings so the new content is mapped and
+ *   verified again next cycle.
  * - archive: archive + queue an archive mutation (m[1] delta). Skipped when the
  *   memory is no longer primary-mutable (already archived/superseded), so a stale
  *   manifest can't fight a concurrent change.
  * All writes happen under ONE lease-guarded transaction.
  */
-async function applyVerifyManifest(
+export async function applyVerifyManifest(
     args: VerifyArgs,
     batch: VerifyPromptMemory[],
     manifestText: string,
@@ -243,14 +247,24 @@ async function applyVerifyManifest(
         | { kind: "update"; id: number; files: string[]; content: string; hash: string }
         | { kind: "archive"; id: number; reason: string };
     const writes: VerifyWrite[] = [];
+    const verdictCounts = new Map<number, number>();
+    for (const verdict of [...parsed.verified, ...parsed.updated, ...parsed.archived]) {
+        if (!batchIds.has(verdict.id)) continue;
+        verdictCounts.set(verdict.id, (verdictCounts.get(verdict.id) ?? 0) + 1);
+    }
+    const conflictingIds = new Set(
+        Array.from(verdictCounts.entries())
+            .filter(([, count]) => count !== 1)
+            .map(([id]) => id),
+    );
 
     for (const v of parsed.verified) {
-        if (!batchIds.has(v.id)) continue;
+        if (!batchIds.has(v.id) || conflictingIds.has(v.id)) continue;
         const files = await normalizeFiles(args, v.files);
         writes.push({ kind: "verify", id: v.id, files });
     }
     for (const u of parsed.updated) {
-        if (!batchIds.has(u.id)) continue;
+        if (!batchIds.has(u.id) || conflictingIds.has(u.id)) continue;
         const content = u.content.trim();
         // An empty/oversized "update" is unsafe — fall back to a plain re-verify
         // (bank the progress, keep the old content) rather than wipe a memory.
@@ -269,7 +283,7 @@ async function applyVerifyManifest(
         });
     }
     for (const a of parsed.archived) {
-        if (!batchIds.has(a.id)) continue;
+        if (!batchIds.has(a.id) || conflictingIds.has(a.id)) continue;
         writes.push({ kind: "archive", id: a.id, reason: a.reason });
     }
     if (writes.length === 0) return { verified: 0, updated: 0, archived: 0 };
@@ -299,7 +313,6 @@ async function applyVerifyManifest(
                     category: memory.category,
                     newContent: w.content,
                 });
-                recordMemoryVerifications(args.db, w.id, w.files, now);
                 updated += 1;
             } else {
                 archiveMemory(args.db, w.id, w.reason);
@@ -335,7 +348,7 @@ function isPrimaryMutable(memory: Memory | null): memory is Memory {
 
 /** Cache-neutral content rewrite (mirrors ctx_memory's in-transaction update):
  *  new content + hash, reset shareable + classified_at (re-scored later by
- *  classify), drop stale embedding (backfill regenerates it). */
+ *  classify), drop stale embeddings/cache, and clear old file mappings. */
 function rewriteMemoryContent(db: Database, memory: Memory, content: string, hash: string): void {
     db.prepare(
         "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
@@ -347,6 +360,8 @@ function rewriteMemoryContent(db: Database, memory: Memory, content: string, has
         db.prepare("UPDATE memories SET classified_at = NULL WHERE id = ?").run(memory.id);
     }
     db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
+    clearMemoryVerifications(db, memory.id);
+    invalidateMemory(memory.projectPath, memory.id);
 }
 
 function recordInvocation(
