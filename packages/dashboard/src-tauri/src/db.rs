@@ -2619,6 +2619,32 @@ pub fn get_primers(
     }
 }
 
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+        [column],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false)
+}
+
+fn table_has_columns(conn: &Connection, table: &str, columns: &[&str]) -> bool {
+    columns
+        .iter()
+        .all(|column| table_has_column(conn, table, column))
+}
+
 /// True when the `memories` table carries the v44 classify columns. The
 /// dashboard never migrates, so a new dashboard can face a pre-v44 plugin DB.
 fn memories_has_classify_columns(conn: &Connection) -> bool {
@@ -4193,32 +4219,72 @@ pub fn get_session_facts(
     rows.collect()
 }
 
+fn note_select_columns(conn: &Connection) -> Option<String> {
+    if !table_exists(conn, "notes") {
+        return None;
+    }
+    let required = [
+        "id",
+        "type",
+        "status",
+        "content",
+        "session_id",
+        "project_path",
+        "surface_condition",
+        "created_at",
+        "updated_at",
+    ];
+    if !table_has_columns(conn, "notes", &required) {
+        return None;
+    }
+
+    let late = |column: &str| {
+        if table_has_column(conn, "notes", column) {
+            column.to_string()
+        } else {
+            format!("NULL AS {column}")
+        }
+    };
+
+    Some(format!(
+        "id, type, status, content, session_id, project_path, surface_condition, \
+         created_at, updated_at, {}, {}, {}",
+        late("last_checked_at"),
+        late("ready_at"),
+        late("ready_reason")
+    ))
+}
+
+fn map_note_row(row: &rusqlite::Row<'_>) -> Result<Note, rusqlite::Error> {
+    Ok(Note {
+        id: row.get(0)?,
+        note_type: row.get(1)?,
+        status: row.get(2)?,
+        content: row.get(3)?,
+        session_id: row.get(4)?,
+        project_path: row.get(5)?,
+        surface_condition: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        last_checked_at: row.get(9)?,
+        ready_at: row.get(10)?,
+        ready_reason: row.get(11)?,
+    })
+}
+
 pub fn get_session_notes(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<Note>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id, type, status, content, session_id, project_path, surface_condition,
-                created_at, updated_at, last_checked_at, ready_at, ready_reason
+    let Some(columns) = note_select_columns(conn) else {
+        return Ok(Vec::new());
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {columns}
          FROM notes WHERE session_id = ?1 AND type = 'session' AND status = 'active'
-         ORDER BY created_at DESC",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![session_id], |row| {
-        Ok(Note {
-            id: row.get(0)?,
-            note_type: row.get(1)?,
-            status: row.get(2)?,
-            content: row.get(3)?,
-            session_id: row.get(4)?,
-            project_path: row.get(5)?,
-            surface_condition: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
-            last_checked_at: row.get(9)?,
-            ready_at: row.get(10)?,
-            ready_reason: row.get(11)?,
-        })
-    })?;
+         ORDER BY created_at DESC"
+    ))?;
+    let rows = stmt.query_map(rusqlite::params![session_id], map_note_row)?;
     rows.collect()
 }
 
@@ -4286,6 +4352,9 @@ pub fn get_smart_notes(
     conn: &Connection,
     project_path: &str,
 ) -> Result<Vec<Note>, rusqlite::Error> {
+    let Some(columns) = note_select_columns(conn) else {
+        return Ok(Vec::new());
+    };
     // Smart notes are stored under the resolved project identity; resolve the
     // filter to all stored paths that normalize to it so symlinked / legacy raw
     // paths still surface (mirrors the memories + key-files path resolution).
@@ -4295,28 +4364,12 @@ pub fn get_smart_notes(
     }
     let placeholders = build_in_placeholders(paths.len(), 1);
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, type, status, content, session_id, project_path, surface_condition,
-                created_at, updated_at, last_checked_at, ready_at, ready_reason
+        "SELECT {columns}
          FROM notes
          WHERE project_path IN ({placeholders}) AND type = 'smart' AND status != 'dismissed'
          ORDER BY created_at ASC"
     ))?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
-        Ok(Note {
-            id: row.get(0)?,
-            note_type: row.get(1)?,
-            status: row.get(2)?,
-            content: row.get(3)?,
-            session_id: row.get(4)?,
-            project_path: row.get(5)?,
-            surface_condition: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
-            last_checked_at: row.get(9)?,
-            ready_at: row.get(10)?,
-            ready_reason: row.get(11)?,
-        })
-    })?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), map_note_row)?;
     rows.collect()
 }
 
@@ -4423,6 +4476,9 @@ pub fn get_subagent_totals_by_subagent(
 pub fn get_task_schedule_state(
     conn: &Connection,
 ) -> Result<Vec<TaskScheduleEntry>, rusqlite::Error> {
+    if !table_exists(conn, "task_schedule_state") {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare(
         "SELECT project_path, task, last_run_at, next_due_at, last_status, last_error, retry_count
          FROM task_schedule_state ORDER BY project_path, task",
@@ -4464,6 +4520,9 @@ struct StoredTaskState {
 /// projects) and use the snapshot purely for last-run status + a next-due that we
 /// only trust when the snapshot's schedule still matches what we display.
 pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, rusqlite::Error> {
+    if !table_exists(conn, "task_schedule_state") {
+        return Ok(Vec::new());
+    }
     // 1. Stored scheduler state, grouped identity → task → state.
     let mut stmt = conn.prepare(
         "SELECT project_path, task, schedule, last_run_at, next_due_at, last_status, last_error, retry_count
@@ -4611,6 +4670,28 @@ pub fn get_dream_state(conn: &Connection) -> Result<Vec<DreamStateEntry>, rusqli
         })
     })?;
     rows.collect()
+}
+
+fn dream_run_select_columns(conn: &Connection) -> Option<String> {
+    if !table_exists(conn, "dream_runs") {
+        return None;
+    }
+    let memory_changes = if table_has_column(conn, "dream_runs", "memory_changes_json") {
+        "memory_changes_json".to_string()
+    } else {
+        "NULL AS memory_changes_json".to_string()
+    };
+    let parent_session = if table_has_column(conn, "dream_runs", "parent_session_id") {
+        "parent_session_id".to_string()
+    } else {
+        "NULL AS parent_session_id".to_string()
+    };
+
+    Some(format!(
+        "id, project_path, started_at, finished_at, holder_id, tasks_json, \
+         tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, \
+         {memory_changes}, {parent_session}"
+    ))
 }
 
 fn parse_dream_run_json<T: serde::de::DeserializeOwned>(
@@ -4837,6 +4918,14 @@ pub fn get_dream_run_memory_changes(
     conn: &Connection,
     run_id: i64,
 ) -> Result<DreamRunMemoryDetail, String> {
+    if !table_exists(conn, "dream_runs") {
+        return Ok(DreamRunMemoryDetail::default());
+    }
+    let memory_changes_col = if table_has_column(conn, "dream_runs", "memory_changes_json") {
+        "memory_changes_json"
+    } else {
+        "NULL AS memory_changes_json"
+    };
     let (project_path, started_at, finished_at, memory_changes_json): (
         String,
         i64,
@@ -4844,7 +4933,9 @@ pub fn get_dream_run_memory_changes(
         Option<String>,
     ) = conn
         .query_row(
-            "SELECT project_path, started_at, finished_at, memory_changes_json FROM dream_runs WHERE id = ?1",
+            &format!(
+                "SELECT project_path, started_at, finished_at, {memory_changes_col} FROM dream_runs WHERE id = ?1"
+            ),
             rusqlite::params![run_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -4924,6 +5015,9 @@ pub fn get_dream_runs(
     project_path: Option<&str>,
     limit: usize,
 ) -> Result<Vec<DreamRun>, String> {
+    let Some(select_columns) = dream_run_select_columns(conn) else {
+        return Ok(Vec::new());
+    };
     let normalized_limit = std::cmp::max(limit, 1) as i64;
     let mut runs: Vec<DreamRun> = Vec::new();
 
@@ -4936,7 +5030,7 @@ pub fn get_dream_runs(
         let placeholders = build_in_placeholders(paths.len(), 1);
         let limit_idx = paths.len() + 1;
         let sql = format!(
-            "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id
+            "SELECT {select_columns}
              FROM dream_runs
              WHERE project_path IN ({placeholders})
              ORDER BY finished_at DESC
@@ -4955,12 +5049,12 @@ pub fn get_dream_runs(
         }
     } else {
         let mut stmt = conn
-            .prepare(
-                "SELECT id, project_path, started_at, finished_at, holder_id, tasks_json, tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending, memory_changes_json, parent_session_id
+            .prepare(&format!(
+                "SELECT {select_columns}
                  FROM dream_runs
                  ORDER BY finished_at DESC
-                 LIMIT ?1",
-            )
+                 LIMIT ?1"
+            ))
             .map_err(|e| e.to_string())?;
         let mut rows = stmt
             .query(rusqlite::params![normalized_limit])
@@ -6724,6 +6818,94 @@ mod memory_project_filter_tests {
             rows.is_empty(),
             "empty db should produce empty picker, got {rows:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod pre_vn_degrade_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn missing_task_schedule_state_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(get_task_schedule_state(&conn).unwrap().is_empty());
+        assert!(get_dreamer_projects(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dream_runs_without_parent_session_id_still_load() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dream_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER NOT NULL,
+                holder_id TEXT,
+                tasks_json TEXT,
+                tasks_succeeded INTEGER,
+                tasks_failed INTEGER,
+                smart_notes_surfaced INTEGER,
+                smart_notes_pending INTEGER,
+                memory_changes_json TEXT
+            );
+            INSERT INTO dream_runs
+                (project_path, started_at, finished_at, holder_id, tasks_json,
+                 tasks_succeeded, tasks_failed, smart_notes_surfaced, smart_notes_pending,
+                 memory_changes_json)
+            VALUES ('dir:proj', 10, 20, 'holder', '[]', 1, 0, 0, 0, NULL);",
+        )
+        .unwrap();
+
+        let runs = get_dream_runs(&conn, None, 10).expect("pre-parent dream runs should load");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].project_path, "dir:proj");
+        assert_eq!(runs[0].parent_session_id, None);
+    }
+
+    #[test]
+    fn old_notes_without_late_columns_return_default_nulls() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT NOT NULL DEFAULT 'session',
+                status TEXT NOT NULL DEFAULT 'active',
+                content TEXT NOT NULL,
+                session_id TEXT,
+                project_path TEXT,
+                surface_condition TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at)
+            VALUES ('session', 'active', 'session note', 'ses_1', NULL, NULL, 10, 11);
+            INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at)
+            VALUES ('smart', 'ready', 'smart note', NULL, 'dir:proj', 'always', 12, 13);",
+        )
+        .unwrap();
+
+        let session_notes = get_session_notes(&conn, "ses_1").expect("session notes");
+        assert_eq!(session_notes.len(), 1);
+        assert_eq!(session_notes[0].content, "session note");
+        assert_eq!(session_notes[0].last_checked_at, None);
+        assert_eq!(session_notes[0].ready_at, None);
+        assert_eq!(session_notes[0].ready_reason, None);
+
+        let smart_notes = get_smart_notes(&conn, "dir:proj").expect("smart notes");
+        assert_eq!(smart_notes.len(), 1);
+        assert_eq!(smart_notes[0].content, "smart note");
+        assert_eq!(smart_notes[0].last_checked_at, None);
+        assert_eq!(smart_notes[0].ready_at, None);
+        assert_eq!(smart_notes[0].ready_reason, None);
+    }
+
+    #[test]
+    fn missing_notes_table_returns_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(get_session_notes(&conn, "ses_1").unwrap().is_empty());
+        assert!(get_smart_notes(&conn, "dir:proj").unwrap().is_empty());
     }
 }
 
