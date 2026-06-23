@@ -2183,6 +2183,12 @@ fn workspace_name_by_identity(conn: &Connection) -> HashMap<String, String> {
 
 // ── Query implementations ─────────────────────────────────────
 
+/// Presence flag for list queries: at least one row in `memory_embeddings` for this
+/// memory. Uses EXISTS instead of LEFT JOIN so a memory with multiple model-specific
+/// embedding rows still appears once in the result set.
+const HAS_EMBEDDING_SELECT: &str =
+    "(EXISTS (SELECT 1 FROM memory_embeddings me WHERE me.memory_id = m.id)) AS has_embedding";
+
 /// Resolve a project filter value (an identity like `git:<hash>` / `dir:<sha>`,
 /// or a legacy raw filesystem path) into the set of `memories.project_path`
 /// values that should be matched against.
@@ -2423,15 +2429,15 @@ pub fn get_memories(
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
                     {classify_cols}
-                    (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
+                    {has_embedding}
              FROM memories m
-             LEFT JOIN memory_embeddings me ON me.memory_id = m.id
              INNER JOIN memories_fts ON memories_fts.rowid = m.id
              WHERE memories_fts MATCH ?1
              {}
              ORDER BY rank
              LIMIT ?{} OFFSET ?{}",
             where_extra, limit_idx, offset_idx,
+            has_embedding = HAS_EMBEDDING_SELECT,
         )
     } else if has_search {
         // LIKE fallback for short queries or special-character-heavy input
@@ -2442,14 +2448,14 @@ pub fn get_memories(
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
                     {classify_cols}
-                    (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
+                    {has_embedding}
              FROM memories m
-             LEFT JOIN memory_embeddings me ON me.memory_id = m.id
              WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
              {}
              ORDER BY m.updated_at DESC
-             LIMIT ?{} OFFSET ?{}",
+              LIMIT ?{} OFFSET ?{}",
             where_extra, limit_idx, offset_idx,
+            has_embedding = HAS_EMBEDDING_SELECT,
         )
     } else {
         format!(
@@ -2459,14 +2465,14 @@ pub fn get_memories(
                     m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                     m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
                     {classify_cols}
-                    (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
+                    {has_embedding}
              FROM memories m
-             LEFT JOIN memory_embeddings me ON me.memory_id = m.id
              WHERE 1=1
              {}
              ORDER BY m.updated_at DESC
-             LIMIT ?{} OFFSET ?{}",
+              LIMIT ?{} OFFSET ?{}",
             where_extra, limit_idx, offset_idx,
+            has_embedding = HAS_EMBEDDING_SELECT,
         )
     };
 
@@ -2493,14 +2499,14 @@ pub fn get_memories(
                         m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                         m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
                         {classify_cols}
-                        (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
+                        {has_embedding}
                  FROM memories m
-                 LEFT JOIN memory_embeddings me ON me.memory_id = m.id
                  WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
                 where_extra, limit_idx, offset_idx,
+                has_embedding = HAS_EMBEDDING_SELECT,
             );
             // Rebuild params with LIKE pattern instead of FTS query.
             // Project filter uses the same resolved_paths set computed at the
@@ -2539,14 +2545,14 @@ pub fn get_memories(
                         m.last_retrieved_at, m.status, m.expires_at, m.verification_status,
                         m.verified_at, m.superseded_by_memory_id, m.merged_from, m.metadata_json,
                         {classify_cols}
-                        (CASE WHEN me.memory_id IS NOT NULL THEN 1 ELSE 0 END) as has_embedding
+                        {has_embedding}
                  FROM memories m
-                 LEFT JOIN memory_embeddings me ON me.memory_id = m.id
                  WHERE (m.content LIKE ?1 ESCAPE '\\' OR m.category LIKE ?1 ESCAPE '\\')
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
                 where_extra, limit_idx, offset_idx,
+                has_embedding = HAS_EMBEDDING_SELECT,
             );
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             like_params.push(Box::new(like_pattern));
@@ -2777,25 +2783,27 @@ pub fn get_memory_stats(
         |r| r.get(0),
     )?;
 
-    // Embeddings count joins through memories to honor the project filter.
-    // Without a filter, count rows in the embeddings table directly (fastest).
+    // Count distinct memories that have at least one embedding row. Multiple rows per
+    // memory (one per model_id) must not inflate this stat.
     let with_embeddings: i64 = if has_filter {
-        // Rewrite the IN clause to be qualified to `m.project_path` for the
-        // JOIN — placeholders stay at indices 1..=N so we can reuse path_params.
         let qualified_in = format!(
             "m.project_path IN ({})",
             build_in_placeholders(resolved_paths.len(), 1)
         );
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE {}",
+                "SELECT COUNT(DISTINCT me.memory_id) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE {}",
                 qualified_in
             ),
             path_params.as_slice(),
             |r| r.get(0),
         )?
     } else {
-        conn.query_row("SELECT COUNT(*) FROM memory_embeddings", [], |r| r.get(0))?
+        conn.query_row(
+            "SELECT COUNT(DISTINCT memory_id) FROM memory_embeddings",
+            [],
+            |r| r.get(0),
+        )?
     };
 
     let cat_sql = format!(
