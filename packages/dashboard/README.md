@@ -70,7 +70,7 @@ packages/dashboard/
 
 The dashboard reads from the same SQLite database the plugin writes to:
 - **Database**: `~/.local/share/opencode/storage/plugin/magic-context/context.db`
-- **Config**: `~/.config/opencode/magic-context.jsonc`
+
 - **Logs**: `/tmp/magic-context.log`
 
 Database access uses WAL mode for safe concurrent reads while the plugin writes. Write operations (memory edits, dream queue entries) use `busy_timeout` to handle contention.

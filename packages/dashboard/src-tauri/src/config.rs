@@ -8,42 +8,20 @@ pub fn resolve_user_config_path() -> PathBuf {
     let config_dir = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".config"));
-    config_dir.join("opencode").join("magic-context.jsonc")
-}
-
-fn resolve_home_dir() -> PathBuf {
-    #[cfg(test)]
-    if let Some(home) = std::env::var_os("MAGIC_CONTEXT_DASHBOARD_TEST_HOME") {
-        return PathBuf::from(home);
-    }
-
-    dirs::home_dir().unwrap_or_default()
+    config_dir.join("cortexkit").join("magic-context.jsonc")
 }
 
 /// Resolves the Pi user-level magic-context config path.
+/// Harness-agnostic: Pi reads the same CortexKit user config as OpenCode.
 pub fn resolve_pi_config_path() -> PathBuf {
-    resolve_home_dir()
-        .join(".pi")
-        .join("agent")
-        .join("magic-context.jsonc")
+    resolve_user_config_path()
 }
 
-/// Resolve the active magic-context config path for a project.
-/// Checks root first, then `.opencode/` alt path. Returns the first that exists,
-/// or root path as default for new config creation.
+/// Resolve the project-level magic-context config path (CortexKit layout).
 pub fn resolve_project_config_path(project_path: &str) -> PathBuf {
-    let root_config = PathBuf::from(project_path).join("magic-context.jsonc");
-    if root_config.exists() {
-        return root_config;
-    }
-    let alt_config = PathBuf::from(project_path)
-        .join(".opencode")
-        .join("magic-context.jsonc");
-    if alt_config.exists() {
-        return alt_config;
-    }
-    // Default to root path for new configs
-    root_config
+    PathBuf::from(project_path)
+        .join(".cortexkit")
+        .join("magic-context.jsonc")
 }
 
 /// Canonical dreamer task names (mirrors the plugin's task registry and the
@@ -128,12 +106,28 @@ pub fn write_project_config(project_path: &str, path: &Path, content: &str) -> R
 }
 
 fn validate_project_config_target(canonical_project: &Path, path: &Path) -> Result<(), String> {
-    let parent = path
+    let expected_config = canonical_project
+        .join(".cortexkit")
+        .join("magic-context.jsonc");
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        canonical_project.join(path)
+    };
+    if abs_path != expected_config {
+        return Err("Config path is outside the project directory".to_string());
+    }
+
+    let parent = expected_config
         .parent()
         .ok_or_else(|| "Config path has no parent directory".to_string())?;
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|e| format!("Invalid config directory: {e}"))?;
+    let canonical_parent = if parent.exists() {
+        parent
+            .canonicalize()
+            .map_err(|e| format!("Invalid config directory: {e}"))?
+    } else {
+        parent.to_path_buf()
+    };
     if !canonical_parent.starts_with(canonical_project) {
         return Err("Config path is outside the project directory".to_string());
     }
@@ -293,8 +287,10 @@ pub struct ProjectConfigEntry {
     pub worktree: String,
     pub config_path: String,
     pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub alt_config_path: Option<String>,
-    pub alt_exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_exists: Option<bool>,
 }
 
 /// Discover projects with magic-context config files by scanning OpenCode project worktrees.
@@ -347,33 +343,28 @@ pub fn discover_project_configs() -> Vec<ProjectConfigEntry> {
 
     let mut entries = Vec::new();
     for (name, worktree) in rows {
-        let root_config = PathBuf::from(&worktree).join("magic-context.jsonc");
-        let alt_config = PathBuf::from(&worktree)
-            .join(".opencode")
-            .join("magic-context.jsonc");
-        let root_exists = root_config.exists();
-        let alt_exists = alt_config.exists();
-
-        // Only include projects that have at least one config file
-        if root_exists || alt_exists {
-            let display_name = if name.is_empty() {
-                std::path::Path::new(&worktree)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| worktree.clone())
-            } else {
-                name
-            };
-
-            entries.push(ProjectConfigEntry {
-                project_name: display_name,
-                worktree: worktree.clone(),
-                config_path: root_config.to_string_lossy().to_string(),
-                exists: root_exists,
-                alt_config_path: Some(alt_config.to_string_lossy().to_string()),
-                alt_exists,
-            });
+        let config_path = resolve_project_config_path(&worktree);
+        if !config_path.exists() {
+            continue;
         }
+
+        let display_name = if name.is_empty() {
+            std::path::Path::new(&worktree)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| worktree.clone())
+        } else {
+            name
+        };
+
+        entries.push(ProjectConfigEntry {
+            project_name: display_name,
+            worktree: worktree.clone(),
+            config_path: config_path.to_string_lossy().to_string(),
+            exists: true,
+            alt_config_path: None,
+            alt_exists: None,
+        });
     }
 
     entries
@@ -384,12 +375,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pi_config_path_and_read_cover_missing_and_existing_file() {
+    fn pi_config_path_matches_cortexkit_user_path() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("MAGIC_CONTEXT_DASHBOARD_TEST_HOME", dir.path());
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
 
-        let expected = dir.path().join(".pi/agent/magic-context.jsonc");
+        let expected = dir.path().join("cortexkit/magic-context.jsonc");
         assert_eq!(resolve_pi_config_path(), expected);
+        assert_eq!(resolve_user_config_path(), expected);
         assert_eq!(pi_config_path(), expected.to_string_lossy());
 
         let missing = read_pi_config().unwrap();
@@ -406,7 +398,7 @@ mod tests {
         assert_eq!(existing.content, content);
         assert_eq!(existing.source, "pi");
 
-        std::env::remove_var("MAGIC_CONTEXT_DASHBOARD_TEST_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -414,10 +406,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let path = project.join("magic-context.jsonc");
+        let canonical_project = project.canonicalize().unwrap();
+        let path = canonical_project.join(".cortexkit/magic-context.jsonc");
 
         write_project_config(
-            project.to_str().unwrap(),
+            canonical_project.to_str().unwrap(),
             &path,
             "{\n  \"enabled\": true\n}\n",
         )
@@ -428,7 +421,7 @@ mod tests {
         );
 
         write_project_config(
-            project.to_str().unwrap(),
+            canonical_project.to_str().unwrap(),
             &path,
             "{\n  \"enabled\": false\n}\n",
         )
@@ -449,11 +442,13 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let outside = dir.path().join("outside.txt");
         std::fs::write(&outside, "do not overwrite").unwrap();
-        let config_path = project.join("magic-context.jsonc");
+        let canonical_project = project.canonicalize().unwrap();
+        let config_path = canonical_project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         symlink(&outside, &config_path).unwrap();
 
         let err = write_project_config(
-            project.to_str().unwrap(),
+            canonical_project.to_str().unwrap(),
             &config_path,
             "{\"enabled\":true}\n",
         )
@@ -470,10 +465,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let config_path = project.join("magic-context.jsonc");
+        let canonical_project = project.canonicalize().unwrap();
+        let config_path = canonical_project.join(".cortexkit/magic-context.jsonc");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::create_dir(&config_path).unwrap();
 
-        let err = write_project_config(project.to_str().unwrap(), &config_path, "{}\n")
+        let err = write_project_config(
+            canonical_project.to_str().unwrap(),
+            &config_path,
+            "{}\n",
+        )
             .expect_err("directory target must be refused");
         assert!(err.contains("regular file"), "unexpected error: {err}");
     }

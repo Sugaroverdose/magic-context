@@ -443,8 +443,8 @@ export interface ProjectConfigEntry {
   worktree: string;
   config_path: string;
   exists: boolean;
-  alt_config_path: string | null;
-  alt_exists: boolean;
+  alt_config_path?: string | null;
+  alt_exists?: boolean;
 }
 
 export interface DbHealth {
