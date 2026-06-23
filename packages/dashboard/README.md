@@ -69,9 +69,9 @@ packages/dashboard/
 ## Data Sources
 
 The dashboard reads from the same SQLite database the plugin writes to:
-- **Database**: `~/.local/share/opencode/storage/plugin/magic-context/context.db`
-
-- **Logs**: `/tmp/magic-context.log`
+- **Database**: `~/.local/share/cortexkit/magic-context/context.db`
+- **Config**: `~/.config/cortexkit/magic-context.jsonc` (user) · `<project>/.cortexkit/magic-context.jsonc` (project)
+- **Logs**: `${TMPDIR}/opencode/magic-context/magic-context.log` (`pi/` for Pi)
 
 Database access uses WAL mode for safe concurrent reads while the plugin writes. Write operations (memory edits, dream queue entries) use `busy_timeout` to handle contention.
 
