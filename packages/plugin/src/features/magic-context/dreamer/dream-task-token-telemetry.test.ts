@@ -19,13 +19,6 @@ function read(relFromFeatures: string): string {
 }
 
 describe("dream-task token telemetry mapping", () => {
-    it('key-files records a dreamer invocation tagged task:"key-files"', () => {
-        const src = read("key-files/identify-key-files.ts");
-        expect(src.includes("recordChildInvocation")).toBe(true);
-        expect(src.includes('subagent: "dreamer"')).toBe(true);
-        expect(src.includes('task: "key-files"')).toBe(true);
-    });
-
     it('user-memory review records a dreamer invocation tagged task:"review-user-memories"', () => {
         const src = read("user-memory/review-user-memories.ts");
         expect(src.includes("recordChildInvocation")).toBe(true);

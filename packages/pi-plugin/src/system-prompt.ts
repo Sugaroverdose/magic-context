@@ -20,7 +20,7 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
-const KEY_FILES_MARKER = "<key-files>";
+
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 
 /**
@@ -47,9 +47,6 @@ export interface BuildMagicContextBlockOptions {
 	cavemanTextCompressionEnabled?: boolean;
 	/** Reserved for compatibility; user profile now lives in m[0]. */
 	userMemoriesEnabled?: boolean;
-	/** Reserved for compatibility; key files now live in m[1]. */
-	pinKeyFilesEnabled?: boolean;
-	pinKeyFilesTokenBudget?: number;
 	existingSystemPrompt?: string;
 	isCacheBusting?: boolean;
 }
@@ -57,8 +54,8 @@ export interface BuildMagicContextBlockOptions {
 /**
  * Build the Pi system-prompt addendum. In v2 this intentionally contains
  * guidance only. The volatile/data-bearing blocks moved to m[0]/m[1], so
- * this function must never emit `<project-docs>`, `<user-profile>`, or
- * `<key-files>` even when legacy options are true.
+ * this function must never emit `<project-docs>` or `<user-profile>` even when
+ * legacy options are true.
  */
 export function buildMagicContextBlock(
 	opts: BuildMagicContextBlockOptions,
@@ -217,5 +214,4 @@ export const MAGIC_CONTEXT_GUIDANCE_MARKER = MAGIC_CONTEXT_MARKER;
 export const SYSTEM_PROMPT_DATA_MARKERS = {
 	projectDocs: PROJECT_DOCS_MARKER,
 	userProfile: USER_PROFILE_MARKER,
-	keyFiles: KEY_FILES_MARKER,
 } as const;

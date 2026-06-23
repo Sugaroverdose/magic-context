@@ -30,8 +30,6 @@ import type {
 	SidekickConfig,
 } from "@magic-context/core/config/schema/magic-context";
 import {
-	keyFilesEnabled,
-	keyFilesTokenBudget,
 	summarizeDreamSchedule,
 	userMemoryCollectionEnabled,
 } from "@magic-context/core/features/magic-context/dreamer/task-config";
@@ -618,8 +616,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			memoryEnabled: cfg.memory.enabled,
 			injectionBudgetTokens: cfg.memory.injection_budget_tokens,
 			temporalAwareness: cfg.temporal_awareness === true,
-			keyFilesEnabled: keyFilesEnabled(cfg.dreamer),
-			keyFilesTokenBudget: keyFilesTokenBudget(cfg.dreamer),
 		},
 		scheduler: {
 			executeThresholdPercentage: cfg.execute_threshold_percentage,
@@ -1063,11 +1059,6 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				// system prompt surfaces them across all sessions in the
 				// project. Gated on dreamer.user_memories.enabled.
 				userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
-				// Pinned key files rendered as <key-files> — dreamer selects
-				// frequently-read files per session, then we read them off
-				// disk with path-traversal + token-budget guards.
-				pinKeyFilesEnabled: keyFilesEnabled(config.dreamer),
-				pinKeyFilesTokenBudget: keyFilesTokenBudget(config.dreamer),
 				isCacheBusting,
 				existingSystemPrompt: event.systemPrompt,
 			});

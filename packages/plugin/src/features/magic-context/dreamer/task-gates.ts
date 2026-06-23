@@ -134,13 +134,6 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
                     (primer.lastObservedAt ?? 0) > primer.answerRefreshedAt,
             );
 
-        case "key-files":
-            // Permissive: the candidate scan needs the OpenCode DB (too heavy for a
-            // per-tick gate). The task itself collects candidates and bails cheaply
-            // before any LLM call when there aren't enough reads. Default schedule
-            // is "" (off) anyway, so this gate runs only when explicitly enabled.
-            return true;
-
         default: {
             const _exhaustive: never = task;
             return Boolean(_exhaustive);

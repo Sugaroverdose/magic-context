@@ -371,12 +371,6 @@
               "schedule": "",
               "timeout_minutes": 20
             },
-            "key-files": {
-              "schedule": "",
-              "timeout_minutes": 20,
-              "token_budget": 10000,
-              "min_reads": 4
-            },
             "evaluate-smart-notes": {
               "schedule": "0 3 * * *",
               "timeout_minutes": 20
@@ -695,70 +689,6 @@
                   "description": "Minutes allowed for this task before it is aborted",
                   "type": "number",
                   "minimum": 5
-                }
-              }
-            },
-            "key-files": {
-              "default": {
-                "schedule": "",
-                "timeout_minutes": 20,
-                "token_budget": 10000,
-                "min_reads": 4
-              },
-              "type": "object",
-              "properties": {
-                "schedule": {
-                  "default": "",
-                  "type": "string",
-                  "description": "5-field cron schedule (e.g. \"0 3 * * *\"), or \"\" to disable this task."
-                },
-                "model": {
-                  "description": "Per-task model override (inherits dreamer.model)",
-                  "type": "string"
-                },
-                "fallback_models": {
-                  "description": "Per-task fallback chain (inherits dreamer.fallback_models)",
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  ]
-                },
-                "thinking_level": {
-                  "description": "Pi only: per-task thinking level",
-                  "type": "string",
-                  "enum": [
-                    "off",
-                    "minimal",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh"
-                  ]
-                },
-                "timeout_minutes": {
-                  "default": 20,
-                  "description": "Minutes allowed for this task before it is aborted",
-                  "type": "number",
-                  "minimum": 5
-                },
-                "token_budget": {
-                  "description": "key-files: total token budget for pinned files (default: 10000)",
-                  "type": "number",
-                  "minimum": 2000,
-                  "maximum": 30000
-                },
-                "min_reads": {
-                  "description": "key-files: min full-read count before a file is pinned (default: 4)",
-                  "type": "number",
-                  "minimum": 2,
-                  "maximum": 20
                 }
               }
             },
@@ -1126,7 +1056,7 @@
           "<!-- magic-context: skip -->"
         ]
       },
-      "description": "Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile / key-files blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically.",
+      "description": "Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically.",
       "type": "object",
       "properties": {
         "enabled": {

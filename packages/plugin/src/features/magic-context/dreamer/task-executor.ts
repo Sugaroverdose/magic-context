@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 
 import { DREAMER_AGENT, DREAMER_RETROSPECTIVE_AGENT } from "../../../agents/dreamer";
 import type { DreamingTask } from "../../../config/schema/magic-context";
-import { type RawMessageProvider } from '../../../hooks/magic-context/read-session-chunk';
+import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
@@ -12,9 +12,7 @@ import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
-import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { getCompartmentEvents } from "../compartment-events";
-import { runKeyFilesTask } from "../key-files/identify-key-files";
 import {
     getMemoriesByProject,
     getMemoryCountsByStatus,
@@ -360,37 +358,6 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                             ? { retrospectiveWatermarkMs: retro.retrospectiveWatermarkMs }
                             : undefined,
                 };
-            }
-
-            if (config.task === "key-files") {
-                const openCodeDb = deps.openOpenCodeDb();
-                if (!openCodeDb) {
-                    recordRun("completed", null);
-                    return { status: "completed" }; // nothing to do without the OpenCode DB
-                }
-                try {
-                    await runKeyFilesTask({
-                        db,
-                        openCodeDb,
-                        client: deps.client,
-                        projectPath: deps.sessionDirectory,
-                        config: {
-                            enabled: true,
-                            token_budget: config.tokenBudget ?? 10000,
-                            min_reads: config.minReads ?? 4,
-                        },
-                        holderId,
-                        leaseKey,
-                        deadline,
-                        parentSessionId: parent,
-                        model: config.model,
-                        fallbackModels: config.fallbackModels,
-                    });
-                } finally {
-                    closeQuietly(openCodeDb);
-                }
-                recordRun("completed", null);
-                return { status: "completed" };
             }
 
             // Agentic tasks: verify / curate / maintain-docs.

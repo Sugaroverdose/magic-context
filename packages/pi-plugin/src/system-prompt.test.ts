@@ -54,12 +54,10 @@ describe("buildMagicContextBlock v2 system-prompt parity", () => {
 				injectDocs: true,
 				includeGuidance: true,
 				userMemoriesEnabled: true,
-				pinKeyFilesEnabled: true,
 			});
 
 			expect(block).not.toContain(SYSTEM_PROMPT_DATA_MARKERS.projectDocs);
 			expect(block).not.toContain(SYSTEM_PROMPT_DATA_MARKERS.userProfile);
-			expect(block).not.toContain(SYSTEM_PROMPT_DATA_MARKERS.keyFiles);
 			expect(block).not.toContain("Stable profile should move to m[0]");
 		} finally {
 			closeQuietly(db);

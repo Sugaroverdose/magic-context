@@ -129,7 +129,15 @@ export function buildHiddenAgentRegistrations(args: {
             // corrupt user source) and NO ctx_memory/ctx_note (ctx_memory
             // update/archive/merge bumps the project memory epoch → busts m[0],
             // violating the primers cache-neutral contract).
-            allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search", "ctx_search"],
+            allowedTools: [
+                "read",
+                "grep",
+                "glob",
+                "aft_outline",
+                "aft_zoom",
+                "aft_search",
+                "ctx_search",
+            ],
             // Tight read-only-lookup budget — NOT the dreamer's 150. A single
             // primer is a targeted investigation, not a whole-pool maintenance
             // loop; it also bounds the per-primer cost of an unsupervised run.

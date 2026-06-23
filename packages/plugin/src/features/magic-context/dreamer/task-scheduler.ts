@@ -30,9 +30,6 @@ export interface DreamTaskRuntimeConfig {
     timeoutMinutes: number;
     /** review-user-memories */
     promotionThreshold?: number;
-    /** key-files */
-    tokenBudget?: number;
-    minReads?: number;
 }
 
 export interface TaskExecOutcome {

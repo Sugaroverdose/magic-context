@@ -226,7 +226,14 @@ describe("subagent-runner pure helpers", () => {
 		// Source-safety + cache-neutrality: no write/edit/bash, and crucially no
 		// ctx_memory (its mutations bump the project memory epoch → bust m[0]).
 		const toolList = args[idx + 1];
-		for (const denied of ["write", "edit", "bash", "ctx_memory", "ctx_note", "aft_search"]) {
+		for (const denied of [
+			"write",
+			"edit",
+			"bash",
+			"ctx_memory",
+			"ctx_note",
+			"aft_search",
+		]) {
 			expect(toolList).not.toContain(denied);
 		}
 		// The lean extension loads (so ctx_search is registered to be gated), but

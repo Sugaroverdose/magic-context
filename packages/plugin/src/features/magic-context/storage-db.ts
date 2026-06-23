@@ -9,7 +9,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { deleteOrphanProjectKeyFiles } from "./key-files/project-key-files";
+
 import { runMigrations } from "./migrations";
 import {
     loadToolDefinitionMeasurements,
@@ -1677,13 +1677,6 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
             return null;
-        }
-        if (!explicitDbPath) {
-            try {
-                deleteOrphanProjectKeyFiles(db);
-            } catch (error) {
-                log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
-            }
         }
         // Recover any Channel-2 ceiling-nudge lease left at `claimed` by a crash
         // mid-delivery (see healWedgedChannel2Claims). Fresh opens and later

@@ -1065,9 +1065,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					// chunk-span fallback when untagged or out of range (non-fatal).
 					const idx = candidate.originCompartmentIndex;
 					const origin =
-						typeof idx === "number" &&
-						idx >= 1 &&
-						idx <= newCompartments.length
+						typeof idx === "number" && idx >= 1 && idx <= newCompartments.length
 							? newCompartments[idx - 1]
 							: undefined;
 					const startC = origin ?? firstNew;
@@ -1076,8 +1074,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						startC?.startMessageId ||
 						`ordinal:${startC?.startMessage ?? chunk.startIndex}`;
 					const sourceEndMessageId =
-						endC?.endMessageId ||
-						`ordinal:${endC?.endMessage ?? lastNewEnd}`;
+						endC?.endMessageId || `ordinal:${endC?.endMessage ?? lastNewEnd}`;
 					const sourceMessage =
 						provider.readMessageById?.(sourceStartMessageId);
 					const sourceMessageTime =

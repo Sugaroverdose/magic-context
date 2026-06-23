@@ -53,7 +53,7 @@ import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
-import { buildKeyFilesBlock, type KeyFilesConfigForRender } from "./key-files-block";
+
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -658,11 +658,9 @@ export interface M0M1RenderOptions {
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
     userProfileBudgetTokens?: number;
-    keyFiles?: KeyFilesConfigForRender;
     isCacheBustingPass?: boolean;
     /** Provider-side cache-eviction signals for HARD-bust detection. */
     hardSignals?: M0HardSignals;
-    preRenderedKeyFilesBlock?: string | null;
     workspaceIdentitySet?: WorkspaceIdentitySet;
     beforePhase3ForTest?: () => void;
 }
@@ -1611,7 +1609,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const m0Bytes = Buffer.from(m0Text, "utf8");
     snapshotMarkers.materializedAt = foldMaterializedAt;
     const renderedMemoryIds = trimmed.renderOrder.map((m) => m.id);
-    const preRenderedKeyFilesBlock = preRenderKeyFilesBlock(options);
     const phase3ProjectDocsHash = projectDirectory ? computeProjectDocsHash(projectDirectory) : "";
 
     options.beforePhase3ForTest?.();
@@ -1684,7 +1681,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         const m1Render = renderM1WithMetadata(
             {
                 ...options,
-                preRenderedKeyFilesBlock,
                 workspaceIdentitySet: {
                     identities: workspace.identities,
                     namesByIdentity: workspace.namesByIdentity,
@@ -1774,23 +1770,6 @@ export function materializeWithRetry(
     });
 }
 
-function preRenderKeyFilesBlock(options: M0M1RenderOptions): string | null {
-    if (!options.projectDirectory) return null;
-    try {
-        return buildKeyFilesBlock(options.db, options.projectDirectory, options.keyFiles) ?? null;
-    } catch (error) {
-        sessionLog(options.sessionId, "key-files render for m[1] failed:", error);
-        return null;
-    }
-}
-
-function renderedKeyFilesBlock(options: M0M1RenderOptions): string | null {
-    if (options.preRenderedKeyFilesBlock !== undefined) {
-        return options.preRenderedKeyFilesBlock;
-    }
-    return preRenderKeyFilesBlock(options);
-}
-
 function renderMemoryUpdatesBlock(args: {
     db: Database;
     projectPath?: string;
@@ -1865,8 +1844,6 @@ function renderM1WithMetadata(
         projectPath: options.projectPath,
         workspaceIdentitySet: options.workspaceIdentitySet,
     });
-    const keyFiles = renderedKeyFilesBlock(options);
-    if (keyFiles) blocks.push(keyFiles);
 
     const memoryUpdates = renderMemoryUpdatesBlock({
         db: options.db,
@@ -2123,7 +2100,6 @@ function replayCachedM1(state: M0M1State): string {
 }
 
 function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
-    const preRenderedKeyFilesBlock = preRenderKeyFilesBlock(options);
     options.db.exec("BEGIN IMMEDIATE");
     try {
         const row = readCachedM0M1Row(options.db, options.sessionId);
@@ -2146,11 +2122,7 @@ function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
         const markers = markersFromCachedRow(row);
         if (!markers) throw new RenderM1InvalidMarkersError(options.sessionId);
         const renderedMemoryIds = parseMemoryBlockIds(row.memory_block_ids);
-        const rendered = renderM1WithMetadata(
-            { ...options, preRenderedKeyFilesBlock },
-            markers,
-            renderedMemoryIds,
-        );
+        const rendered = renderM1WithMetadata({ ...options }, markers, renderedMemoryIds);
         const m1Bytes = Buffer.from(rendered.text, "utf8");
         // Advance the persisted baseline boundary too: soft-refresh re-renders
         // m[1] to cover every compartment up to the latest, so the boundary the
@@ -2428,7 +2400,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         memoryUpdateCount = m1Render.memoryUpdateCount;
     } else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
         const freshM1 = renderM1WithMetadata(
-            { ...options, preRenderedKeyFilesBlock: preRenderKeyFilesBlock(options) },
+            { ...options },
             options.state.snapshotMarkers,
             freshFallbackRenderedMemoryIds,
         );

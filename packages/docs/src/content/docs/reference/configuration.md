@@ -170,13 +170,6 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.tasks.maintain-docs.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
 | `dreamer.tasks.maintain-docs.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
 | `dreamer.tasks.maintain-docs.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
-| `dreamer.tasks.key-files.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.key-files.model` | string | — | Per-task model override (inherits dreamer.model) |
-| `dreamer.tasks.key-files.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
-| `dreamer.tasks.key-files.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
-| `dreamer.tasks.key-files.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
-| `dreamer.tasks.key-files.token_budget` | number (2000–30000) | — | key-files: total token budget for pinned files (default: 10000) |
-| `dreamer.tasks.key-files.min_reads` | number (2–20) | — | key-files: min full-read count before a file is pinned (default: 4) |
 | `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.evaluate-smart-notes.model` | string | — | Per-task model override (inherits dreamer.model) |
 | `dreamer.tasks.evaluate-smart-notes.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
@@ -235,7 +228,7 @@ Behavior tuning most installs never need to touch.
 | `caveman_text_compression` | object | — | Age-tier caveman compression for long user/assistant text parts. Only active when ctx_reduce_enabled is false. Oldest 20% of eligible tags (outside protected tail) go to ultra, next 20% to full, next 20% to lite, newest 40% untouched. Graduated from experimental.caveman_text_compression; opt-in, default off (lossy). |
 | `caveman_text_compression.enabled` | boolean | `false` | Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%). |
 | `caveman_text_compression.min_chars` | number (100–10000) | `500` | Text parts shorter than this (characters) stay untouched. Min 100, max 10000. Default: 500. |
-| `system_prompt_injection` | object | — | Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile / key-files blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically. |
+| `system_prompt_injection` | object | — | Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically. |
 | `system_prompt_injection.enabled` | boolean | `true` | When false, NO injection happens for ANY agent — global escape hatch. (default: true) |
 | `system_prompt_injection.skip_signatures` | string[] | `["<!-- magic-context: skip -->"]` | Substring opt-out list. If the agent's system prompt contains any of these strings, skip ALL Magic Context injection for that call. Default "<!-- magic-context: skip -->" is meant to be added inside a user's custom agent prompt to opt that agent out. |
 | `sqlite` | object | — | SQLite connection tuning for Magic Context's own context.db. These are per-connection PRAGMAs applied at open; they do not change the schema or what is stored. |

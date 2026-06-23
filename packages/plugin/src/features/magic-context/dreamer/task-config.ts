@@ -32,8 +32,6 @@ export function buildDreamTaskRuntimeConfigs(dreamer: DreamerConfig): DreamTaskR
             thinkingLevel,
             timeoutMinutes: t.timeout_minutes ?? 20,
             promotionThreshold: t.promotion_threshold,
-            tokenBudget: t.token_budget,
-            minReads: t.min_reads,
         };
     });
 }
@@ -61,17 +59,6 @@ export function dreamTaskScheduled(
 ): boolean {
     const schedule = dreamer?.tasks?.[task]?.schedule;
     return typeof schedule === "string" && schedule.trim() !== "";
-}
-
-/** Key-files pinning is "on" (transform injects pinned files) when the key-files
- *  task is scheduled — the Option C analogue of the v1 pin_key_files.enabled. */
-export function keyFilesEnabled(dreamer: DreamerConfig | undefined): boolean {
-    return dreamTaskScheduled(dreamer, "key-files");
-}
-
-/** Token budget for pinned key-files injection. */
-export function keyFilesTokenBudget(dreamer: DreamerConfig | undefined): number {
-    return dreamer?.tasks?.["key-files"]?.token_budget ?? 10000;
 }
 
 /** Names of the tasks the user has scheduled (schedule != ""), in canonical order. */

@@ -22,7 +22,6 @@ const CANONICAL = [
     "classify-memories",
     "retrospective",
     "maintain-docs",
-    "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
     "promote-primers",
@@ -84,8 +83,11 @@ function reconcileV2TasksObjectForDoctor(tasksObject: Record<string, unknown>): 
     const hasBroadIntervalAnywhere = Object.values(tasksObject).some(
         (v) => asObject(v) && "broad_interval_days" in (v as Record<string, unknown>),
     );
-    if (hasVerifyBroad && !hasBroadIntervalAnywhere) return false;
+    // key-files was removed (feature moved to AFT); strip any stale task entry.
+    const hasStaleKeyFiles = "key-files" in tasksObject;
+    if (hasVerifyBroad && !hasBroadIntervalAnywhere && !hasStaleKeyFiles) return false;
 
+    if (hasStaleKeyFiles) delete tasksObject["key-files"];
     for (const value of Object.values(tasksObject)) {
         const obj = asObject(value);
         if (obj && "broad_interval_days" in obj) delete obj.broad_interval_days;
@@ -212,7 +214,7 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
                           ? classifySchedule
                           : task === "retrospective"
                             ? retrospectiveSchedule
-                            : task === "maintain-docs" || task === "key-files"
+                            : task === "maintain-docs"
                               ? ""
                               : baseCron;
                 tasks[task] = withTimeout({ schedule });
@@ -260,18 +262,8 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
         });
     }
 
-    const pkf = asObject(dreamer.pin_key_files);
-    const pkfEnabled = pkf ? pkf.enabled === true : false;
-    if (pkf || !tasks["key-files"]) {
-        tasks["key-files"] = withTimeout({
-            ...(tasks["key-files"] ?? {}),
-            schedule: pkfEnabled ? baseCron : "",
-            ...(pkf && typeof pkf.token_budget === "number"
-                ? { token_budget: pkf.token_budget }
-                : {}),
-            ...(pkf && typeof pkf.min_reads === "number" ? { min_reads: pkf.min_reads } : {}),
-        });
-    }
+    // key-files was removed (the feature moved to AFT's dreamer): any legacy
+    // pin_key_files block is dropped below with the other retired keys.
 
     // Mutate in place: drop retired keys, keep agent-config keys, add tasks.
     delete dreamer.schedule;

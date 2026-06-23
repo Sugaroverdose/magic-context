@@ -16,7 +16,6 @@ import {
   dismissNote,
   formatDateTime,
   formatRelativeTime,
-  getProjectKeyFiles,
   getProjects,
   getSessionDetail,
   getSessionMessages,
@@ -135,14 +134,7 @@ function hasTiers(comp: Compartment): boolean {
   });
 }
 
-type ActiveTab =
-  | "messages"
-  | "compartments"
-  | "facts"
-  | "notes"
-  | "historian"
-  | "tokens"
-  | "keyFiles";
+type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" | "tokens";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
@@ -414,13 +406,6 @@ export default function SessionViewer() {
     );
 
   const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
-  const [keyFiles] = createResource(
-    () => sessionDetail()?.project_path ?? null,
-    async (projectPath) => {
-      if (!projectPath) return [];
-      return getProjectKeyFiles(projectPath);
-    },
-  );
 
   // Per-session in-place expansion state for compartmentalized message ranges
   // on the Messages tab. Reset whenever the user picks a different session so
@@ -891,13 +876,6 @@ export default function SessionViewer() {
           >
             Meta
           </button>
-          <button
-            type="button"
-            class={`tab-pill ${activeTab() === "keyFiles" ? "active" : ""}`}
-            onClick={() => setActiveTab("keyFiles")}
-          >
-            Key files ({keyFiles()?.length ?? 0})
-          </button>
         </div>
 
         <Show when={sessionDetail()}>
@@ -1282,71 +1260,6 @@ export default function SessionViewer() {
                           </div>
                         </div>
                       </button>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </Show>
-          </Show>
-
-          {/* Key files tab */}
-          <Show when={activeTab() === "keyFiles"}>
-            <Show
-              when={!keyFiles.loading}
-              fallback={<div class="empty-state">Loading key files...</div>}
-            >
-              <Show
-                when={(keyFiles() ?? []).length > 0}
-                fallback={
-                  <div class="empty-state">
-                    <span class="empty-state-icon">🗂️</span>No project key files
-                  </div>
-                }
-              >
-                <div class="list-gap">
-                  <For each={keyFiles() ?? []}>
-                    {(row) => (
-                      <div class="card">
-                        <div
-                          class="card-title"
-                          style={{ display: "flex", "align-items": "center", gap: "8px" }}
-                        >
-                          <span class="mono">{row.path}</span>
-                          <span class="pill blue">v{row.version}</span>
-                          <Show when={row.stale_reason}>
-                            {(reason) => <span class="pill amber">stale: {reason()}</span>}
-                          </Show>
-                        </div>
-                        <div class="card-meta">
-                          <span>{row.local_token_estimate.toLocaleString()} tokens</span>
-                          <span>·</span>
-                          <span>{formatDateTime(row.generated_at)}</span>
-                          <Show when={row.generated_by_model}>
-                            {(model) => (
-                              <>
-                                <span>·</span>
-                                <span>{model()}</span>
-                              </>
-                            )}
-                          </Show>
-                        </div>
-                        <pre
-                          style={{
-                            "margin-top": "10px",
-                            padding: "10px",
-                            background: "var(--bg-base)",
-                            "border-radius": "var(--radius-md)",
-                            "font-size": "11px",
-                            "line-height": "1.5",
-                            "white-space": "pre-wrap",
-                            "word-break": "break-word",
-                            "max-height": "320px",
-                            overflow: "auto",
-                          }}
-                        >
-                          {row.content}
-                        </pre>
-                      </div>
                     )}
                   </For>
                 </div>

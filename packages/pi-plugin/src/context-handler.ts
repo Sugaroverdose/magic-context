@@ -677,12 +677,10 @@ export interface PiHeuristicsOptions {
 /** <session-history> injection config — writes compartments+facts+memories into message[0]. */
 export interface PiInjectionOptions {
 	/** When false (config `memory.enabled=false`), project memories are NOT read
-	 *  or rendered into m[0]/m[1]. Docs + key-files still render. */
+	 *  or rendered into m[0]/m[1]. Docs still render. */
 	memoryEnabled?: boolean;
 	injectionBudgetTokens: number;
 	temporalAwareness?: boolean;
-	keyFilesEnabled?: boolean;
-	keyFilesTokenBudget?: number;
 }
 
 /** Scheduler config — gates cache-busting stages on TTL + threshold. */
@@ -3283,15 +3281,13 @@ interface RunPipelineArgs {
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
 	injection?: {
 		/** When false (config `memory.enabled=false`), project memories are NOT
-		 *  read or rendered into m[0]/m[1]. Docs + key-files still render. */
+		 *  read or rendered into m[0]/m[1]. Docs still render. */
 		memoryEnabled?: boolean;
 		injectionBudgetTokens: number;
 		/** v2 decay-render history budget (~60K), distinct from the memory
 		 *  injection budget. Drives compartment tier demotion in renderM0Pi. */
 		historyBudgetTokens?: number;
 		temporalAwareness?: boolean;
-		keyFilesEnabled?: boolean;
-		keyFilesTokenBudget?: number;
 	};
 	/**
 	 * Optional entry-id array, indexed 1:1 with `messages`, providing
@@ -3561,8 +3557,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						memoryEnabled: args.injection.memoryEnabled,
 						injectionBudgetTokens: args.injection.injectionBudgetTokens,
 						historyBudgetTokens: args.injection.historyBudgetTokens,
-						keyFilesEnabled: args.injection.keyFilesEnabled,
-						keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
 						hardSignals: piHardSignals,
 					},
 					args.db,
@@ -4223,8 +4217,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					memoryEnabled: args.injection.memoryEnabled,
 					injectionBudgetTokens: args.injection.injectionBudgetTokens,
 					historyBudgetTokens: args.injection.historyBudgetTokens,
-					keyFilesEnabled: args.injection.keyFilesEnabled,
-					keyFilesTokenBudget: args.injection.keyFilesTokenBudget,
 					hardSignals: piHardSignals,
 				},
 				args.db,

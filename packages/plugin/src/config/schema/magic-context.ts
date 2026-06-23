@@ -80,26 +80,8 @@ const PrimerPromotionThresholdSchema = z
     .describe(
         "promote-primers: min recurring source days before promotion is considered (default: 2)",
     );
-const TokenBudgetSchema = z
-    .number()
-    .min(2000)
-    .max(30000)
-    .optional()
-    .describe("key-files: total token budget for pinned files (default: 10000)");
-const MinReadsSchema = z
-    .number()
-    .min(2)
-    .max(20)
-    .optional()
-    .describe("key-files: min full-read count before a file is pinned (default: 4)");
 export const DreamTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     promotion_threshold: PromotionThresholdSchema,
-    token_budget: TokenBudgetSchema,
-    min_reads: MinReadsSchema,
-});
-const KeyFilesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
-    token_budget: TokenBudgetSchema,
-    min_reads: MinReadsSchema,
 });
 const ReviewUserMemoriesTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
     promotion_threshold: PromotionThresholdSchema,
@@ -110,9 +92,8 @@ const PromotePrimersTaskConfigSchema = DreamTaskBaseConfigSchema.extend({
 export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
 
 /** Default schedule per task. Preserves v1 behavior: verify runs nightly;
- *  curate runs weekly; classify runs daily after curation; maintain-docs +
- *  key-files default OFF (maintain-docs was not in the v1 default list;
- *  key-files' pin_key_files.enabled defaulted false); the two promoted
+ *  curate runs weekly; classify runs daily after curation; maintain-docs
+ *  defaults OFF (it was not in the v1 default list); the two promoted
  *  post-phases run nightly and are gated. */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     verify: "0 3 * * *",
@@ -121,7 +102,6 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "classify-memories": "0 6 * * *",
     retrospective: "0 5 * * *",
     "maintain-docs": "",
-    "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
     "review-user-memories": "0 3 * * *",
     "promote-primers": "0 3 * * *",
@@ -132,10 +112,6 @@ function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigS
     const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
     if (task === "review-user-memories") base.promotion_threshold = 3;
     if (task === "promote-primers") base.promotion_threshold = 2;
-    if (task === "key-files") {
-        base.token_budget = 10000;
-        base.min_reads = 4;
-    }
     return base;
 }
 
@@ -163,9 +139,6 @@ export const DreamTasksSchema = z
         ),
         "maintain-docs": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("maintain-docs")),
-        ),
-        "key-files": KeyFilesTaskConfigSchema.default(() =>
-            KeyFilesTaskConfigSchema.parse(defaultTaskConfig("key-files")),
         ),
         "evaluate-smart-notes": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("evaluate-smart-notes")),
@@ -360,7 +333,7 @@ export interface MagicContextConfig {
     /**
      * Controls whether and where Magic Context augments the system prompt
      * (`## Magic Context` guidance, `<project-docs>`, `<user-profile>`,
-     * `<key-files>`, sticky date) inside `experimental.chat.system.transform`.
+     * sticky date) inside `experimental.chat.system.transform`.
      *
      * Internal OpenCode hidden agents (title, summary, compaction) are
      * always skipped automatically — that's a separate code path.
@@ -561,7 +534,7 @@ export const MagicContextConfigSchema = z
                 skip_signatures: ["<!-- magic-context: skip -->"],
             })
             .describe(
-                "Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile / key-files blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically.",
+                "Controls whether and where Magic Context augments the system prompt. Lets users opt specific agents out of the Magic Context guidance and the surrounding project-docs / user-profile blocks. OpenCode's internal hidden agents — title, summary, and compaction — are always skipped automatically.",
             ),
         // v2: the LLM compressor was removed — deterministic decay-tier rendering
         // (decay-render.ts) replaces it, so there are no compressor knobs. A

@@ -192,7 +192,6 @@ interface RunPostTransformPhaseArgs {
         projectDirectory?: string;
         memoryInjectionBudgetTokens?: number;
         historyBudgetTokens?: number;
-        keyFiles?: { enabled: boolean; tokenBudget: number };
         hardSignals?: M0HardSignals;
     };
 }
@@ -750,7 +749,6 @@ export async function runPostTransformPhase(
                 projectDirectory: args.m0M1.projectDirectory,
                 memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
-                keyFiles: args.m0M1.keyFiles,
                 isCacheBustingPass,
                 hardSignals: args.m0M1.hardSignals,
             });

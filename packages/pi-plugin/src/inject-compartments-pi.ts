@@ -77,7 +77,7 @@ import {
 	trimWorkspaceMemoriesToBudgetV2,
 	type WorkspaceRenderContext,
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
-import { buildKeyFilesBlock } from "@magic-context/core/hooks/magic-context/key-files-block";
+
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
@@ -497,7 +497,7 @@ export interface PiM0M1State {
 	/** When false, project memories are NOT read or rendered into m[0]/m[1]
 	 *  (config `memory.enabled=false`). Mirrors OpenCode, which passes
 	 *  `projectPath: undefined` in that case so every memory read short-circuits.
-	 *  Docs + key-files still render (they key off projectDirectory, not memory).
+	 *  Docs still render (they key off projectDirectory, not memory).
 	 *  Unset/true keeps memory on. */
 	memoryEnabled?: boolean;
 	/** Memory-block trim budget (~4K). Bounds the <project-memory> block. */
@@ -506,8 +506,6 @@ export interface PiM0M1State {
 	 *  Distinct from injectionBudgetTokens — using the memory budget here would
 	 *  over-demote every compartment. */
 	historyBudgetTokens?: number;
-	keyFilesEnabled?: boolean;
-	keyFilesTokenBudget?: number;
 	/** User-profile block budget (~4K). The m[1] new-user-profile delta is
 	 *  trimmed to 25% of this (matches OpenCode renderM1). Defaults when unset. */
 	userProfileBudgetTokens?: number;
@@ -1370,7 +1368,6 @@ export function materializeM0Pi(
 		attempts += 1;
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
-	const preRenderedKeyFilesBlock = preRenderKeyFilesBlockPi(state, db);
 	const phase3ProjectDocsHash = readProjectDocsCanonical(
 		state.projectDirectory,
 	).canonicalHash;
@@ -1424,7 +1421,6 @@ export function materializeM0Pi(
 			db,
 			snapshotMarkers,
 			renderedMemoryIds,
-			preRenderedKeyFilesBlock,
 		);
 		const m1Bytes = Buffer.from(m1Render.text, "utf8");
 
@@ -1514,33 +1510,6 @@ export function materializeM0PiWithRetry(
 	);
 }
 
-function preRenderKeyFilesBlockPi(
-	state: PiM0M1State,
-	db: ContextDatabase,
-): string | null {
-	if (!state.keyFilesEnabled) return null;
-	try {
-		return (
-			buildKeyFilesBlock(db, state.projectDirectory, {
-				enabled: true,
-				tokenBudget: state.keyFilesTokenBudget ?? 10_000,
-			}) ?? null
-		);
-	} catch (error) {
-		logSession(state.sessionId, "key-files render for m[1] failed:", error);
-		return null;
-	}
-}
-
-function renderedKeyFilesBlockPi(
-	state: PiM0M1State,
-	db: ContextDatabase,
-	preRenderedKeyFilesBlock?: string | null,
-): string | null {
-	if (preRenderedKeyFilesBlock !== undefined) return preRenderedKeyFilesBlock;
-	return preRenderKeyFilesBlockPi(state, db);
-}
-
 function renderMemoryUpdatesBlockPi(args: {
 	db: ContextDatabase;
 	projectPath: string;
@@ -1608,7 +1577,6 @@ function renderM1PiWithMetadata(
 	db: ContextDatabase,
 	markers: PiM0SnapshotMarkers,
 	renderedMemoryIds: readonly number[],
-	preRenderedKeyFilesBlock?: string | null,
 	// The compartment set the CALLER will use to advance the persisted trim
 	// boundary. When provided, the new-compartments filter renders from this
 	// exact set instead of a fresh live read — so a compartment can never be
@@ -1619,8 +1587,6 @@ function renderM1PiWithMetadata(
 ): RenderM1PiResult {
 	const sections: string[] = [];
 	const workspace = resolveWorkspaceRenderContextPi(state, db);
-	const keyFiles = renderedKeyFilesBlockPi(state, db, preRenderedKeyFilesBlock);
-	if (keyFiles) sections.push(keyFiles);
 
 	const memPath = memoryProjectPath(state);
 	const memoryUpdates = memPath
@@ -1970,10 +1936,6 @@ function softRefreshCachedM1Pi(args: {
 	memoryUpdateCount: number;
 	recomputed: boolean;
 } {
-	const preRenderedKeyFilesBlock = preRenderKeyFilesBlockPi(
-		args.state,
-		args.db,
-	);
 	args.db.exec("BEGIN IMMEDIATE");
 	try {
 		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
@@ -2022,7 +1984,6 @@ function softRefreshCachedM1Pi(args: {
 			args.db,
 			markers,
 			parseMemoryBlockIds(row.memory_block_ids),
-			preRenderedKeyFilesBlock,
 			// Render new compartments from the SAME snapshot the boundary advances
 			// from below, so a concurrent sibling publish can't put a compartment
 			// in m[1] while its raw messages stay in the tail.
@@ -2212,7 +2173,6 @@ export function injectM0M1Pi(
 			db,
 			markers,
 			freshFallbackRenderedMemoryIds,
-			preRenderKeyFilesBlockPi(state, db),
 		);
 		m1 = freshM1.text;
 		memoryUpdateCount = freshM1.memoryUpdateCount;

@@ -494,20 +494,6 @@ pub struct DreamRun {
     pub parent_session_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct KeyFileRow {
-    pub project_path: String,
-    pub path: String,
-    pub content: String,
-    pub content_hash: String,
-    pub local_token_estimate: i64,
-    pub generated_at: i64,
-    pub generated_by_model: Option<String>,
-    pub generation_config_hash: String,
-    pub stale_reason: Option<String>,
-    pub version: i64,
-}
-
 // ── Note types ────────────────────────────────────────────────
 // Unified Note struct replaces SessionNote and SmartNote
 // Both session notes (type='session') and smart notes (type='smart') are stored in the notes table
@@ -3608,55 +3594,6 @@ pub fn get_session_messages(
                 .collect())
         }
     }
-}
-
-pub fn get_project_key_files(
-    conn: &Connection,
-    project_path: &str,
-) -> Result<Vec<KeyFileRow>, rusqlite::Error> {
-    // Resolve the identity filter to the set of stored project_path values so
-    // symlinked / non-canonical / legacy raw paths still match (mirrors the
-    // memories path resolution).
-    let paths = resolve_paths_for_table_filter(conn, "project_key_files", project_path)?;
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let version: i64 = {
-        let placeholders = build_in_placeholders(paths.len(), 1);
-        let params = rusqlite::params_from_iter(paths.iter());
-        conn.query_row(
-            &format!(
-                "SELECT COALESCE(MAX(version), 0) FROM project_key_files_version \
-                 WHERE project_path IN ({placeholders})"
-            ),
-            params,
-            |row| row.get(0),
-        )
-        .unwrap_or(0)
-    };
-    let placeholders = build_in_placeholders(paths.len(), 1);
-    let mut stmt = conn.prepare(&format!(
-        "SELECT project_path, path, content, content_hash, local_token_estimate,
-                generated_at, generated_by_model, generation_config_hash, stale_reason
-           FROM project_key_files
-          WHERE project_path IN ({placeholders})
-          ORDER BY generated_at DESC, path ASC"
-    ))?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(paths.iter()), |row| {
-        Ok(KeyFileRow {
-            project_path: row.get(0)?,
-            path: row.get(1)?,
-            content: row.get(2)?,
-            content_hash: row.get(3)?,
-            local_token_estimate: row.get(4)?,
-            generated_at: row.get(5)?,
-            generated_by_model: row.get(6)?,
-            generation_config_hash: row.get(7)?,
-            stale_reason: row.get(8)?,
-            version,
-        })
-    })?;
-    rows.collect()
 }
 
 pub fn get_opencode_session_detail(

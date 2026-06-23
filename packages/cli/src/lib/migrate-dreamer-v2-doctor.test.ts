@@ -63,7 +63,7 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect(t["maintain-docs"].schedule).toBe(""); // omitted → disabled
     });
 
-    it("preserves user_memories opt-out and key-files params, drops retired keys", () => {
+    it("preserves user_memories opt-out, drops retired keys (incl. pin_key_files)", () => {
         const cfg: Record<string, unknown> = {
             dreamer: {
                 schedule: "03:00-06:00",
@@ -82,9 +82,8 @@ describe("migrateDreamerV2ForDoctor", () => {
         expect("pin_key_files" in d).toBe(false);
         const t = tasksOf(cfg);
         expect(t["review-user-memories"].schedule).toBe(""); // opt-out preserved
-        expect(t["key-files"].schedule).toBe("0 3 * * *");
-        expect(t["key-files"].token_budget).toBe(9000);
-        expect(t["key-files"].min_reads).toBe(5);
+        // key-files was removed (feature moved to AFT's dreamer) — no task emitted.
+        expect("key-files" in t).toBe(false);
     });
 
     it("mutates in place (preserves the original object reference for comment-json)", () => {

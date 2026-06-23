@@ -48,21 +48,20 @@ pub fn resolve_project_config_path(project_path: &str) -> PathBuf {
 /// frontend DreamerTasksField list). The dashboard renders this fixed set so
 /// every project shows the same tasks regardless of its (possibly stale) per-
 /// project scheduler snapshot in task_schedule_state.
-pub const CANONICAL_DREAM_TASKS: [&str; 9] = [
+pub const CANONICAL_DREAM_TASKS: [&str; 8] = [
     "verify",
     "verify-broad",
     "curate",
     "classify-memories",
     "retrospective",
     "maintain-docs",
-    "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
 ];
 
 /// Default cron per task (mirrors DEFAULT_TASK_SCHEDULES in the plugin schema and
 /// the frontend). Applied when neither the project nor the global config sets a
-/// schedule. maintain-docs + key-files default OFF (empty).
+/// schedule. maintain-docs defaults OFF (empty).
 pub fn default_task_schedule(task: &str) -> &'static str {
     match task {
         "verify" => "0 3 * * *",

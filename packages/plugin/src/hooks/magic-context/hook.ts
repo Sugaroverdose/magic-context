@@ -14,8 +14,6 @@ import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-openco
 import { OpenCodeRetrospectiveRawProvider } from "../../features/magic-context/dreamer/retrospective-raw-provider";
 import {
     buildDreamTaskRuntimeConfigs,
-    keyFilesEnabled,
-    keyFilesTokenBudget,
     userMemoryCollectionEnabled,
 } from "../../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
@@ -592,8 +590,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         projectPath,
         historianRunnable,
         experimentalUserMemories: userMemoryCollectionEnabled(dreamerConfig),
-        experimentalPinKeyFiles: keyFilesEnabled(dreamerConfig),
-        experimentalPinKeyFilesTokenBudget: keyFilesTokenBudget(dreamerConfig),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         liveModelBySession,
@@ -830,8 +826,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         ],
         internalChildSessions,
         experimentalUserMemories: userMemoryCollectionEnabled(deps.config.dreamer),
-        experimentalPinKeyFiles: keyFilesEnabled(deps.config.dreamer),
-        experimentalPinKeyFilesTokenBudget: keyFilesTokenBudget(deps.config.dreamer),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         // Caveman text compression only runs when ctx_reduce_enabled === false
         // (gated in transform.ts and in hook.ts cavemanTextCompression wiring above).

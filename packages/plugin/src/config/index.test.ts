@@ -261,18 +261,9 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
     });
 
-    it("coerces primitive experimental.pin_key_files: true to a scheduled key-files task", () => {
-        const config = JSON.stringify({
-            experimental: {
-                pin_key_files: true,
-            },
-        });
-
-        const result = loadWithUserConfig(config);
-        expect(result.dreamer?.tasks["key-files"].schedule).not.toBe("");
-    });
-
-    it("carries experimental.pin_key_files sub-fields into the key-files task", () => {
+    it("drops legacy experimental.pin_key_files — no key-files task is emitted", () => {
+        // key-files was removed (feature moved to AFT's dreamer). A legacy
+        // experimental.pin_key_files block migrates forward but produces no task.
         const config = JSON.stringify({
             experimental: {
                 pin_key_files: { enabled: true, token_budget: 9000, min_reads: 5 },
@@ -280,10 +271,7 @@ describe("loadPluginConfig — experimental graduation migration", () => {
         });
 
         const result = loadWithUserConfig(config);
-        const kf = result.dreamer?.tasks["key-files"];
-        expect(kf?.schedule).not.toBe("");
-        expect(kf?.token_budget).toBe(9000);
-        expect(kf?.min_reads).toBe(5);
+        expect("key-files" in (result.dreamer?.tasks ?? {})).toBe(false);
     });
 
     it("preserves an explicit promotion_threshold through the v2 migration", () => {

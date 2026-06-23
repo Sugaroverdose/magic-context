@@ -97,22 +97,16 @@ describe("migrateDreamerV2", () => {
         expect(tasks(out)["review-user-memories"].promotion_threshold).toBe(7);
     });
 
-    it("pin_key_files.enabled true → key-files scheduled, carries token_budget/min_reads", () => {
+    it("legacy pin_key_files block is dropped — no key-files task is emitted", () => {
         const { out } = migrate({
             dreamer: {
                 schedule: "02:00-06:00",
                 pin_key_files: { enabled: true, token_budget: 8000, min_reads: 6 },
             },
         });
-        const kf = tasks(out)["key-files"];
-        expect(kf.schedule).toBe("0 2 * * *");
-        expect(kf.token_budget).toBe(8000);
-        expect(kf.min_reads).toBe(6);
-    });
-
-    it("pin_key_files default (no block) → key-files DISABLED (v1 default off)", () => {
-        const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
-        expect(tasks(out)["key-files"].schedule).toBe("");
+        // key-files was removed (feature moved to AFT's dreamer).
+        expect("key-files" in tasks(out)).toBe(false);
+        expect("pin_key_files" in (out.dreamer as Record<string, unknown>)).toBe(false);
     });
 
     it("evaluate-smart-notes always gets the base cron", () => {
@@ -168,14 +162,13 @@ describe("migrateDreamerV2", () => {
         expect(warnings.join("\n")).toContain("dreamer.tasks");
     });
 
-    it("all 9 canonical tasks are present after migration", () => {
+    it("all canonical tasks are present after migration (no key-files)", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         expect(Object.keys(tasks(out)).sort()).toEqual(
             [
                 "classify-memories",
                 "curate",
                 "evaluate-smart-notes",
-                "key-files",
                 "maintain-docs",
                 "retrospective",
                 "review-user-memories",
@@ -183,6 +176,20 @@ describe("migrateDreamerV2", () => {
                 "verify-broad",
             ].sort(),
         );
+    });
+
+    it("strips a stale key-files task from an existing v2 tasks-object", () => {
+        const { out } = migrate({
+            dreamer: {
+                tasks: {
+                    verify: { schedule: "0 3 * * *" },
+                    "verify-broad": { schedule: "0 4 * * 0" },
+                    "key-files": { schedule: "0 2 * * *" },
+                },
+            },
+        });
+        expect("key-files" in tasks(out)).toBe(false);
+        expect(tasks(out).verify.schedule).toBe("0 3 * * *");
     });
 
     it("folds object-shaped retired memory tasks into verify + curate", () => {

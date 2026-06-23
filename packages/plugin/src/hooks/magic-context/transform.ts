@@ -284,8 +284,7 @@ export interface TransformDeps {
     getFallbackModelId?: (sessionId: string) => string | undefined;
     projectPath?: string;
     experimentalUserMemories?: boolean;
-    experimentalPinKeyFiles?: boolean;
-    experimentalPinKeyFilesTokenBudget?: number;
+
     /** When true, inject wall-clock gap markers (<!-- +Xm -->) on user messages and
      *  add start/end date attributes to <compartment> elements in <session-history>.
      *  Controlled by `experimental.temporal_awareness` config. */
@@ -1638,10 +1637,6 @@ export function createTransform(deps: TransformDeps) {
                 projectDirectory: sessionDirectory,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 historyBudgetTokens,
-                keyFiles: {
-                    enabled: deps.experimentalPinKeyFiles === true,
-                    tokenBudget: deps.experimentalPinKeyFilesTokenBudget ?? 10_000,
-                },
                 hardSignals: m0HardSignals,
             },
         });

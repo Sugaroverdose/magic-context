@@ -8,8 +8,7 @@ import ModelSelect from "./ModelSelect";
  * Replaces the retired v1 single `schedule` window + `user_memories` /
  * `pin_key_files` blocks. Each canonical task gets its own cron schedule
  * (preset picker + custom escape), an optional per-task model override, and the
- * task-specific params (promotion_threshold for review-user-memories;
- * token_budget / min_reads for key-files).
+ * task-specific params (promotion_threshold for review-user-memories).
  *
  * Self-contained (the dashboard does not import @magic-context/core); the task
  * list, default schedules, and presets mirror the plugin's Zod schema. Plugin-
@@ -21,8 +20,6 @@ export interface DreamTaskConfig {
   schedule?: string;
   model?: string;
   promotion_threshold?: number;
-  token_budget?: number;
-  min_reads?: number;
   broad_interval_days?: number;
   [key: string]: unknown;
 }
@@ -65,11 +62,6 @@ const TASKS: TaskMeta[] = [
   {
     name: "maintain-docs",
     description: "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
-    defaultSchedule: "",
-  },
-  {
-    name: "key-files",
-    description: "Pin frequently-read files into the system prompt",
     defaultSchedule: "",
   },
   {
@@ -133,8 +125,6 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
       schedule: stored?.schedule ?? meta.defaultSchedule,
       model: stored?.model,
       promotion_threshold: stored?.promotion_threshold,
-      token_budget: stored?.token_budget,
-      min_reads: stored?.min_reads,
     };
   };
 
@@ -255,37 +245,6 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                     onInput={(e) =>
                       update(meta().name, {
                         promotion_threshold: Number(e.currentTarget.value),
-                      })
-                    }
-                  />
-                </div>
-              </Show>
-              <Show when={enabled() && meta().name === "key-files"}>
-                <div class="dreamer-task-param">
-                  <span class="config-field-desc">Token budget (2k–30k, default 10k)</span>
-                  <input
-                    class="config-input"
-                    type="number"
-                    min={2000}
-                    max={30000}
-                    step={1000}
-                    value={cfg().token_budget ?? 10000}
-                    onInput={(e) =>
-                      update(meta().name, {
-                        token_budget: Number(e.currentTarget.value),
-                      })
-                    }
-                  />
-                  <span class="config-field-desc">Min reads (2–20, default 4)</span>
-                  <input
-                    class="config-input"
-                    type="number"
-                    min={2}
-                    max={20}
-                    value={cfg().min_reads ?? 4}
-                    onInput={(e) =>
-                      update(meta().name, {
-                        min_reads: Number(e.currentTarget.value),
                       })
                     }
                   />

@@ -5,7 +5,6 @@ import { Database } from "../../shared/sqlite";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import { clearSession } from "./storage-meta-session";
-import { bumpProjectMemoryEpoch, getProjectState } from "./storage-project-state";
 import {
     createPrimer,
     getPrimerCandidatesForProject,
@@ -13,6 +12,7 @@ import {
     primerOccurrenceUtcDay,
     updatePrimerAnswer,
 } from "./storage-primers";
+import { bumpProjectMemoryEpoch, getProjectState } from "./storage-project-state";
 
 function freshDb(): Database {
     const db = new Database(":memory:");

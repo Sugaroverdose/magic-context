@@ -126,10 +126,10 @@ describe("MagicContextConfigSchema", () => {
                     disable: true,
                     enabled: true,
                     // Dreamer v2: per-task config. review-user-memories disabled,
-                    // key-files scheduled.
+                    // maintain-docs scheduled.
                     tasks: {
                         "review-user-memories": { schedule: "" },
-                        "key-files": { schedule: "0 * * * *" },
+                        "maintain-docs": { schedule: "0 * * * *" },
                     },
                 },
                 sidekick: { disable: true, enabled: true },
@@ -141,7 +141,7 @@ describe("MagicContextConfigSchema", () => {
             expect("enabled" in (result.dreamer as Record<string, unknown>)).toBe(false);
             expect("enabled" in (result.sidekick as Record<string, unknown>)).toBe(false);
             expect(result.dreamer?.tasks["review-user-memories"].schedule).toBe("");
-            expect(result.dreamer?.tasks["key-files"].schedule).toBe("0 * * * *");
+            expect(result.dreamer?.tasks["maintain-docs"].schedule).toBe("0 * * * *");
             expect(result.dreamer?.tasks["classify-memories"].schedule).toBe("0 6 * * *");
             expect(result.dreamer?.tasks.retrospective.schedule).toBe("0 5 * * *");
         });

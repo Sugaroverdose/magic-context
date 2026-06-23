@@ -30,7 +30,6 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
     "classify-memories": "Scores memory importance, scope, and shareability",
     retrospective: "Learns from moments you had to correct or re-explain, and records the lesson",
     "maintain-docs": "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
-    "key-files": "Pin frequently-read files into the system prompt",
     "evaluate-smart-notes": "Surface smart notes whose conditions are now met",
     "review-user-memories": "Promote recurring behaviors into your user profile",
     "promote-primers": "Promote recurring project questions into Primers",
@@ -45,7 +44,6 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "classify-memories": "0 6 * * *",
     retrospective: "0 5 * * *",
     "maintain-docs": "",
-    "key-files": "",
     "evaluate-smart-notes": "0 3 * * *",
     "review-user-memories": "0 3 * * *",
     "promote-primers": "0 3 * * *",
@@ -107,7 +105,7 @@ export async function runDreamerSetup(
     prompts.log.success(`Dreamer model: ${model}`);
 
     const useDefaults = await prompts.confirm(
-        "Use recommended task schedules? (verify nightly; curate weekly; classify + retrospective daily; docs & key-files off)",
+        "Use recommended task schedules? (verify nightly; curate weekly; classify + retrospective daily; docs off)",
         true,
     );
     if (useDefaults) {

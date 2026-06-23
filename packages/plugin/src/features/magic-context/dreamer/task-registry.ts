@@ -15,7 +15,6 @@ export const CANONICAL_DREAM_TASKS = [
     "classify-memories",
     "retrospective",
     "maintain-docs",
-    "key-files",
     "evaluate-smart-notes",
     "review-user-memories",
     "promote-primers",
@@ -27,8 +26,8 @@ export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 /**
  * The agentic tasks — those run as a generic dreamer agent session driven by
  * `buildDreamTaskPrompt`. The other canonical tasks (review-user-memories,
- * key-files, evaluate-smart-notes) have their own specialized runners and do NOT
- * go through the prompt builder.
+ * evaluate-smart-notes) have their own specialized runners and do NOT go through
+ * the prompt builder.
  */
 export const AGENTIC_DREAM_TASKS = [
     "verify",
@@ -69,12 +68,7 @@ const MEMORY_DOMAIN_SET = new Set<DreamTaskName>(MEMORY_DOMAIN_TASKS);
  * `user-memories` is GLOBAL (mutates the cross-project user-profile pool, so two
  * different projects' dreamers must not review concurrently).
  */
-export type LeaseKind =
-    | "memory"
-    | "maintain-docs"
-    | "key-files"
-    | "evaluate-smart-notes"
-    | "user-memories";
+export type LeaseKind = "memory" | "maintain-docs" | "evaluate-smart-notes" | "user-memories";
 
 export function leaseKindFor(task: DreamTaskName): LeaseKind {
     if (MEMORY_DOMAIN_SET.has(task)) return "memory";
@@ -86,8 +80,6 @@ export function leaseKindFor(task: DreamTaskName): LeaseKind {
             return "memory";
         case "maintain-docs":
             return "maintain-docs";
-        case "key-files":
-            return "key-files";
         case "evaluate-smart-notes":
             return "evaluate-smart-notes";
         default:

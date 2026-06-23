@@ -46,7 +46,7 @@ fn main() {
             commands::get_session_messages,
             commands::get_subagent_invocations,
             commands::get_subagent_totals_by_subagent,
-            commands::get_project_key_files,
+
             commands::get_session_cache_events,
             commands::get_session_cache_events_by_turns,
             commands::enumerate_projects,

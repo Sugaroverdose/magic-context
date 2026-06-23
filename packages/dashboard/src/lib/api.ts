@@ -11,7 +11,6 @@ import type {
   DreamRunMemoryDetail,
   DreamStateEntry,
   Harness,
-  KeyFileRow,
   LogEntry,
   Memory,
   MemoryStats,
@@ -253,10 +252,6 @@ export async function getSessionMessages(
   sessionId: string,
 ): Promise<SessionMessageRow[]> {
   return invoke("get_session_messages", { harness, sessionId });
-}
-
-export async function getProjectKeyFiles(projectPath: string): Promise<KeyFileRow[]> {
-  return invoke("get_project_key_files", { projectPath });
 }
 
 export async function enumerateProjects(): Promise<ProjectRow[]> {

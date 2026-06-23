@@ -7,7 +7,7 @@ import {
 } from "../../features/magic-context/storage";
 import { sessionLog } from "../../shared/logger";
 import { resolveCtxReduceAvailability } from "./ctx-reduce-availability";
-import { clearKeyFilesCacheForSession } from "./key-files-block";
+
 import { estimateTokens } from "./read-session-formatting";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
@@ -28,7 +28,6 @@ export function clearSystemPromptHashSession(
         cachedDocsBySession: Map<string, string | null>;
     },
 ): void {
-    clearKeyFilesCacheForSession(sessionId);
     handleMaps.stickyDateBySession.delete(sessionId);
     handleMaps.cachedDocsBySession.delete(sessionId);
 }
