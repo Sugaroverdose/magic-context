@@ -52,23 +52,41 @@ export function createSmartNoteCapabilities(
     };
 }
 
+const SECRET_KEY_EXTENSIONS = [".p12", ".pfx", ".crt", ".key", ".pem"] as const;
+
 export function isSecretDeniedPath(repoRelativePath: string): boolean {
     const normalized = normalizeRepoPath(repoRelativePath).toLowerCase();
     if (!normalized) return true;
     const segments = normalized.split("/");
     if (segments.includes(".git") || segments.includes("secrets")) return true;
     const basename = segments.at(-1) ?? "";
-    return (
-        basename === ".npmrc" ||
-        basename.startsWith(".env") ||
-        basename.endsWith(".pem") ||
-        basename.endsWith(".key") ||
+
+    // Smart-note checks may intentionally use egress, so readFile must be
+    // conservative about files that commonly hold credentials.
+    if (basename === ".npmrc" || basename.startsWith(".env")) return true;
+    if (basename === ".pgpass" || basename === ".netrc") return true;
+    if (SECRET_KEY_EXTENSIONS.some((extension) => basename.endsWith(extension))) return true;
+    if (
         basename === "id_rsa" ||
         basename === "id_dsa" ||
         basename === "id_ecdsa" ||
         basename === "id_ed25519" ||
         basename.startsWith("id_")
-    );
+    ) {
+        return true;
+    }
+    if (segments.includes(".aws") && basename === "credentials") return true;
+    if (basename.endsWith(".json")) {
+        const serviceAccountJson =
+            basename.includes("service-account") || basename.includes("service_account");
+        const gcloudCredentialJson =
+            segments.includes("gcloud") &&
+            (basename === "application_default_credentials.json" ||
+                basename.includes("credential") ||
+                segments.includes("legacy_credentials"));
+        if (serviceAccountJson || gcloudCredentialJson) return true;
+    }
+    return false;
 }
 
 export function normalizeRepoPath(repoRelativePath: string): string {

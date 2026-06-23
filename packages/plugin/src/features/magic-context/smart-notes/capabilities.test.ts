@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createSmartNoteCapabilities } from "./capabilities";
+import { createSmartNoteCapabilities, isSecretDeniedPath } from "./capabilities";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
     const dir = await mkdtemp(path.join(tmpdir(), "mc-smart-note-cap-"));
@@ -77,5 +77,37 @@ describe("smart-note readFile capability", () => {
                 await rm(outside, { recursive: true, force: true });
             }
         });
+    });
+});
+
+describe("smart-note secret path denylist", () => {
+    test("blocks common credential file names and key material", () => {
+        for (const file of [
+            ".aws/credentials",
+            ".pgpass",
+            ".netrc",
+            "certs/client.p12",
+            "certs/client.pfx",
+            "certs/server.crt",
+            "certs/server.key",
+            "certs/server.pem",
+            "prod-service-account.json",
+            "prod_service_account.json",
+            ".config/gcloud/application_default_credentials.json",
+            "gcloud/legacy_credentials/user/adc.json",
+        ]) {
+            expect(isSecretDeniedPath(file)).toBe(true);
+        }
+    });
+
+    test("does not block ordinary similarly named project files", () => {
+        for (const file of [
+            "docs/certificate-notes.md",
+            "src/keymap.ts",
+            "service-accounting/report.json",
+            "docs/gcloud-setup.md",
+        ]) {
+            expect(isSecretDeniedPath(file)).toBe(false);
+        }
     });
 });
