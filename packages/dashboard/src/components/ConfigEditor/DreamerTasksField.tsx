@@ -20,63 +20,84 @@ export interface DreamTaskConfig {
   schedule?: string;
   model?: string;
   promotion_threshold?: number;
-  broad_interval_days?: number;
   [key: string]: unknown;
 }
 
 type TasksValue = Record<string, DreamTaskConfig> | undefined;
 
-interface TaskMeta {
+export interface TaskMeta {
   name: string;
+  label: string;
   description: string;
   defaultSchedule: string;
 }
 
 // Mirrors CANONICAL_DREAM_TASKS + DEFAULT_TASK_SCHEDULES in the plugin schema.
-const TASKS: TaskMeta[] = [
+export const TASKS: TaskMeta[] = [
   {
     name: "map-memories",
+    label: "Map memories",
     description: "One-time: maps each memory to its backing files (prepares verify)",
     defaultSchedule: "0 2 * * *",
   },
   {
     name: "verify",
+    label: "Verify changed memories",
     description: "Checks changed-file memories against code and fixes/removes stale ones",
     defaultSchedule: "0 3 * * *",
   },
   {
     name: "verify-broad",
+    label: "Verify all memories",
     description: "Periodic full re-check of the whole memory pool (catches drift)",
     defaultSchedule: "0 4 * * 0",
   },
   {
     name: "curate",
+    label: "Curate memories",
     description: "Deduplicates, tightens, and prunes the memory pool",
     defaultSchedule: "0 4 * * 0",
   },
   {
     name: "classify-memories",
+    label: "Classify memories",
     description: "Scores memory importance, scope, and shareability",
     defaultSchedule: "0 6 * * *",
   },
   {
     name: "retrospective",
+    label: "Retrospective",
     description: "Learns from moments you had to correct or re-explain, and records the lesson",
     defaultSchedule: "0 5 * * *",
   },
   {
     name: "maintain-docs",
+    label: "Maintain docs",
     description: "Keep ARCHITECTURE.md / STRUCTURE.md in sync",
     defaultSchedule: "",
   },
   {
     name: "evaluate-smart-notes",
+    label: "Evaluate smart notes",
     description: "Surface smart notes whose conditions are now met",
     defaultSchedule: "0 3 * * *",
   },
   {
     name: "review-user-memories",
+    label: "Review user memories",
     description: "Promote recurring behaviors into your user profile",
+    defaultSchedule: "0 3 * * *",
+  },
+  {
+    name: "promote-primers",
+    label: "Promote primers",
+    description: "Promote recurring project questions into Primers",
+    defaultSchedule: "0 3 * * *",
+  },
+  {
+    name: "refresh-primers",
+    label: "Refresh primers",
+    description: "Refresh answers for active project Primers",
     defaultSchedule: "0 3 * * *",
   },
 ];
@@ -92,6 +113,18 @@ const CUSTOM = "__custom__";
 
 function isPresetCron(cron: string): boolean {
   return PRESETS.some((p) => p.cron === cron);
+}
+
+function promotionThresholdDefault(taskName: string): number | undefined {
+  if (taskName === "review-user-memories") return 3;
+  if (taskName === "promote-primers") return 2;
+  return undefined;
+}
+
+function promotionThresholdDescription(taskName: string): string {
+  return taskName === "promote-primers"
+    ? "Promotion threshold (2–20 recurring source days, default 2)"
+    : "Promotion threshold (2–20 observations, default 3)";
 }
 
 interface DreamerTasksFieldProps {
@@ -181,8 +214,10 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
           return (
             <div class="dreamer-task-row">
               <div class="dreamer-task-head">
-                <span class="config-field-label">{meta().name}</span>
-                <span class="config-field-desc">{meta().description}</span>
+                <span class="config-field-label">{meta().label}</span>
+                <span class="config-field-desc">
+                  <code>{meta().name}</code> — {meta().description}
+                </span>
               </div>
               <div class="dreamer-task-controls">
                 <div class="select-wrap">
@@ -238,15 +273,17 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                 </div>
               </Show>
               {/* Task-specific params, shown only when scheduled. */}
-              <Show when={enabled() && meta().name === "review-user-memories"}>
+              <Show when={enabled() && promotionThresholdDefault(meta().name) !== undefined}>
                 <div class="dreamer-task-param">
-                  <span class="config-field-desc">Promotion threshold (2–20, default 3)</span>
+                  <span class="config-field-desc">
+                    {promotionThresholdDescription(meta().name)}
+                  </span>
                   <input
                     class="config-input"
                     type="number"
                     min={2}
                     max={20}
-                    value={cfg().promotion_threshold ?? 3}
+                    value={cfg().promotion_threshold ?? promotionThresholdDefault(meta().name) ?? 3}
                     onInput={(e) =>
                       update(meta().name, {
                         promotion_threshold: Number(e.currentTarget.value),
