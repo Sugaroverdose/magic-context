@@ -547,21 +547,7 @@ pub fn get_project_configs() -> Vec<config::ProjectConfigEntry> {
 #[tauri::command(async)]
 pub fn save_project_config(project_path: String, content: String) -> Result<(), String> {
     let path = config::resolve_project_config_path(&project_path);
-
-    // Validate: path must be under the project directory (prevent path traversal)
-    let canonical_project = std::path::Path::new(&project_path)
-        .canonicalize()
-        .map_err(|e| format!("Invalid project path: {}", e))?;
-    let canonical_config = path
-        .parent()
-        .unwrap_or(&path)
-        .canonicalize()
-        .unwrap_or_else(|_| path.clone());
-    if !canonical_config.starts_with(&canonical_project) {
-        return Err("Config path is outside the project directory".to_string());
-    }
-
-    config::write_config(&path, &content)
+    config::write_project_config(&project_path, &path, &content)
 }
 
 // ── Model commands ──────────────────────────────────────────

@@ -2092,6 +2092,7 @@ dependencies = [
  "dirs 5.0.1",
  "image",
  "lazy_static",
+ "libc",
  "md5",
  "notify",
  "regex",

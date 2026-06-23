@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Resolves paths to magic-context config files.
 pub fn resolve_user_config_path() -> PathBuf {
@@ -110,6 +112,157 @@ pub fn write_config(path: &PathBuf, content: &str) -> Result<(), String> {
     }
     std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))?;
     Ok(())
+}
+
+pub fn write_project_config(project_path: &str, path: &Path, content: &str) -> Result<(), String> {
+    let canonical_project = Path::new(project_path)
+        .canonicalize()
+        .map_err(|e| format!("Invalid project path: {e}"))?;
+    validate_project_config_target(&canonical_project, path)?;
+    write_config_atomic(path, content, Some(&canonical_project))
+}
+
+fn validate_project_config_target(canonical_project: &Path, path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Config path has no parent directory".to_string())?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Invalid config directory: {e}"))?;
+    if !canonical_parent.starts_with(canonical_project) {
+        return Err("Config path is outside the project directory".to_string());
+    }
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                return Err(
+                    "Refusing to write project config because the config path is a symlink"
+                        .to_string(),
+                );
+            }
+            if !file_type.is_file() {
+                return Err(
+                    "Refusing to write project config because the config path is not a regular file"
+                        .to_string(),
+                );
+            }
+            validate_existing_file_no_follow(path)?;
+            let canonical_target = path
+                .canonicalize()
+                .map_err(|e| format!("Invalid config file path: {e}"))?;
+            if !canonical_target.starts_with(canonical_project) {
+                return Err("Config file resolves outside the project directory".to_string());
+            }
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to inspect config path: {e}")),
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_existing_file_no_follow(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open config without following symlinks: {e}"))
+}
+
+#[cfg(not(unix))]
+fn validate_existing_file_no_follow(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn write_config_atomic(
+    path: &Path,
+    content: &str,
+    project_root: Option<&Path>,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Config path has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
+
+    let temp_path = create_temp_config_file(parent, path.file_name(), content)?;
+    if let Some(root) = project_root {
+        if let Err(e) = validate_project_config_target(root, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+    }
+
+    replace_with_temp(&temp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!("Failed to replace config atomically: {e}")
+    })
+}
+
+fn create_temp_config_file(
+    parent: &Path,
+    file_name: Option<&std::ffi::OsStr>,
+    content: &str,
+) -> Result<PathBuf, String> {
+    let file_name = file_name
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("magic-context.jsonc");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for attempt in 0..16u8 {
+        let temp_path = parent.join(format!(
+            ".{file_name}.{}.{}.{}.tmp",
+            std::process::id(),
+            stamp,
+            attempt
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&temp_path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(content.as_bytes()) {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(format!("Failed to write config: {e}"));
+                }
+                if let Err(e) = file.sync_all() {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(format!("Failed to sync config: {e}"));
+                }
+                return Ok(temp_path);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Failed to create temporary config: {e}")),
+        }
+    }
+
+    Err("Failed to create a unique temporary config path".to_string())
+}
+
+#[cfg(not(windows))]
+fn replace_with_temp(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp_path, path)
+}
+
+#[cfg(windows)]
+fn replace_with_temp(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    std::fs::rename(temp_path, path)
 }
 
 #[tauri::command(async)]
@@ -249,5 +402,74 @@ mod tests {
         assert_eq!(existing.source, "pi");
 
         std::env::remove_var("MAGIC_CONTEXT_DASHBOARD_TEST_HOME");
+    }
+
+    #[test]
+    fn write_project_config_writes_regular_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let path = project.join("magic-context.jsonc");
+
+        write_project_config(
+            project.to_str().unwrap(),
+            &path,
+            "{\n  \"enabled\": true\n}\n",
+        )
+        .expect("initial write");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"enabled\": true\n}\n"
+        );
+
+        write_project_config(
+            project.to_str().unwrap(),
+            &path,
+            "{\n  \"enabled\": false\n}\n",
+        )
+        .expect("overwrite regular file");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\n  \"enabled\": false\n}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_project_config_refuses_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "do not overwrite").unwrap();
+        let config_path = project.join("magic-context.jsonc");
+        symlink(&outside, &config_path).unwrap();
+
+        let err = write_project_config(
+            project.to_str().unwrap(),
+            &config_path,
+            "{\"enabled\":true}\n",
+        )
+        .expect_err("symlinked config must be refused");
+        assert!(err.contains("symlink"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "do not overwrite"
+        );
+    }
+
+    #[test]
+    fn write_project_config_refuses_non_regular_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let config_path = project.join("magic-context.jsonc");
+        std::fs::create_dir(&config_path).unwrap();
+
+        let err = write_project_config(project.to_str().unwrap(), &config_path, "{}\n")
+            .expect_err("directory target must be refused");
+        assert!(err.contains("regular file"), "unexpected error: {err}");
     }
 }
