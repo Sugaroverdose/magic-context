@@ -183,7 +183,8 @@ export interface RetrospectiveScanWindow {
 /**
  * The retrospective scan window for one run: everything new since the content
  * watermark, PLUS the ~`overlapUserCount` user lines immediately before the
- * watermark per session (so friction straddling a run boundary isn't missed).
+ * watermark for sessions that have kept new rows (so friction straddling a run
+ * boundary isn't missed).
  * The since portion carries user rows + tool metadata (the deepen context); the
  * overlap portion is user-only (gate context). Ordinals are reassigned globally.
  */
@@ -200,17 +201,27 @@ export async function readRetrospectiveScanWindow(
 ): Promise<RetrospectiveScanWindow> {
     const maxMessages = options?.maxMessagesPerRun ?? RETROSPECTIVE_MAX_MESSAGES_PER_RUN;
     const capPerSession = options?.capPerSession ?? RETROSPECTIVE_MAX_MESSAGES_PER_SESSION;
-    const maxSessions = options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN;
+    const sessionReadPageSize = Math.max(
+        1,
+        Math.floor(options?.maxSessionsPerRun ?? RETROSPECTIVE_MAX_SESSIONS_PER_RUN),
+    );
     try {
-        const sessions = (await provider.listProjectSessions(projectIdentity)).slice(
-            0,
-            maxSessions,
-        );
-        const sinceReads = await Promise.all(
-            sessions.map((session) =>
-                provider.readUserMessagesSince(session.sessionId, watermarkMs, capPerSession),
-            ),
-        );
+        const sessions = await provider.listProjectSessions(projectIdentity);
+        const sinceReads: RetrospectiveSinceRead[] = [];
+        for (let i = 0; i < sessions.length; i += sessionReadPageSize) {
+            const page = sessions.slice(i, i + sessionReadPageSize);
+            sinceReads.push(
+                ...(await Promise.all(
+                    page.map((session) =>
+                        provider.readUserMessagesSince(
+                            session.sessionId,
+                            watermarkMs,
+                            capPerSession,
+                        ),
+                    ),
+                )),
+            );
+        }
 
         // A TRUNCATED session read hit its per-session cap with more rows
         // available — it may hold newer (unseen) messages beyond what we got.
@@ -226,19 +237,6 @@ export async function readRetrospectiveScanWindow(
                 saturatedFrontier = Math.min(saturatedFrontier, lastKept.ts - 1);
             }
         }
-        const overlapBatches =
-            overlapUserCount > 0 && watermarkMs > 0
-                ? await Promise.all(
-                      sessions.map((session) =>
-                          provider.readUserMessagesBefore(
-                              session.sessionId,
-                              watermarkMs,
-                              overlapUserCount,
-                          ),
-                      ),
-                  )
-                : [];
-
         // Cap the SINCE portion OLDEST-first (so a backlog drains from the front,
         // one bounded chunk per run). Reading/capping newest-first dropped the
         // oldest friction while the watermark jumped to the newest → permanent
@@ -268,9 +266,24 @@ export async function readRetrospectiveScanWindow(
         }
         maxScannedTs = Math.max(watermarkMs, Math.min(maxScannedTs, frontier));
 
-        // Merge kept-since + overlap (context only, bounded by sessions ×
-        // overlapUserCount), dedupe by stable identity, oldest-first. Overlap rows
-        // are ≤ watermark so they never affect maxScannedTs.
+        const keptSessionIds = new Set(keptSince.map((message) => message.sessionId));
+        const overlapSessions = sessions.filter((session) => keptSessionIds.has(session.sessionId));
+        const overlapBatches =
+            overlapUserCount > 0 && watermarkMs > 0
+                ? await Promise.all(
+                      overlapSessions.map((session) =>
+                          provider.readUserMessagesBefore(
+                              session.sessionId,
+                              watermarkMs,
+                              overlapUserCount,
+                          ),
+                      ),
+                  )
+                : [];
+
+        // Merge kept-since + overlap (context only, bounded by sessions with kept
+        // messages × overlapUserCount), dedupe by stable identity, oldest-first.
+        // Overlap rows are ≤ watermark so they never affect maxScannedTs.
         const seen = new Set<string>();
         const merged: RetrospectiveRawMessage[] = [];
         for (const row of [...keptSince, ...overlapBatches.flat()]) {

@@ -270,6 +270,27 @@ describe("readRetrospectiveScanWindow", () => {
         expect(win.maxScannedTs).toBe(129);
     });
 
+    test("scans every in-window session before advancing the global watermark", async () => {
+        const sessionIds = Array.from({ length: 25 }, (_, i) => `s${25 - i}`);
+        const rows = new Map(
+            sessionIds.map((sessionId) => {
+                const n = Number(sessionId.slice(1));
+                return [sessionId, [u(sessionId, 100 + n, `message-${sessionId}`)]] as const;
+            }),
+        );
+        const provider = new ScriptedProvider(sessionIds, rows);
+
+        const win = await readRetrospectiveScanWindow(provider, "proj", 100, 0, {
+            maxMessagesPerRun: 100,
+            capPerSession: 10,
+            maxSessionsPerRun: 20,
+        });
+
+        expect(win.messages).toHaveLength(25);
+        expect(win.messages.map((m) => m.sessionId).sort()).toEqual(sessionIds.slice().sort());
+        expect(win.maxScannedTs).toBe(125);
+    });
+
     test("dedupes a row that appears in both since and overlap reads", async () => {
         // A provider whose `before` overlaps the `since` boundary row.
         const rows = new Map([["s1", [u("s1", 200, "boundary"), u("s1", 250, "after")]]]);
