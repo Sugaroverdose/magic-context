@@ -185,7 +185,18 @@ const server: Plugin = async (ctx) => {
                 : undefined,
             ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         };
-        stopDreamTimerRegistration = await startDreamScheduleTimer(timerRegistration);
+        // Fail OPEN: the dream timer is best-effort background maintenance and must
+        // never abort the plugin load. This block is awaited and runs BEFORE the
+        // hooks are returned, so an unguarded throw here (e.g. a fatal DB open, or
+        // ensureRegistered failing) would escape server() and leave the transform /
+        // compaction pipeline unregistered — ballooning every session's context.
+        // openTimerDatabaseOrNull already degrades a fatal open to null, but we wrap
+        // the whole registration as defense in depth against any other throw path.
+        try {
+            stopDreamTimerRegistration = await startDreamScheduleTimer(timerRegistration);
+        } catch (err) {
+            log(`[magic-context] dream timer registration failed (continuing without it): ${err}`);
+        }
 
         // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus).
         // `storageDir` is hoisted above so the auto-update checker can also use it.

@@ -70,6 +70,39 @@ describe("dream-timer null-DB guards (static)", () => {
     test("sweepProject has no unguarded openDatabase() default param", () => {
         expect(source).not.toContain("db: Database = openDatabase()");
     });
+
+    test("openTimerDatabaseOrNull catches a FATAL openDatabase() throw and degrades to null", () => {
+        // openDatabase() returns typed-null on the schema fence but THROWS on a
+        // fatal open (corrupt/unwritable DB). openTimerDatabaseOrNull must catch
+        // that throw too, so a fatal open can't escape the awaited startup
+        // registration in index.ts and abort the whole plugin load.
+        const helper = source.slice(
+            source.indexOf("function openTimerDatabaseOrNull("),
+            source.indexOf("const registeredProjects"),
+        );
+        expect(helper).toContain("try {");
+        expect(helper).toContain("catch");
+        expect(helper).toContain("storage fatal");
+    });
+});
+
+describe("dream-timer startup is fail-open at the index.ts call site (static)", () => {
+    // The awaited startDreamScheduleTimer(...) in index.ts runs BEFORE the hooks
+    // are returned from server(). If it throws, the transform/compaction pipeline
+    // never registers and every session's context balloons. The call must be
+    // wrapped so any throw is logged and swallowed.
+    const indexSource = readFileSync(join(import.meta.dir, "../index.ts"), "utf8");
+
+    test("await startDreamScheduleTimer is wrapped in try/catch", () => {
+        const callIdx = indexSource.indexOf("await startDreamScheduleTimer(");
+        expect(callIdx).toBeGreaterThan(0);
+        // The 200 chars before the call must contain a `try {`, and the call must
+        // be followed (within a small window) by a `catch`.
+        const before = indexSource.slice(Math.max(0, callIdx - 200), callIdx);
+        const after = indexSource.slice(callIdx, callIdx + 300);
+        expect(before).toContain("try {");
+        expect(after).toContain("catch");
+    });
 });
 
 describe("dream-timer git commit backlog drain (static)", () => {

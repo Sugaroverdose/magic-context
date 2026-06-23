@@ -35,6 +35,7 @@ import {
 import { drainCommitBacklogForProject } from "../features/magic-context/project-embedding-registry";
 import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
+import { getErrorMessage } from '../shared/error-message';
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
@@ -91,13 +92,24 @@ function directoryStillExists(directory: string): boolean {
 /**
  * Open the shared DB for timer work, returning null (with one clear log) when
  * storage is unavailable. openDatabase() returns a typed-null on the
- * schema-fence and open-failure paths (e.g. a stale binary that supports an
- * older schema than the DB on disk), so every timer entry point MUST null-check
- * before using the handle — otherwise the null reaches `db.transaction(...)`
- * deep in embedding registration and throws a confusing TypeError.
+ * schema-fence path BUT THROWS on a fatal open (corrupt/unwritable DB) — both
+ * mean "storage unavailable" here, so we catch the throw and degrade to null
+ * too. Every timer entry point MUST null-check before using the handle —
+ * otherwise the null reaches `db.transaction(...)` deep in embedding
+ * registration and throws a confusing TypeError. Crucially, this also keeps a
+ * fatal-open throw from escaping the awaited startup registration in index.ts
+ * and aborting the whole plugin load (which would disable the transform).
  */
 function openTimerDatabaseOrNull(context: string): Database | null {
-    const db = openDatabase();
+    let db: Database | null;
+    try {
+        db = openDatabase();
+    } catch (error) {
+        log(
+            `[dreamer] storage fatal; skipping ${context}: ${getErrorMessage(error)}`,
+        );
+        return null;
+    }
     if (!db) {
         log(
             `[dreamer] storage unavailable; skipping ${context} (the cache schema is newer than this binary supports — restart/upgrade OpenCode/Pi/Magic Context to recover)`,
