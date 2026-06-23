@@ -43,7 +43,14 @@ function saveCollapsedCategories(set: Set<string>): void {
   }
 }
 
-export default function MemoryBrowser() {
+interface MemoryBrowserProps {
+  /** When set, the browser is locked to this project: the project + workspace
+   *  pickers are hidden and the breadcrumb is owned by the ProjectDetail shell. */
+  project?: { identity: string; label: string };
+}
+
+export default function MemoryBrowser(props: MemoryBrowserProps = {}) {
+  const embedded = () => props.project != null;
   const [projectFilter, setProjectFilter] = createSignal<string>("");
   const [workspaceFilter, setWorkspaceFilter] = createSignal<number | "">("");
   const [statusFilter, setStatusFilter] = createSignal<string>("");
@@ -65,6 +72,18 @@ export default function MemoryBrowser() {
   const [workspaceSummaries] = createResource(listWorkspaceSummaries);
 
   const fetchParams = () => {
+    // Embedded in a project: lock to that identity, ignore workspace filter.
+    if (props.project) {
+      return {
+        project: props.project.identity,
+        workspaceId: undefined,
+        status: statusFilter() || undefined,
+        category: categoryFilter() || undefined,
+        search: searchQuery() || undefined,
+        limit: 200,
+        offset: 0,
+      };
+    }
     const ws = workspaceFilter();
     return {
       project: ws === "" ? projectFilter() || undefined : undefined,
@@ -361,64 +380,70 @@ export default function MemoryBrowser() {
           </div>
         </div>
       </Show>
-      <div class="section-header">
-        <h1 class="section-title">Memories</h1>
-        <div class="section-actions">
-          <Show when={stats()}>
-            {(s) => (
-              <span style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
-                {s().active + s().permanent} active · {s().archived} archived ·{" "}
-                {s().with_embeddings} embedded
-              </span>
-            )}
-          </Show>
+      <Show when={!embedded()}>
+        <div class="section-header">
+          <h1 class="section-title">Memories</h1>
+          <div class="section-actions">
+            <Show when={stats()}>
+              {(s) => (
+                <span style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
+                  {s().active + s().permanent} active · {s().archived} archived ·{" "}
+                  {s().with_embeddings} embedded
+                </span>
+              )}
+            </Show>
+          </div>
         </div>
-      </div>
+      </Show>
 
       <div class="filter-bar">
-        <FilterSelect
-          value={workspaceFilter() === "" ? "" : String(workspaceFilter())}
-          onChange={(v) => {
-            if (v === "") {
-              setWorkspaceFilter("");
-            } else {
-              setWorkspaceFilter(Number(v));
-              setProjectFilter("");
-            }
-          }}
-          placeholder="All workspaces"
-          align="left"
-          options={[
-            { value: "", label: "All workspaces" },
-            ...(workspaceSummaries() ?? []).map((w) => ({
-              value: String(w.id),
-              label: w.name,
-            })),
-          ]}
-        />
-        <FilterSelect
-          value={projectFilter()}
-          onChange={(v) => {
-            setProjectFilter(v);
-            if (v) setWorkspaceFilter("");
-          }}
-          placeholder="All projects"
-          align="left"
-          options={[
-            { value: "", label: "All projects" },
-            ...(projects() ?? []).map((p) => ({
-              value: p.identity,
-              label: (
-                <span style={{ display: "inline-flex", "align-items": "center", gap: "6px" }}>
-                  <span>{p.display_name}</span>
-                  <span style={{ display: "inline-flex", gap: "3px" }}>
-                    <For each={p.harnesses}>{(harness) => <HarnessBadge harness={harness} />}</For>
+        <Show when={!embedded()}>
+          <FilterSelect
+            value={workspaceFilter() === "" ? "" : String(workspaceFilter())}
+            onChange={(v) => {
+              if (v === "") {
+                setWorkspaceFilter("");
+              } else {
+                setWorkspaceFilter(Number(v));
+                setProjectFilter("");
+              }
+            }}
+            placeholder="All workspaces"
+            align="left"
+            options={[
+              { value: "", label: "All workspaces" },
+              ...(workspaceSummaries() ?? []).map((w) => ({
+                value: String(w.id),
+                label: w.name,
+              })),
+            ]}
+          />
+          <FilterSelect
+            value={projectFilter()}
+            onChange={(v) => {
+              setProjectFilter(v);
+              if (v) setWorkspaceFilter("");
+            }}
+            placeholder="All projects"
+            align="left"
+            options={[
+              { value: "", label: "All projects" },
+              ...(projects() ?? []).map((p) => ({
+                value: p.identity,
+                label: (
+                  <span style={{ display: "inline-flex", "align-items": "center", gap: "6px" }}>
+                    <span>{p.display_name}</span>
+                    <span style={{ display: "inline-flex", gap: "3px" }}>
+                      <For each={p.harnesses}>
+                        {(harness) => <HarnessBadge harness={harness} />}
+                      </For>
+                    </span>
                   </span>
-                </span>
-              ),
-            })),
-          ]}
-        />
+                ),
+              })),
+            ]}
+          />
+        </Show>
         <input
           class="search-input"
           type="text"

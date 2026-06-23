@@ -2,17 +2,15 @@ import { listen } from "@tauri-apps/api/event";
 import { createResource, createSignal, ErrorBoundary, onCleanup, onMount, Show } from "solid-js";
 import CacheDiagnostics from "./components/CacheDiagnostics/CacheDiagnostics";
 import ConfigEditor from "./components/ConfigEditor/ConfigEditor";
-import DreamerPanel from "./components/DreamerPanel/DreamerPanel";
 import Sidebar from "./components/Layout/Sidebar";
 import StatusBar from "./components/Layout/StatusBar";
 import LogViewer from "./components/LogViewer/LogViewer";
-import MemoryBrowser from "./components/MemoryBrowser/MemoryBrowser";
-import Primers from "./components/Primers/Primers";
-import SessionViewer from "./components/SessionViewer/SessionViewer";
+import ProjectDetail from "./components/Projects/ProjectDetail";
+import ProjectsGrid from "./components/Projects/ProjectsGrid";
 import UserMemories from "./components/UserMemories/UserMemories";
 import WorkspacesPanel from "./components/WorkspacesPanel/WorkspacesPanel";
 import { getAvailableModels, getAvailablePiModels, getDbHealth } from "./lib/api";
-import type { NavSection } from "./lib/types";
+import type { NavSection, ProjectCard } from "./lib/types";
 import { checkForUpdate, installAndRelaunch, runUpdater } from "./lib/updater";
 
 const MODELS_CACHE_KEY = "mc_dashboard_models_cache";
@@ -38,7 +36,14 @@ function loadCachedPiModels(): string[] {
 }
 
 export default function App() {
-  const [activeSection, setActiveSection] = createSignal<NavSection>("memories");
+  const [activeSection, setActiveSection] = createSignal<NavSection>("projects");
+  // Projects drill-down: null = card grid, set = that project's detail view.
+  const [selectedProject, setSelectedProject] = createSignal<ProjectCard | null>(null);
+  const navigate = (section: NavSection) => {
+    // Leaving and re-entering Projects always returns to the grid.
+    if (section === "projects") setSelectedProject(null);
+    setActiveSection(section);
+  };
   const [health] = createResource(getDbHealth);
   const [availableModels, setAvailableModels] = createSignal<string[]>(loadCachedModels());
   const [availablePiModels, setAvailablePiModels] = createSignal<string[]>(loadCachedPiModels());
@@ -110,7 +115,7 @@ export default function App() {
 
   return (
     <div class="app-shell">
-      <Sidebar active={activeSection()} onNavigate={setActiveSection} />
+      <Sidebar active={activeSection()} onNavigate={navigate} />
 
       <main class="content">
         {/* Update toast */}
@@ -150,23 +155,21 @@ export default function App() {
             </div>
           )}
         >
-          <Show when={activeSection() === "memories"}>
-            <MemoryBrowser />
-          </Show>
-          <Show when={activeSection() === "primers"}>
-            <Primers />
-          </Show>
-          <Show when={activeSection() === "sessions"}>
-            <SessionViewer />
+          <Show when={activeSection() === "projects"}>
+            <Show
+              when={selectedProject()}
+              fallback={<ProjectsGrid onSelect={setSelectedProject} />}
+            >
+              {(project) => (
+                <ProjectDetail project={project()} onBack={() => setSelectedProject(null)} />
+              )}
+            </Show>
           </Show>
           <Show when={activeSection() === "cache"}>
             <CacheDiagnostics />
           </Show>
           <Show when={activeSection() === "workspaces"}>
             <WorkspacesPanel />
-          </Show>
-          <Show when={activeSection() === "dreamer"}>
-            <DreamerPanel />
           </Show>
           <Show when={activeSection() === "user-memories"}>
             <UserMemories />

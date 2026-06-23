@@ -315,6 +315,25 @@ pub struct ProjectRow {
     pub session_count: u32,
 }
 
+/// Overview row for the Projects card grid. Session-derived (built from the same
+/// `list_all_sessions` truth the Sessions tab uses, so counts/harnesses/last-active
+/// match exactly on drill-in), enriched with the project's memory count and its
+/// workspace membership.
+#[derive(Debug, Serialize, Clone)]
+pub struct ProjectCard {
+    pub identity: String,
+    pub display_name: String,
+    pub primary_path: String,
+    pub harnesses: Vec<Harness>,
+    /// Primary (non-subagent) session count — what a user thinks of as "sessions".
+    pub session_count: u32,
+    pub memory_count: i64,
+    /// The workspace this project belongs to, if any (members belong to ≤1).
+    pub workspace_name: Option<String>,
+    /// Newest primary-session activity; the grid sorts by this descending.
+    pub last_activity_ms: i64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct Compartment {
     pub id: i64,
@@ -1918,13 +1937,37 @@ fn session_directories_by_identity() -> HashMap<String, String> {
         let identity = resolve_project_identity(&dir);
         map.entry(identity)
             .and_modify(|existing| {
-                if dir.len() < existing.len() {
+                if dir_is_better_representative(&dir, existing) {
                     *existing = dir.clone();
                 }
             })
             .or_insert(dir);
     }
     map
+}
+
+/// True if `candidate` is a better representative directory for a project than
+/// `current`. A git WORKTREE shares its main repo's root-commit identity, so
+/// several directories can map to one `git:` identity — but the MAIN checkout
+/// is the one a user recognizes (and names the project after). A main checkout
+/// has `.git` as a directory; a worktree has `.git` as a FILE pointing into the
+/// main repo's `.git/worktrees/`. Prefer a main checkout over a worktree; within
+/// the same kind, prefer the shorter path (closest to the repo root). Without
+/// this, a recent Alfonso/mason worktree (`bg_<hash>`) would win the label and
+/// the project would show as `bg_<hash>` instead of e.g. `aft`.
+fn dir_is_better_representative(candidate: &str, current: &str) -> bool {
+    let cand_main = path_is_main_checkout(candidate);
+    let cur_main = path_is_main_checkout(current);
+    match (cand_main, cur_main) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => candidate.len() < current.len(),
+    }
+}
+
+/// A main checkout has `.git` as a directory; a worktree has `.git` as a file.
+fn path_is_main_checkout(dir: &str) -> bool {
+    std::path::Path::new(dir).join(".git").is_dir()
 }
 
 fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -> Vec<ProjectRow> {
@@ -2029,6 +2072,115 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
     rows
 }
 
+/// Build the Projects card grid. One pass over the session truth
+/// (`list_all_sessions`, both harnesses) grouped by project identity, enriched
+/// per group with its active-memory count and workspace name. Primary sessions
+/// only count toward `session_count`/`last_activity_ms` (subagents are an
+/// implementation detail, not a project the user navigates), but a project that
+/// has ONLY subagent sessions still appears (so nothing silently vanishes).
+///
+/// `conn` is the context.db handle (memories + workspaces). Returns cards sorted
+/// by last activity, newest first.
+pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
+    #[derive(Default)]
+    struct Accum {
+        display_name: String,
+        harnesses: HashSet<Harness>,
+        primary_sessions: u32,
+        last_activity_ms: i64,
+    }
+
+    let mut groups: HashMap<String, Accum> = HashMap::new();
+    for row in list_all_sessions(SessionFilter::default()) {
+        let entry = groups.entry(row.project_identity.clone()).or_default();
+        entry.harnesses.insert(row.harness);
+        // First time we see a usable display name / path for this identity, keep
+        // it (rows are newest-first, so the freshest label wins).
+        if entry.display_name.is_empty() && !row.project_display.is_empty() && row.project_display != "/" {
+            entry.display_name = row.project_display.clone();
+        }
+        if !row.is_subagent {
+            entry.primary_sessions = entry.primary_sessions.saturating_add(1);
+            if row.last_activity_ms > entry.last_activity_ms {
+                entry.last_activity_ms = row.last_activity_ms;
+            }
+        } else if entry.last_activity_ms == 0 && row.last_activity_ms > 0 {
+            // Subagent-only project: still surface a last-activity so it sorts.
+            entry.last_activity_ms = row.last_activity_ms;
+        }
+    }
+
+    // Workspace membership: project identity → workspace name (members ≤ 1 ws).
+    let workspace_by_identity = workspace_name_by_identity(conn);
+    // identity → representative real directory (resolves dir:<hash> to its cwd).
+    let dir_by_identity = session_directories_by_identity();
+
+    let mut cards: Vec<ProjectCard> = groups
+        .into_iter()
+        .map(|(identity, accum)| {
+            let memory_count = count_memories_matching_identity(conn, &identity).unwrap_or(0);
+            let primary_path = dir_by_identity.get(&identity).cloned().unwrap_or_default();
+            // Prefer the representative directory's basename for the label: it's
+            // resolved to the MAIN checkout (not a worktree), so a project shows as
+            // e.g. `aft` rather than a recent worktree's `bg_<hash>` session label.
+            // Fall back to the session-derived label, then a short identity.
+            let display_name = if !primary_path.is_empty() {
+                basename(&primary_path)
+            } else if !accum.display_name.is_empty() {
+                accum.display_name
+            } else {
+                short_identity_label(&identity)
+            };
+            let mut harnesses: Vec<Harness> = accum.harnesses.into_iter().collect();
+            harnesses.sort();
+            ProjectCard {
+                workspace_name: workspace_by_identity.get(&identity).cloned(),
+                identity,
+                display_name,
+                primary_path,
+                harnesses,
+                session_count: accum.primary_sessions,
+                memory_count,
+                last_activity_ms: accum.last_activity_ms,
+            }
+        })
+        // Drop ephemeral noise: deleted mason/background worktrees (`bg_…`) leave
+        // orphan SUBAGENT session rows in opencode.db under a `dir:<hash>` fallback
+        // identity, surfacing as cards with 0 primary sessions and 0 memories. A
+        // real project has at least one primary session OR at least one memory.
+        .filter(|card| card.session_count > 0 || card.memory_count > 0)
+        .collect();
+    cards.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
+    cards
+}
+
+/// A short, human-ish label for an identity that has no resolved directory name
+/// (e.g. a `git:<hash>` whose worktree is gone). Mirrors `enumerate_memory_projects`.
+fn short_identity_label(identity: &str) -> String {
+    if let Some(rest) = identity.strip_prefix("git:") {
+        format!("git:{}…", &rest[..std::cmp::min(rest.len(), 10)])
+    } else if let Some(rest) = identity.strip_prefix("dir:") {
+        format!("dir:{}…", &rest[..std::cmp::min(rest.len(), 10)])
+    } else {
+        basename(identity)
+    }
+}
+
+/// Map each project identity that is a workspace member to its workspace name.
+/// Empty (no allocation beyond the map) when the workspace schema isn't present.
+fn workspace_name_by_identity(conn: &Connection) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(workspaces) = crate::workspaces::list_workspaces(conn) else {
+        return map;
+    };
+    for ws in workspaces {
+        for member in ws.members {
+            map.insert(member.project_path, ws.name.clone());
+        }
+    }
+    map
+}
+
 // ── Query implementations ─────────────────────────────────────
 
 /// Resolve a project filter value (an identity like `git:<hash>` / `dir:<sha>`,
@@ -2059,7 +2211,11 @@ pub(crate) fn resolve_paths_for_memory_filter(
     resolve_paths_for_table_filter(conn, "memories", project_filter)
 }
 
-/// Count memories whose stored `project_path` normalizes to `member_identity`.
+/// Count the ACTIVE (active + permanent) memories whose stored `project_path`
+/// normalizes to `member_identity`. Archived/superseded rows are excluded — the
+/// project card and workspace member count both want the live, injectable pool
+/// (matching the Memories tab's "N active" headline), not the full historical
+/// table (which is dominated by archived rows after curation).
 pub fn count_memories_matching_identity(
     conn: &Connection,
     member_identity: &str,
@@ -2070,7 +2226,8 @@ pub fn count_memories_matching_identity(
     }
     let placeholders = build_in_placeholders(paths.len(), 1);
     let sql = format!(
-        "SELECT COUNT(*) FROM memories WHERE project_path IN ({})",
+        "SELECT COUNT(*) FROM memories
+         WHERE status IN ('active', 'permanent') AND project_path IN ({})",
         placeholders
     );
     conn.query_row(&sql, rusqlite::params_from_iter(paths.iter()), |r| r.get(0))
@@ -5076,6 +5233,41 @@ mod session_history_slice_tests {
     fn returns_none_on_unclosed_block() {
         // Defensive: an open tag with no close must not panic or over-read.
         assert!(extract_session_history_slice("<session-history>oops no close").is_none());
+    }
+}
+
+#[cfg(test)]
+mod representative_dir_tests {
+    use super::dir_is_better_representative;
+    use std::fs;
+
+    #[test]
+    fn main_checkout_beats_worktree_regardless_of_path_length() {
+        let tmp = std::env::temp_dir().join(format!("mc-repr-{}", std::process::id()));
+        let main = tmp.join("aft");
+        // A worktree path is LONGER than the main checkout here, AND we also test
+        // the reverse so length never overrides the main-vs-worktree preference.
+        let worktree = tmp.join("alfonso/worktrees/abc/bg_90a7f9ae");
+        fs::create_dir_all(main.join(".git")).unwrap(); // main: .git is a DIR
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: /somewhere\n").unwrap(); // worktree: .git is a FILE
+
+        let main_s = main.to_string_lossy().to_string();
+        let wt_s = worktree.to_string_lossy().to_string();
+
+        // The main checkout should win as the representative, even though some
+        // worktree paths could be shorter in other layouts.
+        assert!(dir_is_better_representative(&main_s, &wt_s));
+        assert!(!dir_is_better_representative(&wt_s, &main_s));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn within_same_kind_shorter_path_wins() {
+        // Two non-main dirs (neither has a .git): the shorter (closer to root) wins.
+        assert!(dir_is_better_representative("/a/repo", "/a/repo/subdir"));
+        assert!(!dir_is_better_representative("/a/repo/subdir", "/a/repo"));
     }
 }
 

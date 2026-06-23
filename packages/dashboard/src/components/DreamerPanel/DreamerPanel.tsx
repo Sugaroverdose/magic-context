@@ -93,12 +93,23 @@ function hasMemoryChanges(changes: DreamRunMemoryChanges | null): changes is Dre
   return Object.values(changes).some((value) => (value ?? 0) > 0);
 }
 
-export default function DreamerPanel() {
+interface DreamerPanelProps {
+  /** When set, the panel is scoped to one project: the global header + stat
+   *  banner are hidden (the ProjectDetail shell owns the breadcrumb), the card
+   *  grid + run history are filtered to this project, and its single card opens
+   *  expanded. */
+  project?: { identity: string; label: string };
+}
+
+export default function DreamerPanel(props: DreamerPanelProps = {}) {
+  const embedded = () => props.project != null;
   const [dreamerProjects, { refetch: refetchDreamerProjects }] = createResource(getDreamerProjects);
   const [state, { refetch: refetchState }] = createResource(getDreamState);
   const [projects] = createResource(getProjects);
   const [models] = createResource(getAvailableModels);
-  const [runs, { refetch: refetchRuns }] = createResource(() => getDreamRuns(undefined, 50));
+  const [runs, { refetch: refetchRuns }] = createResource(() =>
+    getDreamRuns(props.project?.identity ?? undefined, 50),
+  );
   const [expandedProjects, setExpandedProjects] = createSignal<Set<string>>(new Set());
   // Which project cards are expanded (task list), and which has the gear dialog open.
   const [expandedCards, setExpandedCards] = createSignal<Set<string>>(new Set());
@@ -168,9 +179,12 @@ export default function DreamerPanel() {
 
   // Project cards: every tracked project with at least one scheduled task,
   // sorted by name. Enabled tasks (schedule set) come first within a card.
-  const cards = createMemo<DreamerProject[]>(() =>
-    [...(dreamerProjects() ?? [])].sort((a, b) => a.label.localeCompare(b.label)),
-  );
+  // When embedded, scope to the one project this detail view is about.
+  const cards = createMemo<DreamerProject[]>(() => {
+    const all = [...(dreamerProjects() ?? [])].sort((a, b) => a.label.localeCompare(b.label));
+    const locked = props.project?.identity;
+    return locked ? all.filter((p) => p.identity === locked) : all;
+  });
 
   const isTaskEnabled = (t: DreamerProjectTask) => (t.schedule ?? "").trim() !== "";
   const enabledTasks = (p: DreamerProject) => p.tasks.filter(isTaskEnabled);
@@ -208,7 +222,20 @@ export default function DreamerPanel() {
       return next;
     });
   };
-  const isCardExpanded = (identity: string) => expandedCards().has(identity);
+  // Embedded (single-project) view: the one card is open by default unless the
+  // user explicitly collapsed it.
+  const [collapsedEmbeddedCard, setCollapsedEmbeddedCard] = createSignal(false);
+  const isCardExpanded = (identity: string) => {
+    if (embedded()) return !collapsedEmbeddedCard();
+    return expandedCards().has(identity);
+  };
+  const toggleCardOrEmbedded = (identity: string) => {
+    if (embedded()) {
+      setCollapsedEmbeddedCard((v) => !v);
+      return;
+    }
+    toggleCard(identity);
+  };
 
   const lightTitle = (t: DreamerProjectTask): string => {
     const when = t.last_run_at != null ? formatRelativeTime(t.last_run_at) : "never run";
@@ -259,60 +286,62 @@ export default function DreamerPanel() {
 
   return (
     <>
-      <div class="section-header">
-        <h1 class="section-title">Dreamer</h1>
-        <div class="section-actions">
-          <button type="button" class="btn sm" onClick={refreshAll}>
-            ↻ Refresh
-          </button>
+      <Show when={!embedded()}>
+        <div class="section-header">
+          <h1 class="section-title">Dreamer</h1>
+          <div class="section-actions">
+            <button type="button" class="btn sm" onClick={refreshAll}>
+              ↻ Refresh
+            </button>
+          </div>
         </div>
-      </div>
 
-      <div style={{ padding: "0 20px 12px" }}>
-        <div class="stat-banner">
-          <div class="stat-item">
-            <span class="stat-label">State</span>
-            <span class="stat-value">
-              {leaseState().leaseHolder === "none" ? "idle" : "running"}
-            </span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Lease</span>
-            <span class="stat-value">{leaseState().leaseHolder}</span>
-          </div>
-          <Show when={leaseState().lastRunTime}>
+        <div style={{ padding: "0 20px 12px" }}>
+          <div class="stat-banner">
             <div class="stat-item">
-              <span class="stat-label">Last Run</span>
+              <span class="stat-label">State</span>
               <span class="stat-value">
-                {(() => {
-                  const v = leaseState().lastRunTime;
-                  if (!v) return "—";
-                  const n = Number(v);
-                  return !Number.isNaN(n) && n > 1e12
-                    ? `${formatRelativeTime(n)} · ${formatDateTime(n)}`
-                    : v;
-                })()}
+                {leaseState().leaseHolder === "none" ? "idle" : "running"}
               </span>
             </div>
-          </Show>
-          <Show when={!leaseState().lastRunTime && latestRecordedRun()}>
             <div class="stat-item">
-              <span class="stat-label">Last Run</span>
-              <span class="stat-value">{`${formatRelativeTime(latestRecordedRun()?.finished_at ?? 0)} · ${formatDateTime(latestRecordedRun()?.finished_at ?? 0)}`}</span>
+              <span class="stat-label">Lease</span>
+              <span class="stat-value">{leaseState().leaseHolder}</span>
             </div>
-          </Show>
-          <div class="stat-item">
-            <span class="stat-label">Tracked</span>
-            <span class="stat-value">{cards().length} projects</span>
-          </div>
-          <div class="stat-item">
-            <span class="stat-label">Scheduled</span>
-            <span class="stat-value">
-              {cards().reduce((n, p) => n + enabledTasks(p).length, 0)} tasks
-            </span>
+            <Show when={leaseState().lastRunTime}>
+              <div class="stat-item">
+                <span class="stat-label">Last Run</span>
+                <span class="stat-value">
+                  {(() => {
+                    const v = leaseState().lastRunTime;
+                    if (!v) return "—";
+                    const n = Number(v);
+                    return !Number.isNaN(n) && n > 1e12
+                      ? `${formatRelativeTime(n)} · ${formatDateTime(n)}`
+                      : v;
+                  })()}
+                </span>
+              </div>
+            </Show>
+            <Show when={!leaseState().lastRunTime && latestRecordedRun()}>
+              <div class="stat-item">
+                <span class="stat-label">Last Run</span>
+                <span class="stat-value">{`${formatRelativeTime(latestRecordedRun()?.finished_at ?? 0)} · ${formatDateTime(latestRecordedRun()?.finished_at ?? 0)}`}</span>
+              </div>
+            </Show>
+            <div class="stat-item">
+              <span class="stat-label">Tracked</span>
+              <span class="stat-value">{cards().length} projects</span>
+            </div>
+            <div class="stat-item">
+              <span class="stat-label">Scheduled</span>
+              <span class="stat-value">
+                {cards().reduce((n, p) => n + enabledTasks(p).length, 0)} tasks
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      </Show>
 
       <div class="scroll-area">
         <Show when={cards().length > 0}>
@@ -327,7 +356,7 @@ export default function DreamerPanel() {
                     <button
                       type="button"
                       class="dreamer-project-toggle"
-                      onClick={() => toggleCard(project.identity)}
+                      onClick={() => toggleCardOrEmbedded(project.identity)}
                     >
                       <span class={`status-dot ${cardHealth(project)}`} />
                       <span class="dreamer-project-name">{project.label}</span>

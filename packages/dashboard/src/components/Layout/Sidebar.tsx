@@ -1,13 +1,10 @@
 import type { NavSection } from "../../lib/types";
 
 const NAV_ITEMS: { id: NavSection; icon: string; label: string }[] = [
-  { id: "memories", icon: "🧠", label: "Mem" },
-  { id: "primers", icon: "❓", label: "Prime" },
-  { id: "sessions", icon: "📜", label: "Hist" },
+  { id: "projects", icon: "📁", label: "Projects" },
+  { id: "workspaces", icon: "🗂️", label: "Workspaces" },
   { id: "cache", icon: "📊", label: "Cache" },
-  { id: "workspaces", icon: "🗂️", label: "Space" },
-  { id: "dreamer", icon: "🌙", label: "Dream" },
-  { id: "user-memories", icon: "👤", label: "User" },
+  { id: "user-memories", icon: "👤", label: "User Directives" },
   { id: "config", icon: "⚙️", label: "Config" },
   { id: "logs", icon: "📋", label: "Logs" },
 ];
@@ -27,7 +24,7 @@ export default function Sidebar(props: Props) {
           onClick={() => props.onNavigate(item.id)}
           title={item.label}
         >
-          <span style={{ "font-size": "18px" }}>{item.icon}</span>
+          <span class="nav-icon">{item.icon}</span>
           <span class="nav-label">{item.label}</span>
         </button>
       ))}

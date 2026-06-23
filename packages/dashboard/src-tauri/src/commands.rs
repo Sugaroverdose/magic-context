@@ -314,6 +314,13 @@ pub fn enumerate_memory_projects(
 }
 
 #[tauri::command(async)]
+pub fn get_project_cards(state: State<'_, AppState>) -> Result<Vec<db::ProjectCard>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    Ok(db::get_project_cards(&conn))
+}
+
+#[tauri::command(async)]
 pub fn get_compartments(
     state: State<'_, AppState>,
     session_id: String,

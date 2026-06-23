@@ -39,21 +39,32 @@ function PrimerCard(props: { primer: Primer }) {
   );
 }
 
-export default function Primers() {
-  const [primers] = createResource(() => getPrimers());
+interface PrimersProps {
+  /** When set, list only this project's primers and let the ProjectDetail shell
+   *  own the header (we render just the count + body). */
+  project?: { identity: string; label: string };
+}
+
+export default function Primers(props: PrimersProps = {}) {
+  const embedded = () => props.project != null;
+  // Single-arg fetcher reads props.project reactively: re-runs if the locked
+  // project changes, and works for the standalone (all-primers) case too.
+  const [primers] = createResource(() => getPrimers(props.project?.identity));
 
   return (
     <>
-      <div class="section-header">
-        <h1 class="section-title">Primers</h1>
-        <div class="section-actions">
-          <Show when={primers()}>
-            <span style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
-              {(primers() ?? []).length} promoted
-            </span>
-          </Show>
+      <Show when={!embedded()}>
+        <div class="section-header">
+          <h1 class="section-title">Primers</h1>
+          <div class="section-actions">
+            <Show when={primers()}>
+              <span style={{ "font-size": "12px", color: "var(--text-secondary)" }}>
+                {(primers() ?? []).length} promoted
+              </span>
+            </Show>
+          </div>
         </div>
-      </div>
+      </Show>
 
       <div class="scroll-area">
         <Show when={!primers.loading} fallback={<div class="empty-state">Loading primers…</div>}>

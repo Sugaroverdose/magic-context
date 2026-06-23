@@ -174,8 +174,21 @@ function loadHarnessFilter(): HarnessFilter {
   return stored === "opencode" || stored === "pi" ? stored : "all";
 }
 
-export default function SessionViewer() {
+interface SessionViewerProps {
+  /** When set, the view is locked to this project: the project picker is hidden
+   *  and the project breadcrumb is owned by the ProjectDetail shell. */
+  project?: { identity: string; label: string };
+  /** Fired when a session is opened/closed. The ProjectDetail shell uses this to
+   *  hide its breadcrumb+tabs while a session is open, so the session view takes
+   *  the whole page (no double header / double back button). */
+  onSessionActiveChange?: (active: boolean) => void;
+}
+
+export default function SessionViewer(props: SessionViewerProps = {}) {
+  const embedded = () => props.project != null;
   const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(null);
+  // Report open/closed state up so an embedding shell can take over the page.
+  createEffect(() => props.onSessionActiveChange?.(selectedSession() != null));
   // Default to Compartments so opening a session doesn't pay the messages
   // fetch cost up front (37k+ rows / ~28MB IPC for long sessions). Messages
   // and Cache events both load lazily when the user activates their tab.
@@ -225,7 +238,11 @@ export default function SessionViewer() {
     const filter: SessionFilter = {};
     const harness = harnessFilter();
     if (harness !== "all") filter.harness = harness;
-    if (projectFilter()) filter.project_identity = projectFilter();
+    // Embedded in a project: lock the project filter to that identity (the
+    // picker is hidden); otherwise honor the standalone picker.
+    const lockedProject = props.project?.identity;
+    if (lockedProject) filter.project_identity = lockedProject;
+    else if (projectFilter()) filter.project_identity = projectFilter();
     if (searchQuery()) filter.search = searchQuery();
     // Server-side subagent filter (issue: subagent rows dominate the table
     // since most dashboards see 90%+ subagent sessions; client-side filter
@@ -642,59 +659,68 @@ export default function SessionViewer() {
 
   return (
     <>
-      <div class="section-header">
-        <h1
-          class="section-title"
-          style={{
-            display: "flex",
-            "align-items": "flex-start",
-            gap: "8px",
-            "min-width": 0,
-            "flex-wrap": "wrap",
-          }}
-        >
-          <Show when={selectedSession()} fallback="Sessions">
-            <button
-              type="button"
-              class="btn sm"
-              style={{ "margin-right": "8px", "flex-shrink": 0 }}
-              onClick={() => setSelectedSession(null)}
-            >
-              ←
-            </button>
-            <span
-              style={{
-                display: "inline-flex",
-                "align-items": "flex-start",
-                gap: "8px",
-                "min-width": 0,
-                flex: "1 1 0",
-                "overflow-wrap": "anywhere",
-                "word-break": "break-word",
-              }}
-            >
-              <Show when={sessionDetail() ?? selectedRow()}>
-                {(session) => <HarnessBadge harness={session().harness} />}
-              </Show>
-              <span style={{ "min-width": 0, "overflow-wrap": "anywhere" }}>{displayTitle()}</span>
-            </span>
-          </Show>
-        </h1>
-      </div>
+      {/* When embedded in ProjectDetail the shell owns the breadcrumb/title, so
+          only render the standalone "Sessions" header when NOT embedded. When a
+          session is open we always render it (for the back button + title). */}
+      <Show when={!embedded() || selectedSession()}>
+        <div class="section-header">
+          <h1
+            class="section-title"
+            style={{
+              display: "flex",
+              "align-items": "flex-start",
+              gap: "8px",
+              "min-width": 0,
+              "flex-wrap": "wrap",
+            }}
+          >
+            <Show when={selectedSession()} fallback="Sessions">
+              <button
+                type="button"
+                class="btn sm"
+                style={{ "margin-right": "8px", "flex-shrink": 0 }}
+                onClick={() => setSelectedSession(null)}
+              >
+                ←
+              </button>
+              <span
+                style={{
+                  display: "inline-flex",
+                  "align-items": "flex-start",
+                  gap: "8px",
+                  "min-width": 0,
+                  flex: "1 1 0",
+                  "overflow-wrap": "anywhere",
+                  "word-break": "break-word",
+                }}
+              >
+                <Show when={sessionDetail() ?? selectedRow()}>
+                  {(session) => <HarnessBadge harness={session().harness} />}
+                </Show>
+                <span style={{ "min-width": 0, "overflow-wrap": "anywhere" }}>
+                  {displayTitle()}
+                </span>
+              </span>
+            </Show>
+          </h1>
+        </div>
+      </Show>
 
       <Show when={!selectedSession()}>
         {/* Filter bar */}
         <div class="filter-bar">
-          <FilterSelect
-            value={projectFilter()}
-            onChange={setProjectFilter}
-            placeholder="All projects"
-            align="left"
-            options={[
-              { value: "", label: "All projects" },
-              ...(projects() ?? []).map((p) => ({ value: p.identity, label: p.label })),
-            ]}
-          />
+          <Show when={!embedded()}>
+            <FilterSelect
+              value={projectFilter()}
+              onChange={setProjectFilter}
+              placeholder="All projects"
+              align="left"
+              options={[
+                { value: "", label: "All projects" },
+                ...(projects() ?? []).map((p) => ({ value: p.identity, label: p.label })),
+              ]}
+            />
+          </Show>
           <input
             class="search-input"
             type="text"

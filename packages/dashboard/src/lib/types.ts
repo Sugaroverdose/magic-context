@@ -171,6 +171,17 @@ export interface ProjectRow {
   session_count: number;
 }
 
+export interface ProjectCard {
+  identity: string;
+  display_name: string;
+  primary_path: string;
+  harnesses: Harness[];
+  session_count: number;
+  memory_count: number;
+  workspace_name: string | null;
+  last_activity_ms: number;
+}
+
 export interface Compartment {
   id: number;
   session_id: string;
@@ -503,13 +514,9 @@ export interface WorkspaceSummary {
   name: string;
 }
 
-export type NavSection =
-  | "memories"
-  | "primers"
-  | "sessions"
-  | "workspaces"
-  | "cache"
-  | "dreamer"
-  | "user-memories"
-  | "config"
-  | "logs";
+/** Top-level sidebar sections. Sessions / Memories / Dreamer / Primers are no
+ *  longer top-level — they live inside a project (see ProjectTab). */
+export type NavSection = "projects" | "workspaces" | "cache" | "user-memories" | "config" | "logs";
+
+/** Sub-tabs shown inside a project's detail view. */
+export type ProjectTab = "sessions" | "memories" | "dreamer" | "primers";

@@ -51,6 +51,7 @@ fn main() {
             commands::get_session_cache_events_by_turns,
             commands::enumerate_projects,
             commands::enumerate_memory_projects,
+            commands::get_project_cards,
             commands::get_compartments,
             commands::get_session_facts,
             commands::get_session_notes,
