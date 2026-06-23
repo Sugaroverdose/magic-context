@@ -752,7 +752,7 @@ export interface PiContextHandlerOptions {
 	/**
 	 * Per-project config resolver (Pi `/cd` / multi-root). Pi can switch
 	 * projects mid-process; a switched-into checkout may carry its own
-	 * `.pi/magic-context.jsonc` (different protected_tags, thresholds,
+	 * `.cortexkit/magic-context.jsonc` (different protected_tags, thresholds,
 	 * memory/key-files toggles, historian model). Without this, every
 	 * context pass after a switch would run with the LAUNCH project's
 	 * settings (config bleed). When provided, the handler calls it once per

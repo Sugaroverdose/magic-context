@@ -14,9 +14,10 @@
  * tables carry a `harness` column ('opencode' or 'pi') so per-session
  * data stays correctly attributed.
  *
- * Config: read from $cwd/.pi/magic-context.jsonc (project) and
- *   ~/.pi/agent/magic-context.jsonc (user) via `loadPiConfig()`. Falls
- *   back to schema defaults when neither file exists.
+ * Config: read from the shared CortexKit location —
+ *   $cwd/.cortexkit/magic-context.jsonc (project) and
+ *   ~/.config/cortexkit/magic-context.jsonc (user) via `loadPiConfig()`.
+ *   Falls back to schema defaults when neither file exists.
  */
 
 import { createRequire } from "node:module";
