@@ -13,6 +13,7 @@ describe("dreamer task registry", () => {
         expect(isCanonicalDreamTask("classify-memories")).toBe(true);
         expect(isCanonicalDreamTask("retrospective")).toBe(true);
         expect(MEMORY_DOMAIN_TASKS).toEqual([
+            "map-memories",
             "verify",
             "verify-broad",
             "curate",
@@ -23,6 +24,10 @@ describe("dreamer task registry", () => {
         ]);
         expect(isAgenticTask("promote-primers")).toBe(false);
         expect(isAgenticTask("refresh-primers")).toBe(false);
+        // map-memories has its own runner — NOT the agentic prompt-builder path.
+        expect(isAgenticTask("map-memories")).toBe(false);
+        // It leads the canonical order (records the mappings verify gates on).
+        expect(CANONICAL_DREAM_TASKS.indexOf("map-memories")).toBe(0);
         expect(CANONICAL_DREAM_TASKS.indexOf("classify-memories")).toBe(
             CANONICAL_DREAM_TASKS.indexOf("curate") + 1,
         );

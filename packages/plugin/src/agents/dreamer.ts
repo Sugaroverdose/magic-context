@@ -7,3 +7,22 @@ export const DREAMER_RETROSPECTIVE_AGENT = "dreamer-retrospective";
 // violating the primers cache-neutral contract; write/bash could corrupt the
 // user's source. Mirrors the dreamer-retrospective lockPermissions pattern.
 export const DREAMER_PRIMER_INVESTIGATOR_AGENT = "dreamer-primer-investigator";
+
+// Locked read-only code reader for the memory-maintenance tasks (map-memories,
+// verify, verify-broad). Same source-safety + cache-neutrality lock as the
+// primer investigator (NO write/edit/bash/ctx_memory), but deliberately WITHOUT
+// ctx_search — these tasks check memories against the CURRENT local source, not
+// cross-session recall. The host parses the agent's XML manifest and applies the
+// DB writes itself, so the agent never needs a mutation tool.
+export const DREAMER_MEMORY_MAPPER_AGENT = "dreamer-memory-mapper";
+
+/** Read-only tool profile shared by the memory-maintenance reader agent.
+ *  No ctx_search (local-source checks only), no write/bash/ctx_memory. */
+export const DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS = [
+    "read",
+    "grep",
+    "glob",
+    "aft_outline",
+    "aft_zoom",
+    "aft_search",
+] as const;

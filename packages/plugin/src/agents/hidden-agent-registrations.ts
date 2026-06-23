@@ -148,6 +148,25 @@ export function buildHiddenAgentRegistrations(args: {
             lockPermissions: true,
         },
         {
+            id: "dreamer-memory-mapper",
+            prompt: args.dreamerPrompt,
+            // Read-only local-source reader for map-memories / verify: open and
+            // check the CURRENT source. NO write/edit/bash (could corrupt user
+            // source), NO ctx_memory (mutations bump the project memory epoch →
+            // bust m[0]; the host applies the manifest's DB writes itself), and NO
+            // ctx_search (these tasks check against local code, not cross-session
+            // recall).
+            allowedTools: ["read", "grep", "glob", "aft_outline", "aft_zoom", "aft_search"],
+            // Bounded read-only-lookup budget (mirrors the primer investigator) —
+            // NOT the dreamer's 150. A map/verify batch is a targeted file-lookup
+            // pass, and this bounds the per-batch cost of an unsupervised run.
+            maxSteps: 60,
+            overrides: args.dreamerOverrides,
+            // A user dreamer `permission`/`tools` override must never re-grant the
+            // denied write/bash/ctx_memory surface to this unsupervised agent.
+            lockPermissions: true,
+        },
+        {
             id: "smart-note-compiler",
             prompt: args.smartNoteCompilerPrompt ?? args.dreamerPrompt,
             allowedTools: [],

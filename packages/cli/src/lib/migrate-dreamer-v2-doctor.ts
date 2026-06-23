@@ -16,6 +16,7 @@ const OLD_VERIFY_TASK = "verify";
 const OLD_CURATE_TASKS = ["consolidate", "archive-stale", "improve"] as const;
 const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as const;
 const CANONICAL = [
+    "map-memories",
     "verify",
     "verify-broad",
     "curate",
@@ -248,6 +249,7 @@ export function migrateDreamerV2ForDoctor(mcConfig: Record<string, unknown>): bo
         });
     }
 
+    tasks["map-memories"] ??= withTimeout({ schedule: baseCron });
     tasks["evaluate-smart-notes"] ??= withTimeout({ schedule: baseCron });
 
     const um = asObject(dreamer.user_memories);

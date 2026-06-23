@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
     DREAMER_AGENT,
+    DREAMER_MEMORY_MAPPER_AGENT,
+    DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
     DREAMER_PRIMER_INVESTIGATOR_AGENT,
     DREAMER_RETROSPECTIVE_AGENT,
 } from "./agents/dreamer";
@@ -53,6 +55,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
+                DREAMER_MEMORY_MAPPER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
@@ -60,6 +63,18 @@ describe("hidden-agent registration drift guard", () => {
                 SIDEKICK_AGENT,
             ].sort(),
         );
+    });
+
+    test("memory mapper inline allow-list matches canonical (read-only, no write/ctx_memory/ctx_search)", () => {
+        expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.allowedTools).toEqual([
+            ...DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
+        ]);
+        const tools = byId(DREAMER_MEMORY_MAPPER_AGENT)?.allowedTools ?? [];
+        for (const denied of ["write", "edit", "bash", "ctx_memory", "ctx_note", "ctx_search"]) {
+            expect(tools).not.toContain(denied);
+        }
+        expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_MEMORY_MAPPER_AGENT)?.maxSteps).toBe(60);
     });
 
     test("dreamer inline allow-list matches canonical DREAMER_ALLOWED_TOOLS", () => {
@@ -97,7 +112,8 @@ describe("hidden-agent registration drift guard", () => {
             expect(reg.lockPermissions === true).toBe(
                 reg.id === DREAMER_RETROSPECTIVE_AGENT ||
                     reg.id === SMART_NOTE_COMPILER_AGENT ||
-                    reg.id === DREAMER_PRIMER_INVESTIGATOR_AGENT,
+                    reg.id === DREAMER_PRIMER_INVESTIGATOR_AGENT ||
+                    reg.id === DREAMER_MEMORY_MAPPER_AGENT,
             );
         }
     });
@@ -204,6 +220,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_AGENT,
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
+                DREAMER_MEMORY_MAPPER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,

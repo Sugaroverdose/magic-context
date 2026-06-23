@@ -33,6 +33,7 @@ import {
     type MaintainMemoryGateResult,
     partitionMaintainMemoryScope,
 } from "./maintain-memory-gate";
+import { mapMemories } from "./map-memories";
 import { promotePrimers } from "./promote-primers";
 import { refreshPrimers } from "./refresh-primers";
 import {
@@ -274,6 +275,26 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun("completed", null);
                 log(
                     `[dreamer] review-user-memories: promoted=${result.promoted} merged=${result.merged} dismissed=${result.dismissed}`,
+                );
+                return { status: "completed" };
+            }
+
+            if (config.task === "map-memories") {
+                const result = await mapMemories({
+                    db,
+                    client: deps.client,
+                    projectIdentity,
+                    parentSessionId: parent,
+                    sessionDirectory: deps.sessionDirectory,
+                    holderId,
+                    leaseKey,
+                    deadline,
+                    model: config.model,
+                    fallbackModels: config.fallbackModels,
+                });
+                recordRun("completed", null);
+                log(
+                    `[dreamer] map-memories: mapped=${result.mapped} independent=${result.independent} batches=${result.batches} remaining=${result.remaining}`,
                 );
                 return { status: "completed" };
             }

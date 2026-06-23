@@ -145,6 +145,11 @@ const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
 	// every built-in not named here, so this is the structural source-safety +
 	// cache-neutrality guarantee (no write, no ctx_memory) on the Pi side.
 	["dreamer-primer-investigator", ["read", "grep", "find", "ls", "ctx_search"]],
+	// map-memories / verify reader: read-only check against the CURRENT LOCAL
+	// source. Same read-only lock as the primer investigator but WITHOUT
+	// ctx_search — these tasks read local code, not cross-session recall. The host
+	// applies the manifest's DB writes, so no ctx_memory is needed.
+	["dreamer-memory-mapper", ["read", "grep", "find", "ls"]],
 ]);
 
 function inferAccountingSubagent(agent: string): SubagentKind {

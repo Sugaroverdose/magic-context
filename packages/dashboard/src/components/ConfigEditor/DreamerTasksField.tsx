@@ -35,6 +35,11 @@ interface TaskMeta {
 // Mirrors CANONICAL_DREAM_TASKS + DEFAULT_TASK_SCHEDULES in the plugin schema.
 const TASKS: TaskMeta[] = [
   {
+    name: "map-memories",
+    description: "One-time: maps each memory to its backing files (prepares verify)",
+    defaultSchedule: "0 2 * * *",
+  },
+  {
     name: "verify",
     description: "Checks changed-file memories against code and fixes/removes stale ones",
     defaultSchedule: "0 3 * * *",

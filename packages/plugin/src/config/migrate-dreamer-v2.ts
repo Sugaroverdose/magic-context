@@ -37,6 +37,7 @@ const OLD_VERIFY_TASK = "verify";
 const OLD_CURATE_TASKS = ["consolidate", "archive-stale", "improve"] as const;
 const RETIRED_OBJECT_MEMORY_TASKS = ["maintain-memory", ...OLD_CURATE_TASKS] as const;
 const CANONICAL = [
+    "map-memories",
     "verify",
     "verify-broad",
     "curate",
@@ -289,6 +290,10 @@ export function migrateDreamerV2(
             schedule: legacyArray?.includes("maintain-docs") ? baseCron : "",
         });
     }
+
+    // map-memories (one-time backfill) defaults on so it prepares verify; gated
+    // by "unmapped memories exist", so it drains then no-ops.
+    tasks["map-memories"] ??= withTimeout({ schedule: baseCron });
 
     // evaluate-smart-notes always ran post-suite on pending notes.
     tasks["evaluate-smart-notes"] ??= withTimeout({ schedule: baseCron });

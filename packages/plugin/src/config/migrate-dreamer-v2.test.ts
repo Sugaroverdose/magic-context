@@ -166,6 +166,7 @@ describe("migrateDreamerV2", () => {
         const { out } = migrate({ dreamer: { schedule: "02:00-06:00" } });
         expect(Object.keys(tasks(out)).sort()).toEqual(
             [
+                "map-memories",
                 "classify-memories",
                 "curate",
                 "evaluate-smart-notes",

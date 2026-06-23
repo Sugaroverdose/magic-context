@@ -140,6 +140,11 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.variant` | string | — | OpenCode reasoning variant (e.g. for extended thinking) |
 | `dreamer.fallback_models` | string \\| string[] | — | Fallback model IDs if primary is unavailable |
 | `dreamer.tasks` | object | — | Per-task scheduling + model config. Each task has its own cron schedule and may override the dreamer-level model. |
+| `dreamer.tasks.map-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.map-memories.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.map-memories.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.map-memories.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.map-memories.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
 | `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.verify.model` | string | — | Per-task model override (inherits dreamer.model) |
 | `dreamer.tasks.verify.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |

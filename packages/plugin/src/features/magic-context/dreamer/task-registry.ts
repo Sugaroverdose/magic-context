@@ -9,6 +9,9 @@
  */
 
 export const CANONICAL_DREAM_TASKS = [
+    // map-memories runs BEFORE verify (it records the file mappings verify gates
+    // on) and shares the memory lease, so it leads the canonical order.
+    "map-memories",
     "verify",
     "verify-broad",
     "curate",
@@ -52,6 +55,7 @@ export function isAgenticTask(task: DreamTaskName): task is AgenticDreamTask {
  * merges/splits). Canonical run order when several are due in one drain.
  */
 export const MEMORY_DOMAIN_TASKS: readonly DreamTaskName[] = [
+    "map-memories",
     "verify",
     "verify-broad",
     "curate",

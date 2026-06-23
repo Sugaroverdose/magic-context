@@ -77,11 +77,11 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: Array(10).fill("cron:0 3 * * *"),
+            selects: Array(11).fill("cron:0 3 * * *"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks).toBeDefined();
-        expect(Object.keys(result.tasks ?? {}).length).toBe(10);
+        expect(Object.keys(result.tasks ?? {}).length).toBe(11);
         expect(result.tasks?.verify.schedule).toBe("0 3 * * *");
         expect(result.tasks?.curate.schedule).toBe("0 3 * * *");
         expect(result.tasks?.["classify-memories"].schedule).toBe("0 3 * * *");
@@ -95,7 +95,7 @@ describe("runDreamerSetup", () => {
             confirms: [false],
             autos: ["x/y"],
             // all disabled
-            selects: Array(10).fill("cron:"),
+            selects: Array(11).fill("cron:"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks?.verify.schedule).toBe("");
@@ -112,6 +112,7 @@ describe("runDreamerSetup", () => {
             texts: ["30 4 * * 1"],
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
-        expect(result.tasks?.verify.schedule).toBe("30 4 * * 1");
+        // First task in canonical order is map-memories — Custom applies to it.
+        expect(result.tasks?.["map-memories"].schedule).toBe("30 4 * * 1");
     });
 });

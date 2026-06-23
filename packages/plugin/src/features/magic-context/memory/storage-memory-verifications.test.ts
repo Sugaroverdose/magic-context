@@ -5,10 +5,18 @@ import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
-import { insertMemory, updateMemoryVerification } from "./storage-memory";
+import {
+    getUnclassifiedMemoryIds,
+    insertMemory,
+    setMemoryClassification,
+    updateMemoryContent,
+    updateMemoryVerification,
+} from "./storage-memory";
 import {
     clearMemoryVerifications,
     getMemoryVerifications,
+    getUnmappedMemoryIds,
+    recordMemoryMapping,
     recordMemoryVerifications,
 } from "./storage-memory-verifications";
 
@@ -50,6 +58,77 @@ describe("memory verification side-table helpers", () => {
 
             clearMemoryVerifications(db, memory.id);
             expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("recordMemoryMapping marks mapped (mapped_at) but NOT content-verified (verified_at=0)", () => {
+        const db = freshDb();
+        try {
+            const memory = insertMemory(db, {
+                projectPath: "git:test",
+                category: "ARCHITECTURE",
+                content: "X lives in src/x.ts.",
+                sourceSessionId: "ses",
+            });
+            recordMemoryMapping(db, memory.id, ["src/x.ts"], 5000);
+            const state = getMemoryVerifications(db, [memory.id]).get(memory.id);
+            expect(state?.files).toEqual(["src/x.ts"]);
+            expect(state?.mappedAt).toBe(5000);
+            // Mapped, not verified — verify still sees it as needing a content check.
+            expect(state?.verifiedAt).toBe(0);
+
+            // A later verify run sets verified_at on the same memory.
+            recordMemoryVerifications(db, memory.id, ["src/x.ts"], 9000);
+            const verified = getMemoryVerifications(db, [memory.id]).get(memory.id);
+            expect(verified?.verifiedAt).toBe(9000);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("getUnmappedMemoryIds returns only memories with no mapping rows", () => {
+        const db = freshDb();
+        try {
+            const a = insertMemory(db, {
+                projectPath: "git:test",
+                category: "ARCHITECTURE",
+                content: "A in src/a.ts.",
+                sourceSessionId: "ses",
+            });
+            const b = insertMemory(db, {
+                projectPath: "git:test",
+                category: "CONSTRAINTS",
+                content: "External provider behavior.",
+                sourceSessionId: "ses",
+            });
+            expect(getUnmappedMemoryIds(db, [a.id, b.id]).sort()).toEqual([a.id, b.id].sort());
+            // Mapping a (real file) and b (sentinel) both count as mapped.
+            recordMemoryMapping(db, a.id, ["src/a.ts"], 1);
+            recordMemoryMapping(db, b.id, [], 1);
+            expect(getUnmappedMemoryIds(db, [a.id, b.id])).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("classified_at: setMemoryClassification stamps it; content update clears it", () => {
+        const db = freshDb();
+        try {
+            const m = insertMemory(db, {
+                projectPath: "git:test",
+                category: "ARCHITECTURE",
+                content: "X in src/x.ts.",
+                sourceSessionId: "ses",
+            });
+            // Unclassified initially.
+            expect(getUnclassifiedMemoryIds(db, [m.id])).toEqual([m.id]);
+            setMemoryClassification(db, m.id, { importance: 70 });
+            expect(getUnclassifiedMemoryIds(db, [m.id])).toEqual([]);
+            // Content update re-opens it for classification.
+            updateMemoryContent(db, m.id, "X moved to src/y.ts.", "newhash");
+            expect(getUnclassifiedMemoryIds(db, [m.id])).toEqual([m.id]);
         } finally {
             closeQuietly(db);
         }

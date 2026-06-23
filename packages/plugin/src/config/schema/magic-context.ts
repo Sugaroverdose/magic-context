@@ -96,6 +96,9 @@ export type DreamTaskConfig = z.infer<typeof DreamTaskConfigSchema>;
  *  defaults OFF (it was not in the v1 default list); the two promoted
  *  post-phases run nightly and are gated. */
 const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
+    // map-memories is a one-time-style backfill (gate: unmapped memories exist).
+    // Default nightly so it drains the pool then no-ops once everything is mapped.
+    "map-memories": "0 2 * * *",
     verify: "0 3 * * *",
     "verify-broad": "0 4 * * 0",
     curate: "0 4 * * 0",
@@ -122,6 +125,9 @@ function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigS
  *  the inferred type stays a precise per-key object. */
 export const DreamTasksSchema = z
     .object({
+        "map-memories": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("map-memories")),
+        ),
         verify: DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("verify")),
         ),

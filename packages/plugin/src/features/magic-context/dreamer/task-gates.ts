@@ -39,6 +39,22 @@ function countActiveMemories(db: Database, projectPath: string): number {
     return row?.cnt ?? 0;
 }
 
+/** Active/permanent memories with NO mapping row yet — the map-memories scope. */
+function countUnmappedActiveMemories(db: Database, projectPath: string): number {
+    const row = db
+        .prepare<[string], { cnt: number }>(
+            `SELECT COUNT(*) AS cnt
+               FROM memories m
+              WHERE m.project_path = ?
+                AND m.status IN ('active','permanent')
+                AND NOT EXISTS (
+                    SELECT 1 FROM memory_verifications v WHERE v.memory_id = m.id
+                )`,
+        )
+        .get(projectPath);
+    return row?.cnt ?? 0;
+}
+
 function countCompartmentsSince(db: Database, projectPath: string, since: number): number {
     // Compartments are keyed by session_id; map to project via session_projects.
     const row = db
@@ -80,6 +96,12 @@ function countProjectSessionsSince(
 export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boolean {
     const { db, projectIdentity: project, lastRunAt } = ctx;
     switch (task) {
+        case "map-memories":
+            // Runs only while UNMAPPED active memories exist — the one-time-style
+            // backfill that drains the pool then no-ops. Cheap: a single NOT-IN
+            // count against the verification side-table.
+            return countUnmappedActiveMemories(db, project) > 0;
+
         case "verify":
             // The executor's file gate does the precise incremental partition; the
             // scheduler only avoids taking the memory lease when there is no pool.
