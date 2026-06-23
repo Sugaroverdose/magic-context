@@ -1,110 +1,63 @@
-/**
- * Minimal JSONC parse/format shared by the config editors.
- *
- * Ported from `packages/plugin/src/shared/jsonc-parser.ts`: strips line/block
- * comments AND trailing commas (both valid JSONC — the style doctor/setup write
- * by default), respecting string literals, then JSON.parse. Used to read config
- * files for structured editing; output is re-serialized as plain 2-space JSON.
- */
+import { parse, stringify } from "comment-json";
 
-function stripJsonComments(content: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-
-  for (let index = 0; index < content.length; index += 1) {
-    const char = content[index];
-    const next = content[index + 1];
-
-    if (inLineComment) {
-      if (char === "\n") {
-        inLineComment = false;
-        result += char;
-      }
-      continue;
-    }
-    if (inBlockComment) {
-      if (char === "*" && next === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-    if (inString) {
-      result += char;
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-    if (char === "/" && next === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-    if (char === "/" && next === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-    result += char;
-  }
-  return result;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stripTrailingCommas(content: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < content.length; index += 1) {
-    const char = content[index];
-    if (inString) {
-      result += char;
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') inString = false;
-      continue;
-    }
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-    if (char === ",") {
-      let lookahead = index + 1;
-      while (lookahead < content.length && /\s/.test(content[lookahead] ?? "")) {
-        lookahead += 1;
-      }
-      const next = content[lookahead];
-      if (next === "}" || next === "]") continue;
-    }
-    result += char;
-  }
-  return result;
+export function jsoncErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-/** Parse JSONC into an object, or `{}` on any failure. */
-export function parseJsonc(text: string): Record<string, unknown> {
+function parseRoot(text: string): Record<string, unknown> {
+  const source = text.trim() === "" ? "{}\n" : text;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(stripTrailingCommas(stripJsonComments(text)));
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return {};
-  } catch {
-    return {};
+    parsed = parse(source);
+  } catch (error) {
+    throw new Error(`Config JSONC parse failed: ${jsoncErrorMessage(error)}`);
   }
+  if (!isRecord(parsed)) {
+    throw new Error("Config JSONC root must be an object");
+  }
+  return parsed;
 }
 
-/** Pretty-print as plain JSON (2-space indent). Comments are not preserved. */
+/** Parse JSONC into an object. Throws on malformed JSONC instead of returning a destructive fallback. */
+export function parseJsonc(text: string): Record<string, unknown> {
+  return parseRoot(text);
+}
+
+function stringifyJsonc(root: Record<string, unknown>): string {
+  const rendered = stringify(root, null, 2);
+  if (typeof rendered !== "string") {
+    throw new Error("Failed to serialize config JSONC");
+  }
+  return `${rendered}\n`;
+}
+
+/** Pretty-print a new JSONC object. Existing files should use patch helpers to preserve comments. */
 export function formatJsonc(value: unknown): string {
-  return `${JSON.stringify(value, null, 2)}\n`;
+  if (!isRecord(value)) {
+    throw new Error("Config JSONC root must be an object");
+  }
+  return stringifyJsonc(value);
+}
+
+/**
+ * Patch only dreamer.tasks while preserving comments and unrelated sibling keys.
+ * Throws on malformed input so the caller can refuse the save without clobbering the file.
+ */
+export function patchDreamerTasksJsonc(text: string, tasks: Record<string, unknown>): string {
+  const root = parseRoot(text);
+  const dreamer = isRecord(root.dreamer) ? root.dreamer : {};
+  root.dreamer = dreamer;
+  dreamer.tasks = tasks;
+  return stringifyJsonc(root);
+}
+
+/** Remove the project-level dreamer override while preserving the rest of the config file. */
+export function removeDreamerBlockJsonc(text: string): string {
+  const root = parseRoot(text);
+  delete root.dreamer;
+  return stringifyJsonc(root);
 }

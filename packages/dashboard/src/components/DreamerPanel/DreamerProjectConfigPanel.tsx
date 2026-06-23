@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createResource, createSignal, Show } from "solid-js";
+import { createMemo, createResource, createSignal, Show } from "solid-js";
 import { saveProjectConfig } from "../../lib/api";
-import { formatJsonc, parseJsonc } from "../../lib/jsonc";
+import {
+  jsoncErrorMessage,
+  parseJsonc,
+  patchDreamerTasksJsonc,
+  removeDreamerBlockJsonc,
+} from "../../lib/jsonc";
 import type { ConfigFile, DreamerProject } from "../../lib/types";
 import DreamerTasksField, { type DreamTaskConfig } from "../ConfigEditor/DreamerTasksField";
 
@@ -28,8 +33,17 @@ export default function DreamerProjectConfigPanel(props: {
   );
 
   // The full parsed config object (so we preserve unrelated keys on save), and
-  // the editable dreamer.tasks slice.
-  const parsed = () => parseJsonc(configFile()?.content ?? "");
+  // the editable dreamer.tasks slice. Malformed JSONC is surfaced and saves are
+  // refused; never substitute an empty object for a parse failure.
+  const parsedConfig = createMemo(() => {
+    try {
+      return { value: parseJsonc(configFile()?.content ?? ""), error: null as string | null };
+    } catch (error) {
+      return { value: {} as Record<string, unknown>, error: jsoncErrorMessage(error) };
+    }
+  });
+  const parsed = () => parsedConfig().value;
+  const parseError = () => parsedConfig().error;
   const dreamerObj = (): Record<string, unknown> => {
     const d = parsed().dreamer;
     return d && typeof d === "object" && !Array.isArray(d) ? (d as Record<string, unknown>) : {};
@@ -52,18 +66,18 @@ export default function DreamerProjectConfigPanel(props: {
   const handleSave = async () => {
     const wt = worktree();
     if (!wt) return;
-    // Merge edited tasks into the existing dreamer block, preserving other keys
-    // (model, fallback_models, inject_docs, …) and the rest of the config.
-    const nextDreamer = { ...dreamerObj(), tasks: effectiveTasks() ?? {} };
-    const nextConfig = { ...parsed(), dreamer: nextDreamer };
     try {
-      await saveProjectConfig(wt, formatJsonc(nextConfig));
+      const nextConfig = patchDreamerTasksJsonc(
+        configFile()?.content ?? "",
+        effectiveTasks() ?? {},
+      );
+      await saveProjectConfig(wt, nextConfig);
       setSaveStatus("✓ Saved — applies on the next dreamer tick");
       setDirty(false);
       props.onSaved();
       setTimeout(() => setSaveStatus(null), 4000);
     } catch (err) {
-      setSaveStatus(`✕ ${err}`);
+      setSaveStatus(`✕ ${jsoncErrorMessage(err)}`);
       setTimeout(() => setSaveStatus(null), 5000);
     }
   };
@@ -71,18 +85,16 @@ export default function DreamerProjectConfigPanel(props: {
   const revertToInherited = async () => {
     const wt = worktree();
     if (!wt) return;
-    // Drop the dreamer block entirely → project inherits the global config.
-    const next = { ...parsed() };
-    delete next.dreamer;
     try {
-      await saveProjectConfig(wt, formatJsonc(next));
+      // Drop the dreamer block entirely → project inherits the global config.
+      await saveProjectConfig(wt, removeDreamerBlockJsonc(configFile()?.content ?? ""));
       setSaveStatus("✓ Reverted to inherited global config");
       setTasks(undefined);
       setDirty(false);
       props.onSaved();
       setTimeout(() => setSaveStatus(null), 4000);
     } catch (err) {
-      setSaveStatus(`✕ ${err}`);
+      setSaveStatus(`✕ ${jsoncErrorMessage(err)}`);
       setTimeout(() => setSaveStatus(null), 5000);
     }
   };
@@ -116,6 +128,16 @@ export default function DreamerProjectConfigPanel(props: {
                 saved to the project's <code>magic-context.jsonc</code> (version-controllable — they
                 travel to teammates' clones).
               </p>
+              <Show when={parseError()}>
+                {(message) => (
+                  <p
+                    class="config-field-desc"
+                    style={{ color: "var(--danger, #e5484d)", "margin-bottom": "12px" }}
+                  >
+                    Project config JSONC is invalid: {message()}
+                  </p>
+                )}
+              </Show>
               <DreamerTasksField
                 value={effectiveTasks()}
                 models={props.models}
