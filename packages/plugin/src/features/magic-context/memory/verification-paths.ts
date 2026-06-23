@@ -73,6 +73,53 @@ export async function readGitChangedFilesSince(
     return new Set(stdout.split("\0").filter(Boolean));
 }
 
+/**
+ * Map each repo file changed at/after `sinceMs` to its LATEST commit time (ms).
+ * Drives the per-memory verify gate: a memory needs re-verification if any of
+ * its mapped files has a change time newer than that memory's `verified_at`.
+ *
+ * Returns null on any git failure → caller falls back to full verification
+ * (safe direction: re-check rather than skip). Output excludes the working tree;
+ * a file edited but uncommitted is caught separately by `verificationFileExists`
+ * (deletion) — verify reads the live file regardless, so uncommitted edits are
+ * surfaced when the file is opened. The committed-history map is what lets the
+ * gate cheaply SKIP unchanged memories.
+ */
+export async function readGitFileChangeTimesSince(
+    cwd: string,
+    sinceMs: number,
+): Promise<Map<string, number> | null> {
+    const gitRoot = await resolveGitTopLevel(cwd);
+    if (!gitRoot) return null;
+    const sinceSec = Math.max(0, Math.floor(sinceMs / 1000));
+    // Block format: "<unix-seconds>\n<file>\n<file>\n...\n\n". %ct = committer
+    // time. --name-only lists each commit's files. We walk newest→oldest (git log
+    // default), keeping the FIRST (= latest) time seen per file.
+    const stdout = await runGit(gitRoot, [
+        "log",
+        `--since=${sinceSec}`,
+        "--no-merges",
+        "--name-only",
+        "--format=%ct",
+    ]);
+    if (stdout === null) return null;
+    const times = new Map<string, number>();
+    let currentMs = 0;
+    for (const rawLine of stdout.split("\n")) {
+        const line = rawLine.trimEnd();
+        if (line === "") continue;
+        if (/^\d+$/.test(line)) {
+            currentMs = Number.parseInt(line, 10) * 1000;
+            continue;
+        }
+        // A file path under the current commit. Keep the newest time per file.
+        if (currentMs > 0 && !times.has(line)) {
+            times.set(line, currentMs);
+        }
+    }
+    return times;
+}
+
 async function gitTrackedPath(gitRoot: string, repoRelativePath: string): Promise<string | null> {
     const stdout = await runGit(gitRoot, [
         "ls-files",

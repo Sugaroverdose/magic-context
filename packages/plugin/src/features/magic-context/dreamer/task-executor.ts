@@ -28,11 +28,6 @@ import {
     enforceMaintainDocsProtectedRegions,
     snapshotMaintainDocsFiles,
 } from "./maintain-docs-protected-enforcement";
-import {
-    checkMaintainMemoryCoverage,
-    type MaintainMemoryGateResult,
-    partitionMaintainMemoryScope,
-} from "./maintain-memory-gate";
 import { mapMemories } from "./map-memories";
 import { promotePrimers } from "./promote-primers";
 import { refreshPrimers } from "./refresh-primers";
@@ -56,6 +51,7 @@ import {
     buildFrictionGatePrompt,
     buildRetrospectivePrompt,
     type ClassifyTrajectoryCompartment,
+    type CuratePromptMemory,
     DREAMER_SYSTEM_PROMPT,
     FRICTION_GATE_SYSTEM_PROMPT,
     RETROSPECTIVE_SYSTEM_PROMPT,
@@ -63,6 +59,7 @@ import {
 } from "./task-prompts";
 import { isAgenticTask } from "./task-registry";
 import type { DreamTaskRuntimeConfig, TaskExecOutcome, TaskExecutor } from "./task-scheduler";
+import { runVerify } from "./verify";
 
 export interface DreamTaskExecutorDeps {
     client: PluginContext["client"];
@@ -113,17 +110,16 @@ function newIds(beforeIds: number[], afterIds: number[]): number[] {
     return out;
 }
 
-function toPromptMemory(
+function toCuratePromptMemory(
     memory: Memory,
     verificationById: ReturnType<typeof getMemoryVerifications>,
-): MaintainMemoryGateResult["inScope"][number] {
+): CuratePromptMemory {
     const verification = verificationById.get(memory.id);
     return {
         id: memory.id,
         category: memory.category,
         content: memory.content,
         mappedFiles: verification?.files ?? [],
-        verifiedAt: verification?.verifiedAt ?? null,
         hasNoFileSentinel: verification?.hasSentinel ?? false,
     };
 }
@@ -131,13 +127,13 @@ function toPromptMemory(
 function loadActiveMemoryPromptMemories(
     db: Database,
     projectIdentity: string,
-): MaintainMemoryGateResult["inScope"] {
+): CuratePromptMemory[] {
     const memories = getMemoriesByProject(db, projectIdentity);
     const verificationById = getMemoryVerifications(
         db,
         memories.map((memory) => memory.id),
     );
-    return memories.map((memory) => toPromptMemory(memory, verificationById));
+    return memories.map((memory) => toCuratePromptMemory(memory, verificationById));
 }
 
 export const CLASSIFY_TRAJECTORY_COMPARTMENT_LIMIT = 30;
@@ -296,6 +292,27 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 log(
                     `[dreamer] map-memories: mapped=${result.mapped} independent=${result.independent} batches=${result.batches} remaining=${result.remaining}`,
                 );
+                return { status: "completed" };
+            }
+
+            if (config.task === "verify" || config.task === "verify-broad") {
+                const memoryBefore = getMemoryCountsByStatus(db, projectIdentity);
+                await runVerify({
+                    db,
+                    client: deps.client,
+                    projectIdentity,
+                    parentSessionId: parent,
+                    sessionDirectory: deps.sessionDirectory,
+                    holderId,
+                    leaseKey,
+                    deadline,
+                    forceBroad: config.task === "verify-broad",
+                    model: config.model,
+                    fallbackModels: config.fallbackModels,
+                });
+                recordRun("completed", null, {
+                    memoryChanges: computeMemoryDelta(memoryBefore),
+                });
                 return { status: "completed" };
             }
 
@@ -819,37 +836,11 @@ async function runAgenticTask(
             ? loadRecentTrajectoryCompartments(db, projectIdentity)
             : undefined;
 
-    let verifyGate: MaintainMemoryGateResult | null = null;
-    let curateMemories: MaintainMemoryGateResult["inScope"] | undefined;
-    const isVerify = task === "verify" || task === "verify-broad";
-    if (isVerify) {
-        verifyGate = await partitionMaintainMemoryScope({
-            db,
-            projectIdentity,
-            projectDirectory: deps.sessionDirectory,
-            // BOTH verify and verify-broad read+advance the "verify" row's commit
-            // watermark (shared, serialized by the memory lease). verify-broad
-            // forces the full pool regardless of changed files.
-            scheduleState: getTaskScheduleState(db, projectIdentity, "verify"),
-            forceBroad: task === "verify-broad",
-        });
-        log(
-            `[dreamer] ${task} gate: mode=${verifyGate.mode} in_scope=${verifyGate.inScopeIds.length} skipped=${verifyGate.skippedIds.length} reason=${verifyGate.reason}`,
-        );
-        if (verifyGate.inScopeIds.length === 0) {
-            // Empty scope is still complete coverage → advance the verify
-            // watermark to startHead. verify-broad writes the VERIFY row, not its
-            // own (BLOCKER: the incremental gate + verification-recording read the
-            // watermark from the verify row).
-            const schedulePatch = verifyGate.startHead
-                ? { lastCheckedCommit: verifyGate.startHead, watermarkTask: "verify" as const }
-                : undefined;
-            helpers.recordRun("completed", null, {
-                memoryChanges: helpers.computeMemoryDelta(memoryBefore),
-            });
-            return { status: "completed", schedulePatch };
-        }
-    } else if (task === "curate") {
+    // verify / verify-broad now run via runVerify (their own manifest path) — they
+    // never reach runAgenticTask. The agentic path handles curate / classify /
+    // maintain-docs.
+    let curateMemories: ReturnType<typeof loadActiveMemoryPromptMemories> | undefined;
+    if (task === "curate") {
         curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
         log(`[dreamer] curate pool: in_scope=${curateMemories.length}`);
     } else if (task === "classify-memories") {
@@ -863,12 +854,6 @@ async function runAgenticTask(
         lastDreamAt: lastRunAt ? String(lastRunAt) : null,
         existingDocs,
         userMemories,
-        verify: verifyGate
-            ? {
-                  memories: verifyGate.inScope,
-                  mode: verifyGate.mode,
-              }
-            : undefined,
         curate: curateMemories ? { memories: curateMemories } : undefined,
         classify:
             classifyMemories && classifyTrajectory
@@ -969,32 +954,10 @@ async function runAgenticTask(
             }
         }
 
-        let schedulePatch: TaskExecOutcome["schedulePatch"];
-        if (verifyGate) {
-            const coverage = checkMaintainMemoryCoverage({
-                db,
-                inScopeIds: verifyGate.inScopeIds,
-                runStartedAt: verifyGate.runStartedAt,
-            });
-            if (coverage.covered && verifyGate.startHead) {
-                // Both verify and verify-broad advance the VERIFY row's watermark
-                // to their run-start HEAD on full coverage (BLOCKER: verify-broad
-                // must NOT write its own row — the gate reads the verify row).
-                schedulePatch = {
-                    lastCheckedCommit: verifyGate.startHead,
-                    watermarkTask: "verify",
-                };
-            } else if (!coverage.covered) {
-                log(
-                    `[dreamer] verify coverage incomplete: uncovered=${coverage.uncoveredIds.length} ids=${coverage.uncoveredIds.slice(0, 20).join(",")}`,
-                );
-            }
-        }
-
         helpers.recordRun("completed", null, {
             memoryChanges: helpers.computeMemoryDelta(memoryBefore),
         });
-        return { status: "completed", schedulePatch };
+        return { status: "completed" };
     } catch (error) {
         taskFailed = true;
         throw error;

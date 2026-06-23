@@ -1,5 +1,13 @@
 import type { DreamingTask } from "../../../config/schema/magic-context";
-import type { MaintainMemoryPromptMemory } from "./maintain-memory-gate";
+
+/** Memory shape the curate prompt renders (verify now has its own runner/prompt). */
+export interface CuratePromptMemory {
+    id: number;
+    category: string;
+    content: string;
+    mappedFiles: string[];
+    hasNoFileSentinel: boolean;
+}
 
 // ── System Prompt ──────────────────────────────────────────────────────────
 
@@ -42,9 +50,9 @@ Project memory uses exactly 5 categories. Every memory belongs to one:
 
 **Legacy categories during transition:** older memories may still carry pre-v2 category names. When you touch one, map it to its 5-category home with \`action="update"\` (or \`merge\`): WORKFLOW_RULES→PROJECT_RULES, ARCHITECTURE_DECISIONS→ARCHITECTURE, CONFIG_DEFAULTS→CONFIG_VALUES, ENVIRONMENT→CONFIG_VALUES (paths) or CONSTRAINTS, KNOWN_ISSUES→CONSTRAINTS only if it's an external-system limit (otherwise archive — our own fixed bugs are not world facts). USER_DIRECTIVES / USER_PREFERENCES are NOT project categories — they live in the global user profile; archive project copies only when they add zero project-specific detail.`;
 
-// ── Verify ─────────────────────────────────────────────────────────────────
+// ── Curate ─────────────────────────────────────────────────────────────────
 
-function renderMemoryList(memories: MaintainMemoryPromptMemory[]): string {
+function renderMemoryList(memories: CuratePromptMemory[]): string {
     return memories
         .map((memory) => {
             const files = memory.mappedFiles.length
@@ -55,36 +63,6 @@ function renderMemoryList(memories: MaintainMemoryPromptMemory[]): string {
         .join("\n\n");
 }
 
-export function buildVerifyPrompt(args: {
-    projectPath: string;
-    memories: MaintainMemoryPromptMemory[];
-    mode: string;
-}): string {
-    // adapted from validated shadow-trial prompt; further tuning happens in the harness
-    return `## Task: Verify Project Memories Against Code
-
-**Project:** ${args.projectPath}
-**Mode:** ${args.mode}
-
-You are given the in-scope memories below (their backing files changed since the last verification, or they were never verified). For EACH one, confirm it against the actual code, fix it if the wording drifted, archive it only if the code clearly contradicts it, and record what you verified it against.
-
-### Process (per memory)
-1. Read the mapped files (or grep/read to find the relevant code if none are mapped yet).
-2. Decide:
-   - Correct as-is → leave content; record \`ctx_memory(action="verified", ids=[N], files=[...COMPLETE backing set...])\`.
-   - Wording stale but fact true → \`ctx_memory(action="update", ids=[N], content="...", verified_files=[...COMPLETE backing set...])\`.
-   - Code clearly contradicts it → \`ctx_memory(action="archive", ids=[N], reason="...", verified_files=[...])\`. Be conservative: if you can't find the code but it might exist elsewhere, do NOT archive.
-   - File-independent (external CONSTRAINT, philosophy) → \`ctx_memory(action="verified", ids=[N], files=[])\`.
-3. \`files\` / \`verified_files\` is the COMPLETE current backing set, not just files that changed this run. Include unchanged files that still support the memory.
-
-You do NOT consolidate, improve wording, or archive-for-budget here — that is a separate hygiene task. Only fix accuracy and record the mapping. Every in-scope memory must end recorded (verified, or updated/archived with verified_files).
-
-### In-scope memories
-${renderMemoryList(args.memories)}`;
-}
-
-// ── Curate ─────────────────────────────────────────────────────────────────
-
 function formatUserProfileList(
     userMemories?: Array<{ id: number; content: string }>,
 ): string | undefined {
@@ -94,7 +72,7 @@ function formatUserProfileList(
 
 export function buildCuratePrompt(args: {
     projectPath: string;
-    memories: MaintainMemoryPromptMemory[];
+    memories: CuratePromptMemory[];
     userProfile?: string;
 }): string {
     // adapted from validated shadow-trial prompt; further tuning happens in the harness
@@ -450,12 +428,8 @@ export function buildDreamTaskPrompt(
         lastDreamAt?: string | null;
         existingDocs?: { architecture: boolean; structure: boolean };
         userMemories?: Array<{ id: number; content: string }>;
-        verify?: {
-            memories: MaintainMemoryPromptMemory[];
-            mode: "non-git" | "full" | "broad" | "incremental";
-        };
         curate?: {
-            memories: MaintainMemoryPromptMemory[];
+            memories: CuratePromptMemory[];
         };
         classify?: {
             memories: ClassifyPromptMemory[];
@@ -464,15 +438,6 @@ export function buildDreamTaskPrompt(
     },
 ): string {
     switch (task) {
-        case "verify":
-        case "verify-broad":
-            return buildVerifyPrompt({
-                projectPath: args.projectPath,
-                memories: args.verify?.memories ?? [],
-                // verify-broad always partitions the full pool (mode "broad"); the
-                // gate sets the mode, so this just passes it through.
-                mode: args.verify?.mode ?? "full",
-            });
         case "curate":
             return buildCuratePrompt({
                 projectPath: args.projectPath,

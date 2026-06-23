@@ -441,18 +441,18 @@ describe("magic-context hook", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-dream-notification-");
         const promptMocks = createPromptMocks();
         const deps = createMockDeps(promptMocks);
-        // Dreamer v2 per-task shape. Force a single task via `/ctx-dream verify`
-        // so the run is deterministic (the forced path ignores the activity gate,
-        // so this doesn't depend on the test DB having memories).
+        // Dreamer v2 per-task shape. Force a single AGENTIC task via
+        // `/ctx-dream curate` so the run is deterministic and goes through the
+        // generic dreamer-agent child-session path this test asserts. (verify now
+        // has its own non-agentic manifest runner — covered by verify.test.)
         deps.config = {
             ...deps.config,
             dreamer: {
                 inject_docs: true,
                 tasks: {
-                    verify: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    curate: { schedule: "", timeout_minutes: 10 },
+                    curate: { schedule: "0 3 * * *", timeout_minutes: 10 },
+                    verify: { schedule: "", timeout_minutes: 10 },
                     "maintain-docs": { schedule: "", timeout_minutes: 10 },
-                    "key-files": { schedule: "", timeout_minutes: 10 },
                     "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
                     "review-user-memories": { schedule: "", timeout_minutes: 10 },
                 },
@@ -488,7 +488,7 @@ describe("magic-context hook", () => {
 
         await expectSentinel(
             hook["command.execute.before"]!(
-                { command: "ctx-dream", sessionID: "ses-dream", arguments: "verify" },
+                { command: "ctx-dream", sessionID: "ses-dream", arguments: "curate" },
                 { parts: [{ type: "text", text: "" }] },
             ),
             "__CONTEXT_MANAGEMENT_CTX-DREAM_HANDLED__",
@@ -506,7 +506,7 @@ describe("magic-context hook", () => {
                 body: expect.objectContaining({
                     parts: [
                         expect.objectContaining({
-                            text: 'Running dream task "verify"...',
+                            text: 'Running dream task "curate"...',
                         }),
                     ],
                 }),
@@ -521,9 +521,7 @@ describe("magic-context hook", () => {
                     system: expect.stringContaining("memory maintenance agent"),
                     parts: expect.arrayContaining([
                         expect.objectContaining({
-                            text: expect.stringContaining(
-                                "## Task: Verify Project Memories Against Code",
-                            ),
+                            text: expect.stringContaining("## Task: Curate Project Memory Pool"),
                         }),
                     ]),
                 }),
@@ -637,10 +635,12 @@ describe("magic-context hook", () => {
             dreamer: {
                 inject_docs: true,
                 tasks: {
-                    verify: { schedule: "0 3 * * *", timeout_minutes: 10 },
-                    curate: { schedule: "", timeout_minutes: 10 },
+                    // Use an AGENTIC task (curate) so the scheduler→executor wiring
+                    // drives the generic dreamer child-session path this test counts.
+                    // (verify now has its own non-agentic manifest runner.)
+                    curate: { schedule: "0 3 * * *", timeout_minutes: 10 },
+                    verify: { schedule: "", timeout_minutes: 10 },
                     "maintain-docs": { schedule: "", timeout_minutes: 10 },
-                    "key-files": { schedule: "", timeout_minutes: 10 },
                     "evaluate-smart-notes": { schedule: "", timeout_minutes: 10 },
                     "review-user-memories": { schedule: "", timeout_minutes: 10 },
                 },
@@ -655,11 +655,11 @@ describe("magic-context hook", () => {
             const projectPath = resolveProjectIdentity("/repo/project");
             const now = Date.now();
             // Dreamer v2: a freshly-seeded task is NOT due until its next cron
-            // time. Pre-seed verify's schedule row as DUE (next_due_at in the
+            // time. Pre-seed curate's schedule row as DUE (next_due_at in the
             // past) so the background trigger actually runs it this pass.
             writeTaskScheduleState(db, {
                 projectPath,
-                task: "verify",
+                task: "curate",
                 lastRunAt: null,
                 nextDueAt: now - 1000,
                 schedule: "0 3 * * *",
