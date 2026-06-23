@@ -22,6 +22,7 @@ import {
 import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
+import { runClassify } from "./classify";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
 import { renewLease } from "./lease";
 import {
@@ -50,7 +51,6 @@ import {
     buildDreamTaskPrompt,
     buildFrictionGatePrompt,
     buildRetrospectivePrompt,
-    type ClassifyTrajectoryCompartment,
     type CuratePromptMemory,
     DREAMER_SYSTEM_PROMPT,
     FRICTION_GATE_SYSTEM_PROMPT,
@@ -134,29 +134,6 @@ function loadActiveMemoryPromptMemories(
         memories.map((memory) => memory.id),
     );
     return memories.map((memory) => toCuratePromptMemory(memory, verificationById));
-}
-
-export const CLASSIFY_TRAJECTORY_COMPARTMENT_LIMIT = 30;
-
-export function loadRecentTrajectoryCompartments(
-    db: Database,
-    projectIdentity: string,
-    limit = CLASSIFY_TRAJECTORY_COMPARTMENT_LIMIT,
-): ClassifyTrajectoryCompartment[] {
-    const rows = db
-        .prepare<[string, number], ClassifyTrajectoryCompartment>(
-            `SELECT c.id AS id,
-                    c.title AS title,
-                    COALESCE(NULLIF(c.p1, ''), c.content) AS content,
-                    c.created_at AS createdAt
-               FROM compartments c
-               JOIN session_projects sp ON sp.session_id = c.session_id
-              WHERE sp.project_path = ?
-              ORDER BY c.created_at DESC, c.id DESC
-              LIMIT ?`,
-        )
-        .all(projectIdentity, Math.max(0, Math.floor(limit)));
-    return rows.reverse();
 }
 
 /**
@@ -313,6 +290,28 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun("completed", null, {
                     memoryChanges: computeMemoryDelta(memoryBefore),
                 });
+                return { status: "completed" };
+            }
+
+            if (config.task === "classify-memories") {
+                // Cache-neutral metadata write (classified_at/importance/scope/
+                // shareable) — no memory_changes telemetry (status counts unchanged).
+                const result = await runClassify({
+                    db,
+                    client: deps.client,
+                    projectIdentity,
+                    parentSessionId: parent,
+                    sessionDirectory: deps.sessionDirectory,
+                    holderId,
+                    leaseKey,
+                    deadline,
+                    model: config.model,
+                    fallbackModels: config.fallbackModels,
+                });
+                recordRun("completed", null);
+                log(
+                    `[dreamer] classify-memories: stage=${result.stage} classified=${result.classified} changed=${result.changed} chunks=${result.chunks}`,
+                );
                 return { status: "completed" };
             }
 
@@ -820,33 +819,14 @@ async function runAgenticTask(
         task === "curate"
             ? getActiveUserMemories(db).map((um) => ({ id: um.id, content: um.content }))
             : undefined;
-    const classifyMemories =
-        task === "classify-memories"
-            ? getMemoriesByProject(db, projectIdentity).map((memory) => ({
-                  id: memory.id,
-                  category: memory.category,
-                  content: memory.content,
-                  importance: memory.importance,
-                  scope: memory.scope,
-                  shareable: memory.shareable,
-              }))
-            : undefined;
-    const classifyTrajectory =
-        task === "classify-memories"
-            ? loadRecentTrajectoryCompartments(db, projectIdentity)
-            : undefined;
 
-    // verify / verify-broad now run via runVerify (their own manifest path) — they
-    // never reach runAgenticTask. The agentic path handles curate / classify /
-    // maintain-docs.
+    // verify / verify-broad / classify-memories now run via their own non-agentic
+    // manifest runners and never reach runAgenticTask. The agentic path handles
+    // curate / maintain-docs only.
     let curateMemories: ReturnType<typeof loadActiveMemoryPromptMemories> | undefined;
     if (task === "curate") {
         curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
         log(`[dreamer] curate pool: in_scope=${curateMemories.length}`);
-    } else if (task === "classify-memories") {
-        log(
-            `[dreamer] classify pool: in_scope=${classifyMemories?.length ?? 0} trajectory=${classifyTrajectory?.length ?? 0}`,
-        );
     }
 
     const taskPrompt = buildDreamTaskPrompt(task, {
@@ -855,10 +835,6 @@ async function runAgenticTask(
         existingDocs,
         userMemories,
         curate: curateMemories ? { memories: curateMemories } : undefined,
-        classify:
-            classifyMemories && classifyTrajectory
-                ? { memories: classifyMemories, trajectory: classifyTrajectory }
-                : undefined,
     });
 
     const abortController = new AbortController();

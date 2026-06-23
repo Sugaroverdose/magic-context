@@ -138,6 +138,9 @@ const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
 const STRICT_TOOL_ALLOWLIST: ReadonlyMap<string, readonly string[]> = new Map([
 	["dreamer-retrospective", ["ctx_search"]],
 	["smart-note-compiler", []],
+	// classify-memories: a pure metadata transform (prompt in → XML out). ZERO
+	// tools — it scores from the memory text and the host applies the columns.
+	["dreamer-classifier", []],
 	// refresh-primers code investigator: read-only investigation of the CURRENT
 	// source. Pi's own canonical read-only set is exactly {read, grep, find, ls}
 	// (createReadOnlyToolDefinitions) — NO bash/edit/write — plus our ctx_search.

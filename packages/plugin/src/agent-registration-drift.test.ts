@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
     DREAMER_AGENT,
+    DREAMER_CLASSIFIER_AGENT,
     DREAMER_MEMORY_MAPPER_AGENT,
     DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS,
     DREAMER_PRIMER_INVESTIGATOR_AGENT,
@@ -56,6 +57,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 DREAMER_MEMORY_MAPPER_AGENT,
+                DREAMER_CLASSIFIER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,
@@ -63,6 +65,12 @@ describe("hidden-agent registration drift guard", () => {
                 SIDEKICK_AGENT,
             ].sort(),
         );
+    });
+
+    test("classifier is a zero-tool locked pure transform", () => {
+        expect(byId(DREAMER_CLASSIFIER_AGENT)?.allowedTools).toEqual([]);
+        expect(byId(DREAMER_CLASSIFIER_AGENT)?.lockPermissions).toBe(true);
+        expect(byId(DREAMER_CLASSIFIER_AGENT)?.maxSteps).toBe(4);
     });
 
     test("memory mapper inline allow-list matches canonical (read-only, no write/ctx_memory/ctx_search)", () => {
@@ -113,7 +121,8 @@ describe("hidden-agent registration drift guard", () => {
                 reg.id === DREAMER_RETROSPECTIVE_AGENT ||
                     reg.id === SMART_NOTE_COMPILER_AGENT ||
                     reg.id === DREAMER_PRIMER_INVESTIGATOR_AGENT ||
-                    reg.id === DREAMER_MEMORY_MAPPER_AGENT,
+                    reg.id === DREAMER_MEMORY_MAPPER_AGENT ||
+                    reg.id === DREAMER_CLASSIFIER_AGENT,
             );
         }
     });
@@ -221,6 +230,7 @@ describe("hidden-agent registration drift guard", () => {
                 DREAMER_RETROSPECTIVE_AGENT,
                 DREAMER_PRIMER_INVESTIGATOR_AGENT,
                 DREAMER_MEMORY_MAPPER_AGENT,
+                DREAMER_CLASSIFIER_AGENT,
                 SMART_NOTE_COMPILER_AGENT,
                 HISTORIAN_AGENT,
                 HISTORIAN_EDITOR_AGENT,

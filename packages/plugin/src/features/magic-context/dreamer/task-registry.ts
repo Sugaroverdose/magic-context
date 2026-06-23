@@ -29,11 +29,11 @@ export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 /**
  * The agentic tasks — those run as a generic dreamer agent session driven by
  * `buildDreamTaskPrompt`. The other canonical tasks (map-memories, verify,
- * verify-broad, review-user-memories, evaluate-smart-notes, primers,
- * retrospective) have their own specialized runners and do NOT go through the
- * prompt builder.
+ * verify-broad, classify-memories, review-user-memories, evaluate-smart-notes,
+ * primers, retrospective) have their own specialized runners and do NOT go
+ * through the prompt builder.
  */
-export const AGENTIC_DREAM_TASKS = ["curate", "classify-memories", "maintain-docs"] as const;
+export const AGENTIC_DREAM_TASKS = ["curate", "maintain-docs"] as const;
 
 export type AgenticDreamTask = (typeof AGENTIC_DREAM_TASKS)[number];
 

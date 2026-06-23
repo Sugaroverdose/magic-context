@@ -98,89 +98,6 @@ ${args.userProfile ? `\n### Global user profile (for the redundancy check)\n${ar
 ${renderMemoryList(args.memories)}`;
 }
 
-// ── Classify Memories ──────────────────────────────────────────────────────
-
-export interface ClassifyPromptMemory {
-    id: number;
-    category: string;
-    content: string;
-    importance: number;
-    scope: "project" | "ecosystem" | "universe";
-    shareable: number | boolean;
-}
-
-export interface ClassifyTrajectoryCompartment {
-    id: number;
-    title: string;
-    content: string;
-    createdAt: number;
-}
-
-function renderClassifyMemoryList(memories: ClassifyPromptMemory[]): string {
-    return memories
-        .map(
-            (memory) =>
-                `[${memory.id}] ${memory.category} importance=${memory.importance} scope=${memory.scope} shareable=${Boolean(memory.shareable)}\nContent: ${memory.content}`,
-        )
-        .join("\n\n");
-}
-
-function renderTrajectory(compartments: ClassifyTrajectoryCompartment[]): string {
-    if (compartments.length === 0) {
-        return "(no recent compartments available)";
-    }
-    return compartments
-        .map((compartment) => {
-            const created = new Date(compartment.createdAt).toISOString();
-            return `[#${compartment.id}] ${created} — ${compartment.title}\n${compartment.content}`;
-        })
-        .join("\n\n");
-}
-
-export function buildClassifyPrompt(args: {
-    projectPath: string;
-    memories: ClassifyPromptMemory[];
-    trajectory: ClassifyTrajectoryCompartment[];
-}): string {
-    return `## Task: Classify Project Memories
-
-**Project:** ${args.projectPath}
-
-Classify EVERY active/permanent memory below by writing metadata only with \`ctx_memory(action="classify", ... )\`. Do not rewrite, merge, archive, verify, or create memories in this task. Do not inspect the codebase; use the memory content and the recent trajectory below.
-
-### How to score importance (1–100)
-Importance decides which memories survive when the injected memory block is over budget: high scores stay in context, low scores drop first. So the score is only useful if it **discriminates** — if most memories land in the same band, you have not classified them, you have just labelled them.
-
-Use LLM judgment, not a formula. Blend:
-- **Durability / decay-rate value:** Will this fact still matter weeks from now, across sessions?
-- **Current trajectory:** Is it relevant to what the project has recently been doing?
-- **Operational impact:** Would missing this fact cause wrong code, wasted time, broken workflows, or violated constraints?
-
-Most memories are ordinary working facts — they belong in the middle, not the top. Reserve the high band for the genuinely load-bearing handful a teammate would be sunk without; push routine observations, one-off details, and now-obvious facts down. A "real, true fact" is not automatically important — truth is not importance.
-
-Rough anchors (not quotas — spread naturally within them): transient/obvious observations 1–30, ordinary helpful project facts 40–65, load-bearing rules/architecture/constraints 70–100. A constraint that is a genuine must/never/always rule the project actively depends on floors around 60; but not every memory in a category is load-bearing — a niche, dated, or narrowly-scoped external quirk (a minor upstream behavior, a harness detail) can sit lower even if it is a "constraint". Score the fact, not the label.
-
-Before you finish: if you find you assigned most of the pool to one band, re-read and differentiate — the spread should reflect that some facts genuinely matter far more than others.
-
-### Scope
-- \`project\` — only meaningful inside this repository/product (default when uncertain).
-- \`ecosystem\` — useful to sibling projects in the same stack, harness, provider, or company ecosystem.
-- \`universe\` — broadly true outside this codebase (protocol/platform/API facts), still written as a concise memory.
-
-### Shareability
-Shareability is about EXPOSURE, not scope: **would a teammate working on THIS SAME project benefit from seeing this memory, and is it free of anything personal, local, or sensitive?** If yes, set \`shareable=true\`. This is the COMMON case — most project knowledge is exactly what you'd hand a new teammate: architecture, design rules, conventions, constraints, file locations, hard-won gotchas. Mark those shareable even though they are specific to this repo's internals — that is precisely what helps a teammate here.
-
-Keep \`shareable=false\` only for what is tied to YOU or YOUR machine rather than the project: personal/absolute paths, usernames, local or private endpoints (e.g. localhost), credentials/secrets/tokens, customer data, machine-specific config, and personal working-style preferences. A fact's scope (project/ecosystem/universe) does NOT decide shareability — a project-internal architecture fact is usually shareable; a universally-true personal preference is not. The tool also fails closed and forces secret/credential/personal-path text to private regardless.
-
-Batch ids when they receive the same metadata. Otherwise classify individually. A memory is complete only after you call \`ctx_memory(action="classify", ids=[...], importance=..., scope="...", shareable=...)\` for it.
-
-### Recent trajectory (last ${args.trajectory.length} compartments)
-${renderTrajectory(args.trajectory)}
-
-### Memory pool
-${renderClassifyMemoryList(args.memories)}`;
-}
-
 // ── Retrospective ───────────────────────────────────────────────────────────
 
 export interface RetrospectivePromptEvent {
@@ -431,10 +348,6 @@ export function buildDreamTaskPrompt(
         curate?: {
             memories: CuratePromptMemory[];
         };
-        classify?: {
-            memories: ClassifyPromptMemory[];
-            trajectory: ClassifyTrajectoryCompartment[];
-        };
     },
 ): string {
     switch (task) {
@@ -443,12 +356,6 @@ export function buildDreamTaskPrompt(
                 projectPath: args.projectPath,
                 memories: args.curate?.memories ?? [],
                 userProfile: formatUserProfileList(args.userMemories),
-            });
-        case "classify-memories":
-            return buildClassifyPrompt({
-                projectPath: args.projectPath,
-                memories: args.classify?.memories ?? [],
-                trajectory: args.classify?.trajectory ?? [],
             });
         case "maintain-docs":
             return buildMaintainDocsPrompt(

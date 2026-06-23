@@ -3,11 +3,16 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
-import { appendCompartments } from "../compartment-storage";
-import { getMemoriesByProject, insertMemory, recordMemoryVerifications } from "../memory";
+import {
+    getMemoriesByProject,
+    getUnclassifiedMemoryIds,
+    insertMemory,
+    recordMemoryVerifications,
+} from "../memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { getUserMemoryCandidates, insertUserMemory } from "../user-memory/storage-user-memory";
+import { acquireLease } from "./lease";
 import { createDreamTaskExecutor } from "./task-executor";
 import { leaseKeyFor } from "./task-registry";
 import type { DreamTaskRuntimeConfig } from "./task-scheduler";
@@ -96,45 +101,43 @@ describe("createDreamTaskExecutor — curate", () => {
 });
 
 describe("createDreamTaskExecutor — classify-memories", () => {
-    test("loads active pool and last 30 trajectory compartments without verification gate", async () => {
+    test("runs the non-agentic XML transform and applies the manifest host-side", async () => {
         db = freshDb();
         const project = "/repo/project";
-        const memory = insertMemory(db, {
-            projectPath: project,
-            category: "CONSTRAINTS",
-            content: "External API requests must include x-trace-id for auditability.",
-        });
-        recordMemoryVerifications(db, memory.id, ["src/api.ts"], Date.now());
-        db.prepare(
-            "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, 'opencode', ?, ?)",
-        ).run("session-a", project, Date.now());
-        appendCompartments(
-            db,
-            "session-a",
-            Array.from({ length: 35 }, (_, i) => ({
-                sequence: i + 1,
-                startMessage: i * 2,
-                endMessage: i * 2 + 1,
-                startMessageId: `m${i}-a`,
-                endMessageId: `m${i}-b`,
-                title: `compartment ${i + 1}`,
-                content: `trajectory content ${i + 1}`,
-                p1: `trajectory p1 ${i + 1}`,
-            })),
-        );
+        // Stage 2 needs >= 10 memories in the pool to classify at all.
+        const ids: number[] = [];
+        for (let i = 0; i < 12; i += 1) {
+            const m = insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: `Memory ${i}: the transform lives in src/file${i}.ts.`,
+            });
+            if (m) ids.push(m.id);
+        }
 
         let capturedPrompt = "";
+        let capturedAgent = "";
+        // The classifier emits ONE <classify> manifest; the host parses + applies.
+        const manifest = `<classify>\n${ids
+            .map(
+                (id) =>
+                    `<memory id="${id}" importance="${40 + (id % 30)}" scope="project" shareable="true"/>`,
+            )
+            .join("\n")}\n</classify>`;
         const client = {
             session: {
                 list: mock(async () => ({ data: [] })),
                 create: mock(async () => ({ data: { id: "dream-child" } })),
-                prompt: mock(async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
-                    capturedPrompt = args.body?.parts?.[0]?.text ?? "";
-                    return {};
-                }),
-                messages: mock(async () => ({
-                    data: assistantMessages("classification complete"),
-                })),
+                prompt: mock(
+                    async (args: {
+                        body?: { agent?: string; parts?: Array<{ text?: string }> };
+                    }) => {
+                        capturedPrompt = args.body?.parts?.[0]?.text ?? "";
+                        capturedAgent = args.body?.agent ?? "";
+                        return {};
+                    },
+                ),
+                messages: mock(async () => ({ data: assistantMessages(manifest) })),
                 delete: mock(async () => ({})),
             },
         };
@@ -144,27 +147,32 @@ describe("createDreamTaskExecutor — classify-memories", () => {
             openOpenCodeDb: () => null,
         });
 
+        // classify applies the manifest host-side under a lease-guarded
+        // transaction, so the holder must actually hold the lease.
+        const leaseKey = leaseKeyFor("classify-memories", project);
+        expect(acquireLease(db, "holder-classify", leaseKey)).toBe(true);
+
         const result = await executor(
             { task: "classify-memories", schedule: "0 6 * * *", timeoutMinutes: 20 },
             {
                 db,
                 projectIdentity: project,
                 holderId: "holder-classify",
-                leaseKey: leaseKeyFor("classify-memories", project),
+                leaseKey,
             },
         );
 
         expect(result).toEqual({ status: "completed", schedulePatch: undefined });
+        // Zero-tool pure transform agent + the new XML prompt (no ctx_memory call).
+        expect(capturedAgent).toBe("dreamer-classifier");
         expect(capturedPrompt).toContain("## Task: Classify Project Memories");
-        expect(capturedPrompt).toContain(memory.content);
-        expect(capturedPrompt).toContain("importance=50 scope=project shareable=false");
-        expect(capturedPrompt).toContain('ctx_memory(action="classify"');
-        expect(capturedPrompt).not.toContain("Mapped files: src/api.ts");
-        expect(capturedPrompt).not.toContain("git log");
-        expect(capturedPrompt).toContain("compartment 35");
-        expect(capturedPrompt).toContain("trajectory p1 35");
-        expect(capturedPrompt).toContain("compartment 6");
-        expect(capturedPrompt).not.toContain("compartment 5");
+        expect(capturedPrompt).toContain("Emit one <classify> manifest");
+        expect(capturedPrompt).not.toContain('ctx_memory(action="classify"');
+
+        // Host applied the manifest: every memory is now classified (classified_at
+        // stamped → no longer unclassified) and importance moved off the default.
+        const stillUnclassified = getUnclassifiedMemoryIds(db, ids);
+        expect(stillUnclassified).toEqual([]);
     });
 });
 

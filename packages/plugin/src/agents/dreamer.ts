@@ -26,3 +26,9 @@ export const DREAMER_MEMORY_MAPPER_ALLOWED_TOOLS = [
     "aft_zoom",
     "aft_search",
 ] as const;
+
+// Pure-transform classifier for the classify-memories task: prompt in → ONE XML
+// manifest out, ZERO tools. classify scores metadata from the memory text alone
+// (no code inspection), and the host applies the column writes — so the agent
+// needs no tools at all. Locked so a user override can't grant any.
+export const DREAMER_CLASSIFIER_AGENT = "dreamer-classifier";

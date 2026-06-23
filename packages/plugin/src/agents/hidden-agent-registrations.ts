@@ -167,6 +167,18 @@ export function buildHiddenAgentRegistrations(args: {
             lockPermissions: true,
         },
         {
+            id: "dreamer-classifier",
+            prompt: args.dreamerPrompt,
+            // ZERO tools: classify scores importance/scope/shareable from the
+            // memory text alone (no code inspection), emits ONE XML manifest, and
+            // the host applies the column writes. A pure transform — no tool can
+            // help it, and locking prevents a user override from granting one.
+            allowedTools: [],
+            maxSteps: 4,
+            overrides: args.dreamerOverrides,
+            lockPermissions: true,
+        },
+        {
             id: "smart-note-compiler",
             prompt: args.smartNoteCompilerPrompt ?? args.dreamerPrompt,
             allowedTools: [],
