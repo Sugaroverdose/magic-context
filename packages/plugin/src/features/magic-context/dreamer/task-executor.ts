@@ -148,24 +148,35 @@ function loadActiveMemoryPromptMemories(
  * if the lease is lost, and writes one per-task dream_runs telemetry row.
  */
 export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecutor {
-    let parentSessionIdResolved = false;
-    let parentSessionId: string | undefined;
+    // Memoize the PROMISE, not a flag+value. Domain groups run concurrently
+    // (task-scheduler runs them under Promise.all), so several tasks call this at
+    // once. A flag-then-await memo set the "resolved" flag BEFORE the session.list
+    // await completed, so a concurrent caller in that window read the still-unset
+    // value (undefined) and created its child session with no parentID — which is
+    // why evaluate-smart-notes children consistently came back parent_id NULL
+    // (top-level in the picker) while the memory-domain group won the race. A
+    // single shared promise makes every caller await the same populated result.
+    let parentSessionIdPromise: Promise<string | undefined> | undefined;
 
-    const resolveParentSessionId = async (): Promise<string | undefined> => {
-        if (parentSessionIdResolved) return parentSessionId;
-        parentSessionIdResolved = true;
-        try {
-            const listResponse = await deps.client.session.list({
-                query: { directory: deps.sessionDirectory },
-            });
-            const sessions = shared.normalizeSDKResponse(listResponse, [] as { id?: string }[], {
-                preferResponseOnMissingData: true,
-            });
-            parentSessionId = sessions?.find((s) => typeof s?.id === "string")?.id;
-        } catch {
-            parentSessionId = undefined;
+    const resolveParentSessionId = (): Promise<string | undefined> => {
+        if (!parentSessionIdPromise) {
+            parentSessionIdPromise = (async () => {
+                try {
+                    const listResponse = await deps.client.session.list({
+                        query: { directory: deps.sessionDirectory },
+                    });
+                    const sessions = shared.normalizeSDKResponse(
+                        listResponse,
+                        [] as { id?: string }[],
+                        { preferResponseOnMissingData: true },
+                    );
+                    return sessions?.find((s) => typeof s?.id === "string")?.id;
+                } catch {
+                    return undefined;
+                }
+            })();
         }
-        return parentSessionId;
+        return parentSessionIdPromise;
     };
 
     return async (

@@ -100,6 +100,69 @@ describe("createDreamTaskExecutor — curate", () => {
     });
 });
 
+describe("createDreamTaskExecutor — parent session resolution", () => {
+    test("concurrent task runs all create children under the resolved parentID (no race-NULL)", async () => {
+        db = freshDb();
+        const project = "/repo/project";
+        for (let i = 0; i < 3; i += 1) {
+            insertMemory(db, {
+                projectPath: project,
+                category: "ARCHITECTURE",
+                content: `Memory ${i} backed by src/file${i}.ts.`,
+            });
+        }
+
+        // Delay session.list so the resolution await spans both concurrent calls
+        // — the exact window the old flag-before-await memo leaked undefined into.
+        let listCalls = 0;
+        const createParentIds: Array<string | undefined> = [];
+        const client = {
+            session: {
+                list: mock(async () => {
+                    listCalls += 1;
+                    await new Promise((r) => setTimeout(r, 20));
+                    return { data: [{ id: "real-parent-session" }] };
+                }),
+                create: mock(async (args: { body?: { parentID?: string } }) => {
+                    createParentIds.push(args.body?.parentID);
+                    return { data: { id: `child-${createParentIds.length}` } };
+                }),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({ data: assistantMessages("done") })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+
+        // Two DIFFERENT lease domains run concurrently (as the scheduler does via
+        // Promise.all): curate (memory domain) + maintain-docs (its own domain).
+        const curateKey = leaseKeyFor("curate", project);
+        const docsKey = leaseKeyFor("maintain-docs", project);
+        expect(acquireLease(db, "h-curate", curateKey)).toBe(true);
+        expect(acquireLease(db, "h-docs", docsKey)).toBe(true);
+        await Promise.all([
+            executor(
+                { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+                { db, projectIdentity: project, holderId: "h-curate", leaseKey: curateKey },
+            ),
+            executor(
+                { task: "maintain-docs", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+                { db, projectIdentity: project, holderId: "h-docs", leaseKey: docsKey },
+            ),
+        ]);
+
+        // The list runs once (shared promise), and BOTH children carry the real
+        // parent — none created with an undefined parentID.
+        expect(listCalls).toBe(1);
+        expect(createParentIds.length).toBe(2);
+        expect(createParentIds.every((id) => id === "real-parent-session")).toBe(true);
+    });
+});
+
 describe("createDreamTaskExecutor — classify-memories", () => {
     test("runs the non-agentic XML transform and applies the manifest host-side", async () => {
         db = freshDb();
