@@ -1,6 +1,11 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { formatDateTime } from "../../lib/api";
-import { ctxBarGeom, formatTokensShort, severityColorClass } from "../../lib/cache-format";
+import {
+  ctxBarGeom,
+  formatTokensShort,
+  normalizeEstimatedContextLimits,
+  severityColorClass,
+} from "../../lib/cache-format";
 import type { DbCacheEvent } from "../../lib/types";
 
 interface TimelineSegment {
@@ -70,7 +75,12 @@ export default function CacheTimeline(props: {
     setHoveredDrop({ event, xPct: (centerX / chartRect.width) * 100 });
   };
 
-  const segments = createMemo(() => segmentByContextLimit(props.events));
+  // Collapse climbing max-prompt fallbacks to a stable per-session limit before
+  // segmenting, so a session with no recorded limit renders as one box instead
+  // of fragmenting into one per step.
+  const segments = createMemo(() =>
+    segmentByContextLimit(normalizeEstimatedContextLimits(props.events)),
+  );
 
   const renderBar = (event: DbCacheEvent) => {
     const g = ctxBarGeom(event);

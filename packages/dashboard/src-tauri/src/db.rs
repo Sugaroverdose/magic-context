@@ -556,6 +556,14 @@ pub struct DbCacheEvent {
     // last_usage_context_limit; falls back to the session's own max prompt
     // (auto-scale) when the plugin never recorded a limit for the session.
     pub context_limit: i64,
+    // True when `context_limit` is the max-prompt FALLBACK (the plugin never
+    // recorded a real limit for this session) rather than a recorded value. The
+    // fallback is computed over whatever event batch reached this function, so on
+    // the live incremental (since-based) fetch it CLIMBS as the session grows
+    // (each delta's max ≈ the current prompt). The frontend must collapse these
+    // to a single stable per-session value before scaling/segmenting, or the
+    // timeline fragments into one box per step.
+    pub context_limit_estimated: bool,
     // True when the prompt shrank meaningfully vs the previous step — i.e. Magic
     // Context reclaimed context (execute-pass drops, comparting). The `cause`
     // field carries the reason pulled from the plugin logs for these steps.
@@ -1246,8 +1254,9 @@ fn build_db_cache_events_with_decisions(
             finish: row.finish,
             turn_id: String::new(),
             is_turn_start: false,
-            context_limit: 0, // filled in after sessions are known
-            is_drop: false,   // computed in pass 2
+            context_limit: 0,           // filled in after sessions are known
+            context_limit_estimated: false, // set with context_limit below
+            is_drop: false,             // computed in pass 2
         });
     }
 
@@ -1481,12 +1490,24 @@ fn build_db_cache_events_with_decisions(
     }
     for e in &mut chronological {
         let key = (e.harness, e.session_id.clone());
-        e.context_limit = recorded_limits
-            .get(&key)
-            .copied()
-            .filter(|&l| l > 0)
-            .or_else(|| max_prompt_by_session.get(&key).copied().filter(|&m| m > 0))
-            .unwrap_or(0);
+        let recorded = recorded_limits.get(&key).copied().filter(|&l| l > 0);
+        match recorded {
+            Some(limit) => {
+                e.context_limit = limit;
+                e.context_limit_estimated = false;
+            }
+            None => {
+                // No recorded limit → max-prompt fallback. Mark it estimated so
+                // the frontend collapses it to a stable per-session value (the
+                // batch-local max climbs on the incremental fetch path).
+                e.context_limit = max_prompt_by_session
+                    .get(&key)
+                    .copied()
+                    .filter(|&m| m > 0)
+                    .unwrap_or(0);
+                e.context_limit_estimated = e.context_limit > 0;
+            }
+        }
     }
 
     chronological
@@ -6425,6 +6446,7 @@ mod get_session_cache_events_by_turn_count_tests {
             turn_id: String::new(),
             is_turn_start,
             context_limit: 0,
+            context_limit_estimated: false,
             is_drop: false,
         }
     }

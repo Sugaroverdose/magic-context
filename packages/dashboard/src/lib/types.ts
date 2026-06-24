@@ -416,6 +416,11 @@ export interface DbCacheEvent {
   turn_id: string;
   is_turn_start: boolean;
   context_limit: number;
+  /** True when `context_limit` is the max-prompt fallback (no recorded limit).
+   *  The fallback is batch-local and climbs on the incremental fetch path, so
+   *  estimated limits must be collapsed to a stable per-session value before
+   *  segmenting/scaling the timeline (see normalizeEstimatedContextLimits). */
+  context_limit_estimated: boolean;
   is_drop: boolean;
 }
 

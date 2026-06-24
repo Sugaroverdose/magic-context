@@ -18,6 +18,39 @@ export function severityColorClass(severity: string): string {
   }
 }
 
+// Collapse ESTIMATED (max-prompt fallback) context limits to a single stable
+// value per session, so the timeline doesn't fragment into one box per step.
+//
+// Why: when the plugin never recorded a real limit for a session (e.g. an
+// untracked subagent worktree), the backend falls back to the session's
+// max-prompt — but that's computed over whatever event batch reached it, so on
+// the live incremental (since-based) fetch it CLIMBS as the session grows (85k →
+// 86k → … → 95k). segmentByContextLimit then starts a new segment on every step.
+//
+// Fix: per session, take the MAX estimated limit across the rendered window and
+// stamp it on every estimated event of that session. The window's largest prompt
+// becomes the stable scale; bars read as a consistent fill instead of all ~100%.
+// Recorded limits (context_limit_estimated=false) are left untouched, so a
+// genuine mid-session model switch still segments correctly.
+//
+// Returns a new array (does not mutate the inputs); only estimated events are
+// rewritten, and only their `context_limit`.
+export function normalizeEstimatedContextLimits(events: DbCacheEvent[]): DbCacheEvent[] {
+  const maxEstimatedBySession = new Map<string, number>();
+  for (const e of events) {
+    if (!e.context_limit_estimated) continue;
+    const key = `${e.harness}:${e.session_id}`;
+    const prev = maxEstimatedBySession.get(key) ?? 0;
+    if (e.context_limit > prev) maxEstimatedBySession.set(key, e.context_limit);
+  }
+  if (maxEstimatedBySession.size === 0) return events;
+  return events.map((e) => {
+    if (!e.context_limit_estimated) return e;
+    const stable = maxEstimatedBySession.get(`${e.harness}:${e.session_id}`) ?? e.context_limit;
+    return stable === e.context_limit ? e : { ...e, context_limit: stable };
+  });
+}
+
 // Context-scaled timeline-bar geometry:
 //   outer height = prompt / context_window  (how full the window is)
 //   inner segment = cache_read / prompt       (the cached, cheap portion)
