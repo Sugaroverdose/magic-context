@@ -8,6 +8,7 @@ import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
 const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
+const originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(prefix: string): string {
 	const path = mkdtempSync(join(tmpdir(), prefix));
@@ -17,6 +18,12 @@ function makeTempRoot(prefix: string): string {
 
 function withHome(home: string): void {
 	process.env.HOME = home;
+	// The user config base is `(XDG_CONFIG_HOME ?? <HOME>/.config)/cortexkit/...`.
+	// writeUserConfig() writes under `<HOME>/.config`, so pin XDG_CONFIG_HOME to
+	// match — otherwise a CI runner that exports its own XDG_CONFIG_HOME makes the
+	// loader look elsewhere and these tests read schema defaults (the green-on-my-
+	// machine / red-in-CI hermeticity gap this guards against).
+	process.env.XDG_CONFIG_HOME = join(home, ".config");
 }
 
 function writeConfig(path: string, text: string): void {
@@ -54,6 +61,11 @@ afterEach(() => {
 		delete process.env.HOME;
 	} else {
 		process.env.HOME = originalHome;
+	}
+	if (originalXdgConfigHome === undefined) {
+		delete process.env.XDG_CONFIG_HOME;
+	} else {
+		process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
 	}
 
 	for (const path of tempRoots.splice(0)) {
