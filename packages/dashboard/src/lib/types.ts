@@ -434,8 +434,9 @@ export interface SessionCacheStats {
 export interface ConfigFile {
   path: string;
   exists: boolean;
-  content: string;
+  content: string | null;
   source: string;
+  error?: string | null;
 }
 
 export interface ProjectConfigEntry {

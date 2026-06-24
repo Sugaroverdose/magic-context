@@ -608,6 +608,7 @@ async fn run_via_login_shell(_command: String) -> Option<String> {
     None
 }
 
+#[cfg(any(windows, test))]
 fn pick_first_line(stdout: &str) -> Option<String> {
     let first_line = stdout.lines().next()?.trim().to_string();
     if !first_line.is_empty() {

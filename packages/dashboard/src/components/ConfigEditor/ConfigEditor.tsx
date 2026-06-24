@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import {
   createEffect,
   createMemo,
@@ -8,7 +9,9 @@ import {
   Show,
 } from "solid-js";
 import { getConfig, getProjectConfigs, saveConfig, saveProjectConfig } from "../../lib/api";
+import { jsoncErrorMessage, parseJsonc } from "../../lib/jsonc";
 import type { ProjectConfigEntry } from "../../lib/types";
+import { configSaveBlocker } from "./config-save-guard";
 import type { DreamTaskConfig } from "./DreamerTasksField";
 import DreamerTasksField from "./DreamerTasksField";
 import ModelSelect from "./ModelSelect";
@@ -34,133 +37,16 @@ function loadConfigTarget(): ConfigTarget {
   }
 }
 
-// Minimal JSONC parser: strip comments while respecting string literals, then parse.
-/**
- * JSONC parser ported from `packages/plugin/src/shared/jsonc-parser.ts`.
- * Strips line/block comments AND trailing commas (both valid JSONC).
- * The previous parser only stripped comments, so a config with trailing
- * commas (the recommended editor-friendly style — and what `doctor`/setup
- * writes by default) caused `JSON.parse` to throw, returned `{}`, and
- * every field fell back to its default. That made the entire Config page
- * show defaults even for users with valid config files.
- */
-function stripJsonComments(content: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-
-  for (let index = 0; index < content.length; index += 1) {
-    const char = content[index];
-    const next = content[index + 1];
-
-    if (inLineComment) {
-      if (char === "\n") {
-        inLineComment = false;
-        result += char;
-      }
-      continue;
-    }
-
-    if (inBlockComment) {
-      if (char === "*" && next === "/") {
-        inBlockComment = false;
-        index += 1;
-      }
-      continue;
-    }
-
-    if (inString) {
-      result += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      inLineComment = true;
-      index += 1;
-      continue;
-    }
-
-    if (char === "/" && next === "*") {
-      inBlockComment = true;
-      index += 1;
-      continue;
-    }
-
-    result += char;
-  }
-
-  return result;
+interface ParsedConfigContent {
+  value: Record<string, unknown>;
+  error: string | null;
 }
 
-function stripTrailingCommas(content: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < content.length; index += 1) {
-    const char = content[index];
-
-    if (inString) {
-      result += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      result += char;
-      continue;
-    }
-
-    if (char === ",") {
-      let lookahead = index + 1;
-      while (lookahead < content.length && /\s/.test(content[lookahead] ?? "")) {
-        lookahead += 1;
-      }
-      const next = content[lookahead];
-      if (next === "}" || next === "]") {
-        continue;
-      }
-    }
-
-    result += char;
-  }
-
-  return result;
-}
-
-function parseJsonc(text: string): Record<string, unknown> {
+function parseConfigContent(text: string): ParsedConfigContent {
   try {
-    const normalized = stripTrailingCommas(stripJsonComments(text));
-    const parsed = JSON.parse(normalized);
-    // Defend against `null`, primitives, arrays — `Record<string, unknown>` lies otherwise.
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-    return {};
-  } catch {
-    return {};
+    return { value: parseJsonc(text), error: null };
+  } catch (error) {
+    return { value: {}, error: jsoncErrorMessage(error) };
   }
 }
 
@@ -346,13 +232,15 @@ const RANGE_SLIDER_FIELDS = new Set([
 
 function ConfigForm(props: {
   content: string;
-  onSave: (content: string) => void;
+  exists: boolean;
+  readError?: string | null;
+  onSave: (content: string) => void | Promise<void>;
   saveStatus: string | null;
   models: string[];
 }) {
   const [showRaw, setShowRaw] = createSignal(false);
   const [rawEdit, setRawEdit] = createSignal<string | null>(null);
-  const [formData, setFormData] = createSignal<Record<string, unknown>>(parseJsonc(props.content));
+  const [formData, setFormData] = createSignal<Record<string, unknown>>({});
   const [embeddingTestResult, setEmbeddingTestResult] = createSignal<{
     ok: boolean;
     message: string;
@@ -424,12 +312,28 @@ function ConfigForm(props: {
   }
   const models = () => props.models;
 
-  // Reset form data when content prop changes
-  const parsed = createMemo(() => parseJsonc(props.content));
-  createEffect(() => setFormData(parsed()));
+  const parsedState = createMemo(() => parseConfigContent(props.content));
+  const parsed = createMemo(() => parsedState().value);
+  createEffect(() => {
+    const next = parsedState();
+    if (!next.error) {
+      setFormData(next.value);
+    }
+  });
+
+  // Structured saves merge form fields into the parsed file. If reading or
+  // parsing failed, saving the fallback object would erase secrets and unknown settings.
+  const structuredSaveBlocker = createMemo(() =>
+    configSaveBlocker({
+      exists: props.exists,
+      readError: props.readError,
+      parseError: parsedState().error,
+    }),
+  );
+  const saveMessage = () => structuredSaveBlocker() ?? props.saveStatus;
 
   const hasChanges = createMemo(() => {
-    return JSON.stringify(formData()) !== JSON.stringify(parsed());
+    return !structuredSaveBlocker() && JSON.stringify(formData()) !== JSON.stringify(parsed());
   });
 
   // Section order: Tags & Cleanup goes last (rendered after agent cards)
@@ -458,6 +362,10 @@ function ConfigForm(props: {
   };
 
   const handleFormSave = () => {
+    if (structuredSaveBlocker()) {
+      return;
+    }
+
     // Merge form data with original to preserve unknown keys
     const original = parsed();
     const merged = { ...original, ...formData() };
@@ -488,7 +396,10 @@ function ConfigForm(props: {
     if (content != null) {
       props.onSave(content);
       setRawEdit(null);
-      setFormData(parseJsonc(content));
+      const next = parseConfigContent(content);
+      if (!next.error) {
+        setFormData(next.value);
+      }
     }
   };
 
@@ -634,15 +545,17 @@ function ConfigForm(props: {
           </button>
         </div>
         <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
-          <Show when={props.saveStatus}>
-            <span
-              style={{
-                "font-size": "12px",
-                color: props.saveStatus?.startsWith("✓") ? "var(--green)" : "var(--red)",
-              }}
-            >
-              {props.saveStatus}
-            </span>
+          <Show when={saveMessage()}>
+            {(message) => (
+              <span
+                style={{
+                  "font-size": "12px",
+                  color: message().startsWith("✓") ? "var(--green)" : "var(--red)",
+                }}
+              >
+                {message()}
+              </span>
+            )}
           </Show>
           <button
             type="button"
@@ -861,7 +774,6 @@ function ConfigForm(props: {
                                       }
                                       setEmbeddingTestResult({ ok: false, message: "Testing..." });
                                       try {
-                                        const { invoke } = await import("@tauri-apps/api/core");
                                         // Rust returns the structured outcome directly (not
                                         // `Result<T, String>` anymore). Any thrown error from
                                         // `invoke` itself is a tauri infrastructure failure
@@ -1951,15 +1863,15 @@ function ProjectConfigDetail(props: {
 
   const [config] = createResource(
     () => configPath(),
-    async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      return (await invoke("get_config", {
-        source: "project",
-        projectPath: props.entry.worktree,
-      })) as import("../../lib/types").ConfigFile;
-    },
+    async () => getConfig("project", props.entry.worktree),
   );
 
+  const projectReadBlocker = createMemo(() =>
+    configSaveBlocker({
+      exists: config()?.exists ?? false,
+      readError: config()?.error,
+    }),
+  );
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
 
   const handleSave = async (content: string) => {
@@ -1996,12 +1908,21 @@ function ProjectConfigDetail(props: {
         </tbody>
       </table>
       <Show when={config()} fallback={<div class="empty-state">Loading...</div>}>
-        <ConfigForm
-          content={config()?.content ?? ""}
-          onSave={handleSave}
-          saveStatus={saveStatus()}
-          models={props.models}
-        />
+        <Show
+          when={projectReadBlocker()}
+          fallback={
+            <ConfigForm
+              content={config()?.content ?? ""}
+              exists={config()?.exists ?? true}
+              readError={config()?.error}
+              onSave={handleSave}
+              saveStatus={saveStatus()}
+              models={props.models}
+            />
+          }
+        >
+          {(message) => <div class="empty-state">{message()}</div>}
+        </Show>
       </Show>
     </div>
   );
@@ -2015,6 +1936,12 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
   const [selectedProject, setSelectedProject] = createSignal<ProjectConfigEntry | null>(null);
+  const userReadBlocker = createMemo(() =>
+    configSaveBlocker({
+      exists: userConfig()?.exists ?? false,
+      readError: userConfig()?.error,
+    }),
+  );
 
   const effectiveModels = () => props.models;
 
@@ -2126,12 +2053,21 @@ export default function ConfigEditor(props: { models: string[]; piModels: string
                 </div>
               }
             >
-              <ConfigForm
-                content={userConfig()?.content ?? ""}
-                onSave={handleUserSave}
-                saveStatus={saveStatus()}
-                models={effectiveModels()}
-              />
+              <Show
+                when={userReadBlocker()}
+                fallback={
+                  <ConfigForm
+                    content={userConfig()?.content ?? ""}
+                    exists={userConfig()?.exists ?? true}
+                    readError={userConfig()?.error}
+                    onSave={handleUserSave}
+                    saveStatus={saveStatus()}
+                    models={effectiveModels()}
+                  />
+                }
+              >
+                {(message) => <div class="empty-state">{message()}</div>}
+              </Show>
             </Show>
           </Show>
         </Show>

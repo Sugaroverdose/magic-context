@@ -371,8 +371,8 @@ export async function getCacheEventsFromDb(
 
 // ── Config API ──────────────────────────────────────────────
 
-export async function getConfig(source: string): Promise<ConfigFile> {
-  return invoke("get_config", { source });
+export async function getConfig(source: string, projectPath?: string): Promise<ConfigFile> {
+  return invoke("get_config", { source, projectPath });
 }
 
 export async function saveConfig(source: string, content: string): Promise<void> {
@@ -402,12 +402,10 @@ export async function saveProjectConfig(projectPath: string, content: string): P
 }
 
 export async function getAvailableModels(): Promise<string[]> {
-  const { invoke } = await import("@tauri-apps/api/core");
   return invoke("get_available_models");
 }
 
 export async function getAvailablePiModels(): Promise<string[]> {
-  const { invoke } = await import("@tauri-apps/api/core");
   return invoke("get_available_pi_models");
 }
 

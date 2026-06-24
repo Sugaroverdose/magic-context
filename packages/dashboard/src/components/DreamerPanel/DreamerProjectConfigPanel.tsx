@@ -8,6 +8,7 @@ import {
   removeDreamerBlockJsonc,
 } from "../../lib/jsonc";
 import type { ConfigFile, DreamerProject } from "../../lib/types";
+import { configSaveBlocker } from "../ConfigEditor/config-save-guard";
 import DreamerTasksField, { type DreamTaskConfig } from "../ConfigEditor/DreamerTasksField";
 
 /**
@@ -33,17 +34,28 @@ export default function DreamerProjectConfigPanel(props: {
   );
 
   // The full parsed config object (so we preserve unrelated keys on save), and
-  // the editable dreamer.tasks slice. Malformed JSONC is surfaced and saves are
-  // refused; never substitute an empty object for a parse failure.
+  // the editable dreamer.tasks slice. Read failures and malformed JSONC are
+  // surfaced because patching an empty fallback would discard unrelated settings.
   const parsedConfig = createMemo(() => {
+    const config = configFile();
+    if (config?.exists && config.error) {
+      return { value: {} as Record<string, unknown>, error: null as string | null };
+    }
     try {
-      return { value: parseJsonc(configFile()?.content ?? ""), error: null as string | null };
+      return { value: parseJsonc(config?.content ?? ""), error: null as string | null };
     } catch (error) {
       return { value: {} as Record<string, unknown>, error: jsoncErrorMessage(error) };
     }
   });
   const parsed = () => parsedConfig().value;
   const parseError = () => parsedConfig().error;
+  const saveBlocker = createMemo(() =>
+    configSaveBlocker({
+      exists: configFile()?.exists ?? false,
+      readError: configFile()?.error,
+      parseError: parseError(),
+    }),
+  );
   const dreamerObj = (): Record<string, unknown> => {
     const d = parsed().dreamer;
     return d && typeof d === "object" && !Array.isArray(d) ? (d as Record<string, unknown>) : {};
@@ -63,9 +75,19 @@ export default function DreamerProjectConfigPanel(props: {
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
   const [dirty, setDirty] = createSignal(false);
 
+  const refuseBlockedSave = () => {
+    const blocker = saveBlocker();
+    if (!blocker) {
+      return false;
+    }
+    setSaveStatus(`✕ ${blocker}`);
+    setTimeout(() => setSaveStatus(null), 5000);
+    return true;
+  };
+
   const handleSave = async () => {
     const wt = worktree();
-    if (!wt) return;
+    if (!wt || refuseBlockedSave()) return;
     try {
       const nextConfig = patchDreamerTasksJsonc(
         configFile()?.content ?? "",
@@ -84,7 +106,7 @@ export default function DreamerProjectConfigPanel(props: {
 
   const revertToInherited = async () => {
     const wt = worktree();
-    if (!wt) return;
+    if (!wt || refuseBlockedSave()) return;
     try {
       // Drop the dreamer block entirely → project inherits the global config.
       await saveProjectConfig(wt, removeDreamerBlockJsonc(configFile()?.content ?? ""));
@@ -128,13 +150,13 @@ export default function DreamerProjectConfigPanel(props: {
                 saved to the project's <code>magic-context.jsonc</code> (version-controllable — they
                 travel to teammates' clones).
               </p>
-              <Show when={parseError()}>
+              <Show when={saveBlocker()}>
                 {(message) => (
                   <p
                     class="config-field-desc"
                     style={{ color: "var(--danger, #e5484d)", "margin-bottom": "12px" }}
                   >
-                    Project config JSONC is invalid: {message()}
+                    {message()}
                   </p>
                 )}
               </Show>
@@ -152,11 +174,21 @@ export default function DreamerProjectConfigPanel(props: {
 
         <Show when={props.project.worktree && !configFile.loading}>
           <div class="modal-footer dreamer-config-actions">
-            <button type="button" class="btn primary sm" disabled={!dirty()} onClick={handleSave}>
+            <button
+              type="button"
+              class="btn primary sm"
+              disabled={!dirty() || Boolean(saveBlocker())}
+              onClick={handleSave}
+            >
               Save
             </button>
             <Show when={props.project.has_project_config}>
-              <button type="button" class="btn sm" onClick={revertToInherited}>
+              <button
+                type="button"
+                class="btn sm"
+                disabled={Boolean(saveBlocker())}
+                onClick={revertToInherited}
+              >
                 Revert to inherited
               </button>
             </Show>

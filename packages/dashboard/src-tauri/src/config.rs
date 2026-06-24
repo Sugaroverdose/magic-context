@@ -66,35 +66,48 @@ pub fn default_task_schedule(task: &str) -> &'static str {
 pub struct ConfigFile {
     pub path: String,
     pub exists: bool,
-    pub content: String,
-    pub source: String, // "user" or "project"
+    pub content: Option<String>,
+    pub source: String, // "user", "pi", or "project"
+    pub error: Option<String>,
 }
 
 pub type ConfigFileResponse = ConfigFile;
 
 pub fn read_config(path: &PathBuf, source: &str) -> ConfigFile {
-    let exists = path.exists();
-    let content = if exists {
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else {
-        String::new()
+    let base = || ConfigFile {
+        path: path.to_string_lossy().to_string(),
+        exists: false,
+        content: None,
+        source: source.to_string(),
+        error: None,
     };
 
-    ConfigFile {
-        path: path.to_string_lossy().to_string(),
-        exists,
-        content,
-        source: source.to_string(),
+    // Preserve read failures instead of treating them as empty files; the
+    // structured editor would otherwise write that empty state over API keys.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => match std::fs::read_to_string(path) {
+            Ok(content) => ConfigFile {
+                exists: true,
+                content: Some(content),
+                ..base()
+            },
+            Err(e) => ConfigFile {
+                exists: true,
+                error: Some(format!("Failed to read config: {e}")),
+                ..base()
+            },
+        },
+        Err(e) if e.kind() == ErrorKind::NotFound => base(),
+        Err(e) => ConfigFile {
+            exists: true,
+            error: Some(format!("Failed to inspect config path: {e}")),
+            ..base()
+        },
     }
 }
 
 pub fn write_config(path: &PathBuf, content: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {}", e))?;
-    }
-    std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))?;
-    Ok(())
+    write_config_atomic(path, content, None)
 }
 
 pub fn write_project_config(project_path: &str, path: &Path, content: &str) -> Result<(), String> {
@@ -387,18 +400,49 @@ mod tests {
         let missing = read_pi_config().unwrap();
         assert_eq!(missing.path, expected.to_string_lossy());
         assert!(!missing.exists);
-        assert_eq!(missing.content, "");
+        assert_eq!(missing.content.as_deref(), None);
         assert_eq!(missing.source, "pi");
+        assert!(missing.error.is_none());
 
         let content = "{\n  \"enabled\": true\n}";
         write_pi_config(content.to_string()).unwrap();
 
         let existing = read_pi_config().unwrap();
         assert!(existing.exists);
-        assert_eq!(existing.content, content);
+        assert_eq!(existing.content.as_deref(), Some(content));
         assert_eq!(existing.source, "pi");
+        assert!(existing.error.is_none());
 
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn read_config_reports_absent_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.jsonc");
+
+        let config = read_config(&path, "user");
+
+        assert!(!config.exists);
+        assert_eq!(config.content.as_deref(), None);
+        assert!(config.error.is_none());
+    }
+
+    #[test]
+    fn read_config_reports_error_for_present_unreadable_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magic-context.jsonc");
+        std::fs::create_dir(&path).unwrap();
+
+        let config = read_config(&path, "user");
+
+        assert!(config.exists);
+        assert_eq!(config.content.as_deref(), None);
+        let error = config.error.as_deref().unwrap_or("");
+        assert!(
+            error.contains("Failed to read config"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -470,11 +514,7 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::create_dir(&config_path).unwrap();
 
-        let err = write_project_config(
-            canonical_project.to_str().unwrap(),
-            &config_path,
-            "{}\n",
-        )
+        let err = write_project_config(canonical_project.to_str().unwrap(), &config_path, "{}\n")
             .expect_err("directory target must be refused");
         assert!(err.contains("regular file"), "unexpected error: {err}");
     }
