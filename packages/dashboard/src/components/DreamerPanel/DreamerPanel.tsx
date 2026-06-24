@@ -3,13 +3,16 @@ import {
   formatDateTime,
   formatRelativeTime,
   getAvailableModels,
+  getConfig,
   getDreamerProjects,
   getDreamRunMemoryChanges,
   getDreamRuns,
   getDreamState,
   getProjects,
+  saveProjectConfig,
 } from "../../lib/api";
 import { describeCron } from "../../lib/cron";
+import { jsoncErrorMessage, parseJsonc, patchDreamerTasksJsonc } from "../../lib/jsonc";
 import type {
   DreamerProject,
   DreamerProjectTask,
@@ -20,7 +23,27 @@ import type {
   DreamRunTask,
   ProjectInfo,
 } from "../../lib/types";
+import { TASKS } from "../ConfigEditor/DreamerTasksField";
 import DreamerProjectConfigPanel from "./DreamerProjectConfigPanel";
+import DreamerTaskCard from "./DreamerTaskCard";
+
+// Default cron used when ENABLING a task whose schema default is "" (disabled),
+// e.g. maintain-docs. Keeps the toggle's "on" meaningful for every task. Users
+// fine-tune the exact cron via the gear dialog.
+const ENABLE_FALLBACK_CRON = "0 3 * * *";
+
+function taskMeta(taskName: string): {
+  label: string;
+  description: string;
+  defaultSchedule: string;
+} {
+  const meta = TASKS.find((t) => t.name === taskName);
+  return {
+    label: meta?.label ?? taskName,
+    description: meta?.description ?? "",
+    defaultSchedule: meta?.defaultSchedule ?? "",
+  };
+}
 
 type ProjectRunGroup = {
   project: ProjectInfo | undefined;
@@ -118,6 +141,58 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
   // Which project cards are expanded (task list), and which has the gear dialog open.
   const [expandedCards, setExpandedCards] = createSignal<Set<string>>(new Set());
   const [configProject, setConfigProject] = createSignal<DreamerProject | null>(null);
+  // Per-task in-flight toggle keys ("<identity>::<task>") + a transient error.
+  const [togglingTasks, setTogglingTasks] = createSignal<Set<string>>(new Set());
+  const [toggleError, setToggleError] = createSignal<string | null>(null);
+
+  // Flip one task on/off by writing ONLY that task's schedule into the project's
+  // magic-context.jsonc (a partial override the plugin deep-merges over global):
+  // enable → its default cron (or a sane fallback for default-disabled tasks),
+  // disable → "". Preserves comments + every other key via the JSONC patch.
+  const toggleTask = async (project: DreamerProject, taskName: string, enable: boolean) => {
+    const wt = project.worktree;
+    if (!wt) return;
+    const key = `${project.identity}::${taskName}`;
+    setTogglingTasks((prev) => new Set(prev).add(key));
+    setToggleError(null);
+    try {
+      const file = await getConfig("project", wt);
+      const text = file.content ?? "";
+      const parsed = text.trim() === "" ? {} : parseJsonc(text);
+      const dreamer =
+        parsed.dreamer && typeof parsed.dreamer === "object" && !Array.isArray(parsed.dreamer)
+          ? (parsed.dreamer as Record<string, unknown>)
+          : {};
+      const tasks =
+        dreamer.tasks && typeof dreamer.tasks === "object" && !Array.isArray(dreamer.tasks)
+          ? { ...(dreamer.tasks as Record<string, Record<string, unknown>>) }
+          : {};
+      const existing =
+        tasks[taskName] && typeof tasks[taskName] === "object" ? { ...tasks[taskName] } : {};
+      if (enable) {
+        const def = taskMeta(taskName).defaultSchedule;
+        // Reuse a previously-configured cron if present; else the schema default;
+        // else a sane nightly fallback (default-disabled tasks like maintain-docs).
+        const prior = typeof existing.schedule === "string" ? existing.schedule : "";
+        existing.schedule = prior !== "" ? prior : def !== "" ? def : ENABLE_FALLBACK_CRON;
+      } else {
+        existing.schedule = "";
+      }
+      tasks[taskName] = existing;
+      const nextConfig = patchDreamerTasksJsonc(text, tasks);
+      await saveProjectConfig(wt, nextConfig);
+      refetchDreamerProjects();
+    } catch (err) {
+      setToggleError(`Couldn't update ${taskName}: ${jsoncErrorMessage(err)}`);
+      setTimeout(() => setToggleError(null), 6000);
+    } finally {
+      setTogglingTasks((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
 
   // Lazy per-run memory-change detail (which memories were written/archived/
   // merged), fetched on first expand and cached by run id. The run row stores
@@ -386,36 +461,45 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                   <button
                     type="button"
                     class="dreamer-gear"
-                    title="Configure dreamer for this project"
+                    title="Configure dreamer for this project (model, exact cron)"
                     disabled={!project.worktree}
                     onClick={() => setConfigProject(project)}
                   >
                     ⚙
                   </button>
                 </div>
-                <div class="dreamer-task-list">
+
+                <Show when={toggleError()}>
+                  {(message) => <div class="dreamer-toggle-error">{message()}</div>}
+                </Show>
+
+                <div class="dreamer-task-card-grid">
                   <For each={project.tasks}>
-                    {(task) => (
-                      <div class="dreamer-task-line">
-                        <span class={`status-dot ${taskLight(task)}`} title={lightTitle(task)} />
-                        <span class="dreamer-task-name">{formatTaskLabel(task.task)}</span>
-                        <span class="dreamer-task-sched">
-                          {isTaskEnabled(task) ? describeCron(task.schedule ?? "") : "disabled"}
-                        </span>
-                        <Show when={isTaskEnabled(task) && task.next_due_at != null}>
-                          <span class="dreamer-task-next">
-                            {(task.next_due_at ?? 0) > Date.now()
-                              ? `· ${formatRelativeTime(task.next_due_at ?? 0)}`
-                              : "· overdue"}
-                          </span>
-                        </Show>
-                        <Show when={task.last_error}>
-                          <span class="dreamer-task-err" title={task.last_error ?? ""}>
-                            {task.last_error}
-                          </span>
-                        </Show>
-                      </div>
-                    )}
+                    {(task) => {
+                      const meta = taskMeta(task.task);
+                      const enabled = isTaskEnabled(task);
+                      const nextDue = () => {
+                        if (!enabled || task.next_due_at == null) return null;
+                        return task.next_due_at > Date.now()
+                          ? formatRelativeTime(task.next_due_at)
+                          : "overdue";
+                      };
+                      return (
+                        <DreamerTaskCard
+                          taskName={task.task}
+                          label={meta.label}
+                          description={meta.description}
+                          scheduleText={enabled ? describeCron(task.schedule ?? "") : "Disabled"}
+                          nextDueText={nextDue()}
+                          enabled={enabled}
+                          light={taskLight(task)}
+                          lastError={task.last_error}
+                          canToggle={project.worktree != null}
+                          busy={togglingTasks().has(`${project.identity}::${task.task}`)}
+                          onToggle={(enable) => void toggleTask(project, task.task, enable)}
+                        />
+                      );
+                    }}
                   </For>
                 </div>
               </div>
