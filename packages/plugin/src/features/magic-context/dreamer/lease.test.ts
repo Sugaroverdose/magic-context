@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -229,6 +229,47 @@ describe("startLeaseHeartbeat", () => {
         expect(getLeaseHolder(db)).toBe("holder-a");
         hb.stop();
         closeQuietly(db);
+    });
+
+    it("declares lost (not reclaim) when the lease lapsed past a full TTL — split-brain guard", async () => {
+        // A >TTL stall (e.g. machine sleep): our lease lapsed and a sibling could
+        // have acquired AND mutated in the gap. Even though the lease may now be
+        // free, blindly reclaiming + continuing on our stale snapshot is
+        // split-brain — the heartbeat must declare lost. (A short ≤TTL gap still
+        // reclaims; see the transient-tolerant test above.)
+        const db = makeDb();
+        const realNow = Date.now();
+        const clock = { value: realNow };
+        const nowSpy = spyOn(Date, "now").mockImplementation(() => clock.value);
+        try {
+            expect(acquireLease(db, "holder-a")).toBe(true);
+            let lostReason: string | null = null;
+            // Short interval so a real timer beat fires; the FIRST synchronous
+            // beat confirms ownership at t0 (lastConfirmedAt = realNow).
+            const hb = startLeaseHeartbeat(
+                db,
+                "holder-a",
+                DREAMING_LEASE_KEY,
+                (reason) => {
+                    lostReason = reason;
+                },
+                20,
+            );
+            expect(hb.lost).toBe(false);
+
+            // Jump the clock 3 minutes (> 2min TTL): our own lease has lapsed
+            // (isLeaseActive false), so the next beat's renewLease fails and the
+            // gap exceeds the TTL.
+            clock.value = realNow + 3 * 60 * 1000;
+            await sleep(60);
+
+            expect(hb.lost).toBe(true);
+            expect(lostReason).toContain("past TTL");
+            hb.stop();
+        } finally {
+            nowSpy.mockRestore();
+            closeQuietly(db);
+        }
     });
 
     it("declares lost exactly once when a different holder actively owns the lease", async () => {

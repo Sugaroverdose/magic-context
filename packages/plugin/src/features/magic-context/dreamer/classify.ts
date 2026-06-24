@@ -187,7 +187,6 @@ async function classifyOneChunk(
     signal: AbortSignal,
 ): Promise<{ classified: number; changed: number }> {
     let agentSessionId: string | null = null;
-    let phaseFailed = false;
     const startedAt = Date.now();
     try {
         const createResponse = await args.client.session.create({
@@ -249,7 +248,6 @@ async function classifyOneChunk(
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
         return applyClassifications(args, chunk, run.validated);
     } catch (error) {
-        phaseFailed = true;
         const desc = describeError(error);
         log(
             `[dreamer] classify chunk failed: ${desc.brief}`,
@@ -259,7 +257,10 @@ async function classifyOneChunk(
         if (signal.aborted) throw error;
         return { classified: 0, changed: 0 };
     } finally {
-        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
+        // Delete on success AND failure (the failed child still holds the
+        // memory-pool snapshot from the prompt). keep_subagents still honored —
+        // memory-pool text, not raw user transcripts.
+        if (agentSessionId && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

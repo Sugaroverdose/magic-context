@@ -134,7 +134,6 @@ async function verifyOneBatch(
     signal: AbortSignal,
 ): Promise<{ verified: number; updated: number; archived: number }> {
     let agentSessionId: string | null = null;
-    let phaseFailed = false;
     const startedAt = Date.now();
     try {
         const createResponse = await args.client.session.create({
@@ -192,7 +191,6 @@ async function verifyOneBatch(
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
         return await applyVerifyManifest(args, batch, run.validated);
     } catch (error) {
-        phaseFailed = true;
         const desc = describeError(error);
         log(
             `[dreamer] verify batch failed: ${desc.brief}`,
@@ -202,7 +200,13 @@ async function verifyOneBatch(
         if (signal.aborted) throw error;
         return { verified: 0, updated: 0, archived: 0 };
     } finally {
-        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
+        // Delete the child regardless of success/failure (a FAILED child still
+        // holds the memory-pool snapshot fed into the prompt — leaving it only on
+        // the failure path leaked them on disk). Still honor keep_subagents: this
+        // child carries curated project memories (already in context.db), not raw
+        // user text, so the user's explicit data-collection opt-in wins — unlike
+        // the retrospective child, which is purged unconditionally.
+        if (agentSessionId && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

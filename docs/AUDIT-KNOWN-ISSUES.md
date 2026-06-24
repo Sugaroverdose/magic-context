@@ -819,3 +819,29 @@ window where it GCs off a stale trusted registration. Pi never calls the GC at
 all. Persisting the latch (a migration + cross-process write coordination) would
 add complexity for a window that does not exist given this ordering. If the
 ensureRegistered-before-GC pairing is ever broken, revisit this.
+
+### A50. Smart-note compiled checks expose readFile + httpGet in one sandbox (egress is the accepted v1 design)
+Compiled smart-note checks run in a QuickJS WASM sandbox with BOTH a `readFile`
+capability (repo-relative, denylist-guarded) and an `httpGet` capability
+(SSRF-guarded, public hosts). An audit recurringly flags this as an exfiltration
+P0: a prompt-injected `surface_condition` could author a check that reads a repo
+file and POSTs it to an attacker host, and the capability manifest is advisory
+(not a runtime allowlist). This is the DELIBERATE v1 decision (see
+`.alfonso/plans/smart-notes-compiled-checks-spec.md`): v1 allows all external
+egress, the manifest is an audit artifact not a security boundary, and the actual
+boundaries are the fail-closed SSRF guard (blocks loopback/RFC1918/link-local/
+metadata, pins the socket to the validated IP) and the secret denylist
+(`.env*`, `.npmrc`, `.git`, `secrets/`). Rationale: the host agent that authored
+the note already reads files and hits the network with FAR fewer limits than the
+sandbox, so the marginal risk of sanctioned in-sandbox egress is small, and
+per-note user-approved egress was judged not worth the v1 friction. Per-note
+egress approval remains the planned hardening if real-world misuse appears. Not a
+regression; do not re-flag without new evidence of exploitation.
+
+### A51. Content edits do not invalidate a smart-note's compiled check (correct — the check keys on the trigger, not the body)
+An audit flagged that editing a smart note's `content` leaves its compiled check
+stale. Verified a FALSE POSITIVE: the compiled check evaluates the
+`surface_condition` (the trigger), never the note body. `updateNote` resets the
+whole compiled-check lifecycle ONLY when `surface_condition` changes
+(`smartConditionChanged` in `storage-notes.ts`), which is correct — a body edit
+doesn't change what the check tests, so re-compiling would be wasted work.

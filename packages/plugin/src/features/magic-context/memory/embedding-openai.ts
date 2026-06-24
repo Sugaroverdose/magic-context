@@ -138,6 +138,12 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             model: this.model,
             ...(this.apiKey ? { api_key: this.apiKey } : {}),
             ...(this.inputType ? { input_type: this.inputType } : {}),
+            // truncate participates in identity (it changes which text an
+            // over-long input embeds). MUST mirror getEmbeddingProviderIdentity
+            // exactly — a missing field here makes the provider write under a
+            // different model_id than reads/GC resolve, silently zeroing results
+            // and reaping valid vectors.
+            ...(this.truncate ? { truncate: this.truncate } : {}),
         });
     }
 

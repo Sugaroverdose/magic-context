@@ -155,6 +155,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		// /ctx-dream path already uses.
 		retrospectiveRawProvider: () =>
 			new PiRetrospectiveRawProvider({ projectCwd: opts.projectDir }),
+		// SCHEDULED refresh-primers likewise needs the Pi JSONL factory so its
+		// open-book seed renders raw U:/TC: lines; without it the scheduled task
+		// silently ran closed-book (the manual /ctx-dream path already wires this).
+		primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 	}).then((timerCleanup) => {
 		if (cancelled) {
 			// Registration was cancelled before timer setup completed —

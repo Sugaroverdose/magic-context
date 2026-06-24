@@ -29,11 +29,20 @@ function tableExists(db: Database, name: string): boolean {
     );
 }
 
-function assertForeignKeyIntegrity(db: Database): void {
-    const rows = db.prepare("PRAGMA foreign_key_check").all() as unknown[];
+function assertForeignKeyIntegrity(db: Database, table?: string): void {
+    // Scope the check to the table just rebuilt. A GLOBAL foreign_key_check after
+    // the FIRST rebuild also inspects the OTHER embedding tables, which still
+    // carry their pre-v49 schema + any pre-existing orphans (their own orphan
+    // pre-clean + rebuild run later in this migration) — a global check would
+    // fail the whole migration closed on an orphan we are about to clean anyway.
+    const rows = (
+        table
+            ? db.prepare(`PRAGMA foreign_key_check(${table})`)
+            : db.prepare("PRAGMA foreign_key_check")
+    ).all() as unknown[];
     if (rows.length > 0) {
         throw new Error(
-            `foreign_key_check failed after embedding table rebuild (${rows.length} violation(s))`,
+            `foreign_key_check failed after embedding table rebuild${table ? ` (${table})` : ""} (${rows.length} violation(s))`,
         );
     }
 }
@@ -1786,7 +1795,7 @@ const MIGRATIONS: Migration[] = [
                     DROP TABLE memory_embeddings;
                     ALTER TABLE memory_embeddings_v49_new RENAME TO memory_embeddings;
                 `);
-                assertForeignKeyIntegrity(db);
+                assertForeignKeyIntegrity(db, "memory_embeddings");
             }
 
             if (tableExists(db, "git_commit_embeddings")) {
@@ -1812,7 +1821,7 @@ const MIGRATIONS: Migration[] = [
                     DROP TABLE git_commit_embeddings;
                     ALTER TABLE git_commit_embeddings_v49_new RENAME TO git_commit_embeddings;
                 `);
-                assertForeignKeyIntegrity(db);
+                assertForeignKeyIntegrity(db, "git_commit_embeddings");
             }
 
             if (tableExists(db, "compartment_chunk_embeddings")) {
@@ -1854,7 +1863,7 @@ const MIGRATIONS: Migration[] = [
                     CREATE INDEX IF NOT EXISTS idx_cce_session ON compartment_chunk_embeddings(session_id);
                     CREATE INDEX IF NOT EXISTS idx_cce_project_model ON compartment_chunk_embeddings(project_path, model_id);
                 `);
-                assertForeignKeyIntegrity(db);
+                assertForeignKeyIntegrity(db, "compartment_chunk_embeddings");
             }
 
             db.exec(`

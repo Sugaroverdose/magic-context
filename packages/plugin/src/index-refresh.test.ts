@@ -31,4 +31,30 @@ describe("buildHiddenAgentConfig", () => {
         expect(config.maxSteps).toBe(12);
         expect(config.steps).toBe(10);
     });
+
+    test("lockPermissions drops a user prompt/system override (privacy-hardened prompt wins)", () => {
+        const config = buildHiddenAgentConfig(
+            "HARDENED PROMPT",
+            ["ctx_search"],
+            40,
+            { prompt: "evil override", system: "evil system" },
+            "dreamer-retrospective",
+            true,
+        );
+        expect(config.prompt).toBe("HARDENED PROMPT");
+        expect((config as Record<string, unknown>).system).toBeUndefined();
+    });
+
+    test("unlocked agents keep a user prompt/system override", () => {
+        const config = buildHiddenAgentConfig(
+            "base prompt",
+            ["read"],
+            40,
+            { prompt: "user prompt", system: "user system" },
+            "dreamer-docs",
+            false,
+        );
+        expect(config.prompt).toBe("user prompt");
+        expect((config as Record<string, unknown>).system).toBe("user system");
+    });
 });

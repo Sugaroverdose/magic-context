@@ -136,4 +136,40 @@ describe("migration v49 — per-model embedding coexistence", () => {
             closeQuietly(db);
         }
     });
+
+    test("reaches v49 with a pre-existing orphan in the chunk table (per-table FK check, not global)", () => {
+        // A global foreign_key_check after the FIRST (memory) rebuild would also
+        // inspect the still-old chunk table and fail closed on an orphan there —
+        // before the chunk orphan pre-clean ever runs. The per-table check + each
+        // table's own pre-clean must let the migration finish. The chunk table is
+        // the sharpest case: no prior migration ever cleaned it.
+        const db = new Database(":memory:");
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+
+            // Inject a chunk orphan (no parent compartment) with FK enforcement off,
+            // then roll v49 back and re-run.
+            db.exec("PRAGMA foreign_keys=OFF");
+            db.prepare(
+                `INSERT INTO compartment_chunk_embeddings (
+                    compartment_id, session_id, project_path, harness, window_index,
+                    start_ordinal, end_ordinal, chunk_hash, model_id, dims, vector, created_at
+                 ) VALUES (999999, 'ses-orphan', 'git:orphan', 'opencode', 0, 0, 1, 'h', 'm', 4, x'01020304', 1)`,
+            ).run();
+            db.exec("PRAGMA foreign_keys=ON");
+            db.prepare("DELETE FROM schema_migrations WHERE version = 49").run();
+
+            expect(() => runMigrations(db)).not.toThrow();
+            expect(countRows(db, "compartment_chunk_embeddings")).toBe(0);
+            expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+            expect(
+                db
+                    .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
+                    .get(),
+            ).toEqual({ version: LATEST_MIGRATION_VERSION });
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });

@@ -1,5 +1,53 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { EmbeddingConfig } from "../../../config/schema/magic-context";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { embeddingModelsMatch, OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
+
+describe("provider modelId matches canonical identity (write/read must agree)", () => {
+    // The provider's own this.modelId is what WRITES are stored under; the
+    // registry/GC/reads resolve via getEmbeddingProviderIdentity(config). Any
+    // identity-affecting field present in one but not the other splits the
+    // vector space → silent zero-results + GC of valid vectors. Lock parity
+    // across every identity-affecting field.
+    const cases: Array<{ name: string; config: EmbeddingConfig }> = [
+        {
+            name: "endpoint+model only",
+            config: { provider: "openai-compatible", endpoint: "http://h/v1", model: "m" },
+        },
+        {
+            name: "with api_key + input_type",
+            config: {
+                provider: "openai-compatible",
+                endpoint: "http://h/v1",
+                model: "m",
+                api_key: "k",
+                input_type: "passage",
+            },
+        },
+        {
+            name: "with truncate set",
+            config: {
+                provider: "openai-compatible",
+                endpoint: "http://h/v1",
+                model: "m",
+                truncate: "END",
+            },
+        },
+    ];
+    for (const c of cases) {
+        test(c.name, () => {
+            const provider = new OpenAICompatibleEmbeddingProvider({
+                endpoint: c.config.endpoint,
+                model: c.config.model,
+                apiKey: c.config.provider === "openai-compatible" ? c.config.api_key : undefined,
+                inputType:
+                    c.config.provider === "openai-compatible" ? c.config.input_type : undefined,
+                truncate: c.config.provider === "openai-compatible" ? c.config.truncate : undefined,
+            });
+            expect(provider.modelId).toBe(getEmbeddingProviderIdentity(c.config));
+        });
+    }
+});
 
 describe("embeddingModelsMatch token-boundary semantics", () => {
     test("exact match", () => {

@@ -40,6 +40,7 @@ import {
 } from "../features/magic-context/project-embedding-registry";
 import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import { openDatabase, runSqliteOptimize } from "../features/magic-context/storage";
+import type { RawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import { getErrorMessage } from "../shared/error-message";
 import { log } from "../shared/logger";
 import type { Database } from "../shared/sqlite";
@@ -78,6 +79,16 @@ interface ProjectRegistration {
         db: Database,
         projectIdentity: string,
     ) => RetrospectiveRawProvider | null;
+    /**
+     * Per-registration primer raw-source provider factory for the SCHEDULED
+     * refresh-primers task. Pi supplies a JSONL-backed factory so the open-book
+     * primer seed renders the origin compartment's raw U:/TC: lines; OpenCode
+     * omits it (buildPrimerSeed reads opencode.db directly). When omitted on Pi,
+     * scheduled refresh-primers silently falls back to a closed-book seed.
+     */
+    primerRawProviderFactory?: (
+        sessionId: string,
+    ) => Promise<RawMessageProvider | null> | RawMessageProvider | null;
 }
 
 /** Singleton timer state. */
@@ -328,6 +339,11 @@ async function sweepProject(
             retrospectiveRawProvider:
                 reg.retrospectiveRawProvider ??
                 ((db) => new OpenCodeRetrospectiveRawProvider({ contextDb: db, openOpenCodeDb })),
+            // Pi-only: scheduled refresh-primers needs the JSONL factory to render
+            // the open-book seed. OpenCode omits it (buildPrimerSeed reads
+            // opencode.db directly). Without this the scheduled Pi task ran
+            // closed-book, defeating the open-book primer redesign.
+            primerRawProviderFactory: reg.primerRawProviderFactory,
             userMemoryCollectionEnabled: userMemoryCollectionEnabled(dreamerConfig),
             ensureProjectRegistered: reg.ensureRegistered,
         });

@@ -187,10 +187,28 @@ export function startLeaseHeartbeat(
     const beat = () => {
         if (lost) return;
         try {
-            // renew-or-reclaim: renewLease keeps it if still ours; acquireLease
-            // reclaims an expired/free lease and only returns false when a
-            // different holder is actively in possession.
-            if (renewLease(db, holderId, leaseKey) || acquireLease(db, holderId, leaseKey)) {
+            // Continuous ownership: renewLease keeps it if still ours. This is
+            // the always-safe path — we never lost the lease.
+            if (renewLease(db, holderId, leaseKey)) {
+                lastConfirmedAt = Date.now();
+                return;
+            }
+            // renewLease failed → we are no longer the recorded holder OR the
+            // lease lapsed. If the gap since our last confirmed beat exceeds a
+            // full TTL, the lease was provably claimable by another process for a
+            // meaningful window — a sibling could have acquired AND mutated in the
+            // gap (a >2min stall / machine sleep), so blindly reclaiming a now-free
+            // lease and continuing on our stale snapshot is split-brain. Declare
+            // lost instead. A SHORT delay (≤ TTL, e.g. a slightly-late 60s beat
+            // causing self-inflicted expiry) still recovers via reclaim below.
+            if (Date.now() - lastConfirmedAt > LEASE_DURATION_MS) {
+                declareLost("lease lapsed past TTL — another holder may have run");
+                return;
+            }
+            // reclaim an expired-but-free lease after only a short gap (our own
+            // delayed beat); returns false only when a different holder is
+            // actively in possession.
+            if (acquireLease(db, holderId, leaseKey)) {
                 lastConfirmedAt = Date.now();
                 return;
             }

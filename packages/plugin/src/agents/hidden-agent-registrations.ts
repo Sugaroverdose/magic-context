@@ -270,21 +270,40 @@ export function buildHiddenAgentConfig(
     const {
         permission: overridePermission,
         tools: overrideTools,
+        // Pulled out so they can be conditionally re-added: under lockPermissions
+        // a user `prompt`/`system` override must NOT replace the hardened
+        // system prompt (see below). Spreading `...rest` below would otherwise
+        // clobber the positional `prompt` arg, since `...rest` lands after it.
+        prompt: overridePrompt,
+        system: overrideSystem,
         ...rest
     } = (overrides ?? {}) as {
         permission?: Record<string, unknown>;
         tools?: Record<string, boolean>;
+        prompt?: unknown;
+        system?: unknown;
         [key: string]: unknown;
     };
     // When locked (privacy-critical agents), the user `tools` enable/disable map
-    // is ALSO dropped — it is a privilege-escalation surface (a user
-    // `dreamer.tools: { bash: true }` would otherwise re-enable a denied tool on
-    // the retrospective agent). Unlocked agents keep their `tools` override.
-    const restOverrides = lockPermissions
-        ? rest
-        : overrideTools !== undefined
-          ? { ...rest, tools: overrideTools }
-          : rest;
+    // AND the `prompt`/`system` text are ALL dropped — each is a
+    // privilege/behavior-escalation surface. A user `dreamer.tools: { bash: true }`
+    // would otherwise re-enable a denied tool; a user `dreamer.prompt`/`system`
+    // would otherwise replace the privacy-hardened prompt that, e.g., keeps the
+    // retrospective agent from transcribing raw user text. Unlocked agents keep
+    // their `tools`/`prompt`/`system` overrides.
+    const promptOverrides: Record<string, unknown> = lockPermissions
+        ? {}
+        : {
+              ...(overridePrompt !== undefined ? { prompt: overridePrompt } : {}),
+              ...(overrideSystem !== undefined ? { system: overrideSystem } : {}),
+          };
+    const restOverrides: Record<string, unknown> = lockPermissions
+        ? { ...rest, ...promptOverrides }
+        : {
+              ...rest,
+              ...promptOverrides,
+              ...(overrideTools !== undefined ? { tools: overrideTools } : {}),
+          };
     const basePermission = buildAllowOnlyPermission(allowedTools, agentLabel);
     return {
         prompt,

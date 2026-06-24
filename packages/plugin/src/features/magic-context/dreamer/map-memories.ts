@@ -141,7 +141,6 @@ async function mapOneBatch(
     signal: AbortSignal,
 ): Promise<{ mapped: number; independent: number }> {
     let agentSessionId: string | null = null;
-    let phaseFailed = false;
     const startedAt = Date.now();
     try {
         const createResponse = await args.client.session.create({
@@ -199,7 +198,6 @@ async function mapOneBatch(
         recordInvocation(args, startedAt, { status: "completed", messages: run.output });
         return await applyBatchMappings(args, batch, run.validated);
     } catch (error) {
-        phaseFailed = true;
         const desc = describeError(error);
         log(
             `[dreamer] map-memories batch failed: ${desc.brief}`,
@@ -211,7 +209,10 @@ async function mapOneBatch(
         if (signal.aborted) throw error;
         return { mapped: 0, independent: 0 };
     } finally {
-        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
+        // Delete on success AND failure (the failed child still holds the
+        // memory-pool snapshot from the prompt). keep_subagents still honored —
+        // memory-pool text, not raw user transcripts.
+        if (agentSessionId && !shouldKeepSubagents()) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },
