@@ -32,9 +32,10 @@ export const ANNOUNCEMENT_VERSION = "0.27.0";
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
     "Dreamer V2: each maintenance task now runs on its own schedule (cron), with its own model. Configure them in setup, the dashboard, or magic-context.jsonc.",
-    "New 'classify' task: scores each memory's importance so the most relevant ones stay in context as your work shifts — fully cache-safe, runs in the background.",
-    "New 'retrospective' task: learns from the moments you had to correct or re-explain and records the durable lesson. Reads only your own typed messages; on by default, turn it off anytime.",
-    "Memory hygiene split into 'verify' (checks memories against code) and 'curate' (deduplicates and prunes the pool) so neither starves the other.",
+    "New 'classify' task scores each memory's importance so the most relevant stay in context as your work shifts; new 'retrospective' learns from moments you had to correct or re-explain. Both cache-safe, on by default, off anytime.",
+    "New Primers: durable answers to the questions that keep coming up about your project, kept current by the dreamer investigating the actual code.",
+    "Embedding storage no longer wipes your vectors when you change model or endpoint. Different models now coexist, so switching providers keeps your existing vectors.",
+    "Config moved to a shared CortexKit location (~/.config/cortexkit/ and <project>/.cortexkit/). This happens automatically on first run; your old file is preserved.",
 ];
 
 /**
