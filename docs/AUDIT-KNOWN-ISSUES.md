@@ -734,6 +734,17 @@ evaluate-smart-notes) do NOT have this gap: they do their own
 `peekLeaseHolderAndExpiry` check inside the commit transaction (lease-held-before-
 commit).
 
+Further hardened (v0.26 release audit, council B#2): `startLeaseHeartbeat` now
+confirms ownership SYNCHRONOUSLY at t=0 (declares-lost-before-returning if a
+different holder owns it — no pre-first-beat window), and `runDomainGroup`
+re-peeks the lease before each task in the group. The residual window is now a
+single in-flight `ctx_memory` write racing the abort. Decided NOT to thread
+lease state into the shared `ctx_memory` tool (also used by primary agents +
+sidekick): both racing runs operate on the SAME project pool (that is why they
+share the lease) and the mutations are self-healing — archive idempotent, merge
+supersedes, write dedups by hash — so a stray write is redundant curation of the
+same pool, never corruption. Not worth the risk surface on a primary-agent path.
+
 This is a **pre-existing property carried verbatim from v1** (v1's agentic tasks
 used the same renew-tick + post-run-throw shape under a single serial lease), NOT
 introduced or worsened by the v2 A+B cutover: v2's per-domain `memory:<project>`
@@ -793,7 +804,7 @@ corroborated by the other 8 members):**
   single quotes; dedup key collapses same-ms messages (1-message boundary
   re-read is covered by idempotence). All cosmetic / self-healing.
 
-### A. Embedding untrusted-load latch is process-local (not persisted)
+### A49. Embedding untrusted-load latch is process-local (not persisted)
 The per-model embedding GC consults an in-memory `untrustedLoadProjects` Set to
 skip GC for a project whose latest config load was degraded/untrusted. An audit
 recurringly flags this as cross-process-unsafe on the shared OpenCode+Pi DB ("a
