@@ -28,7 +28,7 @@ import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { runClassify } from "./classify";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
-import { renewLease } from "./lease";
+import { startLeaseHeartbeat } from "./lease";
 import {
     enforceMaintainDocsProtectedRegions,
     snapshotMaintainDocsFiles,
@@ -101,7 +101,7 @@ function classifyFailure(error: unknown): { transient: boolean; brief: string } 
     const combined = `${name} ${brief}`.toLowerCase();
     const transient =
         name === "AbortError" ||
-        /lease|timeout|timed out|econn|socket|network|rate.?limit|429|503|overloaded|sqlite_busy|database is locked/.test(
+        /abort|lease|timeout|timed out|econn|socket|network|rate.?limit|429|503|overloaded|sqlite_busy|database is locked/.test(
             combined,
         );
     return { transient, brief };
@@ -602,17 +602,10 @@ async function runRetrospectiveTask(
 
     const abortController = new AbortController();
     let leaseLost = false;
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(db, holderId, leaseKey)) {
-                leaseLost = true;
-                abortController.abort();
-            }
-        } catch {
-            leaseLost = true;
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(db, holderId, leaseKey, () => {
+        leaseLost = true;
+        abortController.abort();
+    });
 
     let childSessionId: string | null = null;
     try {
@@ -765,7 +758,7 @@ async function runRetrospectiveTask(
         );
         return finish(deepenRun, scan.maxScannedTs);
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
         // PRIVACY: a retrospective child's prompt embeds raw cross-session user
         // text from the friction window. Always delete the child — even on
         // failure, and even when keep_subagents is set. The debug-retention flag
@@ -844,17 +837,10 @@ async function runAgenticTask(
 
     const abortController = new AbortController();
     let leaseLost = false;
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(db, holderId, leaseKey)) {
-                leaseLost = true;
-                abortController.abort();
-            }
-        } catch {
-            leaseLost = true;
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(db, holderId, leaseKey, () => {
+        leaseLost = true;
+        abortController.abort();
+    });
 
     let childSessionId: string | null = null;
     let taskFailed = false;
@@ -951,7 +937,7 @@ async function runAgenticTask(
         taskFailed = true;
         throw error;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
         if (childSessionId && !taskFailed && !shouldKeepSubagents()) {
             await deps.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
         }

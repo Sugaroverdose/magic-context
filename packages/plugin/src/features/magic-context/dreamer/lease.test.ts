@@ -16,7 +16,13 @@ import {
     isLeaseActive,
     releaseLease,
     renewLease,
+    startLeaseHeartbeat,
 } from "./lease";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+function expireLease(db: Database, key = "dreaming_lease_expiry"): void {
+    db.prepare(`UPDATE dream_state SET value = ? WHERE key = '${key}'`).run(String(Date.now() - 1));
+}
 
 function makeDb(path = ":memory:"): Database {
     const db = new Database(path);
@@ -165,5 +171,88 @@ describe("dreamer lease (atomic CAS)", () => {
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    });
+});
+
+describe("startLeaseHeartbeat", () => {
+    it("keeps the lease alive without declaring it lost", async () => {
+        const db = makeDb();
+        expect(acquireLease(db, "holder-a")).toBe(true);
+        const hb = startLeaseHeartbeat(db, "holder-a", DREAMING_LEASE_KEY, () => {}, 20);
+        await sleep(70);
+        expect(hb.lost).toBe(false);
+        expect(getLeaseHolder(db)).toBe("holder-a");
+        expect(isLeaseActive(db)).toBe(true);
+        hb.stop();
+        closeQuietly(db);
+    });
+
+    it("reclaims a self-inflicted expiry instead of declaring lost (transient-tolerant)", async () => {
+        const db = makeDb();
+        expect(acquireLease(db, "holder-a")).toBe(true);
+        // Simulate a missed beat: the lease expired but nobody else took it.
+        expireLease(db);
+        let lostReason: string | null = null;
+        const hb = startLeaseHeartbeat(
+            db,
+            "holder-a",
+            DREAMING_LEASE_KEY,
+            (reason) => {
+                lostReason = reason;
+            },
+            20,
+        );
+        await sleep(50);
+        // renew-or-reclaim: the heartbeat re-acquires the free lease, no loss.
+        expect(lostReason).toBeNull();
+        expect(hb.lost).toBe(false);
+        expect(getLeaseHolder(db)).toBe("holder-a");
+        hb.stop();
+        closeQuietly(db);
+    });
+
+    it("declares lost exactly once when a different holder actively owns the lease", async () => {
+        const db = makeDb();
+        expect(acquireLease(db, "holder-a")).toBe(true);
+        let lostCalls = 0;
+        const hb = startLeaseHeartbeat(
+            db,
+            "holder-a",
+            DREAMING_LEASE_KEY,
+            () => {
+                lostCalls += 1;
+            },
+            20,
+        );
+        // A genuine theft: expire then let another holder claim it.
+        expireLease(db);
+        expect(acquireLease(db, "holder-b")).toBe(true);
+        await sleep(80);
+        expect(hb.lost).toBe(true);
+        expect(lostCalls).toBe(1); // onLost fires once, not on every subsequent beat
+        expect(getLeaseHolder(db)).toBe("holder-b");
+        hb.stop();
+        closeQuietly(db);
+    });
+
+    it("stops firing after stop()", async () => {
+        const db = makeDb();
+        expect(acquireLease(db, "holder-a")).toBe(true);
+        let beats = 0;
+        const hb = startLeaseHeartbeat(
+            db,
+            "holder-a",
+            DREAMING_LEASE_KEY,
+            () => {
+                beats += 1;
+            },
+            20,
+        );
+        hb.stop();
+        expireLease(db);
+        expect(acquireLease(db, "holder-b")).toBe(true);
+        await sleep(60);
+        expect(beats).toBe(0); // no callbacks after stop()
+        closeQuietly(db);
     });
 });

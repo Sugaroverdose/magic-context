@@ -14,7 +14,7 @@ import {
     recordMemoryMapping,
 } from "../memory";
 import { recordChildInvocation } from "../subagent-token-capture";
-import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 import {
     buildMapMemoriesPrompt,
     extractMemoryCandidatePaths,
@@ -101,13 +101,9 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
     result.remaining = inputs.length;
 
     const abortController = new AbortController();
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) abortController.abort();
-        } catch {
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () =>
+        abortController.abort(),
+    );
 
     try {
         for (let i = 0; i < batches.length; i += 1) {
@@ -128,7 +124,7 @@ export async function mapMemories(args: MapMemoriesArgs): Promise<MapMemoriesRes
         );
         return result;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
     }
 }
 

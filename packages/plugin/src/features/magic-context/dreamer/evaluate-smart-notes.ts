@@ -24,7 +24,7 @@ import {
 import type { SmartNoteCheckNote } from "../smart-notes/types";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
 import { recordChildInvocation } from "../subagent-token-capture";
-import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 
 export interface EvaluateSmartNotesArgs {
     db: Database;
@@ -75,18 +75,11 @@ export async function evaluateSmartNotes(
             throw new Error(`Dream lease lost during smart-notes ${phase}`);
         }
     };
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) {
-                leaseLost = true;
-                log("[dreamer] smart notes: lease renewal failed — aborting");
-                args.onLeaseLost?.("smart notes");
-            }
-        } catch (error) {
-            leaseLost = true;
-            args.onLeaseLost?.("smart notes", error);
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () => {
+        leaseLost = true;
+        log("[dreamer] smart notes: lease lost — aborting");
+        args.onLeaseLost?.("smart notes");
+    });
 
     let surfaced = 0;
     let didWork = false;
@@ -161,7 +154,7 @@ export async function evaluateSmartNotes(
         );
         return { surfaced, pending, ran: didWork };
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
     }
 }
 

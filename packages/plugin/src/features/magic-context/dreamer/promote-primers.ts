@@ -19,7 +19,7 @@ import {
     updatePrimerCandidateEmbedding,
     updatePrimerSupport,
 } from "../storage-primers";
-import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 
 export interface PromotePrimersArgs {
     db: Database;
@@ -96,15 +96,12 @@ export async function promotePrimers(args: PromotePrimersArgs): Promise<PromoteP
         threshold: PRIMER_CLUSTER_THRESHOLD,
     });
 
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) {
-                log("[dreamer] primers: lease renewal failed during promote-primers");
-            }
-        } catch {
-            // The commit-time holder check below is authoritative.
-        }
-    }, 60_000);
+    // Best-effort: keep the lease warm during clustering. The commit-time
+    // peekLeaseHolderAndExpiry check inside the transaction is authoritative, so
+    // a lost heartbeat just logs — it never aborts the synchronous commit.
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () =>
+        log("[dreamer] primers: lease lost during promote-primers (commit check is authoritative)"),
+    );
 
     try {
         let leaseLost = false;
@@ -155,6 +152,6 @@ export async function promotePrimers(args: PromotePrimersArgs): Promise<PromoteP
         );
         return result;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
     }
 }

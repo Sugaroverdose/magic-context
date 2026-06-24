@@ -139,6 +139,76 @@ export function renewLease(
     });
 }
 
+/** Renewal beat interval. The lease TTL is LEASE_DURATION_MS (2×), so a single
+ *  missed or contended beat still leaves a full interval of runway. */
+const LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+
+export interface LeaseHeartbeat {
+    /** Stop the heartbeat timer. Safe to call more than once. */
+    stop(): void;
+    /** True once the lease was confirmed genuinely lost (and onLost was called). */
+    readonly lost: boolean;
+}
+
+/**
+ * Keep a held lease alive on a background interval, tolerating transient DB
+ * contention. The brittle inline pattern this replaces aborted the whole task on
+ * the FIRST renewal hiccup — including a transient SQLITE_BUSY throw under a
+ * multi-instance lock storm — even though the 2-minute TTL means one missed 60s
+ * beat is harmless. That killed multi-minute dreamer runs (map-memories/verify)
+ * with "prompt aborted by external signal" when the lease was never actually
+ * lost.
+ *
+ * We declare the lease lost (and call onLost ONCE) only when:
+ *   - a DIFFERENT holder actively owns it — renewLease fails and acquireLease
+ *     can't reclaim it (acquireLease reclaims an expired-but-free lease, so a
+ *     self-inflicted expiry from our own delayed beat recovers instead of
+ *     killing the run); or
+ *   - a full TTL has elapsed with no confirmed renewal (only reachable via
+ *     repeated transient throws), past which exclusive ownership can't be
+ *     guaranteed.
+ * A transient throw with a recent successful renewal is swallowed and retried on
+ * the next beat.
+ */
+export function startLeaseHeartbeat(
+    db: Database,
+    holderId: string,
+    leaseKey: string,
+    onLost: (reason: string) => void,
+    intervalMs: number = LEASE_HEARTBEAT_INTERVAL_MS,
+): LeaseHeartbeat {
+    let lost = false;
+    let lastConfirmedAt = Date.now();
+    const declareLost = (reason: string): void => {
+        if (lost) return;
+        lost = true;
+        onLost(reason);
+    };
+    const timer = setInterval(() => {
+        if (lost) return;
+        try {
+            // renew-or-reclaim: renewLease keeps it if still ours; acquireLease
+            // reclaims an expired/free lease and only returns false when a
+            // different holder is actively in possession.
+            if (renewLease(db, holderId, leaseKey) || acquireLease(db, holderId, leaseKey)) {
+                lastConfirmedAt = Date.now();
+                return;
+            }
+            declareLost("lease acquired by another holder");
+        } catch {
+            if (Date.now() - lastConfirmedAt > LEASE_DURATION_MS) {
+                declareLost("lease renewal unconfirmed past TTL");
+            }
+        }
+    }, intervalMs);
+    return {
+        stop: () => clearInterval(timer),
+        get lost() {
+            return lost;
+        },
+    };
+}
+
 export function releaseLease(
     db: Database,
     holderId: string,

@@ -22,7 +22,7 @@ import {
     type ClassifyPromptMemory,
     parseClassifyManifest,
 } from "./classify-prompt";
-import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 
 /**
  * classify-memories: a NON-agentic single-shot transform. Scores each project
@@ -148,13 +148,9 @@ export async function runClassify(args: ClassifyArgs): Promise<ClassifyResult> {
     }
 
     const abortController = new AbortController();
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) abortController.abort();
-        } catch {
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () =>
+        abortController.abort(),
+    );
 
     try {
         for (let i = 0; i < chunks.length; i += 1) {
@@ -179,7 +175,7 @@ export async function runClassify(args: ClassifyArgs): Promise<ClassifyResult> {
         );
         return result;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
     }
 }
 

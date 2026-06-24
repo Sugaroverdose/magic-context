@@ -20,7 +20,7 @@ import {
     updatePrimerAnswer,
 } from "../storage-primers";
 import { recordChildInvocation } from "../subagent-token-capture";
-import { peekLeaseHolderAndExpiry, renewLease } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 import { buildPrimerSeed } from "./primer-seed";
 import { PRIMER_INVESTIGATOR_SYSTEM_PROMPT } from "./task-prompts";
 
@@ -165,13 +165,9 @@ export async function refreshPrimers(args: RefreshPrimersArgs): Promise<RefreshP
     if (primers.length === 0) return result;
 
     const abortController = new AbortController();
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) abortController.abort();
-        } catch {
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () =>
+        abortController.abort(),
+    );
 
     try {
         for (let i = 0; i < primers.length; i += 1) {
@@ -189,7 +185,7 @@ export async function refreshPrimers(args: RefreshPrimersArgs): Promise<RefreshP
         log(`[dreamer] refresh-primers: refreshed=${result.refreshed} skipped=${result.skipped}`);
         return result;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
     }
 }
 
