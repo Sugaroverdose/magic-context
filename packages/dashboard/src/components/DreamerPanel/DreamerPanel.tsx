@@ -492,6 +492,9 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                           scheduleText={enabled ? describeCron(task.schedule ?? "") : "Disabled"}
                           nextDueText={nextDue()}
                           enabled={enabled}
+                          iconTint={
+                            !enabled ? "gray" : task.last_status === "failed" ? "red" : "green"
+                          }
                           light={taskLight(task)}
                           lastError={task.last_error}
                           canToggle={project.worktree != null}

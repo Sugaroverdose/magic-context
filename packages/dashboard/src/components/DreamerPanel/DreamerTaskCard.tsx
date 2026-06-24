@@ -16,6 +16,11 @@ interface DreamerTaskCardProps {
   scheduleText: string;
   nextDueText: string | null;
   enabled: boolean;
+  /** Icon tint = "is this task active?" — green when enabled, red when enabled
+   *  but its last run failed, gray when disabled. Distinct from `light` (the
+   *  status dot's finer last-run health), so an enabled-but-not-yet-run task
+   *  still reads as on. */
+  iconTint: "green" | "red" | "gray";
   light: TaskLight;
   lastError: string | null;
   /** False when the project has no resolvable worktree to write config to. */
@@ -125,7 +130,7 @@ export default function DreamerTaskCard(props: DreamerTaskCardProps) {
   return (
     <div class={`dreamer-task-card ${props.enabled ? "on" : "off"}`}>
       <div class="dreamer-task-card-top">
-        <span class={`dreamer-task-icon light-${props.light}`}>{taskIcon(props.taskName)}</span>
+        <span class={`dreamer-task-icon light-${props.iconTint}`}>{taskIcon(props.taskName)}</span>
         <div class="dreamer-task-card-titles">
           <div class="dreamer-task-card-label">
             {props.label}
