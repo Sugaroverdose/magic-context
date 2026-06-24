@@ -224,6 +224,75 @@ describe("Pi doctor", () => {
         expect(output).toContain("Repair attempted; 2 item(s) changed");
     });
 
+    it("migrates legacy Pi user config before --force writes a default", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        const settingsPath = join(agentDir, "settings.json");
+        const legacyPath = join(agentDir, "magic-context.jsonc");
+        writeFileSync(settingsPath, JSON.stringify({ packages: [] }));
+        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 13 }));
+        writeFileSync(
+            join(cwd, ".cortexkit", "magic-context.jsonc"),
+            JSON.stringify({ enabled: true }),
+        );
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            ...baseOptions(root, cwd, prompts),
+            force: true,
+        });
+
+        expect(code).toBe(0);
+        const targetPath = join(root, ".config", "cortexkit", "magic-context.jsonc");
+        const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
+            protected_tags?: number;
+        };
+        expect(config.protected_tags).toBe(13);
+        expect(existsSync(legacyPath)).toBe(false);
+        expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Migrated Magic Context user config");
+        expect(output).not.toContain("Wrote default Magic Context config");
+    });
+
+    it("does not write a default when legacy user configs conflict", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@cortexkit/pi-magic-context"] }),
+        );
+        writeFileSync(
+            join(cwd, ".cortexkit", "magic-context.jsonc"),
+            JSON.stringify({ enabled: true }),
+        );
+        const opencodeDir = join(root, ".config", "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "magic-context.jsonc"),
+            JSON.stringify({ protected_tags: 7 }),
+        );
+        writeFileSync(
+            join(agentDir, "magic-context.jsonc"),
+            JSON.stringify({ protected_tags: 13 }),
+        );
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            ...baseOptions(root, cwd, prompts),
+            force: true,
+        });
+
+        expect(code).toBe(0);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(false);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Magic Context user config migration refused");
+        expect(output).toContain("Default config repair skipped");
+        expect(output).not.toContain("Wrote default Magic Context config");
+    });
+
     it("recognizes object-form Magic Context package and preserves object entries during repair", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");

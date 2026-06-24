@@ -1059,26 +1059,34 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				? hasSystemPromptRefresh(sessionId)
 				: true; // first-pass-no-session: act as cache-busting (force fresh read)
 
+			const effectiveDreamerRunnable = switchedProject
+				? isDreamerRunnable(effectiveConfig)
+				: isDreamerRunnable(config);
+			const injectDocs = switchedProject
+				? effectiveDreamerRunnable &&
+					(effectiveConfig.dreamer?.inject_docs ?? true)
+				: isDreamerRunnable(config) && (config.dreamer?.inject_docs ?? true);
 			const block = buildMagicContextBlock({
 				db,
 				cwd: currentProject.projectDir,
 				sessionId,
-				memoryEnabled: config.memory.enabled,
-				injectDocs:
-					isDreamerRunnable(config) && (config.dreamer?.inject_docs ?? true),
+				memoryEnabled: effectiveConfig.memory.enabled,
+				injectDocs,
 				includeGuidance: true,
-				protectedTags: config.protected_tags,
-				ctxReduceEnabled: config.ctx_reduce_enabled,
-				dreamerEnabled: isDreamerRunnable(config),
-				temporalAwarenessEnabled: config.temporal_awareness ?? false,
+				protectedTags: effectiveConfig.protected_tags,
+				ctxReduceEnabled: effectiveConfig.ctx_reduce_enabled,
+				dreamerEnabled: effectiveDreamerRunnable,
+				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
-					config.ctx_reduce_enabled === false &&
-					config.caveman_text_compression?.enabled === true,
+					effectiveConfig.ctx_reduce_enabled === false &&
+					effectiveConfig.caveman_text_compression?.enabled === true,
 				// Stable user memories rendered as <user-profile> — dreamer
 				// promotes recurring observations into this set, then the
 				// system prompt surfaces them across all sessions in the
 				// project. Gated on dreamer.user_memories.enabled.
-				userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
+				userMemoriesEnabled: userMemoryCollectionEnabled(
+					effectiveConfig.dreamer,
+				),
 				isCacheBusting,
 				existingSystemPrompt: event.systemPrompt,
 			});

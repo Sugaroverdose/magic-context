@@ -22,6 +22,7 @@ import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { migrateConfigLocationsForCli } from "../lib/config-location-migration";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { checkLocalEmbeddingRuntime } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-opencode";
@@ -559,6 +560,8 @@ async function checkEmbeddingConfig(
 export async function runDoctor(
     options: { force?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
 ): Promise<number> {
+    migrateConfigLocationsForCli(process.cwd(), log);
+
     if (options.issue) {
         return runIssueFlow();
     }

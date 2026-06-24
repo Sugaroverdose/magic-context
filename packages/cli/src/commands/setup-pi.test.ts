@@ -8,11 +8,20 @@ import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runSetup, type SetupEnvironment, writePiSettingsPackage } from "./setup-pi";
 
 const tempRoots: string[] = [];
+const originalHome = process.env.HOME;
+const originalPiDir = process.env.PI_CODING_AGENT_DIR;
+const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
 function makeTempRoot(): string {
     const path = mkdtempSync(join(tmpdir(), "mc-pi-setup-"));
     tempRoots.push(path);
     return path;
+}
+
+function setConfigEnv(root: string, agentDir: string): void {
+    process.env.HOME = root;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.XDG_CONFIG_HOME = join(root, ".config");
 }
 
 class MockPrompts implements PromptIO {
@@ -73,6 +82,13 @@ class MockPrompts implements PromptIO {
 }
 
 afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalPiDir;
+    if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalConfigHome;
+
     for (const path of tempRoots.splice(0)) {
         rmSync(path, { recursive: true, force: true });
     }
@@ -126,9 +142,43 @@ describe("runSetup", () => {
         ]);
     });
 
+    it("migrates legacy Pi user config before writing setup choices", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const legacyPath = join(agentDir, "magic-context.jsonc");
+        writeFileSync(legacyPath, JSON.stringify({ protected_tags: 7 }));
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.74.0",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () =>
+                    join(root, ".config", "cortexkit", "magic-context.jsonc"),
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+
+        const code = await runSetup({ prompts, env });
+
+        expect(code).toBe(0);
+        const targetPath = join(root, ".config", "cortexkit", "magic-context.jsonc");
+        const config = parseJsonc(readFileSync(targetPath, "utf-8")) as {
+            protected_tags?: number;
+        };
+        expect(config.protected_tags).toBe(7);
+        expect(existsSync(legacyPath)).toBe(false);
+        expect(existsSync(`${legacyPath}.MOVED_READPLEASE`)).toBe(true);
+    });
+
     it("writes Pi settings and magic-context config with mocked prompts", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         mkdirSync(agentDir, { recursive: true });
 
         const env: SetupEnvironment = {
@@ -188,6 +238,7 @@ describe("runSetup", () => {
     it("does not ask for a dreamer model when the dreamer is declined (issue #144)", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         mkdirSync(agentDir, { recursive: true });
 
         const env: SetupEnvironment = {
@@ -228,6 +279,7 @@ describe("runSetup", () => {
     it("prompts for thinking_level when historian model is github-copilot", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         mkdirSync(agentDir, { recursive: true });
 
         const env: SetupEnvironment = {
@@ -262,6 +314,7 @@ describe("runSetup", () => {
     it("exits gracefully without writing files when Pi is missing", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         const env: SetupEnvironment = {
             detectPiBinary: () => null,
             getPiVersion: () => null,
@@ -285,6 +338,7 @@ describe("runSetup", () => {
     it("warns and exits when Pi version is below 0.74.0 and user declines", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
             getPiVersion: () => "0.69.0",
@@ -312,6 +366,7 @@ describe("runSetup", () => {
     it("continues setup when Pi version is below 0.74.0 and user opts in", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
             getPiVersion: () => "0.69.0",

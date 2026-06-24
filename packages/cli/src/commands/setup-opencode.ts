@@ -5,6 +5,10 @@ import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { writeFileAtomic } from "../lib/atomic-write";
+import {
+    hasUserConfigLocationMigrationRefusal,
+    migrateConfigLocationsForCli,
+} from "../lib/config-location-migration";
 import { runDreamerSetup } from "../lib/dreamer-setup";
 import { pickModel } from "../lib/model-picker";
 import {
@@ -226,6 +230,17 @@ export async function runSetup(dryRun = false): Promise<number> {
     intro("Magic Context — Setup");
     if (dryRun) {
         log.warn("Dry run — no files will be written and no config will be changed.");
+        log.message(
+            "[dry-run] would migrate legacy Magic Context config before setup reads or writes the shared CortexKit config.",
+        );
+    } else {
+        const migrationWarnings = migrateConfigLocationsForCli(process.cwd(), log);
+        if (hasUserConfigLocationMigrationRefusal(migrationWarnings)) {
+            outro(
+                "Setup stopped — resolve the legacy Magic Context user config migration conflict, then rerun setup.",
+            );
+            return 1;
+        }
     }
 
     // ─── Step 1: Check OpenCode ─────────────────────────

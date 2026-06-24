@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
+import {
+    hasUserConfigLocationMigrationRefusal,
+    migrateConfigLocationsForCli,
+} from "../lib/config-location-migration";
 import { runDreamerSetup } from "../lib/dreamer-setup";
 import { pickModel } from "../lib/model-picker";
 import { getPiAgentConfigDir, getPiUserConfigPath, getPiUserExtensionsPath } from "../lib/paths";
@@ -215,8 +219,23 @@ async function chooseEmbedding(prompts: PromptIO): Promise<EmbeddingChoice> {
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const prompts = options.prompts ?? (await getDefaultPrompts());
     const env = options.env ?? DEFAULT_ENV;
+    const dryRun = options.dryRun === true;
 
     prompts.intro("Magic Context for Pi — Setup");
+    if (dryRun) {
+        prompts.log.warn("Dry run — no files will be written and no package will be registered.");
+        prompts.log.message(
+            "[dry-run] would migrate legacy Magic Context config before setup reads or writes the shared CortexKit config.",
+        );
+    } else {
+        const migrationWarnings = migrateConfigLocationsForCli(process.cwd(), prompts.log);
+        if (hasUserConfigLocationMigrationRefusal(migrationWarnings)) {
+            prompts.outro(
+                "Setup stopped — resolve the legacy Magic Context user config migration conflict, then rerun setup.",
+            );
+            return 1;
+        }
+    }
 
     const spinner = prompts.spinner();
     spinner.start("Checking Pi installation");
@@ -259,11 +278,6 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     spinner.start("Fetching available Pi models");
     const allModels = env.getAvailableModels(pi.path);
     spinner.stop(`Found ${allModels.length} model choices`);
-
-    const dryRun = options.dryRun === true;
-    if (dryRun) {
-        prompts.log.warn("Dry run — no files will be written and no package will be registered.");
-    }
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
     const configPath = env.paths.getPiUserConfigPath();

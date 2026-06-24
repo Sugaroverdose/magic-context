@@ -24,6 +24,10 @@ import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path"
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
+import {
+    hasUserConfigLocationMigrationRefusal,
+    migrateConfigLocationsForCli,
+} from "../lib/config-location-migration";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
 import { checkLocalEmbeddingRuntimeByResolution } from "../lib/embedding-runtime";
 import { bundleIssueReport } from "../lib/logs-pi";
@@ -397,8 +401,12 @@ async function runHealthChecks(options: {
     prompts: PromptIO;
     deps: DoctorDeps;
     quiet?: boolean;
+    configMigrationWarnings?: readonly string[];
 }): Promise<HealthReport> {
     const results: CheckResult[] = [];
+    const userConfigMigrationRefused = hasUserConfigLocationMigrationRefusal(
+        options.configMigrationWarnings ?? [],
+    );
     const repairPlan: RepairPlan = {
         addPackageEntry: false,
         writeUserConfig: false,
@@ -475,7 +483,15 @@ async function runHealthChecks(options: {
         if (!existsSync(path)) {
             if (required) {
                 add(results, "warn", `No ${label} magic-context.jsonc found at ${path}`);
-                repairPlan.writeUserConfig = true;
+                if (userConfigMigrationRefused) {
+                    add(
+                        results,
+                        "warn",
+                        "Default config repair skipped because legacy Magic Context user config needs manual consolidation first",
+                    );
+                } else {
+                    repairPlan.writeUserConfig = true;
+                }
             } else {
                 add(results, "info", `No project Magic Context config found at ${path}`);
             }
@@ -967,6 +983,9 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         printDoctorHelp();
         return 0;
     }
+
+    const configMigrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
+
     if (options.issue) {
         return runIssueFlow({ cwd, prompts, deps });
     }
@@ -985,7 +1004,12 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     }
 
     prompts.intro("Magic Context for Pi Doctor");
-    const first = await runHealthChecks({ cwd, prompts, deps });
+    const first = await runHealthChecks({
+        cwd,
+        prompts,
+        deps,
+        configMigrationWarnings,
+    });
     console.log("");
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
 
@@ -995,7 +1019,12 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
         prompts.log.message(
             `Repair attempted; ${fixed} item(s) changed. Re-running health checks.`,
         );
-        const second = await runHealthChecks({ cwd, prompts, deps });
+        const second = await runHealthChecks({
+            cwd,
+            prompts,
+            deps,
+            configMigrationWarnings,
+        });
         console.log("");
         prompts.log.message(
             `Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`,
