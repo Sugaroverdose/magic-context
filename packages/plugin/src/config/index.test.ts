@@ -148,6 +148,33 @@ describe("loadPluginConfig — secret redaction", () => {
         }
     });
 
+    it("loadPluginConfig (the runtime init path) honors read-legacy, not schema defaults", () => {
+        // The runtime registers via loadPluginConfig (index.ts), NOT the detailed
+        // variant. This locks that the read-legacy fallback applies there too — a
+        // migration refusal must not silently re-enable disabled features at init.
+        const xdg = mkdtempSync(join(tmpdir(), "mc-config-test-"));
+        const home = mkdtempSync(join(tmpdir(), "mc-config-home-"));
+        const projectDir = mkdtempSync(join(tmpdir(), "mc-config-legacy-proj-"));
+        const origXdg = process.env.XDG_CONFIG_HOME;
+        const origHome = process.env.HOME;
+        process.env.XDG_CONFIG_HOME = xdg;
+        process.env.HOME = home;
+        writeFileSync(join(projectDir, "magic-context.jsonc"), '{"memory":{"enabled":false}}');
+        try {
+            const config = loadPluginConfig(projectDir);
+            expect(config.memory.enabled).toBe(false);
+            expect(config.configWarnings?.join("\n")).toContain("reading legacy config from");
+        } finally {
+            if (origXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = origXdg;
+            if (origHome === undefined) delete process.env.HOME;
+            else process.env.HOME = origHome;
+            rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        }
+    });
+
     it("does NOT leak resolved env values through Zod validation warnings", () => {
         const secret = "sk-live-CARDINAL-SIN-IF-THIS-APPEARS-IN-LOGS";
         const config = JSON.stringify({

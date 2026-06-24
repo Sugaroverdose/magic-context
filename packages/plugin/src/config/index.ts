@@ -93,34 +93,6 @@ interface LoadedConfigFileDetailed extends LoadedConfigFile {
     source: "user" | "project";
 }
 
-function loadConfigFile(configPath: string, isProjectConfig = false): LoadedConfigFile | null {
-    try {
-        if (!existsSync(configPath)) {
-            return null;
-        }
-        const rawText = readFileSync(configPath, "utf-8");
-        // Substitute {env:VAR} and {file:path} tokens on the raw text before
-        // parsing so users can reference env vars (API keys) and external files
-        // without leaking secrets into the config file itself. Matches OpenCode's
-        // ConfigVariable.substitute semantics exactly.
-        const substituted = substituteConfigVariables({
-            text: rawText,
-            configPath,
-            isProjectConfig,
-        });
-        return {
-            config: parseJsonc<Record<string, unknown>>(substituted.text),
-            warnings: substituted.warnings.map((w) => `${configPath}: ${w}`),
-        };
-    } catch (error) {
-        console.warn(
-            `[magic-context] failed to load config from ${configPath}:`,
-            error instanceof Error ? error.message : String(error),
-        );
-        return null;
-    }
-}
-
 function loadConfigFileDetailed(
     configPath: string,
     source: "user" | "project",
@@ -406,83 +378,17 @@ function parsePluginConfig(
 export function loadPluginConfig(
     directory: string,
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
-    // Hard cutover: user + project config come ONLY from the shared CortexKit
-    // location. The pre-cutover root / .opencode / .pi fallbacks are handled by
-    // the location migrator at init, not read here.
-    const userDetected = detectConfigFile(getUserConfigBasePath());
-    const projectDetected = detectConfigFile(getProjectConfigBasePath(directory));
-
-    const userLoaded = userDetected.format === "none" ? null : loadConfigFile(userDetected.path);
-    const projectLoaded =
-        projectDetected.format === "none" ? null : loadConfigFile(projectDetected.path, true);
-
-    const allWarnings: string[] = [];
-    let mergedRaw: Record<string, unknown> = {};
-
-    if (userLoaded) {
-        // Variable-substitution warnings surface first so users see missing
-        // env vars before any downstream schema-validation warnings.
-        allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
-        mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
-    }
-
-    if (projectLoaded) {
-        allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
-
-        // Harden the repo-supplied (untrusted) project config before merging it
-        // over the trusted user config: strip auto_update + hidden-agent
-        // prompt/permission/tools (privilege-escalation vectors).
-        const projectRaw = { ...projectLoaded.config };
-        for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-            allWarnings.push(`[project config] ${warning}`);
-        }
-
-        mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
-
-        // Post-merge: prevent a redirected embedding endpoint from inheriting
-        // the user's api_key (exfiltration guard). Pass the user config so a
-        // project that only repeats the user's own endpoint (to change model,
-        // etc.) is not treated as a redirect.
-        for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-            projectRaw,
-            mergedRaw,
-            userLoaded?.config,
-        )) {
-            allWarnings.push(`[project config] ${warning}`);
-        }
-    }
-
-    // Parse the merged raw config ONCE. Critical: parsing must run AFTER the
-    // raw merge so Zod fills defaults only for keys neither user nor project
-    // explicitly set. The previous design parsed each source separately then
-    // merged the parsed (defaults-filled) results, which let a project
-    // config that didn't mention `embedding` silently override a user's
-    // explicit openai-compatible config with the local Zod default. See
-    // regression discussion 2026-05-12.
-    const config = parsePluginConfig(mergedRaw);
-
-    if (config.configWarnings?.length) {
-        // Tag schema-validation warnings against whichever source set the
-        // bad field. We can't always tell which one set what after merging,
-        // so use a generic prefix when the offending key appears in both.
-        allWarnings.push(
-            ...config.configWarnings.map((w) => {
-                if (userLoaded && projectLoaded) return `[config] ${w}`;
-                if (userLoaded) return `[user config] ${w}`;
-                return `[project config] ${w}`;
-            }),
-        );
-    }
-
-    if (allWarnings.length > 0) {
-        config.configWarnings = allWarnings;
-    } else if ("configWarnings" in config) {
-        // Don't leak an empty configWarnings field through to callers when
-        // the merge was clean.
-        config.configWarnings = undefined;
-    }
-
-    return config;
+    // Delegate to the detailed loader so there is exactly ONE config-resolution
+    // path. The detailed variant owns the read-legacy-on-conflict fallback (when
+    // the shared CortexKit base is absent, read THIS harness's own legacy config
+    // instead of falling to schema defaults), the project-config hardening, and
+    // the embedding-redirect guard. Having a second hand-maintained copy here is
+    // how the read-legacy fallback silently missed the runtime init path
+    // (index.ts calls loadPluginConfig) while only the embedding bootstrap got
+    // it — a config-drop bug. The extra detailed fields (outcome, sources,
+    // substitutionFailures) are simply dropped for callers that only need the
+    // config + warnings.
+    return loadPluginConfigDetailed(directory).config;
 }
 
 function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {

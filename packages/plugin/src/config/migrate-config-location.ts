@@ -284,14 +284,26 @@ function sleepSync(ms: number): void {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// A real migration is a sub-second rename+write, so a lock older than this was
+// almost certainly left by a crashed holder and is safe to reclaim. Kept BELOW
+// the overall timeout so stale reclaim is actually reachable within one waiter's
+// budget (the previous 60s-stale / 30s-timeout pair made reclaim unreachable).
+const CONFIG_LOCK_STALE_MS = 4_000;
+// Hard cap on how long acquisition may block plugin init. Migration is NOT
+// correctness-critical this run — the loaders read-legacy-on-conflict when the
+// CortexKit base is absent — so on timeout we SKIP (return null) rather than
+// freeze init: another instance is migrating, or the next init retries.
+const CONFIG_LOCK_TIMEOUT_MS = 5_000;
+
 /**
  * Directory-mkdir lock. `mkdir` is atomic; EEXIST means another instance holds
- * it — busy-wait with a 60s stale-reclaim (a crashed holder's dir is removed)
- * and a 30s overall timeout. The loser then sees target-exists+matches (no-op)
- * or the source already renamed away (empty existingSources, early return).
+ * it — busy-wait with a stale-reclaim (a crashed holder's dir is removed) and a
+ * short overall timeout. Returns the release fn, or null on timeout (caller
+ * skips migration this run). The loser that does acquire then sees
+ * target-exists+matches (no-op) or the source already renamed away.
  */
-function acquireConfigMigrationLock(lockDir: string): () => void {
-    const deadline = Date.now() + 30_000;
+function acquireConfigMigrationLock(lockDir: string): (() => void) | null {
+    const deadline = Date.now() + CONFIG_LOCK_TIMEOUT_MS;
     while (true) {
         try {
             mkdirSync(lockDir, { recursive: false });
@@ -307,7 +319,7 @@ function acquireConfigMigrationLock(lockDir: string): () => void {
             if (code !== "EEXIST") throw err;
             try {
                 const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-                if (ageMs > 60_000) {
+                if (ageMs > CONFIG_LOCK_STALE_MS) {
                     rmSync(lockDir, { recursive: true, force: true });
                     continue;
                 }
@@ -315,7 +327,7 @@ function acquireConfigMigrationLock(lockDir: string): () => void {
                 // Lock vanished between attempts — retry immediately.
             }
             if (Date.now() >= deadline) {
-                throw new Error(`timed out waiting for config migration lock ${lockDir}`);
+                return null;
             }
             sleepSync(25);
         }
@@ -479,6 +491,15 @@ export function migrateConfigFile(opts: ConfigFileMigrationOptions): ConfigFileM
 
     mkdirSync(dirname(opts.targetPath), { recursive: true });
     const release = acquireConfigMigrationLock(`${opts.targetPath}.lock`);
+    if (!release) {
+        // Another instance holds the lock past our short budget. Skip rather than
+        // block init; the loaders read-legacy-on-conflict so config is correct
+        // this run, and the next init retries the migration.
+        warnings.push(
+            `Config migration for ${opts.scope} skipped this run (another instance is migrating); will retry on next start.`,
+        );
+        return { migrated: false, conflict: false, targetPath: opts.targetPath, warnings };
+    }
     try {
         const sources = existingSources.map((source) => ({
             ...source,

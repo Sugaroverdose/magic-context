@@ -34,6 +34,32 @@ describe("migrateConfigFile (location migration)", () => {
         }
     });
 
+    it("reclaims a stale (crashed-holder) lock within a bounded budget instead of freezing or throwing", () => {
+        const dir = tmp();
+        try {
+            const target = join(dir, ".cortexkit", "magic-context.jsonc");
+            const legacy = join(dir, "magic-context.jsonc");
+            writeFileSync(legacy, '{"enabled":false}');
+            // A leftover lock dir from a crashed holder. The old design (60s
+            // stale / 30s timeout) made reclaim unreachable — a waiter froze
+            // init for 30s then THREW. The fix keeps stale < timeout so the
+            // waiter reclaims and proceeds, bounded and never throwing.
+            mkdirSync(`${target}.lock`, { recursive: true });
+            const start = Date.now();
+            const r = migrateConfigFile({
+                scope: "project",
+                targetPath: target,
+                legacySources: [src(legacy)],
+            });
+            const elapsed = Date.now() - start;
+            expect(elapsed).toBeLessThan(8_000);
+            expect(r.migrated).toBe(true);
+            expect(existsSync(target)).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     it("moves a single legacy source to the target and leaves a .MOVED_READPLEASE marker", () => {
         const dir = tmp();
         try {

@@ -83,7 +83,11 @@ fn get_memories_dedupes_when_multiple_model_embeddings_exist() {
     .unwrap();
 
     let mems = db::get_memories(&conn, None, None, None, None, None, 50, 0).unwrap();
-    assert_eq!(mems.len(), 1, "one memory must appear once despite two embedding rows");
+    assert_eq!(
+        mems.len(),
+        1,
+        "one memory must appear once despite two embedding rows"
+    );
     assert!(mems[0].has_embedding);
 }
 

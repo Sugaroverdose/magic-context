@@ -106,9 +106,7 @@ pub fn config_has_dreamer_block(path: &Path) -> bool {
 /// parse failure, or a missing block, yields an empty map (caller falls back to
 /// global/default schedules). Used to compute the EFFECTIVE configured schedule
 /// for a project rather than its (possibly stale) scheduler snapshot.
-pub fn read_dreamer_task_schedules(
-    path: &Path,
-) -> std::collections::HashMap<String, String> {
+pub fn read_dreamer_task_schedules(path: &Path) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let raw = match std::fs::read_to_string(path) {
         Ok(text) => text,

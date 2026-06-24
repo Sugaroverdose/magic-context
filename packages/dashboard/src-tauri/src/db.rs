@@ -1779,14 +1779,22 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
     let workspace_identities =
         crate::workspaces::extra_workspace_member_identities(conn).unwrap_or_default();
 
-    let mut stmt = conn.prepare(
-        "SELECT project_path FROM memories
-         UNION
-         SELECT project_path FROM task_schedule_state
-         UNION
-         SELECT project_path FROM dream_runs
-         ORDER BY project_path",
-    )?;
+    // UNION only the project-path sources that exist. The dashboard opens the
+    // DB read-only and never migrates, so a DB older than the Dreamer V2 schema
+    // lacks task_schedule_state / dream_runs; an unconditional UNION would throw
+    // "no such table" and break the Projects page instead of degrading.
+    let mut sources = vec!["SELECT project_path FROM memories".to_string()];
+    if table_exists(conn, "task_schedule_state") {
+        sources.push("SELECT project_path FROM task_schedule_state".to_string());
+    }
+    if table_exists(conn, "dream_runs") {
+        sources.push("SELECT project_path FROM dream_runs".to_string());
+    }
+    let union_sql = format!(
+        "{} ORDER BY project_path",
+        sources.join("\n         UNION\n         ")
+    );
+    let mut stmt = conn.prepare(&union_sql)?;
     let stored_values: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2096,7 +2104,10 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
         entry.harnesses.insert(row.harness);
         // First time we see a usable display name / path for this identity, keep
         // it (rows are newest-first, so the freshest label wins).
-        if entry.display_name.is_empty() && !row.project_display.is_empty() && row.project_display != "/" {
+        if entry.display_name.is_empty()
+            && !row.project_display.is_empty()
+            && row.project_display != "/"
+        {
             entry.display_name = row.project_display.clone();
         }
         if !row.is_subagent {
@@ -2436,7 +2447,9 @@ pub fn get_memories(
              {}
              ORDER BY rank
              LIMIT ?{} OFFSET ?{}",
-            where_extra, limit_idx, offset_idx,
+            where_extra,
+            limit_idx,
+            offset_idx,
             has_embedding = HAS_EMBEDDING_SELECT,
         )
     } else if has_search {
@@ -2454,7 +2467,9 @@ pub fn get_memories(
              {}
              ORDER BY m.updated_at DESC
               LIMIT ?{} OFFSET ?{}",
-            where_extra, limit_idx, offset_idx,
+            where_extra,
+            limit_idx,
+            offset_idx,
             has_embedding = HAS_EMBEDDING_SELECT,
         )
     } else {
@@ -2471,7 +2486,9 @@ pub fn get_memories(
              {}
              ORDER BY m.updated_at DESC
               LIMIT ?{} OFFSET ?{}",
-            where_extra, limit_idx, offset_idx,
+            where_extra,
+            limit_idx,
+            offset_idx,
             has_embedding = HAS_EMBEDDING_SELECT,
         )
     };
@@ -2505,7 +2522,9 @@ pub fn get_memories(
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
-                where_extra, limit_idx, offset_idx,
+                where_extra,
+                limit_idx,
+                offset_idx,
                 has_embedding = HAS_EMBEDDING_SELECT,
             );
             // Rebuild params with LIKE pattern instead of FTS query.
@@ -2551,7 +2570,9 @@ pub fn get_memories(
                  {}
                  ORDER BY m.updated_at DESC
                  LIMIT ?{} OFFSET ?{}",
-                where_extra, limit_idx, offset_idx,
+                where_extra,
+                limit_idx,
+                offset_idx,
                 has_embedding = HAS_EMBEDDING_SELECT,
             );
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -2786,18 +2807,26 @@ pub fn get_memory_stats(
     // Count distinct memories that have at least one embedding row. Multiple rows per
     // memory (one per model_id) must not inflate this stat.
     let with_embeddings: i64 = if has_filter {
-        let qualified_in = format!(
-            "m.project_path IN ({})",
-            build_in_placeholders(resolved_paths.len(), 1)
-        );
-        conn.query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT me.memory_id) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE {}",
-                qualified_in
-            ),
-            path_params.as_slice(),
-            |r| r.get(0),
-        )?
+        if resolved_paths.is_empty() {
+            // Empty filter resolves to zero rows — honor the same zero-stats
+            // contract the other counts get from the `0 = 1` sentinel. Rebuilding
+            // an IN-list from an empty resolved_paths would emit invalid
+            // `IN ()` SQL and crash the whole stats query.
+            0
+        } else {
+            let qualified_in = format!(
+                "m.project_path IN ({})",
+                build_in_placeholders(resolved_paths.len(), 1)
+            );
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT me.memory_id) FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE {}",
+                    qualified_in
+                ),
+                path_params.as_slice(),
+                |r| r.get(0),
+            )?
+        }
     } else {
         conn.query_row(
             "SELECT COUNT(DISTINCT memory_id) FROM memory_embeddings",
@@ -4670,6 +4699,10 @@ pub fn get_dreamer_projects(conn: &Connection) -> Result<Vec<DreamerProject>, ru
 }
 
 pub fn get_dream_state(conn: &Connection) -> Result<Vec<DreamStateEntry>, rusqlite::Error> {
+    // Degrade to empty on a pre-Dreamer-V2 DB (read-only dashboard, no migration).
+    if !table_exists(conn, "dream_state") {
+        return Ok(Vec::new());
+    }
     let mut stmt = conn.prepare("SELECT key, value FROM dream_state")?;
     let rows = stmt.query_map([], |row| {
         Ok(DreamStateEntry {
@@ -6755,6 +6788,53 @@ mod memory_project_filter_tests {
         assert_eq!(stats.active, 1);
         assert_eq!(stats.permanent, 1);
         assert_eq!(stats.archived, 1);
+    }
+
+    #[test]
+    fn get_memory_stats_filter_resolving_to_zero_paths_does_not_crash() {
+        // A requested filter that resolves to NO paths (e.g. an empty workspace,
+        // or an identity with no memories) must report zero stats — not emit
+        // `m.project_path IN ()` and crash the whole stats query. The
+        // with_embeddings branch previously rebuilt the IN-list from an empty
+        // resolved_paths instead of honoring the `0 = 1` empty-filter sentinel.
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/has-mem", "X", "active");
+        // An embedding row exists so the with_embeddings branch actually runs.
+        conn.execute(
+            "INSERT INTO memory_embeddings (memory_id, vector, model_id) VALUES (1, X'00', 'm')",
+            [],
+        )
+        .expect("insert embedding");
+
+        let stats = get_memory_stats(&conn, Some("git:does-not-exist"), None)
+            .expect("stats must not crash on an empty-resolved filter");
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.with_embeddings, 0);
+    }
+
+    #[test]
+    fn get_projects_degrades_on_pre_dreamer_v2_schema() {
+        // The dashboard opens DBs read-only and never migrates, so a DB older
+        // than the Dreamer V2 schema has no task_schedule_state / dream_runs.
+        // get_projects must still return memory-derived projects, not throw
+        // "no such table".
+        let conn = make_memory_db();
+        insert_memory(&conn, "/tmp/proj-a", "X", "active");
+
+        let projects = get_projects(&conn).expect("get_projects must degrade, not throw");
+        assert!(
+            projects
+                .iter()
+                .any(|p| p.identity == stable_dir_identity("/tmp/proj-a")),
+            "memory-derived project must still appear"
+        );
+    }
+
+    #[test]
+    fn get_dream_state_degrades_on_pre_dreamer_v2_schema() {
+        let conn = make_memory_db();
+        let state = get_dream_state(&conn).expect("get_dream_state must degrade, not throw");
+        assert!(state.is_empty());
     }
 
     /// Regression: `enumerate_memory_projects` returned rows whose
