@@ -41,7 +41,8 @@ function formatDuration(ms: number): string {
 }
 
 function formatTaskLabel(name: string): string {
-  return name === "smart-notes" ? "smart notes" : name;
+  // The registry/dream-run task name is "evaluate-smart-notes"; show it tidily.
+  return name === "evaluate-smart-notes" ? "smart notes" : name;
 }
 
 function MemoryChangeGroup(props: { label: string; items: DreamMemoryChange[] }) {
@@ -75,7 +76,10 @@ function formatTaskTokens(task: DreamRunTask): string {
 }
 
 function formatTaskOutput(task: DreamRunTask, run: DreamRun): string {
-  if (task.name === "smart-notes") {
+  // Task name from the dream-run row is "evaluate-smart-notes" (registry
+  // canonical). Matching "smart-notes" here never fired, so smart-note runs fell
+  // back to the "N chars" branch instead of the surfaced/pending counts.
+  if (task.name === "evaluate-smart-notes") {
     return `${run.smart_notes_surfaced} surfaced, ${run.smart_notes_pending} pending`;
   }
   return `${task.resultChars.toLocaleString()} chars`;
