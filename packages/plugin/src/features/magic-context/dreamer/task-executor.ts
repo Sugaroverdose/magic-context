@@ -12,7 +12,6 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { describeError } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -28,7 +27,7 @@ import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { runClassify } from "./classify";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
-import { startLeaseHeartbeat } from "./lease";
+import { peekLeaseHolderAndExpiry, startLeaseHeartbeat } from "./lease";
 import {
     enforceMaintainDocsProtectedRegions,
     snapshotMaintainDocsFiles,
@@ -747,23 +746,30 @@ async function runRetrospectiveTask(
         // so a crash between them can't leave the window un-recorded (which would
         // re-deepen + risk a duplicate observation next run, since
         // insertUserMemoryCandidates has no unique key). Both are plain DB writes.
-        const applied = db.transaction(() => {
-            const r = applyRetrospectiveLearnings({
-                db,
-                projectIdentity,
-                sourceSessionId,
-                learnings,
-                userMemoryCollectionEnabled: deps.userMemoryCollectionEnabled === true,
-                // Source user lines for the near-transcription reject: a learning
-                // that echoes a long verbatim run of the user's words is a
-                // transcription.
-                sourceUserTexts: userMessages
-                    .map((message) => message.text ?? "")
-                    .filter((text) => text.length > 0),
-            });
-            recordRetrospectiveWindowProcessed(db, projectIdentity, windowKey);
-            return r;
-        })();
+        const applied = db.transaction(
+            (): ReturnType<typeof applyRetrospectiveLearnings> | null => {
+                if (!peekLeaseHolderAndExpiry(db, holderId, leaseKey)) {
+                    leaseLost = true;
+                    return null;
+                }
+                const result = applyRetrospectiveLearnings({
+                    db,
+                    projectIdentity,
+                    sourceSessionId,
+                    learnings,
+                    userMemoryCollectionEnabled: deps.userMemoryCollectionEnabled === true,
+                    // Source user lines for the near-transcription reject: a learning
+                    // that echoes a long verbatim run of the user's words is a
+                    // transcription.
+                    sourceUserTexts: userMessages
+                        .map((message) => message.text ?? "")
+                        .filter((text) => text.length > 0),
+                });
+                recordRetrospectiveWindowProcessed(db, projectIdentity, windowKey);
+                return result;
+            },
+        )();
+        if (leaseLost || !applied) throw new Error("Dream lease lost during retrospective commit");
         log(
             `[dreamer] retrospective: flagged=${flagged.length} learnings=${learnings.length} memory=${applied.memoryWritten} observations=${applied.observationsInserted} dropped=${applied.observationsDropped} rejected=${applied.rejected.length}`,
         );
@@ -854,7 +860,6 @@ async function runAgenticTask(
     });
 
     let childSessionId: string | null = null;
-    let taskFailed = false;
     try {
         const createResponse = await deps.client.session.create({
             body: {
@@ -944,12 +949,11 @@ async function runAgenticTask(
             memoryChanges: helpers.computeMemoryDelta(memoryBefore),
         });
         return { status: "completed" };
-    } catch (error) {
-        taskFailed = true;
-        throw error;
     } finally {
         heartbeat.stop();
-        if (childSessionId && !taskFailed && !shouldKeepSubagents()) {
+        // These children contain full memory-pool snapshots or generated project
+        // docs context, so debug-retention must not keep them on disk after a run.
+        if (childSessionId) {
             await deps.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
         }
     }

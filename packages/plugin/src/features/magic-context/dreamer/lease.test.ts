@@ -187,6 +187,26 @@ describe("startLeaseHeartbeat", () => {
         closeQuietly(db);
     });
 
+    it("declares a different active holder lost before returning", () => {
+        const db = makeDb();
+        expect(acquireLease(db, "holder-b")).toBe(true);
+        let lostCalls = 0;
+        const hb = startLeaseHeartbeat(
+            db,
+            "holder-a",
+            DREAMING_LEASE_KEY,
+            () => {
+                lostCalls += 1;
+            },
+            20,
+        );
+        expect(hb.lost).toBe(true);
+        expect(lostCalls).toBe(1);
+        expect(getLeaseHolder(db)).toBe("holder-b");
+        hb.stop();
+        closeQuietly(db);
+    });
+
     it("reclaims a self-inflicted expiry instead of declaring lost (transient-tolerant)", async () => {
         const db = makeDb();
         expect(acquireLease(db, "holder-a")).toBe(true);

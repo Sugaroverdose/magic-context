@@ -4,6 +4,8 @@ import type { DreamerConfig } from "../config/schema/magic-context";
 import { acquireLease, releaseLease } from "../features/magic-context/dreamer/lease";
 import { openOpenCodeDb } from "../features/magic-context/dreamer/open-opencode-db";
 import {
+    PRIVACY_SENSITIVE_CHILD_TASKS,
+    PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
     retrospectiveOrphanStaleMs,
     sweepOrphanedRetrospectiveChildren,
 } from "../features/magic-context/dreamer/retrospective-orphan-sweep";
@@ -339,10 +341,13 @@ async function sweepProject(
             log(`[dreamer] timer tick (${origin}) ${reg.projectIdentity} — ran ${ran} task(s)`);
         }
 
-        // PRIVACY backstop: remove crash-orphaned retrospective children (raw
-        // user text on disk) older than any legitimate run. OpenCode-only (Pi
-        // subprocess children die with their process); skip when no opencode.db.
-        const retroTimeout = runtimeConfigs.find((c) => c.task === "retrospective")?.timeoutMinutes;
+        // PRIVACY backstop: remove crash-orphaned children carrying raw user or
+        // project text only after the longest swept task's timeout has elapsed.
+        // OpenCode-only (Pi subprocess children die with their process); skip
+        // when no opencode.db.
+        const privacySweepTimeouts = runtimeConfigs
+            .filter((c) => (PRIVACY_SENSITIVE_CHILD_TASKS as readonly string[]).includes(c.task))
+            .map((c) => c.timeoutMinutes);
         const ocDb = openOpenCodeDb();
         if (ocDb) {
             try {
@@ -350,7 +355,8 @@ async function sweepProject(
                     opencodeDb: ocDb,
                     client: reg.client,
                     sessionDirectory: reg.directory,
-                    staleMs: retrospectiveOrphanStaleMs(retroTimeout),
+                    staleMs: retrospectiveOrphanStaleMs(privacySweepTimeouts),
+                    titleMatches: PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
                 });
             } catch (sweepError) {
                 log(

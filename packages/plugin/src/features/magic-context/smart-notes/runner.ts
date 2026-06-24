@@ -1,9 +1,12 @@
 import type { Database } from "../../../shared/sqlite";
+import { getLeaseHolder, peekLeaseHolderAndExpiry } from "../dreamer/lease";
+import { leaseKeyFor } from "../dreamer/task-registry";
 import { markNoteReady } from "../storage-notes";
 import { createSmartNoteCapabilities } from "./capabilities";
 import { runCompiledSmartNoteCheck } from "./sandbox-runner";
 import { nextSmartNoteCheckDueAt } from "./schedule";
 import {
+    commitSmartNoteState,
     getDueCompiledSmartNoteChecks,
     markCompiledCheckFalse,
     markCompiledCheckLogicFailure,
@@ -28,6 +31,16 @@ export interface RunDueCompiledSmartNoteChecksResult {
     networkFailed: number;
 }
 
+function inferEvaluateSmartNotesLeaseHeld(
+    db: Database,
+    projectIdentity: string,
+): (() => boolean) | undefined {
+    const leaseKey = leaseKeyFor("evaluate-smart-notes", projectIdentity);
+    const holderId = getLeaseHolder(db, leaseKey);
+    if (!holderId || !peekLeaseHolderAndExpiry(db, holderId, leaseKey)) return undefined;
+    return () => peekLeaseHolderAndExpiry(db, holderId, leaseKey);
+}
+
 const DEFAULT_MAX_CHECKS = 10;
 const DEFAULT_SWEEP_BUDGET_MS = 15_000;
 const MAX_FAILURES_BEFORE_REAUTHOR = 3;
@@ -47,6 +60,8 @@ export async function runDueCompiledSmartNoteChecks(
     let surfaced = 0;
     let failed = 0;
     let networkFailed = 0;
+    const leaseHeld =
+        args.leaseHeld ?? inferEvaluateSmartNotesLeaseHeld(args.db, args.projectIdentity);
 
     for (const note of due) {
         if (Date.now() - startedAt >= (args.sweepBudgetMs ?? DEFAULT_SWEEP_BUDGET_MS)) break;
@@ -72,42 +87,63 @@ export async function runDueCompiledSmartNoteChecks(
                 timeoutMs: Math.min(2_000, remaining),
             });
             const runFinishedAt = Date.now();
-            if (args.leaseHeld && !args.leaseHeld()) {
-                throw new Error("Dream lease lost during smart-note check commit");
-            }
             if (result.ok && result.result.met) {
-                markNoteReady(
-                    args.db,
-                    note.id,
-                    hostGeneratedReadyReason(note.id, note.manifestJson),
-                );
+                commitSmartNoteState(args.db, {
+                    phase: "due check",
+                    leaseHeld,
+                    write: () => {
+                        markNoteReady(
+                            args.db,
+                            note.id,
+                            hostGeneratedReadyReason(note.id, note.manifestJson),
+                        );
+                    },
+                });
                 surfaced++;
             } else if (result.ok) {
-                markCompiledCheckFalse(
-                    args.db,
-                    note.id,
-                    nextSmartNoteCheckDueAt(note.checkCron, {
-                        now: runFinishedAt,
-                        noteId: note.id,
-                        hash: note.checkHash,
-                    }),
-                    runFinishedAt,
-                );
+                commitSmartNoteState(args.db, {
+                    phase: "due check",
+                    leaseHeld,
+                    write: () => {
+                        markCompiledCheckFalse(
+                            args.db,
+                            note.id,
+                            nextSmartNoteCheckDueAt(note.checkCron, {
+                                now: runFinishedAt,
+                                noteId: note.id,
+                                hash: note.checkHash,
+                            }),
+                            runFinishedAt,
+                        );
+                    },
+                });
             } else if (result.network) {
-                markCompiledCheckNetworkFailure(
-                    args.db,
-                    note.id,
-                    runFinishedAt,
-                    MAX_FAILURES_BEFORE_REAUTHOR,
-                );
+                commitSmartNoteState(args.db, {
+                    phase: "network failure",
+                    leaseHeld,
+                    write: () => {
+                        markCompiledCheckNetworkFailure(
+                            args.db,
+                            note.id,
+                            runFinishedAt,
+                            MAX_FAILURES_BEFORE_REAUTHOR,
+                        );
+                    },
+                });
                 networkFailed++;
             } else {
-                markCompiledCheckLogicFailure(
-                    args.db,
-                    note.id,
-                    runFinishedAt,
-                    MAX_FAILURES_BEFORE_REAUTHOR,
-                );
+                commitSmartNoteState(args.db, {
+                    phase: "logic failure",
+                    leaseHeld,
+                    write: () => {
+                        markCompiledCheckLogicFailure(
+                            args.db,
+                            note.id,
+                            runFinishedAt,
+                            MAX_FAILURES_BEFORE_REAUTHOR,
+                        );
+                    },
+                });
                 failed++;
             }
         } finally {

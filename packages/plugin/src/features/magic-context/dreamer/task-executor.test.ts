@@ -11,8 +11,10 @@ import {
 } from "../memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
+import { ensureProjectState, getProjectState } from "../storage-project-state";
 import { getUserMemoryCandidates, insertUserMemory } from "../user-memory/storage-user-memory";
 import { acquireLease } from "./lease";
+import { applyRetrospectiveLearnings } from "./retrospective-learnings";
 import { createDreamTaskExecutor } from "./task-executor";
 import { leaseKeyFor } from "./task-registry";
 import type { DreamTaskRuntimeConfig } from "./task-scheduler";
@@ -240,6 +242,32 @@ describe("createDreamTaskExecutor — classify-memories", () => {
 });
 
 describe("createDreamTaskExecutor — retrospective", () => {
+    test("retrospective memory insert leaves project memory epoch unchanged", () => {
+        db = freshDb();
+        const project = "/repo/project";
+        ensureProjectState(db, project, 1);
+        const epochBefore = getProjectState(db, project)?.projectMemoryEpoch;
+
+        const applied = applyRetrospectiveLearnings({
+            db,
+            projectIdentity: project,
+            sourceSessionId: "s1",
+            learnings: [
+                {
+                    route: "memory",
+                    category: "PROJECT_RULES",
+                    content:
+                        "Verify provider-executed tool availability before describing it as supported.",
+                },
+            ],
+            userMemoryCollectionEnabled: false,
+            sourceUserTexts: [],
+        });
+
+        expect(applied.memoryWritten).toBe(1);
+        expect(getProjectState(db, project)?.projectMemoryEpoch).toBe(epochBefore);
+    });
+
     test("gate returns 'n' → one gate turn, child created+deleted, watermark advances, no deepen", async () => {
         db = freshDb();
         const project = "/repo/project";

@@ -9,7 +9,6 @@ import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { describeError, getErrorMessage } from "../../../shared/error-message";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -224,7 +223,6 @@ async function refreshOnePrimer(
     });
 
     let agentSessionId: string | null = null;
-    let phaseFailed = false;
     const startedAt = Date.now();
     try {
         const createResponse = await args.client.session.create({
@@ -300,7 +298,6 @@ async function refreshOnePrimer(
         if (leaseLost) throw new Error("Dream lease lost during refresh-primers commit");
         return true;
     } catch (error) {
-        phaseFailed = true;
         const desc = describeError(error);
         log(
             `[dreamer] refresh-primers failed (primer #${primer.id}): ${desc.brief}`,
@@ -309,7 +306,9 @@ async function refreshOnePrimer(
         recordInvocation(args, startedAt, { status: "failed", error });
         throw error;
     } finally {
-        if (agentSessionId && !phaseFailed && !shouldKeepSubagents()) {
+        // Primer seeds include raw historical user lines, so the child must not
+        // remain on disk after failures or debug-retention runs.
+        if (agentSessionId) {
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },

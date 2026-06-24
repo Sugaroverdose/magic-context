@@ -18,6 +18,30 @@ function toSmartNote(note: Note): SmartNoteCheckNote {
     };
 }
 
+export function commitSmartNoteState(
+    db: Database,
+    args: {
+        phase: string;
+        leaseHeld?: () => boolean;
+        write: () => void;
+    },
+): void {
+    let leaseLost = false;
+    db.transaction(() => {
+        // State transitions surface notes or change future scheduling. The lease
+        // check must be inside the same write transaction so ownership cannot be
+        // lost between a pre-check and the durable update.
+        if (args.leaseHeld && !args.leaseHeld()) {
+            leaseLost = true;
+            return;
+        }
+        args.write();
+    })();
+    if (leaseLost) {
+        throw new Error(`Dream lease lost during smart-note ${args.phase} commit`);
+    }
+}
+
 export function getDueCompiledSmartNoteChecks(
     db: Database,
     projectPath: string,

@@ -2,17 +2,16 @@ import { SMART_NOTE_COMPILER_AGENT } from "../../../agents/smart-note-compiler";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { createSmartNoteCapabilities } from "../smart-notes/capabilities";
 import { compileSmartNoteCheck } from "../smart-notes/compiler";
-import { SMART_NOTE_COMPILER_SYSTEM_PROMPT } from "../smart-notes/compiler-prompt";
 import { runDueCompiledSmartNoteChecks } from "../smart-notes/runner";
 import { runCompiledSmartNoteCheck } from "../smart-notes/sandbox-runner";
 import { nextSmartNoteCheckDueAt } from "../smart-notes/schedule";
 import {
+    commitSmartNoteState,
     getSmartNotesNeedingCompilation,
     getStaleCompiledSmartNotes,
     markCompiledCheckFalse,
@@ -51,6 +50,8 @@ export interface EvaluateSmartNotesResult {
 const MAX_COMPILE_PER_RUN = 5;
 const MAX_FALLBACK_PER_RUN = 3;
 const MAX_COMPILATION_FAILURES = 3;
+const SMART_NOTE_CONFIRMATION_SYSTEM_PROMPT =
+    'You are a no-tool smart-note confirmation evaluator. Output only JSON shaped as {"met": boolean}. Return true only when the supplied text alone proves the condition is satisfied.';
 
 /**
  * Compile and maintain smart-note checks. The legacy broad-tool agentic
@@ -69,8 +70,10 @@ export async function evaluateSmartNotes(
     }
 
     let leaseLost = false;
+    const leaseHeld = (): boolean =>
+        !leaseLost && peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey);
     const assertLeaseHeld = (phase: string): void => {
-        if (leaseLost || !peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
+        if (!leaseHeld()) {
             leaseLost = true;
             throw new Error(`Dream lease lost during smart-notes ${phase}`);
         }
@@ -90,8 +93,7 @@ export async function evaluateSmartNotes(
             projectRoot,
             maxChecks: 10,
             sweepBudgetMs: 10_000,
-            leaseHeld: () =>
-                !leaseLost && peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey),
+            leaseHeld,
         });
         surfaced += dueRun.surfaced;
         didWork ||= dueRun.ran > 0;
@@ -106,7 +108,7 @@ export async function evaluateSmartNotes(
             if (Date.now() >= args.deadline) break;
             assertLeaseHeld("compile start");
             didWork = true;
-            const compiled = await compileNote(args, note, projectRoot, assertLeaseHeld);
+            const compiled = await compileNote(args, note, projectRoot, assertLeaseHeld, leaseHeld);
             if (compiled) surfaced += 1;
         }
 
@@ -120,7 +122,7 @@ export async function evaluateSmartNotes(
             if (Date.now() >= args.deadline) break;
             assertLeaseHeld("liveness start");
             didWork = true;
-            const met = await runLivenessCheck(args, note, projectRoot, assertLeaseHeld);
+            const met = await runLivenessCheck(args, note, projectRoot, assertLeaseHeld, leaseHeld);
             if (met) surfaced += 1;
         }
 
@@ -132,18 +134,25 @@ export async function evaluateSmartNotes(
             assertLeaseHeld("fallback start");
             didWork = true;
             const met = await confirmReadOnly(args, note.id, note.content, note.surfaceCondition);
+            const now = Date.now();
             assertLeaseHeld("fallback commit");
-            if (met) {
-                markNoteReady(
-                    args.db,
-                    note.id,
-                    `Smart note #${note.id}: read-only confirmation evaluator returned met=true`,
-                );
-                surfaced += 1;
-            } else {
-                markNoteChecked(args.db, note.id);
-                markSmartNoteCheckStatus(args.db, note.id, "fallback", Date.now());
-            }
+            commitSmartNoteState(args.db, {
+                phase: "fallback",
+                leaseHeld,
+                write: () => {
+                    if (met) {
+                        markNoteReady(
+                            args.db,
+                            note.id,
+                            `Smart note #${note.id}: read-only confirmation evaluator returned met=true`,
+                        );
+                    } else {
+                        markNoteChecked(args.db, note.id);
+                        markSmartNoteCheckStatus(args.db, note.id, "fallback", now);
+                    }
+                },
+            });
+            if (met) surfaced += 1;
         }
 
         assertLeaseHeld("final commit");
@@ -163,6 +172,7 @@ async function compileNote(
     note: SmartNoteCheckNote,
     projectRoot: string,
     assertLeaseHeld: (phase: string) => void,
+    leaseHeld: () => boolean,
 ): Promise<boolean> {
     const controller = new AbortController();
     const timer = setTimeout(
@@ -186,7 +196,18 @@ async function compileNote(
         assertLeaseHeld("compile commit");
         if (!result.ok) {
             log(`[dreamer] smart note #${note.id}: compile failed — ${result.error}`);
-            markSmartNoteCompilationFailure(args.db, note.id, now, MAX_COMPILATION_FAILURES);
+            commitSmartNoteState(args.db, {
+                phase: "compile failure",
+                leaseHeld,
+                write: () => {
+                    markSmartNoteCompilationFailure(
+                        args.db,
+                        note.id,
+                        now,
+                        MAX_COMPILATION_FAILURES,
+                    );
+                },
+            });
             return false;
         }
         const nextDueAt = nextSmartNoteCheckDueAt(result.checkCron, {
@@ -194,25 +215,31 @@ async function compileNote(
             noteId: note.id,
             hash: result.checkHash,
         });
-        storeCompiledSmartNoteCheck(args.db, {
-            noteId: note.id,
-            compiledCheck: result.compiledCheck,
-            manifest: result.manifest,
-            checkHash: result.checkHash,
-            checkCron: result.checkCron,
-            nextDueAt,
-            now,
+        commitSmartNoteState(args.db, {
+            phase: "compile",
+            leaseHeld,
+            write: () => {
+                storeCompiledSmartNoteCheck(args.db, {
+                    noteId: note.id,
+                    compiledCheck: result.compiledCheck,
+                    manifest: result.manifest,
+                    checkHash: result.checkHash,
+                    checkCron: result.checkCron,
+                    nextDueAt,
+                    now,
+                });
+                if (result.dryRun.met) {
+                    markNoteReady(
+                        args.db,
+                        note.id,
+                        `Smart note #${note.id}: compiled check returned met=true`,
+                    );
+                } else {
+                    markCompiledCheckFalse(args.db, note.id, nextDueAt, now);
+                }
+            },
         });
-        if (result.dryRun.met) {
-            markNoteReady(
-                args.db,
-                note.id,
-                `Smart note #${note.id}: compiled check returned met=true`,
-            );
-            return true;
-        }
-        markCompiledCheckFalse(args.db, note.id, nextDueAt, now);
-        return false;
+        return result.dryRun.met;
     } finally {
         clearTimeout(timer);
     }
@@ -223,6 +250,7 @@ async function runLivenessCheck(
     note: SmartNoteCheckNote,
     projectRoot: string,
     assertLeaseHeld: (phase: string) => void,
+    leaseHeld: () => boolean,
 ): Promise<boolean> {
     if (!note.compiledCheck) return false;
     const controller = new AbortController();
@@ -239,30 +267,34 @@ async function runLivenessCheck(
         });
         const now = Date.now();
         assertLeaseHeld("liveness commit");
-        markSmartNoteLivenessChecked(args.db, note.id, now);
-        if (result.ok && result.result.met) {
-            markNoteReady(
-                args.db,
-                note.id,
-                `Smart note #${note.id}: max-staleness liveness check returned met=true`,
-            );
-            return true;
-        }
-        if (result.ok) {
-            markCompiledCheckFalse(
-                args.db,
-                note.id,
-                nextSmartNoteCheckDueAt(note.checkCron, {
-                    now,
-                    noteId: note.id,
-                    hash: note.checkHash,
-                }),
-                now,
-            );
-        } else if (!result.network) {
-            markSmartNoteCheckStatus(args.db, note.id, "failing", now);
-        }
-        return false;
+        commitSmartNoteState(args.db, {
+            phase: "liveness",
+            leaseHeld,
+            write: () => {
+                markSmartNoteLivenessChecked(args.db, note.id, now);
+                if (result.ok && result.result.met) {
+                    markNoteReady(
+                        args.db,
+                        note.id,
+                        `Smart note #${note.id}: max-staleness liveness check returned met=true`,
+                    );
+                } else if (result.ok) {
+                    markCompiledCheckFalse(
+                        args.db,
+                        note.id,
+                        nextSmartNoteCheckDueAt(note.checkCron, {
+                            now,
+                            noteId: note.id,
+                            hash: note.checkHash,
+                        }),
+                        now,
+                    );
+                } else if (!result.network) {
+                    markSmartNoteCheckStatus(args.db, note.id, "failing", now);
+                }
+            },
+        });
+        return result.ok && result.result.met;
     } finally {
         clearTimeout(timer);
     }
@@ -332,7 +364,7 @@ Output exactly JSON: {"met": false}`;
                 query: { directory: args.sessionDirectory ?? args.projectIdentity },
                 body: {
                     agent: SMART_NOTE_COMPILER_AGENT,
-                    system: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
+                    system: SMART_NOTE_CONFIRMATION_SYSTEM_PROMPT,
                     ...modelBodyField(args.model),
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
@@ -371,7 +403,9 @@ Output exactly JSON: {"met": false}`;
         log(`[dreamer] smart note #${noteId}: read-only confirmation failed — ${error}`);
         return false;
     } finally {
-        if (childSessionId && !shouldKeepSubagents()) {
+        // Confirmation prompts include note content and conditions, so they are
+        // deleted regardless of debug-retention settings.
+        if (childSessionId) {
             await args.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
         }
     }

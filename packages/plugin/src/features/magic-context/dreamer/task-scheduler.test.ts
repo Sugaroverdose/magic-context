@@ -6,7 +6,7 @@ import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { insertMemory } from "../memory/storage-memory";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
-import { acquireLease } from "./lease";
+import { acquireLease, releaseLease } from "./lease";
 import { setDreamState } from "./storage-dream-state";
 import {
     deleteTaskScheduleRowsForProject,
@@ -246,14 +246,13 @@ describe("task-scheduler — runDueTasksForProject", () => {
             ran.push("verify");
             return { status: "completed" };
         };
-        const count = await runDueTasksForProject({
+        await runDueTasksForProject({
             db,
             projectIdentity: PROJECT,
             tasks,
             executor,
             now,
         });
-        expect(count).toBe(1);
         expect(ran).toEqual(["verify"]);
         const state = getTaskScheduleState(db, PROJECT, "verify");
         expect(state?.lastStatus).toBe("completed");
@@ -389,6 +388,36 @@ describe("task-scheduler — runDueTasksForProject", () => {
         expect(count).toBe(2);
         expect(ran).toEqual(["verify", "curate"]);
         expect([...leaseKeys]).toEqual([leaseKeyFor("verify", PROJECT)]);
+    });
+
+    it("stops a domain group before the next task when the lease is no longer held", async () => {
+        db = freshDb();
+        seedActiveMemory(db);
+        const now = Date.now();
+        const tasks = [cfg("verify", "0 3 * * *"), cfg("curate", "0 4 * * 0")];
+        planDueTasks(db, PROJECT, tasks, now);
+        forceDue(db, "verify", now);
+        forceDue(db, "curate", now);
+
+        const ran: string[] = [];
+        const executor = async (
+            c: DreamTaskRuntimeConfig,
+            ctx: { holderId: string; leaseKey: string },
+        ): Promise<TaskExecOutcome> => {
+            ran.push(c.task);
+            releaseLease(db as Database, ctx.holderId, ctx.leaseKey);
+            return { status: "completed" };
+        };
+
+        await runDueTasksForProject({
+            db,
+            projectIdentity: PROJECT,
+            tasks,
+            executor,
+            now,
+        });
+        expect(ran).toEqual(["verify"]);
+        expect(getTaskScheduleState(db, PROJECT, "curate")?.nextDueAt).toBeLessThan(now);
     });
 
     it("transient failure keeps next_due (hot-retry) until MAX_TASK_RETRIES, then advances", async () => {

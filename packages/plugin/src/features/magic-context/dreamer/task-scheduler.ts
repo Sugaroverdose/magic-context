@@ -2,7 +2,7 @@ import type { PiThinkingLevel } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { nextDueAtMs } from "./cron";
-import { acquireLease, releaseLease } from "./lease";
+import { acquireLease, peekLeaseHolderAndExpiry, releaseLease } from "./lease";
 import { getDreamState } from "./storage-dream-state";
 import {
     getTaskScheduleState,
@@ -283,6 +283,11 @@ async function runDomainGroup(
         for (const due of [...group].sort((a, b) =>
             compareTaskOrder(a.config.task, b.config.task),
         )) {
+            if (!peekLeaseHolderAndExpiry(db, holderId, leaseKey)) {
+                log(`[dreamer] domain lease lost (${leaseKey}) — stopping remaining task(s)`);
+                break;
+            }
+
             // Re-evaluate the gate now that we hold the lease: a sibling/other
             // process may have just consumed the work (critical for the global
             // user-memories domain). A forced manual single-task run skips this.

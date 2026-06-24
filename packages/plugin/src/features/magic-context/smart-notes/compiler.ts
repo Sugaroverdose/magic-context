@@ -4,7 +4,6 @@ import { SMART_NOTE_COMPILER_AGENT } from "../../../agents/smart-note-compiler";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
-import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
@@ -171,7 +170,9 @@ Remember: output only the JSON object described by the system prompt.`;
         recordInvocation({ status: "failed", error });
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
     } finally {
-        if (childSessionId && !shouldKeepSubagents()) {
+        // Compiler prompts include note content and conditions, so they are
+        // deleted regardless of debug-retention settings.
+        if (childSessionId) {
             await args.client.session.delete({ path: { id: childSessionId } }).catch(() => {});
         }
     }

@@ -8,6 +8,7 @@ import path from "node:path";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { evaluateSmartNotes } from "../dreamer/evaluate-smart-notes";
+import { acquireLease } from "../dreamer/lease";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { addNote, getPendingSmartNotes } from "../storage-notes";
@@ -89,6 +90,7 @@ describe("evaluateSmartNotes lease guard", () => {
                 check_next_due_at: 0,
                 policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
             });
+            expect(acquireLease(db, "other-holder", "smart-note-lease")).toBe(true);
 
             await expect(
                 evaluateSmartNotes({

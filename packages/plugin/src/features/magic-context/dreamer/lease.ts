@@ -184,7 +184,7 @@ export function startLeaseHeartbeat(
         lost = true;
         onLost(reason);
     };
-    const timer = setInterval(() => {
+    const beat = () => {
         if (lost) return;
         try {
             // renew-or-reclaim: renewLease keeps it if still ours; acquireLease
@@ -200,9 +200,18 @@ export function startLeaseHeartbeat(
                 declareLost("lease renewal unconfirmed past TTL");
             }
         }
-    }, intervalMs);
+    };
+
+    // Confirm ownership before the caller can begin work. Without this first
+    // synchronous beat, a long pre-prompt stall could let the TTL expire and a
+    // same-domain runner start while this runner still waits for the 60s timer.
+    beat();
+
+    const timer = lost ? undefined : setInterval(beat, intervalMs);
     return {
-        stop: () => clearInterval(timer),
+        stop: () => {
+            if (timer) clearInterval(timer);
+        },
         get lost() {
             return lost;
         },

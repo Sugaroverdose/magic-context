@@ -5,8 +5,13 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
+    CURATE_CHILD_TITLE,
+    MAINTAIN_DOCS_CHILD_TITLE,
+    REFRESH_PRIMERS_CHILD_TITLE,
     RETROSPECTIVE_CHILD_TITLE,
     retrospectiveOrphanStaleMs,
+    SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX,
+    SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX,
     sweepOrphanedRetrospectiveChildren,
     USER_MEMORIES_CHILD_TITLE,
 } from "./retrospective-orphan-sweep";
@@ -40,6 +45,7 @@ describe("retrospectiveOrphanStaleMs", () => {
     test("is at least 60min and scales with timeout×3", () => {
         expect(retrospectiveOrphanStaleMs(20)).toBe(60 * 60_000); // 60min floor wins
         expect(retrospectiveOrphanStaleMs(30)).toBe(90 * 60_000); // 30×3 wins
+        expect(retrospectiveOrphanStaleMs([10, 45, undefined])).toBe(135 * 60_000);
         expect(retrospectiveOrphanStaleMs(undefined)).toBe(60 * 60_000);
     });
 });
@@ -64,9 +70,26 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
 
     test("deletes old privacy-sensitive children in this directory", async () => {
         db = makeOpencodeDb();
-        // old orphan in this dir → swept
-        insert(db, "old-user-memories", USER_MEMORIES_CHILD_TITLE, DIR, now - staleMs - 2);
-        insert(db, "old", RETROSPECTIVE_CHILD_TITLE, DIR, now - staleMs - 1);
+        // old orphans in this dir → swept
+        insert(db, "old-user-memories", USER_MEMORIES_CHILD_TITLE, DIR, now - staleMs - 7);
+        insert(db, "old", RETROSPECTIVE_CHILD_TITLE, DIR, now - staleMs - 6);
+        insert(db, "old-curate", CURATE_CHILD_TITLE, DIR, now - staleMs - 5);
+        insert(db, "old-docs", MAINTAIN_DOCS_CHILD_TITLE, DIR, now - staleMs - 4);
+        insert(db, "old-refresh", REFRESH_PRIMERS_CHILD_TITLE, DIR, now - staleMs - 3);
+        insert(
+            db,
+            "old-compile",
+            `${SMART_NOTE_COMPILE_CHILD_TITLE_PREFIX}7`,
+            DIR,
+            now - staleMs - 2,
+        );
+        insert(
+            db,
+            "old-confirm",
+            `${SMART_NOTE_CONFIRM_CHILD_TITLE_PREFIX}7`,
+            DIR,
+            now - staleMs - 1,
+        );
         // recent child (live run) → NOT swept
         insert(db, "fresh", RETROSPECTIVE_CHILD_TITLE, DIR, now - 1000);
         // old but a different title → NOT swept
@@ -83,8 +106,16 @@ describe("sweepOrphanedRetrospectiveChildren", () => {
             now,
         });
 
-        expect(deleted).toEqual(["old-user-memories", "old"]);
-        expect(count).toBe(2);
+        expect(deleted).toEqual([
+            "old-user-memories",
+            "old",
+            "old-curate",
+            "old-docs",
+            "old-refresh",
+            "old-compile",
+            "old-confirm",
+        ]);
+        expect(count).toBe(7);
     });
 
     test("treats a delete error (404 / already removed) as success", async () => {

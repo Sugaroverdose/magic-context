@@ -6,7 +6,11 @@ import { describeError, getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
-import { peekLeaseHolderAndExpiry, renewLease } from "../dreamer/lease";
+import {
+    DREAMING_LEASE_KEY,
+    peekLeaseHolderAndExpiry,
+    startLeaseHeartbeat,
+} from "../dreamer/lease";
 import { REVIEW_USER_MEMORIES_SYSTEM_PROMPT } from "../dreamer/task-prompts";
 import { bumpProjectUserProfileVersion } from "../storage";
 import { recordChildInvocation } from "../subagent-token-capture";
@@ -151,17 +155,12 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
             error: params.error,
         });
     };
+    const leaseKey = args.leaseKey ?? DREAMING_LEASE_KEY;
     const abortController = new AbortController();
-    const leaseInterval = setInterval(() => {
-        try {
-            if (!renewLease(args.db, args.holderId, args.leaseKey)) {
-                log("[dreamer] user-memories: lease renewal failed — aborting");
-                abortController.abort();
-            }
-        } catch {
-            abortController.abort();
-        }
-    }, 60_000);
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, leaseKey, (reason) => {
+        log(`[dreamer] user-memories: lease lost (${reason}) — aborting`);
+        abortController.abort();
+    });
 
     try {
         const createResponse = await args.client.session.create({
@@ -275,7 +274,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         // The thrown "lease" error is classified transient → hot-retry.
         let leaseLostAtCommit = false;
         args.db.transaction(() => {
-            if (!peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
+            if (!peekLeaseHolderAndExpiry(args.db, args.holderId, leaseKey)) {
                 log(
                     `[dreamer] user-memories: commit aborted — lease lost (holder ${args.holderId})`,
                 );
@@ -342,7 +341,7 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
         // permanent (lease/timeout/network → hot-retry; parse/validation → wait).
         throw error;
     } finally {
-        clearInterval(leaseInterval);
+        heartbeat.stop();
         // PRIVACY: this child prompt embeds cross-session user behavior. Always
         // delete it, even on failure and even when debug subagent retention is
         // enabled, so personal data is not left in the OpenCode session store.

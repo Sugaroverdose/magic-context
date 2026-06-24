@@ -14,8 +14,8 @@ import {
     createPrimer,
     getActivePrimers,
     getPrimerCandidatesForPromotion,
+    PRIMER_CANDIDATE_MAX_AGE_MS,
     PRIMER_CANDIDATE_TTL_MS,
-    pruneExpiredPrimerCandidates,
     updatePrimerCandidateEmbedding,
     updatePrimerSupport,
 } from "../storage-primers";
@@ -51,8 +51,12 @@ function canonicalQuestionFromCluster(
     return first.endsWith("?") ? first : `${first}?`;
 }
 
-async function embedMissingCandidates(args: PromotePrimersArgs): Promise<void> {
+async function embedMissingCandidates(
+    args: PromotePrimersArgs,
+    assertLeaseHeld: (phase: string) => void,
+): Promise<void> {
     await args.ensureProjectRegistered?.(args.sessionDirectory, args.db);
+    assertLeaseHeld("embedding registration");
     const candidates = getPrimerCandidatesForPromotion(args.db, args.projectIdentity).filter(
         (candidate) => !candidate.questionEmbedding || !candidate.questionEmbeddingModelId,
     );
@@ -63,48 +67,92 @@ async function embedMissingCandidates(args: PromotePrimersArgs): Promise<void> {
         undefined,
         "passage",
     );
+    assertLeaseHeld("embedding commit");
     if (!batch) return;
     for (let i = 0; i < candidates.length; i += 1) {
+        assertLeaseHeld("embedding commit");
         const vector = batch.vectors[i];
         if (!vector) continue;
         updatePrimerCandidateEmbedding(args.db, candidates[i].id, vector, batch.modelId);
     }
 }
 
+function pruneExpiredPrimerCandidatesForProject(
+    db: Database,
+    projectIdentity: string,
+    now = Date.now(),
+    ttlMs = PRIMER_CANDIDATE_TTL_MS,
+    maxAgeMs = PRIMER_CANDIDATE_MAX_AGE_MS,
+): number {
+    const protectedIds = new Set<number>();
+    for (const primer of getActivePrimers(db, projectIdentity)) {
+        for (const id of primer.sourceCandidateIds) protectedIds.add(id);
+    }
+    const oldRows = db
+        .prepare(
+            `SELECT id, source_message_time
+               FROM primer_candidates
+              WHERE project_path = ? AND source_message_time < ?`,
+        )
+        .all(projectIdentity, now - ttlMs) as Array<{ id: number; source_message_time: number }>;
+    const toDelete = oldRows
+        .filter((row) => !protectedIds.has(row.id) || row.source_message_time < now - maxAgeMs)
+        .map((row) => row.id);
+    if (toDelete.length === 0) return 0;
+    const stmt = db.prepare("DELETE FROM primer_candidates WHERE id = ? AND project_path = ?");
+    db.transaction(() => {
+        for (const id of toDelete) stmt.run(id, projectIdentity);
+    })();
+    return toDelete.length;
+}
+
 export async function promotePrimers(args: PromotePrimersArgs): Promise<PromotePrimersResult> {
     const result: PromotePrimersResult = { promoted: 0, updated: 0, candidates: 0, pruned: 0 };
-
-    result.pruned = pruneExpiredPrimerCandidates(args.db, Date.now(), PRIMER_CANDIDATE_TTL_MS);
-    if (result.pruned > 0) {
-        log(`[dreamer] primers: decayed ${result.pruned} expired candidate(s)`);
-    }
-
-    await embedMissingCandidates(args).catch((error) => {
-        log(
-            `[dreamer] primers: embedding unavailable; falling back to normalized-text clusters: ${error}`,
-        );
+    let leaseLost = false;
+    const assertLeaseHeld = (phase: string): void => {
+        if (leaseLost || !peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
+            leaseLost = true;
+            throw new Error(`Dream lease lost during promote-primers ${phase}`);
+        }
+    };
+    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () => {
+        leaseLost = true;
+        log("[dreamer] primers: lease lost during promote-primers — aborting");
     });
-
-    const candidates = getPrimerCandidatesForPromotion(args.db, args.projectIdentity);
-    result.candidates = candidates.length;
-    if (candidates.length === 0) return result;
-
-    const primers = getActivePrimers(args.db, args.projectIdentity);
-    const clusters = buildPrimerClusters({
-        candidates,
-        activePrimers: primers,
-        threshold: PRIMER_CLUSTER_THRESHOLD,
-    });
-
-    // Best-effort: keep the lease warm during clustering. The commit-time
-    // peekLeaseHolderAndExpiry check inside the transaction is authoritative, so
-    // a lost heartbeat just logs — it never aborts the synchronous commit.
-    const heartbeat = startLeaseHeartbeat(args.db, args.holderId, args.leaseKey, () =>
-        log("[dreamer] primers: lease lost during promote-primers (commit check is authoritative)"),
-    );
 
     try {
-        let leaseLost = false;
+        assertLeaseHeld("prune start");
+        result.pruned = pruneExpiredPrimerCandidatesForProject(
+            args.db,
+            args.projectIdentity,
+            Date.now(),
+            PRIMER_CANDIDATE_TTL_MS,
+        );
+        if (result.pruned > 0) {
+            log(`[dreamer] primers: decayed ${result.pruned} expired candidate(s)`);
+        }
+
+        try {
+            await embedMissingCandidates(args, assertLeaseHeld);
+        } catch (error) {
+            if (leaseLost) throw error;
+            log(
+                `[dreamer] primers: embedding unavailable; falling back to normalized-text clusters: ${error}`,
+            );
+        }
+        assertLeaseHeld("cluster start");
+
+        const candidates = getPrimerCandidatesForPromotion(args.db, args.projectIdentity);
+        result.candidates = candidates.length;
+        if (candidates.length === 0) return result;
+
+        const primers = getActivePrimers(args.db, args.projectIdentity);
+        const clusters = buildPrimerClusters({
+            candidates,
+            activePrimers: primers,
+            threshold: PRIMER_CLUSTER_THRESHOLD,
+        });
+
         args.db.transaction(() => {
             if (!peekLeaseHolderAndExpiry(args.db, args.holderId, args.leaseKey)) {
                 leaseLost = true;
