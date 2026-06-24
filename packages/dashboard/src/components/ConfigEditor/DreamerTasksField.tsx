@@ -37,7 +37,7 @@ export const TASKS: TaskMeta[] = [
   {
     name: "map-memories",
     label: "Map memories",
-    description: "One-time: maps each memory to its backing files (prepares verify)",
+    description: "Maps each memory to its backing files so verify knows what to re-check",
     defaultSchedule: "0 2 * * *",
   },
   {

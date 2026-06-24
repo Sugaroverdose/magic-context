@@ -1567,7 +1567,7 @@ body {
 /* ── Dreamer task cards (embedded project view) ───────── */
 .dreamer-task-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 12px;
 }
 
@@ -1579,6 +1579,13 @@ body {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg-card);
+  /* Uniform height across ALL rows: a min-height floor sized to the worst case
+     (a card with a 2-line error container) so error-free cards match error
+     cards even in other rows. grid-auto-rows:1fr can't equalize across rows
+     without a definite container height; the floor + default within-row stretch
+     does it deterministically. The foot uses margin-top:auto to sit at the
+     bottom of the extra space. */
+  min-height: 184px;
   transition:
     border-color 0.15s ease,
     opacity 0.15s ease;
