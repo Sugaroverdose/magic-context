@@ -983,6 +983,16 @@ body {
   border-collapse: collapse;
 }
 
+.kv-table th {
+  padding: 4px 12px 6px 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
 .kv-table td {
   padding: 4px 0;
   font-size: 12px;
@@ -999,6 +1009,52 @@ body {
 .kv-table td:last-child {
   font-family: var(--mono-font);
   color: var(--text-primary);
+}
+
+/* ── Dreamer flat run table (embedded project view) ───── */
+/* Reuses .kv-table for borders/sizing but is a real multi-column table, so undo
+   the key-value first/last-column styling and give every cell consistent padding. */
+.dream-run-flat-table td,
+.dream-run-flat-table th {
+  padding: 5px 12px 5px 0;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.dream-run-flat-table td:first-child {
+  color: var(--text-secondary);
+  width: auto;
+}
+
+.dream-run-flat-table td:last-child {
+  font-family: inherit;
+  color: var(--text-secondary);
+}
+
+.dream-run-flat-row.clickable {
+  cursor: pointer;
+}
+
+.dream-run-flat-row.clickable:hover td {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.03));
+}
+
+.dream-run-flat-mem {
+  color: var(--text-secondary);
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+
+.dream-run-flat-err {
+  color: var(--red);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dream-run-flat-detail-row td {
+  white-space: normal;
+  padding: 4px 0 10px;
 }
 
 /* ── Chart container ─────────────────────────────────── */
@@ -1478,6 +1534,23 @@ body {
   margin-top: 4px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+/* Embedded (single-project) dreamer: no card container, no collapse — a bare
+   header row of badges + the always-visible task list. */
+.dreamer-embedded {
+  margin-bottom: 20px;
+}
+
+.dreamer-embedded-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dreamer-embedded-head .dreamer-gear {
+  margin-left: auto;
 }
 
 .dreamer-task-line {

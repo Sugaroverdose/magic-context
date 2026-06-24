@@ -274,6 +274,13 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
       .sort((left, right) => (right.runs[0]?.finished_at ?? 0) - (left.runs[0]?.finished_at ?? 0));
   });
 
+  // Embedded (single-project) run history: a flat, newest-first list of runs.
+  // One run records one task (recordRun is per-task), so this reads as a table
+  // of task executions, mirroring the historian-runs table.
+  const flatRuns = createMemo<DreamRun[]>(() =>
+    [...(runs() ?? [])].sort((a, b) => b.finished_at - a.finished_at),
+  );
+
   const toggleProject = (projectPath: string) => {
     setExpandedProjects((previous) => {
       const next = new Set(previous);
@@ -348,7 +355,75 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
       </Show>
 
       <div class="scroll-area">
-        <Show when={cards().length > 0}>
+        {/* Single-project (embedded) view: no "Tracked Projects" header, no card
+            container, no collapse — the task list is always visible. The panel is
+            only ever rendered embedded (the global all-projects Dreamer route was
+            removed when each project got its own detail page), so the non-embedded
+            grid below is a vestigial fallback. */}
+        <Show when={embedded()}>
+          <For each={cards()}>
+            {(project) => (
+              <div class="dreamer-embedded">
+                <div class="dreamer-embedded-head">
+                  <span class={`status-dot ${cardHealth(project)}`} />
+                  <span class="pill blue">{enabledTasks(project).length} on</span>
+                  <Show when={failedCount(project) > 0}>
+                    <span class="pill red">{failedCount(project)} failed</span>
+                  </Show>
+                  <span
+                    class={`pill ${project.has_project_config ? "indigo" : "gray"}`}
+                    title={
+                      project.has_project_config
+                        ? "This project has its own dreamer config"
+                        : "Inherits the global dreamer config"
+                    }
+                  >
+                    {project.has_project_config ? "per-project" : "inherited"}
+                  </span>
+                  <span class="mono dreamer-project-identity" title={project.identity}>
+                    {project.worktree ?? project.identity}
+                  </span>
+                  <button
+                    type="button"
+                    class="dreamer-gear"
+                    title="Configure dreamer for this project"
+                    disabled={!project.worktree}
+                    onClick={() => setConfigProject(project)}
+                  >
+                    ⚙
+                  </button>
+                </div>
+                <div class="dreamer-task-list">
+                  <For each={project.tasks}>
+                    {(task) => (
+                      <div class="dreamer-task-line">
+                        <span class={`status-dot ${taskLight(task)}`} title={lightTitle(task)} />
+                        <span class="dreamer-task-name">{formatTaskLabel(task.task)}</span>
+                        <span class="dreamer-task-sched">
+                          {isTaskEnabled(task) ? describeCron(task.schedule ?? "") : "disabled"}
+                        </span>
+                        <Show when={isTaskEnabled(task) && task.next_due_at != null}>
+                          <span class="dreamer-task-next">
+                            {(task.next_due_at ?? 0) > Date.now()
+                              ? `· ${formatRelativeTime(task.next_due_at ?? 0)}`
+                              : "· overdue"}
+                          </span>
+                        </Show>
+                        <Show when={task.last_error}>
+                          <span class="dreamer-task-err" title={task.last_error ?? ""}>
+                            {task.last_error}
+                          </span>
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            )}
+          </For>
+        </Show>
+
+        <Show when={!embedded() && cards().length > 0}>
           <div class="category-header">
             Tracked Projects <span class="category-count">({cards().length})</span>
           </div>
@@ -439,7 +514,7 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
           fallback={<div class="empty-state">Loading dream history...</div>}
         >
           <Show
-            when={groupedRuns().length > 0}
+            when={(runs() ?? []).length > 0}
             fallback={
               <div class="empty-state">
                 <span class="empty-state-icon">🌙</span>
@@ -450,234 +525,366 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
               </div>
             }
           >
-            <div class="category-header">
-              Run History <span class="category-count">({groupedRuns().length})</span>
-            </div>
-            <div class="list-gap">
-              <For each={groupedRuns()}>
-                {(group) => {
-                  const latestRun = () => group.runs[0];
-                  const latestDuration = () => {
-                    const run = latestRun();
-                    return run ? formatDuration(run.finished_at - run.started_at) : "—";
-                  };
-
-                  return (
-                    <div class="card dream-run-card">
-                      <button
-                        type="button"
-                        class="dream-run-header"
-                        onClick={() => toggleProject(group.projectPath)}
-                      >
-                        <div>
-                          <div class="dream-run-title-row">
-                            <span class="card-title" style={{ margin: 0 }}>
-                              {getProjectLabel(group.project, group.projectPath)}
-                            </span>
-                            <span class="pill blue">
-                              {group.runs.length} run{group.runs.length === 1 ? "" : "s"}
-                            </span>
-                          </div>
-                          <div class="card-meta" style={{ "margin-top": "4px" }}>
-                            <span>Last run: {formatRelativeTime(latestRun()?.finished_at)}</span>
-                            <span>·</span>
-                            <span>{formatDateTime(latestRun()?.finished_at)}</span>
-                            <span>·</span>
-                            <span>Duration: {latestDuration()}</span>
-                            <Show
-                              when={
-                                group.projectPath !==
-                                getProjectLabel(group.project, group.projectPath)
+            {/* Embedded (single-project): flat run table, one row per task
+                execution (recordRun is per-task), mirroring the historian-runs
+                table. Click a row with memory changes to expand which memories
+                changed. */}
+            <Show when={embedded()}>
+              <div class="category-header">
+                Run History <span class="category-count">({flatRuns().length})</span>
+              </div>
+              <table class="kv-table dream-run-flat-table">
+                <thead>
+                  <tr>
+                    <th>Started</th>
+                    <th>Task</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Output</th>
+                    <th>Tokens</th>
+                    <th>Memory</th>
+                    <th>Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={flatRuns()}>
+                    {(run) => {
+                      const task = () => run.tasks_json[0];
+                      const memChanged = () => hasMemoryChanges(run.memory_changes_json);
+                      const memSummary = () => {
+                        const c = run.memory_changes_json;
+                        if (!c) return "—";
+                        const parts: string[] = [];
+                        if ((c.written ?? 0) > 0) parts.push(`+${c.written}`);
+                        if ((c.merged ?? 0) > 0) parts.push(`⤳${c.merged}`);
+                        if ((c.archived ?? 0) > 0) parts.push(`⊘${c.archived}`);
+                        if ((c.deleted ?? 0) > 0) parts.push(`✕${c.deleted}`);
+                        return parts.length > 0 ? parts.join(" ") : "—";
+                      };
+                      return (
+                        <>
+                          <tr
+                            class={
+                              memChanged() ? "dream-run-flat-row clickable" : "dream-run-flat-row"
+                            }
+                            onClick={() => memChanged() && toggleRunDetail(run.id)}
+                          >
+                            <td>{formatDateTime(run.started_at)}</td>
+                            <td>{task() ? formatTaskLabel(task().name) : "—"}</td>
+                            <td>
+                              <span
+                                class={`dream-run-status ${run.tasks_failed > 0 ? "error" : "success"}`}
+                              >
+                                {run.tasks_failed > 0 ? "failed" : "completed"}
+                              </span>
+                            </td>
+                            <td>{formatDuration(run.finished_at - run.started_at)}</td>
+                            <td>{task() ? formatTaskOutput(task(), run) : "—"}</td>
+                            <td
+                              title={
+                                task()?.tokens
+                                  ? `input ${task().tokens?.input.toLocaleString()} · output ${task().tokens?.output.toLocaleString()} · cache ${task().tokens?.cache_read.toLocaleString()}/${task().tokens?.cache_write.toLocaleString()}`
+                                  : undefined
                               }
                             >
-                              <span>·</span>
-                              <span class="mono">{group.projectPath}</span>
-                            </Show>
-                          </div>
-                        </div>
-                        <span class="dream-run-chevron">
-                          {isExpanded(group.projectPath) ? "▾" : "▸"}
-                        </span>
-                      </button>
-
-                      <Show when={isExpanded(group.projectPath)}>
-                        <div class="dream-run-history">
-                          <For each={group.runs}>
-                            {(run) => (
-                              <section class="dream-run-detail">
-                                <div class="dream-run-detail-header">
-                                  <div>
-                                    <div class="dream-run-detail-title">
-                                      {formatRelativeTime(run.finished_at)}
-                                    </div>
-                                    <div class="card-meta">
-                                      <span>{formatDateTime(run.finished_at)}</span>
-                                      <span>·</span>
-                                      <span>
-                                        {formatDuration(run.finished_at - run.started_at)}
-                                      </span>
-                                      <span>·</span>
-                                      <span>{run.tasks_succeeded} succeeded</span>
-                                      <Show when={run.tasks_failed > 0}>
-                                        <span style={{ color: "var(--red)" }}>
-                                          {run.tasks_failed} failed
-                                        </span>
-                                      </Show>
-                                    </div>
-                                  </div>
-                                  <span class={`pill ${run.tasks_failed > 0 ? "red" : "green"}`}>
-                                    {run.tasks_failed > 0 ? "issues" : "ok"}
-                                  </span>
-                                </div>
-
-                                <table class="dream-run-table">
-                                  <thead>
-                                    <tr>
-                                      <th>Task</th>
-                                      <th>Duration</th>
-                                      <th>Output</th>
-                                      <th>Tokens</th>
-                                      <th>Status</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    <For each={run.tasks_json}>
-                                      {(task) => (
-                                        <tr>
-                                          <td>{formatTaskLabel(task.name)}</td>
-                                          <td class="mono">{formatDuration(task.durationMs)}</td>
-                                          <td class="mono">{formatTaskOutput(task, run)}</td>
-                                          <td
-                                            class="mono"
-                                            title={
-                                              task.tokens
-                                                ? `input ${task.tokens.input.toLocaleString()} · output ${task.tokens.output.toLocaleString()} · cache ${task.tokens.cache_read.toLocaleString()}/${task.tokens.cache_write.toLocaleString()}`
-                                                : undefined
-                                            }
-                                          >
-                                            {formatTaskTokens(task)}
-                                          </td>
-                                          <td>
-                                            <span
-                                              class={`dream-run-status ${task.error ? "error" : "success"}`}
-                                            >
-                                              {task.error ? "✕" : "✓"}
-                                            </span>
-                                          </td>
-                                        </tr>
-                                      )}
-                                    </For>
-                                  </tbody>
-                                </table>
-
-                                <Show when={hasMemoryChanges(run.memory_changes_json)}>
-                                  <div class="dream-run-memory-section">
-                                    <button
-                                      type="button"
-                                      class="dream-run-memory-title"
-                                      style={{
-                                        cursor: "pointer",
-                                        background: "none",
-                                        border: "none",
-                                        color: "inherit",
-                                        font: "inherit",
-                                        padding: "0",
-                                        display: "flex",
-                                        "align-items": "center",
-                                        gap: "6px",
-                                      }}
-                                      onClick={() => toggleRunDetail(run.id)}
-                                      title="Show which memories changed"
-                                    >
-                                      <span>{expandedRun() === run.id ? "▾" : "▸"}</span>
-                                      <span>Memory Changes</span>
-                                    </button>
-                                    <div class="dream-run-memory-grid">
-                                      <Show when={(run.memory_changes_json?.written ?? 0) > 0}>
-                                        <div class="dream-run-memory-pill">
-                                          <span>written</span>
-                                          <strong>{run.memory_changes_json?.written}</strong>
-                                        </div>
-                                      </Show>
-                                      <Show when={(run.memory_changes_json?.deleted ?? 0) > 0}>
-                                        <div class="dream-run-memory-pill">
-                                          <span>deleted</span>
-                                          <strong>{run.memory_changes_json?.deleted}</strong>
-                                        </div>
-                                      </Show>
-                                      <Show when={(run.memory_changes_json?.archived ?? 0) > 0}>
-                                        <div class="dream-run-memory-pill">
-                                          <span>archived</span>
-                                          <strong>{run.memory_changes_json?.archived}</strong>
-                                        </div>
-                                      </Show>
-                                      <Show when={(run.memory_changes_json?.merged ?? 0) > 0}>
-                                        <div class="dream-run-memory-pill">
-                                          <span>merged</span>
-                                          <strong>{run.memory_changes_json?.merged}</strong>
-                                        </div>
-                                      </Show>
-                                    </div>
-                                    <Show when={expandedRun() === run.id}>
+                              {task() ? formatTaskTokens(task()) : "—"}
+                            </td>
+                            <td>
+                              <Show when={memChanged()} fallback="—">
+                                <span class="dream-run-flat-mem">
+                                  {expandedRun() === run.id ? "▾ " : "▸ "}
+                                  {memSummary()}
+                                </span>
+                              </Show>
+                            </td>
+                            <td class="dream-run-flat-err" title={task()?.error ?? ""}>
+                              {task()?.error ?? "—"}
+                            </td>
+                          </tr>
+                          <Show when={expandedRun() === run.id && memChanged()}>
+                            <tr class="dream-run-flat-detail-row">
+                              <td colspan="8">
+                                <Show
+                                  when={memoryDetails()[run.id]}
+                                  fallback={
+                                    <div class="dream-run-memory-detail-empty">
                                       <Show
-                                        when={memoryDetails()[run.id]}
+                                        when={memoryErrors()[run.id]}
                                         fallback={
-                                          <div class="dream-run-memory-detail-empty">
-                                            <Show
-                                              when={memoryErrors()[run.id]}
-                                              fallback={
-                                                loadingDetail() === run.id
-                                                  ? "Loading…"
-                                                  : "No detail available."
-                                              }
-                                            >
-                                              {(message) => (
-                                                <span class="dream-run-memory-detail-error">
-                                                  Failed to load memory changes: {message()}{" "}
-                                                  <button
-                                                    type="button"
-                                                    class="dream-run-memory-detail-retry"
-                                                    disabled={loadingDetail() === run.id}
-                                                    onClick={() => retryRunDetail(run.id)}
-                                                  >
-                                                    Retry
-                                                  </button>
-                                                </span>
-                                              )}
-                                            </Show>
-                                          </div>
+                                          loadingDetail() === run.id
+                                            ? "Loading…"
+                                            : "No detail available."
                                         }
                                       >
-                                        {(detail) => (
-                                          <div class="dream-run-memory-detail">
-                                            <MemoryChangeGroup
-                                              label="Written"
-                                              items={detail().written}
-                                            />
-                                            <MemoryChangeGroup
-                                              label="Merged"
-                                              items={detail().merged}
-                                            />
-                                            <MemoryChangeGroup
-                                              label="Archived"
-                                              items={detail().archived}
-                                            />
-                                          </div>
+                                        {(message) => (
+                                          <span class="dream-run-memory-detail-error">
+                                            Failed to load memory changes: {message()}{" "}
+                                            <button
+                                              type="button"
+                                              class="dream-run-memory-detail-retry"
+                                              disabled={loadingDetail() === run.id}
+                                              onClick={() => retryRunDetail(run.id)}
+                                            >
+                                              Retry
+                                            </button>
+                                          </span>
                                         )}
                                       </Show>
-                                    </Show>
-                                  </div>
+                                    </div>
+                                  }
+                                >
+                                  {(detail) => (
+                                    <div class="dream-run-memory-detail">
+                                      <MemoryChangeGroup label="Written" items={detail().written} />
+                                      <MemoryChangeGroup label="Merged" items={detail().merged} />
+                                      <MemoryChangeGroup
+                                        label="Archived"
+                                        items={detail().archived}
+                                      />
+                                    </div>
+                                  )}
                                 </Show>
-                              </section>
-                            )}
-                          </For>
-                        </div>
-                      </Show>
-                    </div>
-                  );
-                }}
-              </For>
-            </div>
+                              </td>
+                            </tr>
+                          </Show>
+                        </>
+                      );
+                    }}
+                  </For>
+                </tbody>
+              </table>
+            </Show>
+
+            <Show when={!embedded()}>
+              <div class="category-header">
+                Run History <span class="category-count">({groupedRuns().length})</span>
+              </div>
+              <div class="list-gap">
+                <For each={groupedRuns()}>
+                  {(group) => {
+                    const latestRun = () => group.runs[0];
+                    const latestDuration = () => {
+                      const run = latestRun();
+                      return run ? formatDuration(run.finished_at - run.started_at) : "—";
+                    };
+
+                    return (
+                      <div class="card dream-run-card">
+                        <button
+                          type="button"
+                          class="dream-run-header"
+                          onClick={() => toggleProject(group.projectPath)}
+                        >
+                          <div>
+                            <div class="dream-run-title-row">
+                              <span class="card-title" style={{ margin: 0 }}>
+                                {getProjectLabel(group.project, group.projectPath)}
+                              </span>
+                              <span class="pill blue">
+                                {group.runs.length} run{group.runs.length === 1 ? "" : "s"}
+                              </span>
+                            </div>
+                            <div class="card-meta" style={{ "margin-top": "4px" }}>
+                              <span>Last run: {formatRelativeTime(latestRun()?.finished_at)}</span>
+                              <span>·</span>
+                              <span>{formatDateTime(latestRun()?.finished_at)}</span>
+                              <span>·</span>
+                              <span>Duration: {latestDuration()}</span>
+                              <Show
+                                when={
+                                  group.projectPath !==
+                                  getProjectLabel(group.project, group.projectPath)
+                                }
+                              >
+                                <span>·</span>
+                                <span class="mono">{group.projectPath}</span>
+                              </Show>
+                            </div>
+                          </div>
+                          <span class="dream-run-chevron">
+                            {isExpanded(group.projectPath) ? "▾" : "▸"}
+                          </span>
+                        </button>
+
+                        <Show when={isExpanded(group.projectPath)}>
+                          <div class="dream-run-history">
+                            <For each={group.runs}>
+                              {(run) => (
+                                <section class="dream-run-detail">
+                                  <div class="dream-run-detail-header">
+                                    <div>
+                                      <div class="dream-run-detail-title">
+                                        {formatRelativeTime(run.finished_at)}
+                                      </div>
+                                      <div class="card-meta">
+                                        <span>{formatDateTime(run.finished_at)}</span>
+                                        <span>·</span>
+                                        <span>
+                                          {formatDuration(run.finished_at - run.started_at)}
+                                        </span>
+                                        <span>·</span>
+                                        <span>{run.tasks_succeeded} succeeded</span>
+                                        <Show when={run.tasks_failed > 0}>
+                                          <span style={{ color: "var(--red)" }}>
+                                            {run.tasks_failed} failed
+                                          </span>
+                                        </Show>
+                                      </div>
+                                    </div>
+                                    <span class={`pill ${run.tasks_failed > 0 ? "red" : "green"}`}>
+                                      {run.tasks_failed > 0 ? "issues" : "ok"}
+                                    </span>
+                                  </div>
+
+                                  <table class="dream-run-table">
+                                    <thead>
+                                      <tr>
+                                        <th>Task</th>
+                                        <th>Duration</th>
+                                        <th>Output</th>
+                                        <th>Tokens</th>
+                                        <th>Status</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      <For each={run.tasks_json}>
+                                        {(task) => (
+                                          <tr>
+                                            <td>{formatTaskLabel(task.name)}</td>
+                                            <td class="mono">{formatDuration(task.durationMs)}</td>
+                                            <td class="mono">{formatTaskOutput(task, run)}</td>
+                                            <td
+                                              class="mono"
+                                              title={
+                                                task.tokens
+                                                  ? `input ${task.tokens.input.toLocaleString()} · output ${task.tokens.output.toLocaleString()} · cache ${task.tokens.cache_read.toLocaleString()}/${task.tokens.cache_write.toLocaleString()}`
+                                                  : undefined
+                                              }
+                                            >
+                                              {formatTaskTokens(task)}
+                                            </td>
+                                            <td>
+                                              <span
+                                                class={`dream-run-status ${task.error ? "error" : "success"}`}
+                                              >
+                                                {task.error ? "✕" : "✓"}
+                                              </span>
+                                            </td>
+                                          </tr>
+                                        )}
+                                      </For>
+                                    </tbody>
+                                  </table>
+
+                                  <Show when={hasMemoryChanges(run.memory_changes_json)}>
+                                    <div class="dream-run-memory-section">
+                                      <button
+                                        type="button"
+                                        class="dream-run-memory-title"
+                                        style={{
+                                          cursor: "pointer",
+                                          background: "none",
+                                          border: "none",
+                                          color: "inherit",
+                                          font: "inherit",
+                                          padding: "0",
+                                          display: "flex",
+                                          "align-items": "center",
+                                          gap: "6px",
+                                        }}
+                                        onClick={() => toggleRunDetail(run.id)}
+                                        title="Show which memories changed"
+                                      >
+                                        <span>{expandedRun() === run.id ? "▾" : "▸"}</span>
+                                        <span>Memory Changes</span>
+                                      </button>
+                                      <div class="dream-run-memory-grid">
+                                        <Show when={(run.memory_changes_json?.written ?? 0) > 0}>
+                                          <div class="dream-run-memory-pill">
+                                            <span>written</span>
+                                            <strong>{run.memory_changes_json?.written}</strong>
+                                          </div>
+                                        </Show>
+                                        <Show when={(run.memory_changes_json?.deleted ?? 0) > 0}>
+                                          <div class="dream-run-memory-pill">
+                                            <span>deleted</span>
+                                            <strong>{run.memory_changes_json?.deleted}</strong>
+                                          </div>
+                                        </Show>
+                                        <Show when={(run.memory_changes_json?.archived ?? 0) > 0}>
+                                          <div class="dream-run-memory-pill">
+                                            <span>archived</span>
+                                            <strong>{run.memory_changes_json?.archived}</strong>
+                                          </div>
+                                        </Show>
+                                        <Show when={(run.memory_changes_json?.merged ?? 0) > 0}>
+                                          <div class="dream-run-memory-pill">
+                                            <span>merged</span>
+                                            <strong>{run.memory_changes_json?.merged}</strong>
+                                          </div>
+                                        </Show>
+                                      </div>
+                                      <Show when={expandedRun() === run.id}>
+                                        <Show
+                                          when={memoryDetails()[run.id]}
+                                          fallback={
+                                            <div class="dream-run-memory-detail-empty">
+                                              <Show
+                                                when={memoryErrors()[run.id]}
+                                                fallback={
+                                                  loadingDetail() === run.id
+                                                    ? "Loading…"
+                                                    : "No detail available."
+                                                }
+                                              >
+                                                {(message) => (
+                                                  <span class="dream-run-memory-detail-error">
+                                                    Failed to load memory changes: {message()}{" "}
+                                                    <button
+                                                      type="button"
+                                                      class="dream-run-memory-detail-retry"
+                                                      disabled={loadingDetail() === run.id}
+                                                      onClick={() => retryRunDetail(run.id)}
+                                                    >
+                                                      Retry
+                                                    </button>
+                                                  </span>
+                                                )}
+                                              </Show>
+                                            </div>
+                                          }
+                                        >
+                                          {(detail) => (
+                                            <div class="dream-run-memory-detail">
+                                              <MemoryChangeGroup
+                                                label="Written"
+                                                items={detail().written}
+                                              />
+                                              <MemoryChangeGroup
+                                                label="Merged"
+                                                items={detail().merged}
+                                              />
+                                              <MemoryChangeGroup
+                                                label="Archived"
+                                                items={detail().archived}
+                                              />
+                                            </div>
+                                          )}
+                                        </Show>
+                                      </Show>
+                                    </div>
+                                  </Show>
+                                </section>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
           </Show>
         </Show>
 
