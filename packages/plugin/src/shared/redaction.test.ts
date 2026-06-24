@@ -2,7 +2,43 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { hasShareabilitySensitiveText } from "./redaction";
+import { hasShareabilitySensitiveText, redactSecretText } from "./redaction";
+
+describe("redactSecretText — token counts and scalar diagnostics stay visible", () => {
+    test("keeps numeric/boolean values whose key merely contains a secret word", () => {
+        // These log shapes are counts/flags, not secrets, so they must stay readable.
+        expect(redactSecretText("tokens.input=45000 cache.read=0 cache.write=0")).toBe(
+            "tokens.input=45000 cache.read=0 cache.write=0",
+        );
+        expect(redactSecretText("hasUsageTokens=true")).toBe("hasUsageTokens=true");
+        expect(redactSecretText("totalInputTokens=132000")).toBe("totalInputTokens=132000");
+        expect(redactSecretText("max_tokens=4096")).toBe("max_tokens=4096");
+    });
+
+    test("keeps quoted numeric values matched only on the key word", () => {
+        expect(redactSecretText('"max_tokens": "4096"')).toBe('"max_tokens": "4096"');
+    });
+
+    test("still redacts real secret string values", () => {
+        // High-entropy / non-scalar values must always be redacted; only bare
+        // numeric/boolean scalars are exempt from the key-based match.
+        expect(redactSecretText("api_key=sk-abc123XYZsecretvalue")).toContain("<REDACTED:");
+        expect(redactSecretText("api_key=sk-abc123XYZsecretvalue")).not.toContain(
+            "sk-abc123XYZsecretvalue",
+        );
+        expect(redactSecretText('"auth_token": "tok_live_9f8e7d6c5b"')).toContain("<REDACTED:");
+    });
+
+    test("value-shaped secret patterns still fire independent of key name", () => {
+        // A bearer/JWT value is caught by its own pattern even if its key is bland.
+        expect(redactSecretText("Authorization: Bearer abc123def456ghi789")).toContain(
+            "<REDACTED:bearer>",
+        );
+        expect(redactSecretText("blob=eyJhbGciOi.eyJzdWIiOiIx.SflKxwRJSMeKKF2QT4")).toContain(
+            "<JWT_REDACTED>",
+        );
+    });
+});
 
 describe("hasShareabilitySensitiveText", () => {
     test("safe project facts are shareable", () => {
