@@ -98,12 +98,49 @@ export interface CommandExecuteOutput {
 
 const SENTINEL_PREFIX = "__CONTEXT_MANAGEMENT_";
 
-/** Throw sentinel error to prevent OpenCode from forwarding the command to the LLM.
- *  This works in TUI and Desktop. In web mode, the error surfaces as a failure in the
- *  browser UI — that's an OpenCode limitation (no "handled" return path from
- *  command.execute.before). Filed as a known issue. */
-function throwSentinel(command: string): never {
-    throw new Error(`${SENTINEL_PREFIX}${command.toUpperCase()}_HANDLED__`);
+type HttpEmpty = (opts: { status: number }) => unknown;
+
+// Lazily resolve effect's HttpServerResponse.empty ONCE. effect is the host
+// OpenCode's dependency (not ours, not bundled), so we resolve it at runtime via
+// a string-indirected dynamic import — the /* @vite-ignore */ + variable hides
+// the specifier from the bundler so it isn't pulled into dist. Memoized: at most
+// one resolution attempt per process. Resolves to null when effect can't be
+// reached (older host layout, or a bundle that can't see it).
+let httpEmptyResolver: Promise<HttpEmpty | null> | null = null;
+function resolveHttpEmpty(): Promise<HttpEmpty | null> {
+    if (!httpEmptyResolver) {
+        const spec = "effect/unstable/http";
+        httpEmptyResolver = import(/* @vite-ignore */ spec)
+            .then((mod: unknown) => {
+                const fn = (mod as { HttpServerResponse?: { empty?: unknown } })?.HttpServerResponse
+                    ?.empty;
+                return typeof fn === "function" ? (fn as HttpEmpty) : null;
+            })
+            .catch(() => null);
+    }
+    return httpEmptyResolver;
+}
+
+/** Prevent OpenCode from forwarding the handled command to the LLM.
+ *
+ *  Preferred: throw `HttpServerResponse.empty({ status: 204 })` — effect's HTTP
+ *  layer treats this as a clean early-return response, so it is NOT logged. This
+ *  fixes the error-log leak OpenCode 1.17.x reintroduced (PR #31551 restored
+ *  effect error logging, which un-silenced the previous string-sentinel throw).
+ *
+ *  Fallback: when effect can't be resolved, throw the string-sentinel Error.
+ *  On hosts predating the 1.17.x logging change that throw was swallowed
+ *  silently anyway, so the fallback is at worst the prior behavior — never worse.
+ *
+ *  Web mode still surfaces a failure in the browser UI (no "handled" return path
+ *  from command.execute.before); an official cancel/noReply hook output remains
+ *  the long-term fix. */
+async function sentinelToThrow(command: string): Promise<unknown> {
+    const httpEmpty = await resolveHttpEmpty();
+    if (httpEmpty) {
+        return httpEmpty({ status: 204 });
+    }
+    return new Error(`${SENTINEL_PREFIX}${command.toUpperCase()}_HANDLED__`);
 }
 
 function getLegacyCompartmentCount(db: Database, sessionId: string): number {
@@ -195,7 +232,7 @@ async function executeAugmentation(
             "## /ctx-aug\n\nSidekick is not configured. Add sidekick settings to `magic-context.jsonc` to use /ctx-aug.",
             {},
         );
-        throwSentinel("CTX-AUG");
+        throw await sentinelToThrow("CTX-AUG");
     }
 
     const prompt = userPrompt.trim();
@@ -205,7 +242,7 @@ async function executeAugmentation(
             "## /ctx-aug\n\nUsage: `/ctx-aug <your prompt>`\n\nProvide a prompt to augment with project memory context.",
             {},
         );
-        throwSentinel("CTX-AUG");
+        throw await sentinelToThrow("CTX-AUG");
     }
 
     // Step 1: Show "preparing" notification (hidden from LLM)
@@ -240,7 +277,7 @@ async function executeAugmentation(
     // Step 4: Send as a real user prompt (will be processed by the model)
     await sendUserPrompt(deps.sidekick.client, sessionId, augmentedPrompt);
 
-    throwSentinel("CTX-AUG");
+    throw await sentinelToThrow("CTX-AUG");
 }
 
 export type ManualDreamSummary = ManualRunResult;
@@ -293,7 +330,7 @@ async function executeDreaming(
             "## /ctx-dream\n\nDreaming is not configured for this project.",
             dreamNotificationParams,
         );
-        throwSentinel("CTX-DREAM");
+        throw await sentinelToThrow("CTX-DREAM");
     }
 
     // Optional single-task arg: `/ctx-dream verify`.
@@ -306,7 +343,7 @@ async function executeDreaming(
                 `## /ctx-dream\n\nUnknown task "${requested}". Valid tasks: ${CANONICAL_DREAM_TASKS.join(", ")}.`,
                 dreamNotificationParams,
             );
-            throwSentinel("CTX-DREAM");
+            throw await sentinelToThrow("CTX-DREAM");
         }
         task = requested;
     }
@@ -320,7 +357,7 @@ async function executeDreaming(
     const summary = await deps.dreamer.runManual(task);
 
     await deps.sendNotification(sessionId, summarizeManualDream(summary), dreamNotificationParams);
-    throwSentinel("CTX-DREAM");
+    throw await sentinelToThrow("CTX-DREAM");
 }
 
 export function createMagicContextCommandHandler(deps: {
@@ -437,7 +474,7 @@ export function createMagicContextCommandHandler(deps: {
                     } else {
                         await deps.sendNotification(sessionId, summary, {});
                     }
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
                 if (sub === "start") {
                     const summary = deps.executeEmbedHistory
@@ -452,7 +489,7 @@ export function createMagicContextCommandHandler(deps: {
                     } else {
                         await deps.sendNotification(sessionId, summary, {});
                     }
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
                 if (sub !== "") {
                     await deps.sendNotification(
@@ -460,12 +497,12 @@ export function createMagicContextCommandHandler(deps: {
                         "Usage: `/ctx-embed` (status), `/ctx-embed start`, or `/ctx-embed pause`.",
                         {},
                     );
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
                 if (isTuiConnected(sessionId)) {
                     pushNotification("action", { action: "show-embed-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-embed: pushed show-embed-dialog to TUI");
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
                 result = deps.getEmbedStatusText
                     ? `## Embedding Status\n\n${deps.getEmbedStatusText(sessionId)}`
@@ -482,7 +519,7 @@ export function createMagicContextCommandHandler(deps: {
                         sessionId,
                     );
                     sessionLog(sessionId, "command ctx-flush: pushed show-flush-dialog to TUI");
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
             }
 
@@ -491,7 +528,7 @@ export function createMagicContextCommandHandler(deps: {
                     // In TUI, push an RPC action so the TUI poller shows a native dialog
                     pushNotification("action", { action: "show-status-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-status: pushed show-status-dialog to TUI");
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 }
                 const liveModelKey = deps.getLiveModelKey?.(sessionId);
                 const liveContextLimit = deps.getContextLimit?.(sessionId);
@@ -521,7 +558,7 @@ export function createMagicContextCommandHandler(deps: {
                     // range UI is tracked as a phase-2 enhancement; typed args are ignored here.
                     pushNotification("action", { action: "show-recomp-dialog" }, sessionId);
                     sessionLog(sessionId, "command ctx-recomp: pushed show-recomp-dialog to TUI");
-                    throwSentinel(input.command);
+                    throw await sentinelToThrow(input.command);
                 } else if (!deps.executeRecomp) {
                     result =
                         "## Magic Recomp\n\n/ctx-recomp is unavailable because the recomp handler is not configured.";
@@ -634,7 +671,7 @@ export function createMagicContextCommandHandler(deps: {
             await deps.sendNotification(sessionId, result, {});
             sessionLog(sessionId, `command ${input.command} handled via command.execute.before`);
 
-            throwSentinel(input.command);
+            throw await sentinelToThrow(input.command);
         },
     };
 }

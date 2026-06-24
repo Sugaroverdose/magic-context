@@ -312,6 +312,10 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 				dreamSession.messages = [
 					makeMessage("user", [{ type: "text", text: userMessage }]),
 					makeMessage("assistant", [
+						// Synthetic tool parts first so investigationToolCallCount
+						// (refresh-primers grounding gate) sees the agent's tool use,
+						// then the final answer text.
+						...syntheticToolParts(result.toolCallCount ?? 0),
 						{ type: "text", text: result.assistantText },
 					]),
 				];
@@ -416,9 +420,29 @@ function extractBodyAgent(args: { body?: unknown }): string | undefined {
 	return typeof agent === "string" && agent.length > 0 ? agent : undefined;
 }
 
+type SyntheticPart =
+	| { type: "text"; text: string }
+	| { type: "tool"; tool: string; state: { input: { description: string } } };
+
+/**
+ * Build `toolCallCount` synthetic tool parts so the shared
+ * `investigationToolCallCount` / `extractToolCallSummaries` (which require
+ * `{ type: "tool", tool, state }`) sees the agent's investigation on Pi. Pi's
+ * facade only carries the final assistant text, so without these the
+ * refresh-primers grounding gate (count > 0) would reject every Pi answer.
+ */
+function syntheticToolParts(count: number): SyntheticPart[] {
+	const safe = Math.max(0, Math.floor(count));
+	return Array.from({ length: safe }, () => ({
+		type: "tool" as const,
+		tool: "investigation",
+		state: { input: { description: "investigation step" } },
+	}));
+}
+
 function makeMessage(
 	role: "user" | "assistant",
-	parts: Array<{ type: "text"; text: string }>,
+	parts: SyntheticPart[],
 ): unknown {
 	return {
 		info: {

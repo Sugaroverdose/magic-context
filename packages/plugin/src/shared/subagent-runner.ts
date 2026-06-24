@@ -180,6 +180,15 @@ export type SubagentRunResult =
           ok: true;
           assistantText: string;
           durationMs: number;
+          /**
+           * Number of tool invocations the agent made during the run. Pi reports
+           * this so callers that gate on "did the agent actually investigate vs
+           * just paraphrase" (refresh-primers' grounding gate) work on Pi, whose
+           * facade otherwise surfaces only the final assistant text. OpenCode
+           * leaves it undefined — its callers read tool-call parts straight off
+           * the real session messages.
+           */
+          toolCallCount?: number;
           meta?: Record<string, unknown>;
       }
     | {

@@ -508,6 +508,10 @@ export class PiSubagentRunner implements SubagentRunner {
 			let finalStopReason: string | null = null;
 			let sawAgentEnd = false;
 			let parseError: string | null = null;
+			// Count tool invocations across the run so callers that gate on
+			// "the agent actually investigated" (refresh-primers grounding gate)
+			// work on Pi, whose result otherwise carries only the final text.
+			let toolCallCount = 0;
 
 			// Terminal-drain state. Set when we detect the final assistant
 			// turn, used to short-circuit the full-timeout wait on Pi's
@@ -679,6 +683,10 @@ export class PiSubagentRunner implements SubagentRunner {
 
 				if (e.type === "tool_result_end" && e.message) {
 					accumulatedMessages.push(e.message);
+					// Each completed tool result is one investigation step. Used by
+					// the grounding gate (count > 0 = real investigation, not a
+					// closed-book paraphrase).
+					toolCallCount += 1;
 				}
 
 				// Pi's print mode finishes the agent loop but does NOT always
@@ -823,6 +831,7 @@ export class PiSubagentRunner implements SubagentRunner {
 					settle({
 						ok: true,
 						assistantText: trimmedAssistantText,
+						toolCallCount,
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});

@@ -401,10 +401,49 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(await resultPromise).toEqual({
 			ok: true,
 			assistantText: "looks done",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
 		});
 	});
+	it("counts tool_result_end events into toolCallCount (refresh-primers grounding gate)", async () => {
+		// The grounding gate (refresh-primers) treats toolCallCount === 0 as a
+		// closed-book paraphrase and refuses to commit. Pi's facade carries only
+		// the final assistant text, so the runner must surface the investigation
+		// count for that gate to work on Pi at all.
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({
+			type: "tool_result_end",
+			message: {
+				role: "tool",
+				content: [{ type: "toolResult", text: "read ok" }],
+			},
+		});
+		child.writeStdoutLine({
+			type: "tool_result_end",
+			message: {
+				role: "tool",
+				content: [{ type: "toolResult", text: "grep ok" }],
+			},
+		});
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "grounded answer" }],
+				stopReason: "stop",
+			},
+		});
+		child.emitClose(0);
+
+		const result = await resultPromise;
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.toolCallCount).toBe(2);
+	});
+
 	it("spawns pi, parses stdout, trims assistant text, and captures stderr", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, "custom-pi");
@@ -440,6 +479,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(result).toEqual({
 			ok: true,
 			assistantText: "final answer",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: "warning from pi" },
 		});
@@ -615,6 +655,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(await resultPromise).toEqual({
 			ok: true,
 			assistantText: "recovered",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
 		});
@@ -782,6 +823,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(await resultPromise).toEqual({
 			ok: true,
 			assistantText: "looks done",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: "process reported late noise" },
 		});
@@ -830,6 +872,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(await resultPromise).toEqual({
 			ok: true,
 			assistantText: "good",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
 		});
@@ -885,6 +928,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(await resultPromise).toEqual({
 			ok: true,
 			assistantText: "fallback text",
+			toolCallCount: 0,
 			durationMs: expect.any(Number),
 			meta: { stderr: undefined },
 		});
