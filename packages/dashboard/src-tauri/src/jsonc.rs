@@ -10,14 +10,22 @@ use std::path::Path;
 
 /// Strip JSONC line/block comments AND trailing commas, respecting string
 /// literals, so the result parses as plain JSON.
+///
+/// Single pass over `char`s (NOT bytes): iterating bytes and casting
+/// `byte as char` corrupts any multi-byte UTF-8 (non-ASCII paths, CJK, accents)
+/// by splitting each code point into Latin-1 bytes. The trailing-comma removal
+/// is folded INTO the same string-state-aware loop so a comma inside a string
+/// value (e.g. `"a,}b"`) is never mistaken for a trailing `,}` / `,]` and
+/// stripped — the previous second-pass operated on the comment-stripped output
+/// without string awareness and corrupted such values.
 pub fn strip_jsonc(input: &str) -> String {
-    let bytes = input.as_bytes();
+    let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len());
     let mut i = 0usize;
     let mut in_string = false;
     let mut escaped = false;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
+    while i < chars.len() {
+        let c = chars[i];
         if in_string {
             out.push(c);
             if escaped {
@@ -36,21 +44,21 @@ pub fn strip_jsonc(input: &str) -> String {
             i += 1;
             continue;
         }
-        let next = if i + 1 < bytes.len() {
-            bytes[i + 1] as char
+        let next = if i + 1 < chars.len() {
+            chars[i + 1]
         } else {
             '\0'
         };
         if c == '/' && next == '/' {
-            while i < bytes.len() && bytes[i] as char != '\n' {
+            while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
             continue;
         }
         if c == '/' && next == '*' {
             i += 2;
-            while i + 1 < bytes.len() {
-                if bytes[i] as char == '*' && bytes[i + 1] as char == '/' {
+            while i + 1 < chars.len() {
+                if chars[i] == '*' && chars[i + 1] == '/' {
                     break;
                 }
                 i += 1;
@@ -58,29 +66,22 @@ pub fn strip_jsonc(input: &str) -> String {
             i += 2;
             continue;
         }
-        out.push(c);
-        i += 1;
-    }
-
-    // Drop trailing commas: `,}` / `,]` (optional whitespace between).
-    let chars: Vec<char> = out.chars().collect();
-    let mut cleaned = String::with_capacity(chars.len());
-    let mut j = 0usize;
-    while j < chars.len() {
-        if chars[j] == ',' {
-            let mut k = j + 1;
+        // Trailing comma (outside strings only): a `,` whose next non-whitespace
+        // char is `}` or `]`. Skip emitting it.
+        if c == ',' {
+            let mut k = i + 1;
             while k < chars.len() && chars[k].is_whitespace() {
                 k += 1;
             }
             if k < chars.len() && (chars[k] == '}' || chars[k] == ']') {
-                j += 1;
+                i += 1;
                 continue;
             }
         }
-        cleaned.push(chars[j]);
-        j += 1;
+        out.push(c);
+        i += 1;
     }
-    cleaned
+    out
 }
 
 /// True when the config file at `path` exists AND declares a non-empty `dreamer`
@@ -163,6 +164,27 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc(input)).unwrap();
         assert_eq!(parsed["url"], "http://x/y");
         assert_eq!(parsed["note"], "a // b");
+    }
+
+    #[test]
+    fn does_not_strip_commas_inside_string_values() {
+        // A `,}` / `,]` sequence INSIDE a string value must survive — the
+        // trailing-comma pass must be string-state-aware.
+        let input = "{ \"a\": \"x,}y\", \"b\": \"p,]q\", \"c\": [1, 2,] }";
+        let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc(input)).unwrap();
+        assert_eq!(parsed["a"], "x,}y");
+        assert_eq!(parsed["b"], "p,]q");
+        assert_eq!(parsed["c"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn preserves_non_ascii_utf8() {
+        // Byte-casting (`byte as char`) would mojibake multi-byte code points.
+        let input = "{ \"path\": \"/Users/José/café\", \"emoji\": \"🌙\", \"cjk\": \"日本語\", }";
+        let parsed: serde_json::Value = serde_json::from_str(&strip_jsonc(input)).unwrap();
+        assert_eq!(parsed["path"], "/Users/José/café");
+        assert_eq!(parsed["emoji"], "🌙");
+        assert_eq!(parsed["cjk"], "日本語");
     }
 
     #[test]

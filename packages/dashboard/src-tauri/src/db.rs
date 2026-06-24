@@ -2350,6 +2350,16 @@ pub fn get_memories(
         "50 AS importance, 'project' AS scope, 0 AS shareable,"
     };
 
+    // Degrade gracefully on a pre-vN / never-initialized DB that has no
+    // `memory_embeddings` table: the EXISTS subquery would error the whole query
+    // (the dashboard opens DBs read-only and never creates tables). Mirror the
+    // classify-column degradation and report no embeddings instead of crashing.
+    let has_embedding_select = if table_exists(conn, "memory_embeddings") {
+        HAS_EMBEDDING_SELECT
+    } else {
+        "0 AS has_embedding"
+    };
+
     let raw_search = search_query.unwrap_or("").trim().to_string();
     let has_search = !raw_search.is_empty();
 
@@ -2450,7 +2460,7 @@ pub fn get_memories(
             where_extra,
             limit_idx,
             offset_idx,
-            has_embedding = HAS_EMBEDDING_SELECT,
+            has_embedding = has_embedding_select,
         )
     } else if has_search {
         // LIKE fallback for short queries or special-character-heavy input
@@ -2470,7 +2480,7 @@ pub fn get_memories(
             where_extra,
             limit_idx,
             offset_idx,
-            has_embedding = HAS_EMBEDDING_SELECT,
+            has_embedding = has_embedding_select,
         )
     } else {
         format!(
@@ -2489,7 +2499,7 @@ pub fn get_memories(
             where_extra,
             limit_idx,
             offset_idx,
-            has_embedding = HAS_EMBEDDING_SELECT,
+            has_embedding = has_embedding_select,
         )
     };
 
@@ -2525,7 +2535,7 @@ pub fn get_memories(
                 where_extra,
                 limit_idx,
                 offset_idx,
-                has_embedding = HAS_EMBEDDING_SELECT,
+                has_embedding = has_embedding_select,
             );
             // Rebuild params with LIKE pattern instead of FTS query.
             // Project filter uses the same resolved_paths set computed at the
@@ -2573,7 +2583,7 @@ pub fn get_memories(
                 where_extra,
                 limit_idx,
                 offset_idx,
-                has_embedding = HAS_EMBEDDING_SELECT,
+                has_embedding = has_embedding_select,
             );
             let mut like_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             like_params.push(Box::new(like_pattern));
@@ -2805,8 +2815,12 @@ pub fn get_memory_stats(
     )?;
 
     // Count distinct memories that have at least one embedding row. Multiple rows per
-    // memory (one per model_id) must not inflate this stat.
-    let with_embeddings: i64 = if has_filter {
+    // memory (one per model_id) must not inflate this stat. Guard against a
+    // pre-vN/never-initialized DB with no memory_embeddings table (read-only
+    // dashboard never creates it) — report 0 rather than crashing the stats query.
+    let with_embeddings: i64 = if !table_exists(conn, "memory_embeddings") {
+        0
+    } else if has_filter {
         if resolved_paths.is_empty() {
             // Empty filter resolves to zero rows — honor the same zero-stats
             // contract the other counts get from the `0 = 1` sentinel. Rebuilding
@@ -6700,6 +6714,27 @@ mod memory_project_filter_tests {
         assert_eq!(rows[0].importance, 50);
         assert_eq!(rows[0].scope, "project");
         assert!(!rows[0].shareable);
+    }
+
+    #[test]
+    fn get_memories_degrades_without_memory_embeddings_table() {
+        // A pre-vN / never-initialized DB may have `memories` but no
+        // `memory_embeddings` table (the read-only dashboard never creates it).
+        // get_memories and the stats path must report no embeddings rather than
+        // erroring on the missing table.
+        let conn = make_memory_db();
+        conn.execute_batch("DROP TABLE memory_embeddings;")
+            .expect("drop memory_embeddings");
+        assert!(!table_exists(&conn, "memory_embeddings"));
+        insert_memory(&conn, "/tmp/no-emb", "CONSTRAINTS", "active");
+
+        let rows = get_memories(&conn, None, None, None, None, None, 100, 0)
+            .expect("get_memories must not error when memory_embeddings is absent");
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].has_embedding, "no embeddings table → has_embedding=false");
+
+        let stats = get_memory_stats(&conn, None, None).expect("stats must not error");
+        assert_eq!(stats.with_embeddings, 0);
     }
 
     #[test]
