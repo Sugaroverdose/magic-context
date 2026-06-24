@@ -2155,11 +2155,28 @@ pub fn get_project_cards(conn: &Connection) -> Vec<ProjectCard> {
                 last_activity_ms: accum.last_activity_ms,
             }
         })
-        // Drop ephemeral noise: deleted mason/background worktrees (`bg_…`) leave
-        // orphan SUBAGENT session rows in opencode.db under a `dir:<hash>` fallback
-        // identity, surfacing as cards with 0 primary sessions and 0 memories. A
-        // real project has at least one primary session OR at least one memory.
-        .filter(|card| card.session_count > 0 || card.memory_count > 0)
+        // Drop ephemeral noise. Two cases:
+        //   1. Deleted worktrees with no surviving primary session and no memory
+        //      (orphan subagent rows under a `dir:<hash>` fallback identity).
+        //   2. Deleted mason/background worktrees (`bg_<hash>`) that DID own a
+        //      primary session: a LIVE worktree coalesces into its git root, so a
+        //      card that still resolves to `dir:<hash>` with its own basename means
+        //      the worktree was removed and its directory no longer exists on disk.
+        // Keep anything with memories (real curated knowledge, even if the dir
+        // moved); for memory-less cards, require the representative directory to
+        // still exist. An empty path can't be verified, so keep it conservatively.
+        .filter(|card| {
+            if card.memory_count > 0 {
+                return true;
+            }
+            if card.session_count == 0 {
+                return false;
+            }
+            if card.primary_path.is_empty() {
+                return true;
+            }
+            std::path::Path::new(&card.primary_path).exists()
+        })
         .collect();
     cards.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
     cards
@@ -3599,11 +3616,16 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     // `p.worktree` is "/" and basename("/") renders as "/". `s.directory` always
     // holds the real cwd. We resolve identity from it too — which also matches
     // what the plugin keys memories under (plugin identity = session.directory).
+    // Exclude archived sessions: OpenCode archives a session (sets time_archived)
+    // to hide it from its own list, so the dashboard mirrors that and shows only
+    // live sessions. This also keeps archived rows out of the project-card session
+    // counts, which read through this same path.
     let Ok(mut stmt) = conn.prepare(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
                 COALESCE(s.directory, ''), s.time_updated AS last_activity
          FROM session s
-         LEFT JOIN project p ON p.id = s.project_id",
+         LEFT JOIN project p ON p.id = s.project_id
+         WHERE s.time_archived IS NULL",
     ) else {
         return Vec::new();
     };
