@@ -69,8 +69,8 @@ echo "$DOCTOR_OUT" | tail -40
 check "magic-context doctor --harness pi --force exits with a Doctor summary" \
     "echo \"\$DOCTOR_OUT\" | grep -qE 'Doctor (complete|repair complete|found failures)'"
 
-check "Pi user config created at ~/.pi/agent/magic-context.jsonc" \
-    "test -f $HOME/.pi/agent/magic-context.jsonc"
+check "Pi user config created at ~/.config/cortexkit/magic-context.jsonc" \
+    "test -f $HOME/.config/cortexkit/magic-context.jsonc"
 
 check "Pi settings.json registered the magic-context package" \
     "grep -q 'pi-magic-context' $HOME/.pi/agent/settings.json"
@@ -112,8 +112,11 @@ node -e '
 
 # Magic Context config: minimal — just enable the extension. Subagents
 # are off because the session-smoke is single-turn; aimock is for the
-# main turn only.
-cat > "$HOME/.pi/agent/magic-context.jsonc" <<'JSON'
+# main turn only. Written to the shared CortexKit location (the hard
+# cutover target the Pi extension now reads); overwrite-in-place is fine
+# since Phase 1's doctor already created this same file.
+mkdir -p "$HOME/.config/cortexkit"
+cat > "$HOME/.config/cortexkit/magic-context.jsonc" <<'JSON'
 {
   "enabled": true,
   "ctx_reduce_enabled": true,
