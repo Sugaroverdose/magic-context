@@ -285,4 +285,48 @@ describe("resolveLegacyConfigSources", () => {
             true,
         );
     });
+
+    it("never lists a user-scope config as a project source when the project dir is the CortexKit config home", () => {
+        // Regression: opencode opened with cwd = ~/.config/cortexkit made the
+        // bare-root project source `<root>/magic-context.jsonc` collide with the
+        // USER config, so the project migration ate the user config into
+        // `<root>/.cortexkit/` and left the user on schema defaults.
+        const prev = process.env.XDG_CONFIG_HOME;
+        const home = tmp();
+        try {
+            process.env.XDG_CONFIG_HOME = home;
+            const cortexkitHome = join(home, "cortexkit");
+            const sources = resolveLegacyConfigSources(cortexkitHome);
+            const projectPaths = sources.project.map((s) => s.path);
+            // The user config path must NOT be a project migration source.
+            expect(projectPaths).not.toContain(join(cortexkitHome, "magic-context.jsonc"));
+            expect(projectPaths).not.toContain(join(cortexkitHome, "magic-context.json"));
+            // The genuine project subdir sources are still present.
+            expect(projectPaths).toContain(join(cortexkitHome, ".opencode", "magic-context.jsonc"));
+            expect(projectPaths).toContain(join(cortexkitHome, ".pi", "magic-context.jsonc"));
+        } finally {
+            if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = prev;
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
+
+    it("never lists the OpenCode/Pi user legacy paths as project sources when the project dir is the user config dir", () => {
+        // Same collision class for a project opened directly in ~/.config/opencode
+        // (bare-root would resolve to the OpenCode user legacy config).
+        const prev = process.env.XDG_CONFIG_HOME;
+        const home = tmp();
+        try {
+            process.env.XDG_CONFIG_HOME = home;
+            const opencodeHome = join(home, "opencode");
+            const sources = resolveLegacyConfigSources(opencodeHome);
+            const projectPaths = sources.project.map((s) => s.path);
+            expect(projectPaths).not.toContain(join(opencodeHome, "magic-context.jsonc"));
+            expect(projectPaths).not.toContain(join(opencodeHome, "magic-context.json"));
+        } finally {
+            if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+            else process.env.XDG_CONFIG_HOME = prev;
+            rmSync(home, { recursive: true, force: true });
+        }
+    });
 });

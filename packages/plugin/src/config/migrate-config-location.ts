@@ -111,15 +111,43 @@ function legacySourcesForBase(basePath: string, label: string): LegacyConfigSour
 }
 
 /**
+ * Every user-scope config path the migrator knows: the CortexKit user target
+ * plus the user legacy sources. A project-scope migration must NEVER move any of
+ * these (they are user-scope files, not project files).
+ */
+function userScopeConfigPaths(): Set<string> {
+    return new Set<string>([
+        // The CortexKit user target, both extensions: the bare-root project
+        // source produces `.jsonc` AND `.json`, so exclude both or a stray
+        // `~/.config/cortexkit/magic-context.json` would still be eaten.
+        `${cortexKitUserConfigBasePath()}.jsonc`,
+        `${cortexKitUserConfigBasePath()}.json`,
+        join(configHome(), "opencode", `${CONFIG_FILE_BASENAME}.jsonc`),
+        join(configHome(), "opencode", `${CONFIG_FILE_BASENAME}.json`),
+        join(homeDir(), ".pi", "agent", `${CONFIG_FILE_BASENAME}.jsonc`),
+        join(homeDir(), ".pi", "agent", `${CONFIG_FILE_BASENAME}.json`),
+    ]);
+}
+
+/**
  * The legacy config locations to migrate FROM, by scope. Each base produces a
  * `.jsonc` and a `.json` candidate; whichever exists migrates, target is always
  * `.jsonc`. The bare-root project source (`<root>/magic-context.*`) is unique to
  * Magic Context (AFT never had it) — omitting it would orphan repo-root configs.
+ *
+ * Project sources are filtered against the user-scope path set: when a session's
+ * project directory IS the user config home (e.g. opencode opened in
+ * `~/.config/cortexkit`), the bare-root project source `<root>/magic-context.jsonc`
+ * resolves to the USER config path. Without this guard the project migration
+ * would "migrate" the user's own config into `<root>/.cortexkit/` and rename the
+ * original aside, leaving the user on schema defaults (the config-eats-itself
+ * bug). A project migration must never touch a user-scope file.
  */
 export function resolveLegacyConfigSources(directory: string): {
     user: LegacyConfigSource[];
     project: LegacyConfigSource[];
 } {
+    const userPaths = userScopeConfigPaths();
     return {
         user: [
             ...legacySourcesForBase(
@@ -138,7 +166,7 @@ export function resolveLegacyConfigSources(directory: string): {
                 "OpenCode project",
             ),
             ...legacySourcesForBase(join(directory, ".pi", CONFIG_FILE_BASENAME), "Pi project"),
-        ],
+        ].filter((source) => !userPaths.has(source.path)),
     };
 }
 
