@@ -73,6 +73,13 @@ jobs:
       - name: Smoke (smart-note wasm bundle)
         run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
 
+      # The raw-TSX ./tui entry imports @opentui/solid's JSX runtime. `bun test`
+      # never imports it, so a missing/mismatched OpenTUI or Solid dep (as broke
+      # on OpenCode 1.17.10's OpenTUI 0.4.2 bump) ships a TUI that won't load.
+      # Import the entry the way OpenCode loads the ./tui export to catch it.
+      - name: Smoke (TUI entry import)
+        run: bun packages/plugin/scripts/smoke-tui-import.ts
+
   check-pi-plugin:
     name: Check (pi-plugin)
     runs-on: ubuntu-latest

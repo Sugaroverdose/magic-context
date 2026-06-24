@@ -89,6 +89,11 @@ jobs:
       - name: Smoke (smart-note wasm bundle)
         run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
 
+      # Verify the raw-TSX ./tui entry imports (OpenTUI/Solid runtime resolves)
+      # before publishing — a missing dep ships a TUI that won't load.
+      - name: Smoke (TUI entry import)
+        run: bun packages/plugin/scripts/smoke-tui-import.ts
+
   test-pi:
     name: Test (pi-plugin)
     runs-on: ubuntu-latest
