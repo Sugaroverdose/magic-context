@@ -508,10 +508,14 @@ export class PiSubagentRunner implements SubagentRunner {
 			let finalStopReason: string | null = null;
 			let sawAgentEnd = false;
 			let parseError: string | null = null;
-			// Count tool invocations across the run so callers that gate on
-			// "the agent actually investigated" (refresh-primers grounding gate)
-			// work on Pi, whose result otherwise carries only the final text.
-			let toolCallCount = 0;
+			// Tool-invocation count for the grounding gate (refresh-primers:
+			// 0 tool calls = closed-book paraphrase, rejected). Derived at settle
+			// from the accumulated assistant message CONTENT (toolCall parts) via
+			// countToolCalls — NOT from a discrete tool-event, since Pi's --print
+			// stdout has no reliable tool-completion event name. The authoritative
+			// source is agent_end's full message array when present, else the
+			// accumulated message_end messages.
+			let agentEndMessages: unknown[] | null = null;
 
 			// Terminal-drain state. Set when we detect the final assistant
 			// turn, used to short-circuit the full-timeout wait on Pi's
@@ -619,6 +623,7 @@ export class PiSubagentRunner implements SubagentRunner {
 				// it as authoritative. Older Pi versions may have done this.
 				if (e.type === "agent_end" && Array.isArray(e.messages)) {
 					sawAgentEnd = true;
+					agentEndMessages = e.messages;
 					const result = extractFinalAssistant(e.messages);
 					finalAssistantText = result.text;
 					finalStopReason = result.stopReason;
@@ -679,14 +684,6 @@ export class PiSubagentRunner implements SubagentRunner {
 							});
 						}
 					}
-				}
-
-				if (e.type === "tool_result_end" && e.message) {
-					accumulatedMessages.push(e.message);
-					// Each completed tool result is one investigation step. Used by
-					// the grounding gate (count > 0 = real investigation, not a
-					// closed-book paraphrase).
-					toolCallCount += 1;
 				}
 
 				// Pi's print mode finishes the agent loop but does NOT always
@@ -831,7 +828,12 @@ export class PiSubagentRunner implements SubagentRunner {
 					settle({
 						ok: true,
 						assistantText: trimmedAssistantText,
-						toolCallCount,
+						// Prefer agent_end's authoritative full array; else the
+						// accumulated message_end stream. Counting toolCall content
+						// parts is event-name-independent (see countToolCalls).
+						toolCallCount: countToolCalls(
+							agentEndMessages ?? accumulatedMessages,
+						),
 						durationMs: Date.now() - startTime,
 						meta: { stderr: stderr.length > 0 ? stderr : undefined },
 					});
@@ -1096,6 +1098,35 @@ export function extractFinalAssistant(messages: unknown[]): {
 		};
 	}
 	return { text: null, stopReason: null, errorMessage: null };
+}
+
+/**
+ * Count tool invocations across a run from the assistant messages themselves —
+ * each `toolCall` content part is one invocation. We derive the count from
+ * message CONTENT (which `message_end` always carries, and `agent_end` carries
+ * in its final array) rather than a discrete tool-completion EVENT, because
+ * Pi's --print stdout vocabulary is message_start / message_end /
+ * tool_execution_* (no `tool_result_end`), so keying on an event name is
+ * fragile. The grounding gate only needs "did the agent call tools at all"
+ * (count > 0), so counting requested toolCall parts is the robust signal.
+ */
+export function countToolCalls(messages: unknown[]): number {
+	let count = 0;
+	for (const msg of messages) {
+		if (typeof msg !== "object" || msg === null) continue;
+		const m = msg as { role?: string; content?: unknown };
+		if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+		for (const part of m.content) {
+			if (
+				typeof part === "object" &&
+				part !== null &&
+				(part as { type?: unknown }).type === "toolCall"
+			) {
+				count += 1;
+			}
+		}
+	}
+	return count;
 }
 
 export function parsePiEventLine(

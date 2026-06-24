@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    utimesSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,16 +42,47 @@ describe("migrateConfigFile (location migration)", () => {
         }
     });
 
-    it("reclaims a stale (crashed-holder) lock within a bounded budget instead of freezing or throwing", () => {
+    it("reclaims a stale (crashed-holder) lock in one shot without blocking init", () => {
         const dir = tmp();
         try {
             const target = join(dir, ".cortexkit", "magic-context.jsonc");
             const legacy = join(dir, "magic-context.jsonc");
             writeFileSync(legacy, '{"enabled":false}');
-            // A leftover lock dir from a crashed holder. The old design (60s
-            // stale / 30s timeout) made reclaim unreachable — a waiter froze
-            // init for 30s then THREW. The fix keeps stale < timeout so the
-            // waiter reclaims and proceeds, bounded and never throwing.
+            // A leftover lock dir from a crashed holder, aged past the stale
+            // threshold. The non-blocking lock removes it and re-attempts mkdir
+            // once (no busy-wait, no synchronous sleep), so migration proceeds
+            // and init is never frozen.
+            const lockDir = `${target}.lock`;
+            mkdirSync(lockDir, { recursive: true });
+            // Backdate the lock dir's mtime well past CONFIG_LOCK_STALE_MS (4s).
+            const old = Date.now() - 60_000;
+            utimesSync(lockDir, new Date(old), new Date(old));
+            const start = Date.now();
+            const r = migrateConfigFile({
+                scope: "project",
+                targetPath: target,
+                legacySources: [src(legacy)],
+            });
+            const elapsed = Date.now() - start;
+            // Effectively instant — no timeout budget is ever waited.
+            expect(elapsed).toBeLessThan(1_000);
+            expect(r.migrated).toBe(true);
+            expect(existsSync(target)).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("skips migration this run (no block) when a LIVE holder owns the lock", () => {
+        const dir = tmp();
+        try {
+            const target = join(dir, ".cortexkit", "magic-context.jsonc");
+            const legacy = join(dir, "magic-context.jsonc");
+            writeFileSync(legacy, '{"enabled":false}');
+            // A FRESH lock dir (live holder, not stale): we must not block waiting
+            // for it — return immediately with migrated:false and leave the
+            // target absent (the loader read-legacy-on-conflict covers this run;
+            // the next init retries once the holder releases).
             mkdirSync(`${target}.lock`, { recursive: true });
             const start = Date.now();
             const r = migrateConfigFile({
@@ -52,9 +91,10 @@ describe("migrateConfigFile (location migration)", () => {
                 legacySources: [src(legacy)],
             });
             const elapsed = Date.now() - start;
-            expect(elapsed).toBeLessThan(8_000);
-            expect(r.migrated).toBe(true);
-            expect(existsSync(target)).toBe(true);
+            expect(elapsed).toBeLessThan(1_000);
+            expect(r.migrated).toBe(false);
+            expect(r.conflict).toBe(false);
+            expect(existsSync(target)).toBe(false);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

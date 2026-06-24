@@ -406,29 +406,43 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			meta: { stderr: undefined },
 		});
 	});
-	it("counts tool_result_end events into toolCallCount (refresh-primers grounding gate)", async () => {
+	it("counts toolCall content parts from assistant message_end into toolCallCount (grounding gate)", async () => {
 		// The grounding gate (refresh-primers) treats toolCallCount === 0 as a
-		// closed-book paraphrase and refuses to commit. Pi's facade carries only
-		// the final assistant text, so the runner must surface the investigation
-		// count for that gate to work on Pi at all.
+		// closed-book paraphrase and refuses to commit. The count is derived from
+		// `toolCall` CONTENT parts on assistant message_end turns — NOT a tool
+		// event name. Pi has no `tool_result_end` (its real tool event is
+		// `tool_execution_end`), so content-part counting is robust to event-name
+		// drift. (Confirmed against Pi source via the PI peer.)
 		const child = createMockChild();
 		const { runner } = runnerWith(child);
 
 		const resultPromise = runner.run(baseOptions);
+		// Two intermediate tool-calling assistant turns (one toolCall part each).
 		child.writeStdoutLine({
-			type: "tool_result_end",
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", toolName: "read", toolCallId: "c1" }],
+				stopReason: "toolUse",
+			},
+		});
+		// A toolResult message_end (role: "tool") must NOT be counted.
+		child.writeStdoutLine({
+			type: "message_end",
 			message: {
 				role: "tool",
 				content: [{ type: "toolResult", text: "read ok" }],
 			},
 		});
 		child.writeStdoutLine({
-			type: "tool_result_end",
+			type: "message_end",
 			message: {
-				role: "tool",
-				content: [{ type: "toolResult", text: "grep ok" }],
+				role: "assistant",
+				content: [{ type: "toolCall", toolName: "grep", toolCallId: "c2" }],
+				stopReason: "toolUse",
 			},
 		});
+		// Terminal assistant turn: text only, no toolCall → not counted.
 		child.writeStdoutLine({
 			type: "message_end",
 			message: {

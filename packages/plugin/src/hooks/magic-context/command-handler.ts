@@ -406,6 +406,27 @@ export function createMagicContextCommandHandler(deps: {
         runManual: (task?: DreamTaskName) => Promise<ManualRunResult>;
     };
 }) {
+    // Notification delivery MUST NOT bypass the sentinel. Every command path
+    // ends in throwSentinel() (the 204 that suppresses the error-log leak and
+    // stops the command reaching the LLM). If sendNotification throws — RPC down,
+    // client gone, transient post failure — that throw would skip the pending
+    // throwSentinel and the raw command would be forwarded to the model (and a
+    // real error logged). Wrap it once so a delivery failure is logged and
+    // swallowed, never preempting the sentinel. Reassigning the deps method
+    // covers the handler AND the standalone executeAugmentation/executeDreaming,
+    // which receive this same deps reference.
+    const rawSendNotification = deps.sendNotification;
+    deps.sendNotification = async (sessionId, text, params) => {
+        try {
+            await rawSendNotification(sessionId, text, params);
+        } catch (err) {
+            sessionLog(
+                sessionId,
+                `command notification delivery failed (continuing to sentinel): ${err instanceof Error ? err.message : String(err)}`,
+            );
+        }
+    };
+
     const isStatusCommand = (command: string): boolean => command === "ctx-status";
     const isFlushCommand = (command: string): boolean => command === "ctx-flush";
     const isRecompCommand = (command: string): boolean => command === "ctx-recomp";

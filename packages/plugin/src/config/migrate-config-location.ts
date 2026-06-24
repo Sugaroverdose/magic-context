@@ -280,31 +280,23 @@ function fileSemanticsMatch(a: string, b: string): boolean {
 
 // ── Cross-process lock (Desktop runs many instances concurrently) ────────────
 
-function sleepSync(ms: number): void {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 // A real migration is a sub-second rename+write, so a lock older than this was
-// almost certainly left by a crashed holder and is safe to reclaim. Kept BELOW
-// the overall timeout so stale reclaim is actually reachable within one waiter's
-// budget (the previous 60s-stale / 30s-timeout pair made reclaim unreachable).
+// almost certainly left by a crashed holder and is safe to reclaim.
 const CONFIG_LOCK_STALE_MS = 4_000;
-// Hard cap on how long acquisition may block plugin init. Migration is NOT
-// correctness-critical this run — the loaders read-legacy-on-conflict when the
-// CortexKit base is absent — so on timeout we SKIP (return null) rather than
-// freeze init: another instance is migrating, or the next init retries.
-const CONFIG_LOCK_TIMEOUT_MS = 5_000;
 
 /**
  * Directory-mkdir lock. `mkdir` is atomic; EEXIST means another instance holds
- * it — busy-wait with a stale-reclaim (a crashed holder's dir is removed) and a
- * short overall timeout. Returns the release fn, or null on timeout (caller
- * skips migration this run). The loser that does acquire then sees
- * target-exists+matches (no-op) or the source already renamed away.
+ * it. We do NOT block plugin init: migration is not correctness-critical this
+ * run (the loaders read-legacy-on-conflict when the CortexKit base is absent),
+ * so on a LIVE competing holder we return null immediately and skip migration
+ * this run — the holder finishes its sub-second rename+write, and the next init
+ * sees target-present and consolidates. The ONLY retry is a single one-shot
+ * stale reclaim: a crashed holder's lock dir (older than the stale threshold) is
+ * removed and we re-attempt mkdir once. No busy-wait, no synchronous sleep — the
+ * init path never blocks on lock contention.
  */
 function acquireConfigMigrationLock(lockDir: string): (() => void) | null {
-    const deadline = Date.now() + CONFIG_LOCK_TIMEOUT_MS;
-    while (true) {
+    for (let attempt = 0; attempt < 2; attempt++) {
         try {
             mkdirSync(lockDir, { recursive: false });
             return () => {
@@ -317,6 +309,9 @@ function acquireConfigMigrationLock(lockDir: string): (() => void) | null {
         } catch (err) {
             const code = (err as { code?: unknown })?.code;
             if (code !== "EEXIST") throw err;
+            // EEXIST: another instance holds the lock. Reclaim ONLY if it's stale
+            // (crashed holder) and retry mkdir once; otherwise a live holder owns
+            // it → skip this run rather than block init.
             try {
                 const ageMs = Date.now() - statSync(lockDir).mtimeMs;
                 if (ageMs > CONFIG_LOCK_STALE_MS) {
@@ -324,14 +319,13 @@ function acquireConfigMigrationLock(lockDir: string): (() => void) | null {
                     continue;
                 }
             } catch {
-                // Lock vanished between attempts — retry immediately.
+                // Lock vanished between stat and now — retry mkdir once.
+                continue;
             }
-            if (Date.now() >= deadline) {
-                return null;
-            }
-            sleepSync(25);
+            return null;
         }
     }
+    return null;
 }
 
 // ── Atomic writes ────────────────────────────────────────────
