@@ -6,7 +6,9 @@ import {
     clearModelsDevCache,
     getModelsDevCacheState,
     getSdkContextLimit,
+    refreshModelLimitsAfterAuthOnce,
     refreshModelLimitsFromApi,
+    resetAuthRewarmLatchForTest,
 } from "./models-dev-cache";
 
 /**
@@ -195,6 +197,86 @@ describe("models-dev-cache (SDK-only)", () => {
             clearModelsDevCache();
             expect(getSdkContextLimit("p", "good")).toBe(200000);
             expect(getSdkContextLimit("p", "bad")).toBeUndefined();
+        });
+    });
+
+    describe("after-auth re-warm (once per process)", () => {
+        // The startup warm can run before provider auth is loaded, caching a raw
+        // pre-downshift limit (gpt-5.5 922k) that then survives restarts and is
+        // never corrected by the too-low-only recovery. The first usage event
+        // proves auth is live; one re-warm there overwrites the stale value.
+        function makeCountingClient(input: number) {
+            let calls = 0;
+            return {
+                client: {
+                    config: {
+                        providers: async () => {
+                            calls++;
+                            return {
+                                data: {
+                                    providers: [
+                                        {
+                                            id: "openai",
+                                            models: { "gpt-5.5": { limit: { input } } },
+                                        },
+                                    ],
+                                },
+                            };
+                        },
+                    },
+                },
+                calls: () => calls,
+            };
+        }
+
+        test("re-warm overwrites a stale pre-auth limit and runs only once per process", async () => {
+            resetAuthRewarmLatchForTest();
+            // Pre-auth startup warm cached the raw 922k.
+            await refreshModelLimitsFromApi(
+                makeClient([{ id: "openai", models: { "gpt-5.5": { limit: { input: 922000 } } } }]),
+            );
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(922000);
+
+            // First usage: auth is live, providers() now reports the 272k cap.
+            const { client, calls } = makeCountingClient(272000);
+            await refreshModelLimitsAfterAuthOnce(client);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+            expect(calls()).toBe(1);
+
+            // Subsequent usage events are a no-op (latch held).
+            await refreshModelLimitsAfterAuthOnce(client);
+            await refreshModelLimitsAfterAuthOnce(client);
+            expect(calls()).toBe(1);
+        });
+
+        test("a failed re-warm resets the latch so a later usage event retries", async () => {
+            resetAuthRewarmLatchForTest();
+            let calls = 0;
+            const flaky = {
+                config: {
+                    providers: async () => {
+                        calls++;
+                        // First attempt: empty payload (auth still settling) → no warm.
+                        if (calls === 1) return { data: { providers: [] } };
+                        return {
+                            data: {
+                                providers: [
+                                    {
+                                        id: "openai",
+                                        models: { "gpt-5.5": { limit: { input: 272000 } } },
+                                    },
+                                ],
+                            },
+                        };
+                    },
+                },
+            };
+            await refreshModelLimitsAfterAuthOnce(flaky);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBeUndefined();
+            // Latch was reset on failure, so the next event retries and succeeds.
+            await refreshModelLimitsAfterAuthOnce(flaky);
+            expect(getSdkContextLimit("openai", "gpt-5.5")).toBe(272000);
+            expect(calls).toBe(2);
         });
     });
 

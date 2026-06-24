@@ -30,7 +30,10 @@ import {
 } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
-import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    refreshModelLimitsAfterAuthOnce,
+    refreshModelLimitsFromApi,
+} from "../../shared/models-dev-cache";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import {
@@ -478,6 +481,16 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         (info.tokens?.input ?? 0) +
                         (info.tokens?.cache?.read ?? 0) +
                         (info.tokens?.cache?.write ?? 0);
+                    // Auth is provably live now (a request returned usage), so
+                    // re-warm the model-limit cache once per process to overwrite
+                    // any stale pre-auth limit (e.g. gpt-5.5 cached at the raw
+                    // 922k before the OAuth 272k downshift applied, #179). No-op
+                    // after the first successful warm.
+                    if (deps.client) {
+                        await refreshModelLimitsAfterAuthOnce(
+                            deps.client as Parameters<typeof refreshModelLimitsAfterAuthOnce>[0],
+                        );
+                    }
                     let contextLimit = resolveContextLimit(info.providerID, info.modelID, {
                         db: deps.db,
                         sessionID: info.sessionID,

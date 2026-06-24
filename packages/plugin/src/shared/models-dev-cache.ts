@@ -210,6 +210,41 @@ export async function refreshModelLimitsFromApi(
     }
 }
 
+// Once-per-process latch for the after-auth re-warm below.
+let authRewarmDone = false;
+
+/**
+ * Re-warm the limit cache ONCE per process, after auth is provably live.
+ *
+ * The startup warm (index.ts) can run before the user's provider auth is
+ * loaded. When it does, an auth-conditional limit patch hasn't applied yet, so
+ * `config.providers()` returns the RAW catalog limit (e.g. OpenAI gpt-5.5 OAuth
+ * is downshifted to a 272k input cap by OpenCode's Codex auth plugin only when
+ * `ctx.auth.type === "oauth"`; before auth loads it reports the raw 922k). That
+ * too-high value gets cached AND persisted as last-known-good, survives
+ * restarts, and the existing recovery only re-resolves a too-LOW limit
+ * (overflow / `percentage > 100`), so a too-HIGH one never self-corrects: the
+ * sidebar shows huge headroom while the backend rejects at the real cap (#179).
+ *
+ * The first `message.updated` carrying usage tokens proves a request succeeded,
+ * so auth + providers are fully resolved. Re-warming there overwrites any stale
+ * pre-auth limit with the live auth-adjusted one. Idempotent and cheap: a single
+ * `config.providers()` round-trip, then a no-op for the rest of the process. The
+ * latch is set before the await so concurrent `message.updated` events don't
+ * stack duplicate warms; a failed warm resets it so a later message retries.
+ */
+export async function refreshModelLimitsAfterAuthOnce(client: OpencodeClientLike): Promise<void> {
+    if (authRewarmDone) return;
+    authRewarmDone = true;
+    const ok = await refreshModelLimitsOnce(client);
+    if (!ok) authRewarmDone = false;
+}
+
+/** Test-only: reset the after-auth re-warm latch between cases. */
+export function resetAuthRewarmLatchForTest(): void {
+    authRewarmDone = false;
+}
+
 /** Single SDK fetch + cache rebuild. Returns true when providers were loaded. */
 async function refreshModelLimitsOnce(client: OpencodeClientLike): Promise<boolean> {
     try {
