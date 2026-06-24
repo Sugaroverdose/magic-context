@@ -845,3 +845,20 @@ stale. Verified a FALSE POSITIVE: the compiled check evaluates the
 whole compiled-check lifecycle ONLY when `surface_condition` changes
 (`smartConditionChanged` in `storage-notes.ts`), which is correct — a body edit
 doesn't change what the check tests, so re-compiling would be wasted work.
+
+### A52. Config loader trusts a PRESENT shared CortexKit config (legacy-read fallback is absent-only) — correct by construction
+An audit flagged that `loadPluginConfigDetailed` only reads the running harness's
+legacy config when the shared CortexKit base is **absent**, so a shared config
+that is "present but conflicted" would be trusted (GC not suppressed) and could
+drive a destructive embedding sweep under a cross-harness conflict. Traced as a
+FALSE POSITIVE grounded in the migrator's invariant: a *present* shared config is
+NEVER a conflicted merge. `migrateConfigFile` (`migrate-config-location.ts`)
+**refuses on conflict** — when the OpenCode/Pi legacy pair differs, or a present
+target differs from legacy, it returns `conflict: true` and writes **nothing**,
+leaving the shared base absent → the absent-path legacy-read fallback handles it.
+The migrator only ever writes the shared file from a single source (or matching
+sources). So "shared present" means "the user's authoritative, conflict-free
+config" — trusting it (and letting GC run against the model it names) is correct,
+not a data-safety hole. The destructive-sweep scenario requires a conflicted
+shared file to exist, which the migrator structurally never produces. If a user
+hand-authors a shared config, that IS their authoritative intent by definition.
