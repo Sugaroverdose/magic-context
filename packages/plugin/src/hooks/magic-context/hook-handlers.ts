@@ -444,6 +444,7 @@ function maybeInjectChannel1Nudge(
     const decision = decideChannel1({
         undroppedTokens,
         pressure,
+        estimatedInputTokens: state.lastInputTokens + state.turnToolTokens,
         workingWindowTokens,
         lastNudgeUndropped: getLastNudgeUndropped(args.db, sessionId),
         lastNudgeLevel: getLastNudgeLevel(args.db, sessionId),

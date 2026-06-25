@@ -61,49 +61,67 @@ describe("computeTailTokenEstimate", () => {
 });
 
 describe("decideChannel1 — trajectories", () => {
+    // severity = undroppedTokens / estimatedInputTokens (the reclaimable share of
+    // the live input). pressure is a separate clamped GATE (>= 0.8). Default
+    // estimatedInput=200k so undropped maps directly to a share: 40k→0.20,
+    // 80k→0.40, 130k→0.65.
     const base = {
         workingWindowTokens: BUDGET,
+        estimatedInputTokens: 200_000,
         lastNudgeUndropped: 0,
         lastNudgeLevel: "" as const,
         hasRecentReduce: false,
     };
 
-    it("early reading: large undropped, low pressure → silent", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 40_000, pressure: 0.3 });
-        // severity = 0.4 * 0.3 = 0.12 < gentle
+    it("pressure gate: below the floor → silent even with an urgent reclaimable share", () => {
+        // share = 150k/200k = 0.75 (would be urgent), but pressure 0.6 < 0.8 gate.
+        const d = decideChannel1({ ...base, undroppedTokens: 150_000, pressure: 0.6 });
         expect(d.fire).toBe(false);
     });
-    it("disciplined small working set at high pressure → silent", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 9_000, pressure: 0.9 });
-        expect(d.fire).toBe(false); // below floor
+    it("below the absolute token floor → silent", () => {
+        const d = decideChannel1({
+            ...base,
+            undroppedTokens: 9_000,
+            estimatedInputTokens: 12_000,
+            pressure: 1.0,
+        });
+        expect(d.fire).toBe(false); // below CHANNEL1_FLOOR_TOKENS
     });
-    it("small unreduced pile, not pressured → silent (ratio would over-nudge)", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 12_000, pressure: 0.3 });
-        // severity = 0.12 * 0.3 = 0.036 → silent
+    it("low reclaimable share at high pressure → silent", () => {
+        // share = 20k/200k = 0.10 < gentle; pressure passes the gate but share is low.
+        const d = decideChannel1({ ...base, undroppedTokens: 20_000, pressure: 1.0 });
         expect(d.fire).toBe(false);
     });
-    it("undisciplined + pressured → urgent", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 90_000, pressure: 0.9 });
-        // severity = 0.9 * 0.9 = 0.81 ≥ 0.65
-        expect(d.fire).toBe(true);
-        expect(d.level).toBe("urgent");
-    });
-    it("moderate, modest pressure → gentle", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 40_000, pressure: 0.6 });
-        // severity = 0.4 * 0.6 = 0.24 → gentle band [0.2,0.4)
+    it("gentle band: ~25% reclaimable share, gate passed", () => {
+        const d = decideChannel1({ ...base, undroppedTokens: 50_000, pressure: 0.9 });
+        // share = 0.25 → gentle [0.2,0.4)
         expect(d.fire).toBe(true);
         expect(d.level).toBe("gentle");
     });
-    it("moderate-high → firm", () => {
-        const d = decideChannel1({ ...base, undroppedTokens: 50_000, pressure: 0.8 });
-        // severity = 0.5 * 0.8 = 0.40 ≥ 0.4 → firm
+    it("firm band: ~45% reclaimable share", () => {
+        const d = decideChannel1({ ...base, undroppedTokens: 90_000, pressure: 0.9 });
+        // share = 0.45 → firm [0.4,0.65)
         expect(d.fire).toBe(true);
         expect(d.level).toBe("firm");
+    });
+    it("urgent band: ~70% reclaimable share", () => {
+        const d = decideChannel1({ ...base, undroppedTokens: 140_000, pressure: 0.9 });
+        // share = 0.70 ≥ 0.65 → urgent
+        expect(d.fire).toBe(true);
+        expect(d.level).toBe("urgent");
+    });
+    // The core defect fix: over-threshold pressure (>1) must NOT inflate the band.
+    // Previously severity = share × pressure² so this would have read urgent.
+    it("pressure clamp: over-threshold pressure does not inflate the band", () => {
+        const d = decideChannel1({ ...base, undroppedTokens: 60_000, pressure: 1.5 });
+        // share = 0.30 → gentle; pressure clamps to 1.0 (gate passes), stays gentle.
+        expect(d.fire).toBe(true);
+        expect(d.level).toBe("gentle");
     });
     it("post-ctx_reduce suppression: never fire on a reduce turn", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 90_000,
+            undroppedTokens: 140_000,
             pressure: 0.9,
             hasRecentReduce: true,
         });
@@ -118,31 +136,32 @@ describe("decideChannel1 — trajectories", () => {
             ...base,
             workingWindowTokens: 1_000_000,
             undroppedTokens: 40_000,
-            pressure: 10,
+            estimatedInputTokens: 100_000, // share 0.4 (firm), band would fire
+            pressure: 0.9,
         });
-        // 5% of a 1M-token history budget is 50k, so a 40k pile is below cadence.
+        // 5% of a 1M working window is 50k, so a 40k pile is below cadence → quiet.
         expect(d.fire).toBe(false);
     });
     it("band suppression: does not repeat the same level on cadence alone", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 60_000,
-            pressure: 0.5,
+            undroppedTokens: 60_000, // share 0.30, still gentle
+            pressure: 0.9,
             lastNudgeUndropped: 40_000,
             lastNudgeLevel: "gentle",
         });
-        // severity = 0.30 (still gentle); grew 20k but same-band repetition is noise.
+        // grew 20k but same-band repetition is noise.
         expect(d.fire).toBe(false);
     });
     it("band suppression: fires immediately when severity escalates", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 50_000,
-            pressure: 0.8,
-            lastNudgeUndropped: 45_000,
+            undroppedTokens: 90_000, // share 0.45 → firm
+            pressure: 0.9,
+            lastNudgeUndropped: 85_000,
             lastNudgeLevel: "gentle",
         });
-        // severity = 0.40 (firm), an escalation even though cadence grew only 5k.
+        // an escalation (gentle→firm) even though cadence grew only 5k.
         expect(d.fire).toBe(true);
         expect(d.level).toBe("firm");
         expect(d.nextLastNudgeLevel).toBe("firm");
@@ -150,9 +169,9 @@ describe("decideChannel1 — trajectories", () => {
     it("post-ctx_reduce reset clears the persisted level", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 80_000,
+            undroppedTokens: 140_000,
             pressure: 0.9,
-            lastNudgeUndropped: 70_000,
+            lastNudgeUndropped: 120_000,
             lastNudgeLevel: "urgent",
             hasRecentReduce: true,
         });
@@ -163,49 +182,44 @@ describe("decideChannel1 — trajectories", () => {
     it("cadence re-arms after a reduce drops undropped below last mark", () => {
         const d = decideChannel1({
             ...base,
-            undroppedTokens: 30_000,
+            undroppedTokens: 50_000, // share 0.25 → gentle
             pressure: 0.9,
-            lastNudgeUndropped: 80_000,
+            lastNudgeUndropped: 120_000,
             lastNudgeLevel: "urgent",
         });
-        // undropped fell below last mark → reset to 0/none → 30k ≥ 0+10k.
-        // severity = 0.3 * 0.9 = 0.27 ≥ 0.2 → gentle, fires again.
+        // undropped fell below last mark → reset to 0/none → 50k ≥ 0+10k cadence.
         expect(d.fire).toBe(true);
-        expect(d.nextLastNudge).toBe(30_000);
+        expect(d.nextLastNudge).toBe(50_000);
         expect(d.nextLastNudgeLevel).toBe("gentle");
     });
 
-    // Regression: the live bug. A 272k-context session (working window
-    // ≈ 272k × 0.65 ≈ 177k) sat at a 25k reclaimable pile near the threshold and
-    // got nagged URGENT every step because the denominator used to be the much
-    // smaller history budget (~26.5k → 25k/26.5k ≈ 0.94 → urgent). With the
-    // working window as denominator, the same pile is a non-event.
-    it("regression: 25k reclaimable on a 177k working window is quiet near threshold", () => {
+    // Regression for the reported symptom: a tool-dominant tail near/over the
+    // execute threshold no longer auto-escalates to URGENT. Old metric:
+    // severity = share × pressure²; with share 0.40 and pressure 1.2 it read
+    // 0.40 × 1.44 = 0.576 (near-urgent) and any higher pressure pushed it over.
+    // New metric: pressure clamps to a gate, severity = the plain 0.40 share → firm.
+    it("regression: tool-heavy tail over the threshold reads firm, not urgent", () => {
         const d = decideChannel1({
-            workingWindowTokens: 177_000,
-            undroppedTokens: 25_000,
-            pressure: 0.95, // ~near the execute threshold
+            ...base,
+            undroppedTokens: 80_000, // share = 0.40
+            pressure: 1.2, // over threshold; clamps to 1.0 (gate passes)
             lastNudgeUndropped: 0,
             lastNudgeLevel: "",
-            hasRecentReduce: false,
         });
-        // severity = (25000/177000) × 0.95 ≈ 0.134 < gentle (0.2)
-        expect(d.fire).toBe(false);
+        expect(d.fire).toBe(true);
+        expect(d.level).toBe("firm");
     });
 
-    // The property the user asked to confirm: once the agent has dropped enough,
-    // climbing back toward the execute threshold does NOT re-nag, because the
-    // numerator (reclaimable) is small regardless of pressure.
-    it("dropped-enough pile stays quiet even at full pressure", () => {
+    // A small reclaimable pile near the threshold stays quiet (the numerator
+    // reclaimable share is small regardless of how close to compaction we are).
+    it("small reclaimable share stays quiet even at full pressure", () => {
         const d = decideChannel1({
-            workingWindowTokens: 177_000,
-            undroppedTokens: 18_000,
-            pressure: 1.0, // exactly at the execute threshold
+            ...base,
+            undroppedTokens: 25_000, // share = 0.125 < gentle
+            pressure: 1.0,
             lastNudgeUndropped: 0,
             lastNudgeLevel: "",
-            hasRecentReduce: false,
         });
-        // severity = (18000/177000) × 1.0 ≈ 0.102 < gentle
         expect(d.fire).toBe(false);
     });
 });

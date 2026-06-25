@@ -254,6 +254,7 @@ export function maybeChannel1ReminderForToolResult(args: {
 	const decision = decideChannel1({
 		undroppedTokens,
 		pressure,
+		estimatedInputTokens: state.lastInputTokens + state.turnToolTokens,
 		workingWindowTokens,
 		lastNudgeUndropped: getLastNudgeUndropped(db, sessionId),
 		lastNudgeLevel: getLastNudgeLevel(db, sessionId),

@@ -85,18 +85,27 @@ export function channel1RefireTokens(workingWindowTokens: number): number {
     const scaled = Math.round(0.05 * Math.max(0, workingWindowTokens));
     return Math.max(CHANNEL1_REFIRE_FLOOR_TOKENS, scaled);
 }
-// severity = (undropped / workingWindow) × pressure, where workingWindow is the
-// execute-threshold token budget — the span the agent actually operates in, NOT
-// the (much smaller) history-compaction budget. Using the history budget made a
-// ~25k tool pile saturate to "urgent" on a 272k-context session (denominator was
-// ~26.5k instead of ~177k), nagging every step. Both factors ∈ [0,1] (undropped
-// is capped at the window in practice), so severity ∈ ~[0,1]: a small reclaimable
-// pile stays quiet even at high pressure (the agent already dropped enough), and
-// a big pile with lots of headroom stays quiet (low pressure spares the early
-// explorer). The 10k floor handles "tiny amounts never fire".
+// Pressure GATES; reclaimable share BANDS. Two independent questions:
+//   1. Are we late enough in the window to bother nudging?  → pressure gate.
+//   2. Is a disproportionate share of the live input reclaimable tool output?
+//      → severity = undroppedTokens / estimatedInputTokens.
+// The earlier metric was `severity = (undropped / workingWindow) × pressure`.
+// Because workingWindow = contextLimit × executeThreshold%, that pressure term
+// equals estimatedInput / workingWindow, so the formula collapsed to
+// `reclaimableShare × pressure²`, so pressure counted TWICE. computePressure is
+// unbounded, so once the agent reached/passed the execute threshold (pressure
+// > 1, the normal state right before compaction) the bands compressed and any
+// tool-dominant tail jumped straight to "urgent" purely from threshold
+// proximity, not from a genuine reclaim opportunity. Splitting the two (pressure
+// as a clamped gate, severity as the plain reclaimable share) makes the bands
+// mean what they say: urgent ≈ "65%+ of the live input is unreduced tool output".
+// pressure only decides whether it's late enough to mention it.
 const S_GENTLE = 0.2;
 const S_FIRM = 0.4;
 const S_URGENT = 0.65;
+// Below this pressure (clamped usage% / executeThreshold%) Channel 1 stays
+// silent regardless of reclaimable share (too early in the window to nag).
+export const CHANNEL1_PRESSURE_FLOOR = 0.8;
 const LEVEL_RANK: Record<Channel1Level, number> = { gentle: 1, firm: 2, urgent: 3 };
 
 const DROP_SENTINELS = ["[dropped", "[truncated"];
@@ -238,18 +247,30 @@ export interface Channel1Decision {
  */
 export function decideChannel1(input: {
     undroppedTokens: number;
+    /**
+     * Raw usage% / executeThreshold% (unclamped at the call site). Used here only
+     * as a GATE after clamping to [0,1]; it no longer multiplies severity.
+     */
     pressure: number;
     /**
-     * The agent's usable working window in tokens (executeThresholdTokens =
-     * contextLimit × executeThreshold%). The severity denominator — replaces the
-     * old `historyBudgetTokens`, which was ~7× too small and over-fired.
+     * The whole prompt's input tokens this turn (lastInputTokens +
+     * turnToolTokens): the severity DENOMINATOR. severity = undropped / this =
+     * the share of what we're about to send that is unreduced tool output.
+     */
+    estimatedInputTokens: number;
+    /**
+     * The agent's working window (contextLimit × executeThreshold%). Used ONLY
+     * to scale the re-fire cadence interval, no longer in the severity formula.
      */
     workingWindowTokens: number;
     lastNudgeUndropped: number;
     lastNudgeLevel: Channel1Level | "";
     hasRecentReduce: boolean;
 }): Channel1Decision {
-    const { undroppedTokens, pressure, workingWindowTokens, hasRecentReduce } = input;
+    const { undroppedTokens, workingWindowTokens, hasRecentReduce } = input;
+    // Pressure is a gate, not a multiplier: clamp it so an over-threshold reading
+    // (pressure > 1) can't compress the severity bands.
+    const pressure = Math.min(1, Math.max(0, input.pressure));
 
     // Re-arm: once the agent has reduced (or the measured tail fell below the
     // last-fire mark), clear BOTH cadence and band state so the next accumulation
@@ -272,8 +293,13 @@ export function decideChannel1(input: {
     // Floor: below this much reclaimable space, never fire (working room).
     if (undroppedTokens < CHANNEL1_FLOOR_TOKENS) return quiet();
 
-    const budget = workingWindowTokens > 0 ? workingWindowTokens : undroppedTokens || 1;
-    const severity = (undroppedTokens / budget) * pressure;
+    // Pressure GATE: too early in the window to bother, regardless of share.
+    if (pressure < CHANNEL1_PRESSURE_FLOOR) return quiet();
+
+    // Severity = share of the live input that is unreduced tool output. Bounded
+    // to 1 defensively (undropped ⊆ input, so it's < 1 in practice).
+    const denom = Math.max(input.estimatedInputTokens, 1);
+    const severity = Math.min(1, undroppedTokens / denom);
 
     if (severity < S_GENTLE) return quiet();
 
