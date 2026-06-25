@@ -122,6 +122,60 @@ describe("storage-tags", () => {
                 { tagNumber: 3, toolName: "grep" },
             ]);
         });
+
+        it("#then never surfaces todowrite (task-state tool), even when it is the oldest", () => {
+            db = makeMemoryDatabase();
+            // todowrite is the oldest entry; without the todowrite exclusion it would be returned as the oldest reclaim hint.
+            insertTag(db, "ses-todo", "msg-1", "tool", 100, 1, 0, "todowrite", 0, null, null, {
+                tokenCount: 700,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+            insertTag(db, "ses-todo", "msg-2", "tool", 100, 2, 0, "bash", 0, null, null, {
+                tokenCount: 800,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-todo", 0, 4);
+
+            expect(hints).toEqual([{ tagNumber: 2, toolName: "bash" }]);
+        });
+
+        it("#then skips trivially-small sized outputs below the token floor", () => {
+            db = makeMemoryDatabase();
+            // tiny control-plane outputs (ctx_reduce/bash_status) below the floor
+            insertTag(db, "ses-floor", "msg-1", "tool", 50, 1, 0, "ctx_reduce", 0, null, null, {
+                tokenCount: 40,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+            insertTag(db, "ses-floor", "msg-2", "tool", 60, 2, 0, "bash_status", 0, null, null, {
+                tokenCount: 33,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+            // a real, reclaimable bash output above the floor
+            insertTag(db, "ses-floor", "msg-3", "tool", 9000, 3, 0, "bash", 0, null, null, {
+                tokenCount: 2300,
+                inputTokenCount: 0,
+                reasoningTokenCount: 0,
+            });
+
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-floor", 0, 4);
+
+            expect(hints).toEqual([{ tagNumber: 3, toolName: "bash" }]);
+        });
+
+        it("#then keeps tags with NO cached token count (cannot size → never hidden by the floor)", () => {
+            db = makeMemoryDatabase();
+            // This insertTag call supplies only a byte size (no token counts), leaving token_count and input_token_count NULL.
+            insertTag(db, "ses-null", "msg-1", "tool", 5000, 1, 0, "read");
+
+            const hints = getOldestActiveUnprotectedToolTags(db, "ses-null", 0, 4);
+
+            expect(hints).toEqual([{ tagNumber: 1, toolName: "read" }]);
+        });
     });
 
     describe("#given updateTagStatus", () => {
