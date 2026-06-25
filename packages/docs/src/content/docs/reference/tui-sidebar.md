@@ -25,7 +25,7 @@ The file is **shared** across CortexKit OpenCode plugins — one top-level key p
 {
   "magic-context": {
     "forceToTop": false,
-    "order": 200,
+    "order": 170,
 
     "startCollapsed": false,
     "rememberCollapsed": true,
@@ -51,7 +51,7 @@ The file is **shared** across CortexKit OpenCode plugins — one top-level key p
 | Key | Default | Effect |
 |---|---|---|
 | `forceToTop` | `false` | Pin the sidebar above other TUI plugins, ignoring `order`. |
-| `order` | `200` | Sort position among TUI plugins (lower = higher up). OpenCode's built-ins occupy 100–500. |
+| `order` | `170` | Sort position among TUI plugins (lower = higher up). OpenCode's built-ins occupy 100–500. |
 | `startCollapsed` | `false` | Whether the sidebar starts collapsed when there's no remembered state. |
 | `rememberCollapsed` | `true` | Persist collapse/expand across restarts. When `true`, clicking the header writes `collapsed` back to this file. |
 | `collapsed` | — | The remembered collapse state. Managed automatically when `rememberCollapsed` is on; you can also set it by hand. |
@@ -66,4 +66,4 @@ Edits to `header`, `sections`, and the collapse defaults apply **live** while th
 
 ## Coordinating with other CortexKit plugins
 
-`order` defaults are spaced so the CortexKit plugins stack predictably out of the box: `anthropic-auth` at 160, `aft` at 180, `magic-context` at 200 (top to bottom). Set your own `order` on any of them to rearrange, or `forceToTop` to pin one above the rest.
+`order` defaults are spaced so the CortexKit plugins stack predictably out of the box: `anthropic-auth` at 160, `magic-context` at 170, `aft` at 180 (top to bottom). Set your own `order` on any of them to rearrange, or `forceToTop` to pin one above the rest.

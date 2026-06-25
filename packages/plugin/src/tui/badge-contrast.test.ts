@@ -9,14 +9,21 @@ describe("readableTextColorOn", () => {
     });
 
     test("light accent gets black text", () => {
-        // Light/pastel accents should read as black.
+        // Only accents pale enough that white fails the contrast bar go black.
         expect(readableTextColorOn({ r: 0.9, g: 0.9, b: 0.7 })).toBe("#000000");
         expect(readableTextColorOn({ r: 1, g: 1, b: 1 })).toBe("#000000");
     });
 
-    test("pure green is treated as light (high luma weight)", () => {
-        // Green dominates perceived brightness, so a saturated green badge needs
-        // dark text.
+    test("mid-tone orange accent prefers white (white-bias, matches sibling badges)", () => {
+        // A typical orange/amber accent reads white ~4:1 and black ~5:1. A
+        // higher-contrast-wins pick would flip it to black (the #186 over-
+        // correction); the white bias keeps it white, clearing the bold-text bar.
+        expect(readableTextColorOn({ r: 0.69, g: 0.455, b: 0.188 })).toBe("#ffffff");
+        expect(readableTextColorOn({ r: 0.741, g: 0.482, b: 0.2 })).toBe("#ffffff");
+    });
+
+    test("pure green is treated as light (white fails the contrast bar)", () => {
+        // A saturated green is bright enough that white drops below the bar.
         expect(readableTextColorOn({ r: 0, g: 1, b: 0 })).toBe("#000000");
     });
 

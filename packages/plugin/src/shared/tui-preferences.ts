@@ -11,7 +11,7 @@ import { parse, stringify } from "comment-json";
 // Cross-plugin convention (anthropic-auth / aft / magic-context all mirror it):
 //   - same file name + env override + lookup order,
 //   - byte-identical `computeEffectiveOrder` so the three sort consistently,
-//   - a coordinated default-order ladder (anthropic-auth 160, AFT 180, MC 200).
+//   - a coordinated default-order ladder (anthropic-auth 160, MC 170, AFT 180).
 //
 // MC uses `comment-json` (already a dep, Bun-safe) for the WRITE path — a full
 // parse → mutate-one-key → stringify round-trip that preserves comments and
@@ -64,7 +64,7 @@ export function readTuiPreferencesFileSync(): Record<string, unknown> {
 }
 
 export const PLUGIN_KEY = "magic-context";
-export const DEFAULT_SLOT_ORDER = 200;
+export const DEFAULT_SLOT_ORDER = 170;
 
 export interface MagicContextTuiPrefs {
     forceToTop: boolean;
