@@ -595,6 +595,42 @@ navigation tools; Pi gets an equally safe, narrower built-in set.
 
 ---
 
+## 22. Shrinking model-switch overflow: OpenCode arms proactively; Pi is covered by the forward-pressure floor
+
+When a session switches mid-conversation from a large-context model to a smaller
+one (e.g. 512k → 272k) while carrying more history than the new model's window,
+the first request on the new model would otherwise be sent oversized and rejected
+("Input exceeds context window"), with recovery only arming on the next pass from
+the provider error (issue #188).
+
+- **OpenCode** needs an explicit proactive arm. Its pressure on the first pass
+  after a switch reads the OLD model's low ratio (the live `contextUsageMap` and
+  persisted `lastContextPercentage` were measured against the larger window), so
+  no band trips. The transform's overflow block therefore arms recovery
+  (flag-only) when the last-measured input exceeds the CURRENT model's trusted
+  limit, so the existing bump-to-95% compacts before sending.
+- **Pi** needs no such arm. Its `applyForwardPressureFloor` already computes
+  `forwardTokens / (contextWindow * 0.85)` every pass, and on the first pass
+  after a switch `getContextUsage()` returns `.tokens` ≈ the forward estimate
+  (last OLD-model usage + trailing) while `.contextWindow` already reflects the
+  NEW (smaller) model (set synchronously at `setModel`). So the floor computes
+  ~130% → trips the 95% emergency band → Pi compacts before sending. Verified
+  against pi-mono source (`getContextUsage` → `estimateContextTokens`; `setModel`
+  sets `state.model` synchronously).
+
+Net behavior matches (both compact before the oversized request), via different
+mechanisms: OpenCode adds a targeted arm, Pi reuses its existing floor.
+
+Narrow residual edge (not fixed, documented): if a user switches model in the
+window right AFTER a compaction but BEFORE any assistant response on the new
+model, Pi's `getContextUsage().tokens` is `null` (no post-compaction usage yet),
+so the floor falls back to the low ratio and would not trip. The reported #188
+scenario (substantial live history = many old-model assistant usages present) is
+firmly outside this edge. If it ever surfaces, the clean Pi fix is
+`tokens === null AND model-window-shrank-since-last-pass → arm`.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or

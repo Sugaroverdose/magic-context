@@ -22,6 +22,7 @@ import {
     getLastNudgeLevel,
     getLastNudgeUndropped,
     getOrCreateSessionMeta,
+    getOverflowState,
     getPendingOps,
     getTagById,
     getTagsBySession,
@@ -39,7 +40,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
-import { clearModelsDevCache } from "../../shared/models-dev-cache";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTransform } from "./transform";
@@ -2233,6 +2234,279 @@ describe("createTransform protected tail", () => {
 
         //#then
         expect(getOrCreateSessionMeta(db, "ses-pt-pending").compartmentInProgress).toBe(false);
+    });
+});
+
+describe("createTransform shrinking model-switch overflow pre-arm", () => {
+    const OLD_MODEL = { providerID: "anthropic", modelID: "claude-big-512k" };
+    const NEW_MODEL = { providerID: "openai", modelID: "gpt-5.5" };
+    const NEW_KEY = "openai/gpt-5.5";
+    const OLD_KEY = "anthropic/claude-big-512k";
+
+    async function seedNewModelLimit(inputCap: number): Promise<void> {
+        clearModelsDevCache();
+        await refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            { id: "openai", models: { "gpt-5.5": { limit: { input: inputCap } } } },
+                        ],
+                    },
+                }),
+            },
+        });
+    }
+
+    function makeTransform(
+        db: ReturnType<typeof openDatabase>,
+        sessionId: string,
+        liveModel: { providerID: string; modelID: string },
+        usage: { percentage: number; inputTokens: number },
+    ) {
+        const abort = mock(async () => ({}));
+        const prompt = mock(async () => ({}));
+        const liveModelBySession = new Map([[sessionId, liveModel]]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([[sessionId, { usage, updatedAt: Date.now() }]]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            liveModelBySession,
+            // Mirror production: getModelKey derives from the live model map.
+            getModelKey: (id: string) => {
+                const m = liveModelBySession.get(id);
+                return m ? `${m.providerID}/${m.modelID}` : undefined;
+            },
+            client: { session: { abort, prompt } } as unknown as PluginContext["client"],
+            directory: "/tmp",
+        });
+        return { transform, abort, prompt };
+    }
+
+    // Production shape on a live switch: the array still ends with the OLD
+    // model's assistant response (flat info.providerID/modelID), then the NEW
+    // user message carrying the just-selected model nested under info.model.
+    // liveModelBySession was already flipped to NEW by chat.message.
+    function switchTurnMessages(sessionId: string) {
+        return [
+            {
+                info: { id: "m-user-0", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "earlier" }],
+            },
+            {
+                info: {
+                    id: "m-assistant-old",
+                    role: "assistant",
+                    sessionID: sessionId,
+                    providerID: OLD_MODEL.providerID,
+                    modelID: OLD_MODEL.modelID,
+                },
+                parts: [{ type: "text", text: "old model reply" }],
+            },
+            {
+                info: {
+                    id: "m-user-1",
+                    role: "user",
+                    sessionID: sessionId,
+                    model: { providerID: NEW_MODEL.providerID, modelID: NEW_MODEL.modelID },
+                },
+                parts: [{ type: "text", text: "continue" }],
+            },
+        ];
+    }
+
+    it("arms recovery (flag-only) when last input on the OLD model exceeds the NEW model's cap", async () => {
+        useTempDataHome("transform-shrink-switch-arm-");
+        createOpenCodeDbForTransform("ses-shrink", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+            { id: "m-raw-2", role: "assistant", text: "recent 2" },
+        ]);
+        const db = openDatabase();
+        // Persisted usage from the PREVIOUS (large, 512k) model: 300k input,
+        // ~58%, well under any threshold. lastObservedModelKey = OLD model.
+        updateSessionMeta(db, "ses-shrink", {
+            lastContextPercentage: 58,
+            lastInputTokens: 300_000,
+            lastObservedModelKey: OLD_KEY,
+            lastUsageContextLimit: 512_000,
+        });
+        await seedNewModelLimit(272_000);
+
+        const { transform } = makeTransform(db, "ses-shrink", NEW_MODEL, {
+            percentage: 58,
+            inputTokens: 300_000,
+        });
+        await transform({}, { messages: switchTurnMessages("ses-shrink") });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const overflow = getOverflowState(db, "ses-shrink");
+        // Armed THIS pass so the existing bump-to-95% compacts before the
+        // oversized request is sent (not one pass late from the provider error).
+        expect(overflow.needsEmergencyRecovery).toBe(true);
+        // Flag-only: no catalog/auth limit pinned into detected_context_limit.
+        expect(overflow.detectedContextLimit).toBe(0);
+    });
+
+    it("does not arm on a normal SAME-model turn whose input fits the model", async () => {
+        useTempDataHome("transform-shrink-switch-noarm-");
+        createOpenCodeDbForTransform("ses-fits", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+        ]);
+        const db = openDatabase();
+        // Same (new) model, last input under the 272k cap.
+        updateSessionMeta(db, "ses-fits", {
+            lastContextPercentage: 73,
+            lastInputTokens: 200_000,
+            lastObservedModelKey: NEW_KEY,
+            lastUsageContextLimit: 272_000,
+        });
+        await seedNewModelLimit(272_000);
+
+        const { transform } = makeTransform(db, "ses-fits", NEW_MODEL, {
+            percentage: 73,
+            inputTokens: 200_000,
+        });
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: {
+                            id: "m-user-1",
+                            role: "user",
+                            sessionID: "ses-fits",
+                            model: NEW_MODEL,
+                        },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                ],
+            },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(getOverflowState(db, "ses-fits").needsEmergencyRecovery).toBe(false);
+    });
+
+    it("does NOT arm when last input exceeds the limit but on the SAME model (cache regression, not overflow)", async () => {
+        useTempDataHome("transform-shrink-switch-samemodel-");
+        createOpenCodeDbForTransform("ses-same", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+        ]);
+        const db = openDatabase();
+        // The last input (300k) was ACCEPTED by this same model, so a now-lower
+        // catalog reading (272k) is a stale/regressed limit, not a real overflow.
+        // Arming here would cause a gratuitous compaction + cache bust.
+        updateSessionMeta(db, "ses-same", {
+            lastContextPercentage: 90,
+            lastInputTokens: 300_000,
+            lastObservedModelKey: NEW_KEY,
+            lastUsageContextLimit: 400_000,
+        });
+        await seedNewModelLimit(272_000);
+
+        const { transform } = makeTransform(db, "ses-same", NEW_MODEL, {
+            percentage: 90,
+            inputTokens: 300_000,
+        });
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: {
+                            id: "m-user-1",
+                            role: "user",
+                            sessionID: "ses-same",
+                            model: NEW_MODEL,
+                        },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                ],
+            },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(getOverflowState(db, "ses-same").needsEmergencyRecovery).toBe(false);
+    });
+
+    it("does not arm for a subagent session", async () => {
+        useTempDataHome("transform-shrink-switch-subagent-");
+        createOpenCodeDbForTransform("ses-shrink-sub", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+        ]);
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-shrink-sub", {
+            isSubagent: true,
+            lastContextPercentage: 58,
+            lastInputTokens: 300_000,
+            lastObservedModelKey: OLD_KEY,
+            lastUsageContextLimit: 512_000,
+        });
+        await seedNewModelLimit(272_000);
+
+        const { transform } = makeTransform(db, "ses-shrink-sub", NEW_MODEL, {
+            percentage: 58,
+            inputTokens: 300_000,
+        });
+        await transform({}, { messages: switchTurnMessages("ses-shrink-sub") });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(getOverflowState(db, "ses-shrink-sub").needsEmergencyRecovery).toBe(false);
+    });
+
+    it("still arms when the newest user message lacks info.model (falls back to the live map, not the OLD assistant)", async () => {
+        useTempDataHome("transform-shrink-switch-nomodel-");
+        createOpenCodeDbForTransform("ses-nomodel", [
+            { id: "m-raw-1", role: "user", text: "recent 1" },
+        ]);
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-nomodel", {
+            lastContextPercentage: 58,
+            lastInputTokens: 300_000,
+            lastObservedModelKey: OLD_KEY,
+            lastUsageContextLimit: 512_000,
+        });
+        await seedNewModelLimit(272_000);
+
+        // liveModelBySession = NEW (chat.message set it). The newest user message
+        // carries NO info.model, so the resolver must fall back to the live map
+        // (NEW), NOT the OLD last-assistant. If it fell to the assistant, the
+        // detector would mis-resolve to OLD and the arm would not fire.
+        const { transform } = makeTransform(db, "ses-nomodel", NEW_MODEL, {
+            percentage: 58,
+            inputTokens: 300_000,
+        });
+        await transform(
+            {},
+            {
+                messages: [
+                    {
+                        info: {
+                            id: "m-assistant-old",
+                            role: "assistant",
+                            sessionID: "ses-nomodel",
+                            providerID: OLD_MODEL.providerID,
+                            modelID: OLD_MODEL.modelID,
+                        },
+                        parts: [{ type: "text", text: "old model reply" }],
+                    },
+                    {
+                        // newest user, no info.model
+                        info: { id: "m-user-1", role: "user", sessionID: "ses-nomodel" },
+                        parts: [{ type: "text", text: "continue" }],
+                    },
+                ],
+            },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(getOverflowState(db, "ses-nomodel").needsEmergencyRecovery).toBe(true);
     });
 });
 

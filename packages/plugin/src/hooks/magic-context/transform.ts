@@ -28,6 +28,7 @@ import {
     clearPersistedReasoningWatermark,
     getOverflowState,
     loadProtectedTailMeta,
+    recordOverflowDetected,
     resetLastNudgeCycleIfTailShrank,
     resetProtectedTailNoEligibleHead,
     setDeferredExecutePendingIfAbsent,
@@ -43,6 +44,7 @@ import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import { applyMidTurnDeferral, detectMidTurnBypassReason } from "./boundary-execution";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
@@ -55,7 +57,11 @@ import {
 import { resolveCtxReduceAvailabilityFromMessages } from "./ctx-reduce-availability";
 import { computeTailTokenEstimate, shouldTriggerChannel2 } from "./ctx-reduce-nudge";
 import { deriveTriggerBudget } from "./derive-budgets";
-import { resolveExecuteThreshold, resolveTrustedContextLimit } from "./event-resolvers";
+import {
+    resolveExecuteThreshold,
+    resolveModelKey,
+    resolveTrustedContextLimit,
+} from "./event-resolvers";
 import type { LiveModelBySession } from "./hook-handlers";
 import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import {
@@ -203,6 +209,43 @@ function findLastAssistantModel(
         if (info.role === "assistant" && info.providerID && info.modelID) {
             return { providerID: info.providerID, modelID: info.modelID };
         }
+    }
+    return null;
+}
+
+/**
+ * Extract the selected model from the newest USER message in the array. This is
+ * the model the outgoing request will ACTUALLY go to: OpenCode's loop resolves
+ * the request model from `lastUser.model` (verified with the OpenCode
+ * maintainer). On a mid-session model switch, the array ends with
+ * `[..., OLD-model assistant, NEW user message]` (the new model has not
+ * produced an assistant message yet), so the last ASSISTANT still carries the
+ * OLD model while the newest USER carries the NEW one. Preferring this over the
+ * last-assistant model is what stops the model-change detector from false-firing
+ * on the switching turn.
+ *
+ * Note the role asymmetry in OpenCode's schema: user messages nest the model
+ * under `info.model.{providerID,modelID}`, whereas assistant messages carry it
+ * flat as `info.providerID`/`info.modelID`.
+ */
+function findNewestUserModel(
+    messages: MessageLike[],
+): { providerID: string; modelID: string } | null {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const info = messages[i].info as {
+            role?: string;
+            model?: { providerID?: string; modelID?: string };
+        };
+        if (info.role !== "user") continue;
+        // The NEWEST (last) user message is the one OpenCode resolves the
+        // outgoing request model from (`lastUser.model`). Return its model, or
+        // null if it carries none (do NOT keep scanning to an OLDER user, whose
+        // model is not what this request goes to). A null return lets the caller
+        // fall back to the last-assistant model.
+        if (info.model?.providerID && info.model.modelID) {
+            return { providerID: info.model.providerID, modelID: info.model.modelID };
+        }
+        return null;
     }
     return null;
 }
@@ -475,39 +518,65 @@ export function createTransform(deps: TransformDeps) {
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
 
         const tModelDetect = performance.now();
-        // Detect model changes early in the transform — BEFORE loading context usage.
-        // When a user switches models (e.g., 128K→1M), the persisted lastContextPercentage
-        // reflects the old model's context limit. If we don't clear it, the 95% blocking
-        // threshold can deadlock the session: transform blocks awaiting historian,
-        // but no message.updated event fires to clear the stale percentage because
-        // the transform never completes.
-        // NOTE: This detection only works AFTER the first assistant response on the new model,
-        // because findLastAssistantModel reads the latest assistant message in history.
-        // Before that first response, the last assistant message is still from the old model.
-        // The first-pass reset (below) handles the restart case. Mid-session model switches
-        // without restart rely on the first message.updated to trigger hook-handler clearing.
-        // A brief stale-percentage window exists between the model switch and first response.
+        // Snapshot persisted usage BEFORE any reset this pass. Both the
+        // model-change clear (just below) and the first-pass reset (further down)
+        // zero last_context_percentage / last_input_tokens; the proactive
+        // shrinking-switch arm and the protected-tail boundary sizing need the
+        // pre-reset values, so capture them once, here, up front.
+        const persistedUsageBeforeResets = loadPersistedUsage(db, sessionId);
+
+        // Detect model changes early in the transform, BEFORE loading context
+        // usage, so threshold checks (95% blocking, 80% emergency nudge) and the
+        // history budget don't run on the previous model's numbers.
         if (deps.liveModelBySession) {
-            const lastAssistantModel = findLastAssistantModel(messages);
-            if (lastAssistantModel) {
-                const knownModel = deps.liveModelBySession.get(sessionId);
-                if (!knownModel) {
-                    // No known model yet — populate from message history so the
-                    // scheduler can resolve per-model execute_threshold_percentage
-                    // immediately. Without this, after a plugin restart the map
-                    // stays empty until a new message.updated event fires, and
-                    // any transform in between uses the default threshold even
-                    // for sessions with explicit per-model config.
-                    deps.liveModelBySession.set(sessionId, lastAssistantModel);
-                } else if (
-                    knownModel.providerID !== lastAssistantModel.providerID ||
-                    knownModel.modelID !== lastAssistantModel.modelID
+            // The model the request will ACTUALLY go to. The newest USER message
+            // carries the selected (possibly just-switched) model, and OpenCode
+            // resolves the outgoing request from it (`lastUser.model`). On a
+            // switching turn the array ends with [..., OLD assistant, NEW user]:
+            // the last ASSISTANT still reads OLD (assistant model is flat
+            // info.providerID/modelID) while the newest USER reads NEW (nested
+            // info.model). Prefer the newest user; if that message somehow
+            // carries no model, prefer the live map (chat.message set it to the
+            // just-selected model BEFORE this pass) over the last assistant. The
+            // last assistant still reads the OLD model on a switching turn, so
+            // falling straight to it would reintroduce the mis-resolution. Use the
+            // last assistant only when neither is available (fork / cold-start
+            // replay with an empty live map).
+            const currentOutgoingModel =
+                findNewestUserModel(messages) ??
+                deps.liveModelBySession.get(sessionId) ??
+                findLastAssistantModel(messages);
+            if (currentOutgoingModel) {
+                // Always track the outgoing model as the live model (seeds an
+                // empty map after restart; keeps it current otherwise).
+                deps.liveModelBySession.set(sessionId, currentOutgoingModel);
+
+                // Model-change detection drives stale per-model state clearing.
+                // Trigger off the model that produced the LAST PERSISTED USAGE
+                // (lastObservedModelKey), NOT the volatile liveModelBySession: on
+                // a LIVE switch chat.message has already set liveModelBySession to
+                // the new model before transform runs, so a liveModel-vs-outgoing
+                // comparison never sees the change, and hook-handlers.ts does not
+                // clear on a live switch either. The persisted usage's model is
+                // the authoritative "what the last measured turn ran on" signal;
+                // when it differs from the outgoing model the model genuinely
+                // changed since the last turn, so the old model's detected-limit /
+                // reasoning watermark / emergency state must be cleared. One
+                // trigger covers live switch, cold start, and fork alike.
+                const outgoingModelKey = resolveModelKey(
+                    currentOutgoingModel.providerID,
+                    currentOutgoingModel.modelID,
+                );
+                const lastUsageModelKey = persistedUsageBeforeResets?.lastObservedModelKey ?? null;
+                if (
+                    lastUsageModelKey != null &&
+                    outgoingModelKey != null &&
+                    lastUsageModelKey !== outgoingModelKey
                 ) {
                     sessionLog(
                         sessionId,
-                        `transform: model change detected (${knownModel.providerID}/${knownModel.modelID} -> ${lastAssistantModel.providerID}/${lastAssistantModel.modelID}), clearing stale context state`,
+                        `transform: model change since last usage (${lastUsageModelKey} -> ${outgoingModelKey}), clearing stale per-model state`,
                     );
-                    deps.liveModelBySession.set(sessionId, lastAssistantModel);
                     updateSessionMeta(db, sessionId, {
                         lastContextPercentage: 0,
                         lastInputTokens: 0,
@@ -518,23 +587,16 @@ export function createTransform(deps: TransformDeps) {
                     clearHistorianFailureState(db, sessionId);
                     clearPersistedReasoningWatermark(db, sessionId);
                     // The emergency-drop watermark is keyed to the prior model's
-                    // ceiling (contextLimit × executeThreshold). A model change
-                    // moves the contextLimit → reset the emergency idempotence
-                    // latch so the new model re-evaluates the full tail. NOTE: on a
-                    // LIVE mid-session switch this branch is dead — hook-handlers.ts
-                    // updates liveModelBySession first, so knownModel already equals
-                    // the new model by the time the transform runs. The live clear
-                    // lives in hook-handlers.ts; this covers the fork / cold-start
-                    // path where the transform itself first observes the change.
+                    // ceiling (contextLimit × executeThreshold); a model change
+                    // moves the ceiling, so reset the latch to re-evaluate the
+                    // full tail. The detected-overflow limit + recovery flag were
+                    // specific to the prior model and must not leak into the new
+                    // model's pressure math, so clear them too (the proactive arm
+                    // below re-arms from scratch against the new model if needed).
                     clearEmergencyDropSample(db, sessionId);
-                    // Clear any detected context limit from a prior overflow — the
-                    // old limit was specific to the previous model and must not
-                    // leak into pressure math for the new model. The recovery
-                    // flag is cleared too; the new model gets a fresh chance
-                    // to overflow (and a fresh detection cycle) if it must.
                     clearDetectedContextLimit(db, sessionId);
                     clearEmergencyRecovery(db, sessionId);
-                    // Also clear the in-memory usage map so loadContextUsage gets fresh values
+                    // Clear the in-memory usage map so loadContextUsage recomputes.
                     deps.contextUsageMap.delete(sessionId);
                     sessionMeta = {
                         ...sessionMeta,
@@ -557,11 +619,9 @@ export function createTransform(deps: TransformDeps) {
         // First-pass reset MUST run BEFORE loadContextUsage so threshold checks
         // (95% blocking, 80% emergency nudge) don't fire on stale data from a
         // different model, reverted message, or previous session state.
-        // Snapshot failure/usage state BEFORE reset — restart recovery needs
-        // failure state, and protected-tail boundary sizing can use fresh
-        // persisted usage even when first-pass cache hygiene clears the live
-        // usage counters below.
-        const persistedUsageBeforeFirstPassReset = loadPersistedUsage(db, sessionId);
+        // `persistedUsageBeforeResets` (captured above, before the model-change
+        // clear too) holds the pre-reset usage that restart recovery and
+        // protected-tail boundary sizing rely on.
         const historianFailureState = getHistorianFailureState(db, sessionId);
 
         if (isFirstTransformPassForSession && sessionMeta) {
@@ -603,6 +663,66 @@ export function createTransform(deps: TransformDeps) {
         // emergency path — we'd just keep hitting the same overflow error.
         if (fullFeatureMode) {
             try {
+                // Proactive arm for a shrinking model switch (large->small
+                // context). After switching to a smaller-context model, the
+                // last-measured input (produced by the previous, larger model)
+                // can already exceed the new model's hard cap. On this first pass
+                // the pressure math still reads the OLD model's ratio (well under
+                // threshold), so without this the oversized prompt is sent and
+                // rejected, and recovery only arms on the NEXT pass from the
+                // provider error. Detect it here: if the last input (measured on
+                // a DIFFERENT model) exceeds the CURRENT model's catalog cap, the
+                // next request will overflow, so arm recovery now and let the bump
+                // below compact before the request goes out.
+                //
+                // Guards (each prevents a gratuitous compaction/cache bust):
+                //  - DIFFERENT-model only: lastObservedModelKey !== current. A
+                //    same-model "input > limit" is NOT an overflow: that input
+                //    was already ACCEPTED under this model, so a now-smaller limit
+                //    is cache regression (#179), not a real shrink.
+                //  - getSdkContextLimit (NOT resolveTrustedContextLimit): the new
+                //    model's catalog/auth cap only, never a detected-overflow
+                //    limit. A stale unkeyed detected limit from the old model
+                //    could otherwise read low and false-arm.
+                //  - flag-only arm: never writes detected_context_limit from a
+                //    catalog value (that would pin a stale-low cap).
+                const armModel = deps.liveModelBySession?.get(sessionId);
+                const armModelKey = deps.getModelKey?.(sessionId);
+                const armSnapshot = persistedUsageBeforeResets;
+                const lastMeasuredInput =
+                    armSnapshot?.usage.inputTokens ?? sessionMeta?.lastInputTokens ?? 0;
+                const lastMeasuredModelKey = armSnapshot?.lastObservedModelKey ?? null;
+                const armCatalogLimit = armModel
+                    ? getSdkContextLimit(armModel.providerID, armModel.modelID)
+                    : undefined;
+                if (
+                    !sessionMeta?.isSubagent &&
+                    armModel &&
+                    typeof armCatalogLimit === "number" &&
+                    armCatalogLimit > 0 &&
+                    lastMeasuredInput > armCatalogLimit &&
+                    // different-model guard: the prior input was measured on a
+                    // model other than the one we're about to send to.
+                    lastMeasuredModelKey != null &&
+                    armModelKey != null &&
+                    lastMeasuredModelKey !== armModelKey &&
+                    !getOverflowState(db, sessionId).needsEmergencyRecovery
+                ) {
+                    sessionLog(
+                        sessionId,
+                        `transform: last input ${lastMeasuredInput} (model ${lastMeasuredModelKey}) exceeds new model ${armModelKey} catalog limit ${armCatalogLimit}; arming overflow recovery proactively for the shrinking switch`,
+                    );
+                    // Flag-only arm: undefined reportedLimit sets
+                    // needs_emergency_recovery WITHOUT writing
+                    // detected_context_limit.
+                    recordOverflowDetected(db, sessionId, undefined, armModelKey);
+                    // recordOverflowDetected does NOT reset the no-eligible-head
+                    // count. A stale count from the prior model would make
+                    // noHeadEscape (below) suppress the bump we just armed, so
+                    // reset it for a fresh evaluation against the new model.
+                    resetProtectedTailNoEligibleHead(db, sessionId);
+                }
+
                 const overflowState = getOverflowState(db, sessionId);
                 emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
                 if (contextUsageEarly.percentage < 80 && !overflowState.needsEmergencyRecovery) {
@@ -685,16 +805,15 @@ export function createTransform(deps: TransformDeps) {
             : undefined;
         const currentModelKeyForBoundary = deps.getModelKey?.(sessionId);
         const persistedUsageFreshForBoundary =
-            persistedUsageBeforeFirstPassReset &&
-            Date.now() - persistedUsageBeforeFirstPassReset.updatedAt <= 10 * 60 * 1000 &&
-            (persistedUsageBeforeFirstPassReset.lastObservedModelKey === null ||
+            persistedUsageBeforeResets &&
+            Date.now() - persistedUsageBeforeResets.updatedAt <= 10 * 60 * 1000 &&
+            (persistedUsageBeforeResets.lastObservedModelKey === null ||
                 currentModelKeyForBoundary === undefined ||
-                persistedUsageBeforeFirstPassReset.lastObservedModelKey ===
-                    currentModelKeyForBoundary) &&
+                persistedUsageBeforeResets.lastObservedModelKey === currentModelKeyForBoundary) &&
             (resolvedContextLimit === undefined ||
-                persistedUsageBeforeFirstPassReset.lastUsageContextLimit === 0 ||
-                persistedUsageBeforeFirstPassReset.lastUsageContextLimit === resolvedContextLimit)
-                ? persistedUsageBeforeFirstPassReset.usage
+                persistedUsageBeforeResets.lastUsageContextLimit === 0 ||
+                persistedUsageBeforeResets.lastUsageContextLimit === resolvedContextLimit)
+                ? persistedUsageBeforeResets.usage
                 : null;
         const boundaryUsageForProtectedTail = persistedUsageFreshForBoundary ?? contextUsageEarly;
         const boundaryUsageSource = persistedUsageFreshForBoundary ? "persisted" : "live";
