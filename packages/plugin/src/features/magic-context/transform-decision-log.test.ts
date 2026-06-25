@@ -55,13 +55,23 @@ function rowCount(): number {
 }
 
 describe("transform_decisions retention cap", () => {
-    it("prunes to the newest TRANSFORM_DECISIONS_RETENTION rows per (session,harness)", () => {
+    // The prune SQL is cap-agnostic (`LIMIT ?`), so we inject a tiny cap to
+    // exercise it with a handful of rows. Writing the real 2000+ cap opened
+    // that many fresh DB connections in a loop and timed out under CI load.
+    // The override removes the flake without weakening the assertion.
+    const TEST_CAP = 10;
+
+    beforeEach(() => {
+        __test.setRetentionForTests(TEST_CAP);
+    });
+
+    it("prunes to the newest cap rows per (session,harness)", () => {
         // Write cap + 5 rows with strictly increasing ts and distinct message ids.
-        const total = TRANSFORM_DECISIONS_RETENTION + 5;
+        const total = TEST_CAP + 5;
         for (let i = 0; i < total; i++) {
             __test.writeRow(dbPath, baseRow(`msg-${i}`, 1000 + i));
         }
-        expect(rowCount()).toBe(TRANSFORM_DECISIONS_RETENTION);
+        expect(rowCount()).toBe(TEST_CAP);
 
         // The oldest (smallest ts) must be gone; the newest must remain.
         const oldest = db
@@ -75,10 +85,15 @@ describe("transform_decisions retention cap", () => {
     });
 
     it("does not prune below the cap", () => {
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < TEST_CAP - 1; i++) {
             __test.writeRow(dbPath, baseRow(`m-${i}`, 1000 + i));
         }
-        expect(rowCount()).toBe(10);
+        expect(rowCount()).toBe(TEST_CAP - 1);
+    });
+
+    it("keeps the production retention constant sane", () => {
+        // Guard against accidental drift of the real cap.
+        expect(TRANSFORM_DECISIONS_RETENTION).toBe(2000);
     });
 });
 

@@ -82,6 +82,12 @@ const scheduledWriteTokensBySession = new Map<string, Set<symbol>>();
 
 let writerOverrideForTests: TransformDecisionWriter | null = null;
 
+// Tests override the retention cap so the prune can be exercised with a handful
+// of rows instead of writing TRANSFORM_DECISIONS_RETENTION+ rows (each opening a
+// fresh DB connection), which timed out under CI load. The prune SQL is
+// cap-agnostic (LIMIT ?), so a small cap verifies identical behavior.
+let retentionOverrideForTests: number | null = null;
+
 export function normalizeMaterializeReason(
     harness: TransformDecisionHarness,
     reason: string | null | undefined,
@@ -353,7 +359,7 @@ function writeTransformDecisionRow(dbPath: string, row: TransformDecisionRow): v
             row.harness,
             row.sessionId,
             row.harness,
-            TRANSFORM_DECISIONS_RETENTION,
+            retentionOverrideForTests ?? TRANSFORM_DECISIONS_RETENTION,
         );
     } finally {
         closeQuietly(db);
@@ -373,9 +379,13 @@ export const __test = {
         lastBoundMessageIdBySession.clear();
         scheduledWriteTokensBySession.clear();
         writerOverrideForTests = null;
+        retentionOverrideForTests = null;
     },
     setWriterForTests(writer: TransformDecisionWriter | null): void {
         writerOverrideForTests = writer;
+    },
+    setRetentionForTests(cap: number | null): void {
+        retentionOverrideForTests = cap;
     },
     writeRow(dbPath: string, row: TransformDecisionRow): void {
         writeTransformDecisionRow(dbPath, row);
