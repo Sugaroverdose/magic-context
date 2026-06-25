@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidLanguageCode } from "../../agents/language-directive";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { isValidCron } from "../../features/magic-context/dreamer/cron";
 import {
@@ -19,13 +20,6 @@ export const EXECUTE_THRESHOLD_CAP_MESSAGE =
 export const DEFAULT_HISTORIAN_TIMEOUT_MS = 300_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 
-function isPlainSingleLineLanguageName(value: string): boolean {
-    for (const ch of value) {
-        const code = ch.charCodeAt(0);
-        if (code <= 0x1f || ch === "<" || ch === ">" || ch === "`") return false;
-    }
-    return true;
-}
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 // Re-exported from the (DB-free) task registry so the schema and the runtime
@@ -442,24 +436,22 @@ export const MagicContextConfigSchema = z
         language: z
             .string()
             .trim()
-            .min(1)
-            .max(64)
+            .toLowerCase()
             .refine(
-                (s) => isPlainSingleLineLanguageName(s),
-                "language must be a plain single-line name",
+                (s) => isValidLanguageCode(s),
+                'language must be a 2-letter ISO 639-1 code (e.g. "tr", "es", "de")',
             )
-            .transform((s) => s.normalize("NFC"))
             .optional()
             .describe(
-                "Output language for Magic Context's generated content and guidance. When set " +
-                    '(e.g. "Turkish", "Español", "日本語", "Brazilian Portuguese"), the historian, ' +
-                    "dreamer, sidekick, and the agent-guidance block instruct the model to write its " +
-                    "PROSE in this language while keeping all structural tokens (XML tags, the five " +
-                    "memory category names, code identifiers, file paths) in English. Free-form: use " +
-                    "the language's own name. USER-LEVEL ONLY (ignored in project config for security). " +
-                    "Unset = today's behavior (model mirrors the conversation; English scaffolding). " +
-                    "Changing it triggers one cache re-materialization; existing compartments/memories " +
-                    "keep their original language until naturally rewritten.",
+                "Output language for Magic Context's generated content and guidance, as a " +
+                    '2-letter ISO 639-1 code (e.g. "tr", "es", "de", "ja", "pt"). When set, the ' +
+                    "historian, dreamer, sidekick, and the agent-guidance block instruct the model to " +
+                    "write its PROSE in this language while keeping all structural tokens (XML tags, " +
+                    "the five memory category names, code identifiers, file paths) in English. " +
+                    "USER-LEVEL ONLY (ignored in project config for security). Unset = today's " +
+                    "behavior (model mirrors the conversation; English scaffolding). Changing it " +
+                    "triggers one cache re-materialization; existing compartments/memories keep their " +
+                    "original language until naturally rewritten.",
             ),
         ctx_reduce_enabled: z
             .boolean()

@@ -81,7 +81,7 @@ const FIELD_DEFS: FieldDef[] = [
     label: "Output Language",
     type: "string",
     description:
-      "Optional user-level language for Magic Context generated prose and guidance. Leave blank to keep today's behavior.",
+      "Optional user-level output language for Magic Context generated prose and guidance, as a 2-letter ISO 639-1 code (e.g. tr, es, de, ja). Leave blank to keep today's behavior.",
     section: "General",
   },
   {

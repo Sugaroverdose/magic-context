@@ -15,7 +15,7 @@ describe("stripUnsafeProjectConfigFields", () => {
     });
 
     it("strips language from project config", () => {
-        const raw: Record<string, unknown> = { language: "Turkish", historian: { model: "x" } };
+        const raw: Record<string, unknown> = { language: "tr", historian: { model: "x" } };
         const warnings = stripUnsafeProjectConfigFields(raw);
         expect("language" in raw).toBe(false);
         expect(raw.historian).toEqual({ model: "x" });

@@ -157,16 +157,10 @@ describe("MagicContextConfigSchema", () => {
             expect(MagicContextConfigSchema.parse({ auto_update: true }).auto_update).toBe(true);
         });
 
-        it("accepts and normalizes output language names", () => {
-            expect(
-                MagicContextConfigSchema.parse({ language: " Português (Brasil) " }).language,
-            ).toBe("Português (Brasil)");
-            expect(MagicContextConfigSchema.parse({ language: "中文（简体）" }).language).toBe(
-                "中文（简体）",
-            );
-            expect(MagicContextConfigSchema.parse({ language: "Cafe\u0301" }).language).toBe(
-                "Café",
-            );
+        it("accepts and normalizes 2-letter ISO 639-1 language codes", () => {
+            expect(MagicContextConfigSchema.parse({ language: "tr" }).language).toBe("tr");
+            expect(MagicContextConfigSchema.parse({ language: "  ES " }).language).toBe("es");
+            expect(MagicContextConfigSchema.parse({ language: "ja" }).language).toBe("ja");
         });
 
         it("parses per-model cache_ttl objects", () => {
@@ -208,13 +202,11 @@ describe("MagicContextConfigSchema", () => {
             ).toThrow();
         });
 
-        it("rejects unsafe output language names", () => {
-            expect(() => MagicContextConfigSchema.parse({ language: "x".repeat(65) })).toThrow();
-            expect(() =>
-                MagicContextConfigSchema.parse({ language: "Turkish\nSpanish" }),
-            ).toThrow();
-            expect(() => MagicContextConfigSchema.parse({ language: "<Turkish>" })).toThrow();
-            expect(() => MagicContextConfigSchema.parse({ language: "`Turkish`" })).toThrow();
+        it("rejects non-code output language values", () => {
+            expect(() => MagicContextConfigSchema.parse({ language: "Turkish" })).toThrow(); // full name
+            expect(() => MagicContextConfigSchema.parse({ language: "tur" })).toThrow(); // 3-letter
+            expect(() => MagicContextConfigSchema.parse({ language: "zz" })).toThrow(); // unknown code
+            expect(() => MagicContextConfigSchema.parse({ language: "<x>" })).toThrow();
         });
 
         it("rejects openai-compatible embedding config without endpoint", () => {

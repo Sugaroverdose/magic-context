@@ -35,11 +35,11 @@ describe("buildHistorianFailureNotice", () => {
 
 describe("buildHistorianRepairPrompt", () => {
     test("appends the language directive last when configured", () => {
-        const prompt = buildHistorianRepairPrompt("base", "<bad />", "bad xml", "Turkish");
+        const prompt = buildHistorianRepairPrompt("base", "<bad />", "bad xml", "tr");
         expect(prompt).toContain("Your previous XML response was invalid");
-        expect(prompt.trim().endsWith("write the surrounding summary prose in Turkish.")).toBe(
-            true,
-        );
+        expect(
+            prompt.trim().endsWith("write the surrounding summary prose in Turkish (Türkçe)."),
+        ).toBe(true);
     });
 });
 

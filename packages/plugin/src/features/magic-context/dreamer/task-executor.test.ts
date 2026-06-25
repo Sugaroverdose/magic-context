@@ -127,7 +127,7 @@ describe("createDreamTaskExecutor — curate", () => {
             client: client as never,
             sessionDirectory: project,
             openOpenCodeDb: () => null,
-            language: "Turkish",
+            language: "tr",
         });
 
         await executor(
@@ -140,7 +140,9 @@ describe("createDreamTaskExecutor — curate", () => {
             },
         );
 
-        expect(capturedSystem).toContain("Write human-readable prose you author in: Turkish.");
+        expect(capturedSystem).toContain(
+            "Write human-readable prose you author in: Turkish (Türkçe).",
+        );
         expect(capturedSystem).toContain("Copy required output schemas exactly");
     });
 });

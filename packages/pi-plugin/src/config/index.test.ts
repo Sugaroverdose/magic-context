@@ -288,12 +288,12 @@ describe("loadPiConfig", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");
 		withHome(home);
-		writeUserConfig(home, JSON.stringify({ language: "Português (Brasil)" }));
-		writeProjectConfig(cwd, JSON.stringify({ language: "Turkish" }));
+		writeUserConfig(home, JSON.stringify({ language: "pt" }));
+		writeProjectConfig(cwd, JSON.stringify({ language: "tr" }));
 
 		const result = loadPiConfig({ cwd });
 
-		expect(result.config.language).toBe("Português (Brasil)");
+		expect(result.config.language).toBe("pt");
 		expect(result.warnings.join("\n")).toContain(
 			"Ignoring language from project config",
 		);

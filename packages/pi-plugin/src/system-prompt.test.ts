@@ -154,12 +154,12 @@ describe("buildMagicContextBlock v2 system-prompt parity", () => {
 				memoryEnabled: true,
 				injectDocs: false,
 				includeGuidance: true,
-				language: "Español",
+				language: "es",
 			});
 
 			expect(unset).toBe(baseline);
 			expect(localized).toContain(
-				"Use Español for your natural-language replies",
+				"Use Spanish (Español) for your natural-language replies",
 			);
 		} finally {
 			closeQuietly(db);

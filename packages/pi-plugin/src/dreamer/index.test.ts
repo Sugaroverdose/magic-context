@@ -142,12 +142,12 @@ describe("Pi dreamer wiring", () => {
 			dreamerOptions({
 				database: db,
 				projectIdentity: "git:pi-language",
-				language: "Español",
+				language: "es",
 			}),
 		);
 		await flushMicrotasks();
 
-		expect(language).toBe("Español");
+		expect(language).toBe("es");
 	});
 
 	test("manual dreamer passes a directive-bearing system prompt when language is set", async () => {
@@ -178,7 +178,7 @@ describe("Pi dreamer wiring", () => {
 					model: "test/model",
 					tasks: { curate: { schedule: "0 4 * * *" } },
 				}),
-				language: "Español",
+				language: "es",
 			}),
 		);
 
@@ -197,7 +197,7 @@ describe("Pi dreamer wiring", () => {
 		});
 
 		expect(capturedSystem).toContain(
-			"Write human-readable prose you author in: Español.",
+			"Write human-readable prose you author in: Spanish (Español).",
 		);
 	});
 

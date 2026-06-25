@@ -24,30 +24,12 @@ describe("Magic Context language guidance", () => {
     });
 
     it("adds deterministic primary language guidance when set", () => {
-        const first = buildMagicContextSection(
-            null,
-            20,
-            true,
-            true,
-            false,
-            false,
-            false,
-            "Turkish",
-        );
-        const second = buildMagicContextSection(
-            null,
-            20,
-            true,
-            true,
-            false,
-            false,
-            false,
-            "Turkish",
-        );
+        const first = buildMagicContextSection(null, 20, true, true, false, false, false, "tr");
+        const second = buildMagicContextSection(null, 20, true, true, false, false, false, "tr");
         const baseline = buildMagicContextSection(null, 20, true, true, false, false, false);
 
         expect(first).toBe(second);
-        expect(first).toContain("Use Turkish for your natural-language replies");
+        expect(first).toContain("Use Turkish (Türkçe) for your natural-language replies");
         expect(first.startsWith(baseline)).toBe(true);
     });
 });

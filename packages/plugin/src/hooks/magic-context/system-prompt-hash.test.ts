@@ -319,11 +319,13 @@ describe("system-prompt-hash v2 system prompt contents", () => {
             systemPromptRefreshSessions,
             historyRefreshSessions,
             pendingMaterializationSessions,
-            language: "Turkish",
+            language: "tr",
         });
         const changed = ["You are helpful."];
         await withLanguage.handler({ sessionID: sessionId }, { system: changed });
-        expect(changed.join("\n")).toContain("Use Turkish for your natural-language replies");
+        expect(changed.join("\n")).toContain(
+            "Use Turkish (Türkçe) for your natural-language replies",
+        );
         expect(historyRefreshSessions.has(sessionId)).toBe(true);
         expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
 
@@ -332,7 +334,9 @@ describe("system-prompt-hash v2 system prompt contents", () => {
         systemPromptRefreshSessions.clear();
         const stable = ["You are helpful."];
         await withLanguage.handler({ sessionID: sessionId }, { system: stable });
-        expect(stable.join("\n")).toContain("Use Turkish for your natural-language replies");
+        expect(stable.join("\n")).toContain(
+            "Use Turkish (Türkçe) for your natural-language replies",
+        );
         expect(historyRefreshSessions.has(sessionId)).toBe(false);
         expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
         expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).not.toBe("");

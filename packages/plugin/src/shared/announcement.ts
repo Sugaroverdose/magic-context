@@ -31,8 +31,8 @@ export const ANNOUNCEMENT_VERSION = "0.28.0";
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    'New \'language\' option: set a top-level language (e.g. "Türkçe" or "Español") and Magic Context writes its summaries, memories, and guidance in that language, while keeping all structure (tags, categories, code, paths) in English. User-level only, off by default.',
-    "The ctx_reduce reminder now reflects how much tool output is actually reclaimable, instead of escalating to 'urgent' just because you're near compaction. It also no longer suggests dropping your todo list or tiny status outputs.",
+    'New \'language\' option: set a top-level 2-letter language code (e.g. "tr" or "es") and Magic Context writes its summaries, memories, and guidance in that language, while keeping all structure (tags, categories, code, paths) in English. User-level only, off by default.',
+    "The ctx_reduce reminder now reflects how much tool output is actually reclaimable, instead of escalating to 'urgent' just because you're near compaction. It also no longer suggests dropping the agent's task list or tiny status outputs.",
 ];
 
 /**

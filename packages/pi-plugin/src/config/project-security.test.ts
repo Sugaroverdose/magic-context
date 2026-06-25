@@ -5,7 +5,7 @@ import { stripUnsafeProjectConfigFields } from "@magic-context/core/config/proje
 describe("Pi project config security", () => {
 	it("strips language from project config", () => {
 		const raw: Record<string, unknown> = {
-			language: "Turkish",
+			language: "tr",
 			dreamer: { model: "x" },
 		};
 		const warnings = stripUnsafeProjectConfigFields(raw);

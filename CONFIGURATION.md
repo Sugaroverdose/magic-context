@@ -98,7 +98,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 |--------|------|---------|-------------|
 | `enabled` | `boolean` | `true` | Master toggle. |
 | `auto_update` | `boolean` | `true` | User-config-only plugin self-update toggle; project configs cannot disable it. |
-| `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, for example `"Turkish"`, `"Español"`, or `"Português (Brasil)"`. Structural tokens stay in English. |
+| `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, as a 2-letter ISO 639-1 code, for example `"tr"`, `"es"`, or `"pt"`. Structural tokens stay in English. |
 | `ctx_reduce_enabled` | `boolean` | `true` | When `false`, hides `ctx_reduce` tool, disables all nudges/reminders, and strips reduction guidance from prompts. Heuristic cleanup, compartments, memory, and search still work. Useful for testing whether automatic cleanup alone is sufficient. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
 | `protected_tags` | `number` (1–100) | `20` | Last N active tags immune from immediate dropping. |
@@ -114,11 +114,11 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 
 ### `language`
 
-Set `language` in your **user config** when you want Magic Context generated prose to consistently use a language instead of relying on model auto-mirroring:
+Set `language` in your **user config** when you want Magic Context generated prose to consistently use a language instead of relying on model auto-mirroring. The value is a 2-letter ISO 639-1 code (for example `tr`, `es`, `de`, `ja`, `pt`):
 
 ```jsonc
 {
-  "language": "Türkçe"
+  "language": "tr"
 }
 ```
 
