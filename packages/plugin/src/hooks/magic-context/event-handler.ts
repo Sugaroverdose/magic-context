@@ -88,11 +88,8 @@ export interface EventHandlerDeps {
     // deps after it has already null-checked and disabled MC on storage failure,
     // so by this point db is always a live handle.
     db: import("../../shared/sqlite").Database;
+    /** The in-process client OpenCode hands the plugin; Channel 2 delivers through it. */
     client?: unknown;
-    /** Live HTTP listener URL — Channel 2 ceiling nudge delivery (#28202 workaround). */
-    serverUrl?: string;
-    /** Project directory — passed to the live-server client for Channel 2. */
-    directory?: string;
     /** Channel 1 per-session metric baseline; read for the Channel 2 ceiling-nudge wording. */
     channel1StateBySession?: Map<string, import("./ctx-reduce-nudge").Channel1State>;
     getNotificationParams?: (sessionId: string) => NotificationParams;
@@ -128,11 +125,10 @@ function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry
  */
 async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: string): Promise<void> {
     try {
-        // Channel 2 fires for primaries AND subagents. A subagent runs under the
-        // same live server, so promptAsync reaches it and its run loop addresses
-        // the queued synthetic-user nudge at the next step boundary. Delivery
-        // self-gates on the live-server probe (channel2-delivery.ts), so plain
-        // TUI still 404s out; it no-ops unless a `pending` intent exists.
+        // Channel 2 fires for primaries AND subagents. Delivery routes through the
+        // in-process client (input.client), which on OpenCode >= 1.17.7 coalesces
+        // the synthetic-user nudge into the in-flight runner; it no-ops unless a
+        // `pending` intent exists and a client is wired.
         const baseline = deps.channel1StateBySession?.get(sessionId);
         // If the agent already called ctx_reduce since the last transform refreshed
         // the baseline, the tailToolTokens/turnToolTokens here are STALE-HIGH (they
@@ -143,8 +139,7 @@ async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: strin
         if (baseline?.reducedSinceRefresh) return;
         await maybeDeliverChannel2(sessionId, {
             db: deps.db,
-            serverUrl: deps.serverUrl,
-            directory: deps.directory ?? ".",
+            client: deps.client,
             reclaimableTokens: baseline
                 ? baseline.tailToolTokens + baseline.turnToolTokens
                 : undefined,
@@ -599,15 +594,14 @@ export function createEventHandler(deps: EventHandlerDeps) {
             // (runLoop re-reads the message table every iteration), so the
             // agent gets warned while it can still act this turn — waiting for
             // idle would deliver the warning after all the growth already
-            // happened. promptAsync is mid-turn-safe: the live-server client
-            // coalesces into the in-flight run, never splicing mid-prefix.
-            // The delivery itself no-ops unless a `pending` intent exists and
-            // the live server is reachable, so this is cheap per event.
-            // Fires for primaries and subagents alike; no-ops unless a `pending`
-            // intent exists. Fire-and-forget — never block the event loop.
+            // happened. promptAsync is mid-turn-safe: the in-process client
+            // (input.client) coalesces into the in-flight run on OpenCode
+            // >= 1.17.7, never splicing mid-prefix. Fires for primaries and
+            // subagents alike; no-ops unless a `pending` intent exists.
+            // Fire-and-forget, never blocking the event loop.
             if (
                 (info.finish === "stop" || info.finish === "tool-calls") &&
-                deps.serverUrl &&
+                deps.client &&
                 deps.channel1StateBySession
             ) {
                 void deliverChannel2IfPending(deps, info.sessionID);

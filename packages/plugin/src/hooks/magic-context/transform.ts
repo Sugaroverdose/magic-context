@@ -2068,7 +2068,7 @@ export function createTransform(deps: TransformDeps) {
                 // Channel 2 (ceiling) trigger — record a one-shot pending intent
                 // when pressure is near the execute threshold AND a large pile of
                 // reclaimable tool output remains. Delivery happens later from the
-                // event handler (`message.updated`) via the live-server client.
+                // event handler (`message.updated`) via the in-process client.
                 // Uses the real post-transform pressure (current usage% / threshold)
                 // and the just-computed tail tokens. Only escalate from the empty
                 // ('') state so we never reset an in-flight claim/delivery; the cap
@@ -2077,12 +2077,10 @@ export function createTransform(deps: TransformDeps) {
                 // Subagents included: Channel 2 injects a synthetic user message
                 // via promptAsync, which a subagent's run loop picks up at its next
                 // step boundary and addresses like any queued message — verified
-                // safe (a subagent running under the live server is reachable the
-                // same as a primary; delivery self-gates on the live-server probe,
-                // so plain TUI still 404s out). The only gate is ctx_reduce being
-                // effectively enabled (this whole block), so we never nudge toward
-                // an uncallable tool. resolvedContextLimit/threshold known is all
-                // that's required.
+                // safe (a subagent runs under the same in-process client as a
+                // primary). The only gate is ctx_reduce being effectively enabled
+                // (this whole block), so we never nudge toward an uncallable tool.
+                // resolvedContextLimit/threshold known is all that's required.
                 // usable = the agent's working range = the gap between the fixed
                 // overhead floor (everything that ISN'T live tail: system + tool
                 // defs + m[0] + m[1]) and the execute-threshold ceiling. Derived

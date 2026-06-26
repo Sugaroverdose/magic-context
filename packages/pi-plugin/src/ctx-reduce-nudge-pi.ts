@@ -9,13 +9,13 @@
 //   (OpenCode→DB, Pi→JSONL via `appendMessage` on `message_end`) and replay
 //   verbatim, so both are "free sticky" with no anchor/CAS/replay machinery.
 //
-//   Channel 2 (ceiling nudge): OpenCode must use a live-server `promptAsync`
-//   with a `/session` probe to dodge the plugin runner-split bug
-//   (anomalyco/opencode#28202). Pi is single-process, so it just calls the
-//   native `pi.sendMessage(..., { deliverAs })` as a hidden custom message
-//   (`display:false`) — no probe, no live-server client, no #28202 workaround.
-//   The `channel2_nudge_state` lease is kept for the one-ceiling-per-lifetime
-//   cap + the record-in-pipeline / deliver-on-`tool_result` or `agent_end` split.
+//   Channel 2 (ceiling nudge): OpenCode delivers via the in-process client's
+//   `promptAsync` (which joins the in-flight runner on OpenCode >= 1.17.7). Pi
+//   is single-process, so it just calls the native `pi.sendMessage(..., {
+//   deliverAs })` as a hidden custom message (`display:false`). The
+//   `channel2_nudge_state` lease is kept both to enforce the one-nudge-per-
+//   session cap and because the intent is recorded at one point in the pipeline
+//   but delivered later, when a `tool_result` or `agent_end` event arrives.
 
 import {
 	casChannel2NudgeState,

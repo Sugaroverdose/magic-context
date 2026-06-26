@@ -88,8 +88,6 @@ const DREAM_SCHEDULE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 export interface MagicContextDeps {
     client: PluginContext["client"];
     directory: string;
-    /** Live HTTP listener URL for the Channel 2 ceiling nudge (#28202 workaround). */
-    serverUrl?: string;
     tagger: Tagger;
     scheduler: Scheduler;
     onSessionCacheInvalidated?: (sessionId: string) => void;
@@ -627,8 +625,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         tagger: deps.tagger,
         db,
         client: deps.client,
-        serverUrl: deps.serverUrl,
-        directory: deps.directory,
         channel1StateBySession,
         internalChildSessions,
         getNotificationParams: (sessionId) =>

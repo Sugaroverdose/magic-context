@@ -6,7 +6,6 @@ import {
     openDatabase,
     setChannel2NudgeState,
 } from "../../features/magic-context/storage";
-import { setLiveServerWakeAvailable } from "../../shared/live-server-client";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 
 function useTempDataHome(prefix: string): void {
@@ -16,7 +15,14 @@ function useTempDataHome(prefix: string): void {
     process.env.XDG_DATA_HOME = mkdtempSync(join(tmpdir(), prefix));
 }
 
-const SERVER = "http://127.0.0.1:5599";
+/**
+ * A minimal stand-in for the in-process client OpenCode hands the plugin
+ * (`input.client`). `promptAsync` is the delivery primitive; `messages` backs
+ * resolvePromptContext (empty by default).
+ */
+function fakeClient(promptAsync: (input: unknown) => Promise<unknown>) {
+    return { session: { promptAsync, messages: async () => ({ data: [] }) } };
+}
 
 afterEach(() => {
     closeDatabase();
@@ -27,43 +33,36 @@ describe("maybeDeliverChannel2", () => {
     it("no-ops when no pending intent exists", async () => {
         useTempDataHome("ch2-noop-");
         const db = openDatabase()!;
-        setLiveServerWakeAvailable(SERVER, true);
         const delivered = await maybeDeliverChannel2("ses-noop", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(async () => ({})),
         });
         expect(delivered).toBe(false);
         expect(getChannel2NudgeState(db, "ses-noop")).toBe("");
     });
 
-    it("no-ops (keeps pending) when the live server is unreachable (plain TUI)", async () => {
-        useTempDataHome("ch2-unreachable-");
+    it("no-ops (keeps pending) when no client is wired", async () => {
+        useTempDataHome("ch2-noclient-");
         const db = openDatabase()!;
-        setChannel2NudgeState(db, "ses-tui", "pending");
-        // Mark this server as probed-and-unreachable (the plain-TUI 404 case).
-        setLiveServerWakeAvailable(SERVER, false);
-        const delivered = await maybeDeliverChannel2("ses-tui", {
+        setChannel2NudgeState(db, "ses-noclient", "pending");
+        const delivered = await maybeDeliverChannel2("ses-noclient", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            // No client (e.g. a context with no client available).
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
         expect(delivered).toBe(false);
-        // Intent stays pending — Channel 2 is simply disabled here, not consumed.
-        expect(getChannel2NudgeState(db, "ses-tui")).toBe("pending");
+        // Intent stays pending: delivery is simply unavailable, not consumed.
+        expect(getChannel2NudgeState(db, "ses-noclient")).toBe("pending");
     });
 
     it("does NOT deliver and leaves pending when the baseline is unknown", async () => {
         useTempDataHome("ch2-unknown-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-unknown", "pending");
-        setLiveServerWakeAvailable(SERVER, true);
         const delivered = await maybeDeliverChannel2("ses-unknown", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(async () => ({})),
             // No reclaimable/usable measurement at this event.
         });
         // Unknown pressure must never burn the one-shot cap NOR cancel the
@@ -76,14 +75,12 @@ describe("maybeDeliverChannel2", () => {
         useTempDataHome("ch2-stale-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-stale", "pending");
-        setLiveServerWakeAvailable(SERVER, true);
         // 11k reclaimable >= 10k floor but < usable/3 (44k/3 ≈ 14.7k): the
         // audit repro — floor-only validation delivered this stale nudge and
         // permanently burned the one-per-session cap.
         const delivered = await maybeDeliverChannel2("ses-stale", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(async () => ({})),
             reclaimableTokens: 11_000,
             usableTokens: 44_000,
         });
@@ -125,27 +122,15 @@ describe("maybeDeliverChannel2", () => {
         expect(getChannel2NudgeClaimedAt(db, "ses-cache-heal")).toBe(0);
     });
 
-    it("delivers via the live-server client and consumes the one-shot cap", async () => {
+    it("delivers via the in-process client and consumes the one-shot cap", async () => {
         useTempDataHome("ch2-deliver-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-go", "pending");
-        setLiveServerWakeAvailable(SERVER, true);
 
         const promptAsync = mock(async () => ({}));
-        const messages = mock(async () => ({ data: [] }));
-        mock.module("../../shared/live-server-client", () => ({
-            getLiveServerClient: () => ({ session: { promptAsync, messages } }),
-            hasFreshProbe: () => true,
-            probeServerReachable: async () => true,
-            useLiveServerWake: () => true,
-            setLiveServerWakeAvailable: () => {},
-        }));
-
-        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
-        const delivered = await deliver("ses-go", {
+        const delivered = await maybeDeliverChannel2("ses-go", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(promptAsync),
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
@@ -173,26 +158,15 @@ describe("maybeDeliverChannel2", () => {
         useTempDataHome("ch2-confirm-lost-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-confirm-lost", "pending");
-        setLiveServerWakeAvailable(SERVER, true);
 
         const promptAsync = mock(async () => {
             // Simulate a sibling process consuming/cancelling the claim after the
             // send returns but before this process can confirm claimed→delivered.
             setChannel2NudgeState(db, "ses-confirm-lost", "");
         });
-        mock.module("../../shared/live-server-client", () => ({
-            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
-            hasFreshProbe: () => true,
-            probeServerReachable: async () => true,
-            useLiveServerWake: () => true,
-            setLiveServerWakeAvailable: () => {},
-        }));
-
-        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
-        const delivered = await deliver("ses-confirm-lost", {
+        const delivered = await maybeDeliverChannel2("ses-confirm-lost", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(promptAsync),
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
@@ -207,7 +181,6 @@ describe("maybeDeliverChannel2", () => {
         const db = openDatabase()!;
         const sessionId = "ses-duplicate-window";
         setChannel2NudgeState(db, sessionId, "pending");
-        setLiveServerWakeAvailable(SERVER, true);
 
         const sessionLog = mock(() => {});
         const promptAsync = mock(async () => {
@@ -215,20 +188,12 @@ describe("maybeDeliverChannel2", () => {
                 "UPDATE session_meta SET channel2_nudge_state = 'delivered', channel2_nudge_claimed_at = 0 WHERE session_id = ?",
             ).run(sessionId);
         });
-        mock.module("../../shared/live-server-client", () => ({
-            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
-            hasFreshProbe: () => true,
-            probeServerReachable: async () => true,
-            useLiveServerWake: () => true,
-            setLiveServerWakeAvailable: () => {},
-        }));
         mock.module("../../shared/logger", () => ({ sessionLog }));
 
         const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
         const delivered = await deliver(sessionId, {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(promptAsync),
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
@@ -251,7 +216,6 @@ describe("maybeDeliverChannel2", () => {
         const db = openDatabase()!;
         const sessionId = "ses-revert-throw";
         setChannel2NudgeState(db, sessionId, "pending");
-        setLiveServerWakeAvailable(SERVER, true);
 
         const originalPrepare = db.prepare.bind(db);
         (db as unknown as { prepare: typeof db.prepare }).prepare = (sql: string) => {
@@ -280,19 +244,11 @@ describe("maybeDeliverChannel2", () => {
         const promptAsync = mock(async () => {
             throw new Error("transient network failure");
         });
-        mock.module("../../shared/live-server-client", () => ({
-            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
-            hasFreshProbe: () => true,
-            probeServerReachable: async () => true,
-            useLiveServerWake: () => true,
-            setLiveServerWakeAvailable: () => {},
-        }));
 
         const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
         const delivered = await deliver(sessionId, {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(promptAsync),
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
@@ -315,24 +271,13 @@ describe("maybeDeliverChannel2", () => {
         useTempDataHome("ch2-fail-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-fail", "pending");
-        setLiveServerWakeAvailable(SERVER, true);
 
         const promptAsync = mock(async () => {
             throw new Error("transient network failure");
         });
-        mock.module("../../shared/live-server-client", () => ({
-            getLiveServerClient: () => ({ session: { promptAsync, messages: async () => [] } }),
-            hasFreshProbe: () => true,
-            probeServerReachable: async () => true,
-            useLiveServerWake: () => true,
-            setLiveServerWakeAvailable: () => {},
-        }));
-
-        const { maybeDeliverChannel2: deliver } = await import("./channel2-delivery");
-        const delivered = await deliver("ses-fail", {
+        const delivered = await maybeDeliverChannel2("ses-fail", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(promptAsync),
             reclaimableTokens: 30_000,
             usableTokens: 60_000,
         });
@@ -346,11 +291,9 @@ describe("maybeDeliverChannel2", () => {
         useTempDataHome("ch2-twice-");
         const db = openDatabase()!;
         setChannel2NudgeState(db, "ses-twice", "delivered");
-        setLiveServerWakeAvailable(SERVER, true);
         const delivered = await maybeDeliverChannel2("ses-twice", {
             db,
-            serverUrl: SERVER,
-            directory: ".",
+            client: fakeClient(async () => ({})),
         });
         expect(delivered).toBe(false);
         expect(getChannel2NudgeState(db, "ses-twice")).toBe("delivered");

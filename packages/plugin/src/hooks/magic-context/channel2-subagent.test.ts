@@ -10,13 +10,12 @@ import { join } from "node:path";
  * Channel-1 reminders injected (observed live: a mason ignored escalating
  * gentle→firm→urgent Channel-1 nudges at 86.9% pressure). Channel 2 — the
  * synthetic-user interrupt the run loop must address — is the firmer lever, and
- * a subagent runs under the same live server so promptAsync reaches it. The two
- * gates that previously excluded subagents were:
+ * a subagent runs under the same in-process client so promptAsync reaches it.
+ * The two gates that previously excluded subagents were:
  *   1. transform.ts: `channel2MetricsKnown = fullFeatureMode && …` (trigger)
  *   2. event-handler.ts: `if (meta.isSubagent) return;` (delivery wrapper)
  * Both are removed. The ONLY gate now is ctx_reduce being effective (the
- * enclosing Channel-1 block) so we never nudge toward an uncallable tool; plain
- * TUI still self-excludes via the live-server probe in channel2-delivery.ts.
+ * enclosing Channel-1 block) so we never nudge toward an uncallable tool.
  * This guard pins that against a silent revert.
  */
 

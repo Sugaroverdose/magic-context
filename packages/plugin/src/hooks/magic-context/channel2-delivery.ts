@@ -20,22 +20,21 @@
 //     another claimant already sealed `delivered`, preserve that authoritative
 //     row and log the duplicate window instead of blindly overwriting it.
 //
-// Delivery transport is the live-server client ONLY (no in-process fallback):
-// plain TUI's listener 404s the probe, so Channel 2 is disabled there and the
-// 85% force-materialization remains the backstop. MC will not knowingly trigger
-// the duplicate-runner bug (anomalyco/opencode#28202).
+// Delivery transport is the in-process client OpenCode hands the plugin
+// (`input.client`). On OpenCode >= 1.17.7 that client routes through the live
+// listener runtime when one exists, so `promptAsync` joins the in-flight runner
+// mid-turn (the synthetic nudge is queued and the existing run picks it up at
+// its next step) instead of starting a SECOND runner that would persist a
+// duplicate assistant message. Earlier OpenCode had that duplicate-runner bug
+// for plugin-issued prompts (anomalyco/opencode#28202), so we used to build a
+// separate client aimed at the live HTTP listener + a reachability probe to
+// avoid it; that's fixed upstream now, so the separate client + probe are gone.
 
 import {
     casChannel2NudgeState,
     getChannel2NudgeState,
     setChannel2NudgeState,
 } from "../../features/magic-context/storage-meta-persisted";
-import {
-    getLiveServerClient,
-    hasFreshProbe,
-    probeServerReachable,
-    useLiveServerWake,
-} from "../../shared/live-server-client";
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
@@ -47,8 +46,12 @@ import {
 
 export interface Channel2DeliveryDeps {
     db: Database;
-    serverUrl?: string;
-    directory: string;
+    /**
+     * The in-process client OpenCode hands the plugin (`input.client`). Channel 2
+     * delivers the synthetic-user ceiling nudge through `client.session.promptAsync`.
+     * No-op when absent (e.g. a context with no client wired).
+     */
+    client?: unknown;
     /** Reclaimable tool-output tokens for the wording + stale-intent revalidation. */
     reclaimableTokens?: number;
     /**
@@ -85,9 +88,9 @@ function sealDeliveredAfterUnconfirmedSend(
 
 /**
  * Attempt to deliver a pending Channel 2 ceiling nudge for `sessionId`. Safe to
- * call on every final-stop `message.updated` — it no-ops unless a `pending`
- * intent exists and the live server is reachable. Returns true only when a
- * delivery was confirmed (intent moved to `delivered`).
+ * call on every step-boundary `message.updated`: it no-ops unless a `pending`
+ * intent exists and a client is wired. Returns true only when a delivery was
+ * confirmed (intent moved to `delivered`).
  */
 export async function maybeDeliverChannel2(
     sessionId: string,
@@ -138,15 +141,8 @@ export async function maybeDeliverChannel2(
         return false;
     }
 
-    const { serverUrl } = deps;
-    if (!serverUrl) return false;
-
-    // Probe the live listener if we don't have a fresh decision. Plain TUI 404s
-    // here -> Channel 2 stays disabled (no in-process fallback).
-    if (!hasFreshProbe(serverUrl)) {
-        await probeServerReachable(serverUrl);
-    }
-    if (!useLiveServerWake(serverUrl)) return false;
+    const client = deps.client;
+    if (!client) return false;
 
     // Claim the intent before sending so a sibling process can't double-deliver.
     if (!casChannel2NudgeState(deps.db, sessionId, "pending", "claimed")) {
@@ -154,7 +150,6 @@ export async function maybeDeliverChannel2(
     }
 
     try {
-        const client = getLiveServerClient(serverUrl, deps.directory);
         const promptContext = await resolvePromptContext(client, sessionId);
         // reclaimableTokens is guaranteed defined here (unknown-baseline path
         // returned above), so the wording always reflects a real measurement.
@@ -188,7 +183,7 @@ export async function maybeDeliverChannel2(
         const session = (client as { session?: { promptAsync?: (i: unknown) => Promise<unknown> } })
             .session;
         if (typeof session?.promptAsync !== "function") {
-            throw new Error("live-server client has no session.promptAsync");
+            throw new Error("client has no session.promptAsync");
         }
         await session.promptAsync({ path: { id: sessionId }, body });
     } catch (error) {

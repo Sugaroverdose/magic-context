@@ -66,10 +66,6 @@ export function createSessionHooks(args: {
         magicContext: createMagicContextHook({
             client: ctx.client,
             directory: ctx.directory,
-            serverUrl:
-                (ctx as { serverUrl?: URL }).serverUrl instanceof URL
-                    ? (ctx as { serverUrl: URL }).serverUrl.toString().replace(/\/$/, "")
-                    : undefined,
             tagger,
             scheduler,
             compactionHandler,
