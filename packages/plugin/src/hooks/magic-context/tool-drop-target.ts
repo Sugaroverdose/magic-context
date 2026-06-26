@@ -377,8 +377,17 @@ export function createToolDropTarget(
         readInput: (): Record<string, unknown> | null => {
             const entry = index.get(compositeKey);
             if (!entry) return null;
+            // Prefer an invocation occurrence's input, but fall back to ANY
+            // occurrence carrying readable input: a COMPLETED OpenCode tool part
+            // is `{ type:"tool", state:{ input, output } }`, classified as a
+            // "result" occurrence, yet it still holds the call's input, which is
+            // where an edit/write's filePath lives once the call finished.
             for (const occurrence of entry.occurrences) {
                 if (occurrence.kind !== "invocation") continue;
+                const input = readToolPartInput(occurrence.part);
+                if (input) return input;
+            }
+            for (const occurrence of entry.occurrences) {
                 const input = readToolPartInput(occurrence.part);
                 if (input) return input;
             }

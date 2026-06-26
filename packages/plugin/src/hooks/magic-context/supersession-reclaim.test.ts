@@ -10,8 +10,9 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
+import { createTagger } from "../../features/magic-context/tagger";
 import { buildEditSupersessionReclaim, buildSupersessionReclaimOps } from "./supersession-reclaim";
-import type { TagTarget } from "./tag-messages";
+import { type MessageLike, type TagTarget, tagMessages } from "./tag-messages";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -236,5 +237,43 @@ describe("buildEditSupersessionReclaim (superseded-edit compression)", () => {
         });
         // older A (1) is already pending → not re-emitted.
         expect(ops).toHaveLength(0);
+    });
+
+    // Real-target integration: a COMPLETED OpenCode edit is
+    // `{ type:"tool", state:{ input, output } }`, classified as a "result"
+    // occurrence. The selector must still resolve its filePath (via the
+    // readInput result-occurrence fallback) and compress the older one.
+    it("resolves filePath from completed {type:tool} parts and marks the older edit", () => {
+        const db = freshDb();
+        const tagger = createTagger();
+        const editPart = (callId: string) => ({
+            info: { id: `m-${callId}`, role: "assistant", sessionID: SES },
+            parts: [
+                {
+                    type: "tool",
+                    tool: "edit",
+                    callID: callId,
+                    state: {
+                        input: { filePath: "/p/spec.md", oldString: "x".repeat(80) },
+                        output: "applied",
+                        status: "completed",
+                    },
+                },
+            ],
+        });
+        const messages = [editPart("call-a"), editPart("call-b")] as unknown as MessageLike[];
+        const { targets } = tagMessages(SES, messages, tagger, db);
+        const olderId = tagger.getToolTag(SES, "call-a", "m-call-a");
+        const newerId = tagger.getToolTag(SES, "call-b", "m-call-b");
+        expect(olderId).toBeDefined();
+        expect(newerId).toBeDefined();
+
+        const { editMarkerTagIds } = buildEditSupersessionReclaim({
+            db,
+            sessionId: SES,
+            targets,
+        });
+        // newest (call-b) kept; older (call-a) compressed.
+        expect([...editMarkerTagIds]).toEqual([olderId!]);
     });
 });
