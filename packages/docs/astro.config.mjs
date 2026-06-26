@@ -17,6 +17,7 @@ export default defineConfig({
     integrations: [
         starlight({
             plugins: [starlightThemeObsidian({ graph: false, backlinks: false })],
+            customCss: ["./src/styles/reference-tables.css"],
             title: "Magic Context",
             description:
                 "Persistent memory and self-managing context for OpenCode and Pi coding agents.",
