@@ -244,7 +244,7 @@ Recall works **across sessions** (a new session inherits everything) and **acros
 A companion desktop app for browsing and managing Magic Context state outside the terminal.
 
 <p align="center">
-  <a href="https://github.com/cortexkit/magic-context/releases"><strong>⬇️ Download for macOS · Windows · Linux</strong></a>
+  <a href="https://github.com/cortexkit/magic-context/releases?q=dashboard&expanded=true"><strong>⬇️ Download for macOS · Windows · Linux</strong></a>
 </p>
 
 - **Memory browser**: search, filter, and edit project memories by category and project.
