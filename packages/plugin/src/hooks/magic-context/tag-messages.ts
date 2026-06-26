@@ -207,6 +207,10 @@ export type TagTarget = {
     /** Non-mutating: would drop()/truncate() actually reclaim bytes? Tool
      * targets only; absent on message/file targets. */
     canDrop?: () => boolean;
+    /** Non-mutating read of the tool invocation's input object (e.g. to read
+     * `ctx_note`'s action or an edit's filePath for supersession selection).
+     * Tool targets only; null when no invocation part is present. */
+    readInput?: () => Record<string, unknown> | null;
     message?: MessageLike;
 };
 

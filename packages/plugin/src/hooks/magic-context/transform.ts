@@ -274,6 +274,10 @@ export interface TransformDeps {
      * Defaults to true when omitted (preserves legacy behavior for tests).
      */
     ctxReduceEnabled?: boolean;
+    /** Smart-drops (experimental, default off): also reclaim tool output that a
+     *  later call supersedes, on top of the age-based auto-drop. Off → messages
+     *  sent to the model are byte-identical to the age-based-only behavior. */
+    smartDrops?: boolean;
     clearReasoningAge: number;
     /** Commit-cluster historian trigger config (`commit_cluster_trigger`). */
     commitClusterTrigger?: { enabled: boolean; min_clusters: number };
@@ -1739,6 +1743,7 @@ export function createTransform(deps: TransformDeps) {
                 deps.ctxReduceEnabled === false && !reducedMode
                     ? deps.cavemanTextCompression
                     : undefined,
+            smartDrops: deps.smartDrops === true,
             // Pass the single resolved provider through to postprocess so every
             // empty-sentinel gate and whole-message placeholder choice agrees for
             // this transform pass, including cold DB-recovered passes.

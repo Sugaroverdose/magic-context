@@ -134,6 +134,15 @@ export interface TranscriptPart {
     };
 
     /**
+     * Non-mutating read of this tool invocation's input object, or null for
+     * non-tool parts / parts without an input. Used by smart-drops supersession
+     * selection (read `ctx_note`'s action, an edit's `filePath`) without
+     * touching the wire. Returns the live object reference; callers must NOT
+     * mutate it.
+     */
+    getToolInput?(): Record<string, unknown> | null;
+
+    /**
      * Replace this part with a sentinel placeholder. Sentinels look like
      * `[dropped §N§]` or `[truncated §N§]` and survive cache-busting
      * cycles by carrying their original tag number. Used by the

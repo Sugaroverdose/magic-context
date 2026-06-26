@@ -134,6 +134,7 @@ import {
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
+import { buildSupersessionReclaimOps } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
 import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
@@ -705,6 +706,10 @@ export interface PiContextHandlerOptions {
 	 * they can't act on. Mirrors OpenCode behavior.
 	 */
 	ctxReduceEnabled: boolean;
+	/** Smart-drops (experimental, default off): also reclaim tool output that a
+	 *  later call supersedes, on top of the age-based auto-drop. Off → messages
+	 *  sent to the model are byte-identical to the age-based-only behavior. */
+	smartDrops?: boolean;
 	/**
 	 * Heuristic-cleanup config (tiered emergency drop + caveman). When
 	 * omitted, heuristic cleanup is disabled — tagging and queued-drop
@@ -2185,6 +2190,7 @@ export function registerPiContextHandler(
 				projectDirectory,
 				messages: event.messages,
 				ctxReduceEnabled: options.ctxReduceEnabled,
+				smartDrops: options.smartDrops === true,
 				protectedTags: options.protectedTags ?? 20,
 				heuristics: options.heuristics,
 				emergencyCeilingTokens,
@@ -3274,6 +3280,10 @@ interface RunPipelineArgs {
 	projectDirectory: string;
 	messages: Parameters<typeof createPiTranscript>[0];
 	ctxReduceEnabled: boolean;
+	/** Smart-drops (experimental, default off): also reclaim tool output that a
+	 *  later call supersedes, on top of the age-based auto-drop. Off → messages
+	 *  sent to the model are byte-identical to the age-based-only behavior. */
+	smartDrops?: boolean;
 	protectedTags: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
@@ -4119,6 +4129,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			watermark: reclaimMeta.toolReclaimWatermark ?? 0,
 			pendingOps,
 		});
+		// Smart-drops: also reclaim older todowrite/ctx_reduce/meta outputs that
+		// a later call supersedes, merged into the same already-gated drop apply
+		// as the age-based sweep above. Dedupe (a tag can qualify under both).
+		if (args.smartDrops) {
+			const positionalIds = new Set(syntheticPendingOps.map((op) => op.tagId));
+			const supersessionOps = buildSupersessionReclaimOps({
+				db: args.db,
+				sessionId: args.sessionId,
+				targets,
+				pendingOps,
+			});
+			for (const op of supersessionOps) {
+				if (!positionalIds.has(op.tagId)) syntheticPendingOps.push(op);
+			}
+		}
 		autoReclaimTargetCount = syntheticPendingOps.length;
 		if (syntheticPendingOps.length > 0) {
 			autoReclaimDidMutate = applyPendingOperations(

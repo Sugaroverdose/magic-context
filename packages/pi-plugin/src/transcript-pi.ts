@@ -707,6 +707,14 @@ function createPiAssistantPart(
 			}
 			return { toolName: p.name, inputByteSize, inputTokenCount };
 		},
+		getToolInput(): Record<string, unknown> | null {
+			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const p = current[partIndex];
+			if (p?.type !== "toolCall") return null;
+			return p.arguments && typeof p.arguments === "object"
+				? (p.arguments as Record<string, unknown>)
+				: null;
+		},
 		// Replace this assistant part's content with a sentinel placeholder.
 		//
 		// CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",

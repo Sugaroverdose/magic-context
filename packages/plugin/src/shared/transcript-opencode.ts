@@ -137,6 +137,9 @@ function createOpenCodePart(
         } {
             return readOpenCodeToolMetadata(rawPart);
         },
+        getToolInput(): Record<string, unknown> | null {
+            return readOpenCodeToolInput(rawPart);
+        },
         replaceWithSentinel(sentinelText: string): boolean {
             // Build a synthetic text part that carries the sentinel as
             // its content. Subsequent passes see this as a normal text
@@ -266,4 +269,12 @@ function readOpenCodeToolMetadata(part: unknown): {
     }
 
     return { toolName, inputByteSize, inputTokenCount };
+}
+
+/** Non-mutating read of an OpenCode tool part's input object (or null). */
+function readOpenCodeToolInput(part: unknown): Record<string, unknown> | null {
+    if (!isRecord(part)) return null;
+    const state = isRecord(part.state) ? part.state : null;
+    const input = state?.input ?? part.args ?? part.input;
+    return isRecord(input) ? input : null;
 }

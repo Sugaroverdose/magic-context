@@ -64,6 +64,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
   // Advanced
   "auto_update",
   "keep_subagents",
+  "smart_drops",
   "sqlite",
   "system_prompt_injection.enabled",
 ];

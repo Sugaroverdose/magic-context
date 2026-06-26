@@ -369,6 +369,15 @@ export interface MagicContextConfig {
      *  of deleting them on success. For short-term inspection/data collection;
      *  kept sessions accumulate until manually cleared. Default false. */
     keep_subagents: boolean;
+    /** Content-aware reclaim of tool output that a later call supersedes, added
+     *  to the normal age-based auto-drop: superseded todowrite/ctx_reduce/meta
+     *  outputs are dropped, and older edits to a file are compressed to a marker
+     *  that keeps only the filePath. Only runs on a transform pass that is
+     *  already rewriting the messages, so it never triggers a prompt-cache miss
+     *  on its own; when off, the messages sent to the model are byte-identical to
+     *  the age-based-only behavior. Experimental, opt-in, default off until cache
+     *  stability is proven. */
+    smart_drops: boolean;
     /**
      * Age-tier caveman compression for long user/assistant text parts.
      * Graduated from `experimental.caveman_text_compression`; opt-in, default off.
@@ -607,6 +616,12 @@ export const MagicContextConfigSchema = z
             .default(false)
             .describe(
                 "Debug: keep the child sessions Magic Context spawns for its own subagents (historian, dreamer, sidekick, memory-migration) instead of deleting them on success. Useful for short-term inspection/data collection — their full transcript (prompt, tool calls, token usage, output) stays in the host session store. Kept sessions accumulate until manually cleared; leave false for normal use. Requires a restart to take effect.",
+            ),
+        smart_drops: z
+            .boolean()
+            .default(false)
+            .describe(
+                "Content-aware reclaim of provably-superseded tool output, layered on the existing execute-pass auto-drop. When on: superseded todowrite (keep newest 1), spent ctx_reduce (keep newest 5), and zero-value meta (bash_status, bash_kill, ctx_note read/dismiss) outputs are dropped; older edits to a file are compressed to a filePath-preserving marker while the newest edit per file stays full. Only acts on passes already busting the cache, so it never originates a cache bust. Honors the protected-tag reserve. Experimental: opt-in, default off until cache stability is proven; when off the wire is byte-identical to the positional-only reclaim. Requires a restart.",
             ),
         caveman_text_compression: z
             .object({

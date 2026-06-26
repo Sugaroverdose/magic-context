@@ -425,6 +425,109 @@ describe("two-pass tool reclaim", () => {
     });
 });
 
+describe("smart-drops supersession reclaim (flag-gated)", () => {
+    function tagStatuses(sessionId: string): Map<number, string> {
+        return new Map(getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]));
+    }
+
+    // tag 1 performs a real drop, which enables the reclaim block this pass;
+    // tags 2 & 3 are todowrite where the older (2) is superseded by the newer
+    // (3). watermark=1 makes the age-based sweep skip tags 2/3, so only the
+    // smart-drops supersession path can touch them.
+    function seedTodowriteSession(sessionId: string): {
+        trigger: MessageLike;
+        older: MessageLike;
+        newer: MessageLike;
+    } {
+        const trigger = makeToolMessage("tool-1");
+        const older = makeToolMessage("tool-2");
+        const newer = makeToolMessage("tool-3");
+        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "edit");
+        insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "todowrite");
+        insertTag(db, sessionId, "tool-3", "tool", 4000, 3, 0, "todowrite");
+        queuePendingOp(db, sessionId, 1, "drop", 1);
+        advanceToolReclaimWatermark(db, sessionId, 1);
+        return { trigger, older, newer };
+    }
+
+    it("OFF (default): superseded todowrite is NOT dropped even on a mutating execute pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-smart-off";
+        const { trigger, older, newer } = seedTodowriteSession(sessionId);
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [trigger, older, newer], {
+                schedulerDecision: "execute",
+                smartDrops: false,
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([
+                    [1, makeDropTarget(trigger)],
+                    [2, makeDropTarget(older)],
+                    [3, makeDropTarget(newer)],
+                ]),
+                sessionMeta: getOrCreateSessionMeta(db, sessionId),
+            }),
+        );
+
+        const statuses = tagStatuses(sessionId);
+        expect(statuses.get(1)).toBe("dropped"); // dropped by its own queued drop, not smart-drops
+        expect(statuses.get(2)).toBe("active"); // untouched: flag off
+        expect(statuses.get(3)).toBe("active");
+    });
+
+    it("ON: superseded todowrite is dropped, newest kept, on a mutating execute pass", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-smart-on";
+        const { trigger, older, newer } = seedTodowriteSession(sessionId);
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [trigger, older, newer], {
+                schedulerDecision: "execute",
+                smartDrops: true,
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([
+                    [1, makeDropTarget(trigger)],
+                    [2, makeDropTarget(older)],
+                    [3, makeDropTarget(newer)],
+                ]),
+                sessionMeta: getOrCreateSessionMeta(db, sessionId),
+            }),
+        );
+
+        const statuses = tagStatuses(sessionId);
+        expect(statuses.get(1)).toBe("dropped");
+        expect(statuses.get(2)).toBe("dropped"); // superseded todowrite
+        expect(statuses.get(3)).toBe("active"); // newest todowrite kept
+    });
+
+    it("ON but DEFER pass: nothing is dropped (reclaim block requires execute)", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-smart-defer";
+        const { trigger, older, newer } = seedTodowriteSession(sessionId);
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [trigger, older, newer], {
+                schedulerDecision: "defer",
+                smartDrops: true,
+                tags: getActiveTagsBySession(db, sessionId),
+                targets: new Map([
+                    [1, makeDropTarget(trigger)],
+                    [2, makeDropTarget(older)],
+                    [3, makeDropTarget(newer)],
+                ]),
+                sessionMeta: getOrCreateSessionMeta(db, sessionId),
+            }),
+        );
+
+        const statuses = tagStatuses(sessionId);
+        expect(statuses.get(2)).toBe("active");
+        expect(statuses.get(3)).toBe("active");
+    });
+});
+
 describe("known m[0] hard-fold folds the execute pass in", () => {
     const FOLD_PROJECT = "/tmp/test-hardfold-project";
     const BASE_HARD: M0HardSignals = {

@@ -622,6 +622,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	): PiContextHandlerOptions => ({
 		db: database,
 		ctxReduceEnabled: cfg.ctx_reduce_enabled,
+		smartDrops: cfg.smart_drops === true,
 		protectedTags: cfg.protected_tags ?? 20,
 		heuristics: {
 			caveman:

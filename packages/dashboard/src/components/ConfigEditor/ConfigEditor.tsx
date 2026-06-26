@@ -1705,6 +1705,7 @@ function ConfigForm(props: {
               return v == null ? true : Boolean(v);
             };
             const keepSubagents = () => Boolean(getNestedValue(formData(), "keep_subagents"));
+            const smartDrops = () => Boolean(getNestedValue(formData(), "smart_drops"));
             const sqlite = () =>
               (getNestedValue(formData(), "sqlite") as
                 | { cache_size_mb?: number; mmap_size_mb?: number }
@@ -1776,6 +1777,30 @@ function ConfigForm(props: {
                       />
                       <span class="toggle-slider" />
                       <span class="toggle-label">{keepSubagents() ? "Enabled" : "Disabled"}</span>
+                    </label>
+                  </div>
+
+                  {/* Smart drops */}
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Smart Drops</span>
+                      <span class="config-field-key">smart_drops</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Experimental: content-aware reclaim of provably-superseded tool output, on top
+                      of the existing auto-drop. Drops superseded todowrite, spent ctx_reduce, and
+                      zero-value status outputs, and compresses older edits to a file while keeping
+                      the newest. Only acts on passes already busting the cache, so it never causes a
+                      cache bust on its own. Off by default while cache stability is being proven.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={smartDrops()}
+                        onChange={(e) => handleFieldChange("smart_drops", e.currentTarget.checked)}
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">{smartDrops() ? "Enabled" : "Disabled"}</span>
                     </label>
                   </div>
 

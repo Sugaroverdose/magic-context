@@ -52,6 +52,7 @@ import {
     stripInlineThinking,
     stripSystemInjectedMessages,
 } from "./strip-content";
+import { buildSupersessionReclaimOps } from "./supersession-reclaim";
 import { buildSyntheticTodoPart } from "./todo-view";
 import {
     advanceToolReclaimWatermarkToCurrentMax,
@@ -180,6 +181,14 @@ interface RunPostTransformPhaseArgs {
         enabled: boolean;
         minChars: number;
     };
+    /**
+     * Smart-drops (experimental, default off): content-aware reclaim of tool
+     * output that a later call supersedes. Runs alongside the age-based
+     * auto-drop, only inside an execute pass that is already mutating, so it
+     * never causes a cache bust on its own. Off → the messages sent to the model
+     * are byte-identical to the age-based-only behavior.
+     */
+    smartDrops?: boolean;
     /**
      * Provider resolved once by the main transform for this pass. Used for every
      * empty-sentinel gate and whole-message placeholder choice so postprocess
@@ -624,6 +633,22 @@ export async function runPostTransformPhase(
                 watermark: args.sessionMeta.toolReclaimWatermark ?? 0,
                 pendingOps,
             });
+            // Smart-drops: reclaim spent control-plane outputs that a later
+            // call supersedes (older todowrite/ctx_reduce/meta), merged into the
+            // same gated apply as the age-based sweep. Dedupe against those ops
+            // (a tag can qualify under both).
+            if (args.smartDrops) {
+                const positionalIds = new Set(syntheticPendingOps.map((op) => op.tagId));
+                const supersessionOps = buildSupersessionReclaimOps({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    targets: args.targets,
+                    pendingOps,
+                });
+                for (const op of supersessionOps) {
+                    if (!positionalIds.has(op.tagId)) syntheticPendingOps.push(op);
+                }
+            }
             autoReclaimTargetCount = syntheticPendingOps.length;
             if (syntheticPendingOps.length > 0) {
                 autoReclaimDidMutate = applyPendingOperations(

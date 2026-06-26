@@ -136,6 +136,26 @@ describe("createPiTranscript", () => {
 		});
 	});
 
+	it("getToolInput returns the toolCall arguments object, null for non-tool parts", () => {
+		const messages = [
+			assistantToolCall("call-1", "ctx_note", {
+				action: "dismiss",
+				note_id: 42,
+			}),
+			userMessage("plain text", 11),
+		];
+		const transcript = createPiTranscript(messages, "ses-transcript");
+		const toolPart = transcript.messages[0]?.parts[0];
+		const textPart = transcript.messages[1]?.parts[0];
+
+		expect(toolPart?.getToolInput?.()).toEqual({
+			action: "dismiss",
+			note_id: 42,
+		});
+		// non-tool (text) part has no input
+		expect(textPart?.getToolInput?.() ?? null).toBeNull();
+	});
+
 	it("folds Pi toolResult messages into the following user transcript message", () => {
 		const messages = [
 			assistantToolCall("call-1", "Read", { path: "x" }),

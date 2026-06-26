@@ -115,6 +115,22 @@ function estimateInputSize(input: Record<string, unknown>): number {
     }
 }
 
+/**
+ * Non-mutating read of a tool part's input object across the formats
+ * `truncateToolPart` handles. Returns null when the part carries no input.
+ * Used by supersession selection (read `ctx_note` action / edit `filePath`)
+ * without touching the wire.
+ */
+function readToolPartInput(part: unknown): Record<string, unknown> | null {
+    if (!isRecord(part)) return null;
+    if (part.type === "tool" && isRecord(part.state) && isRecord(part.state.input)) {
+        return part.state.input;
+    }
+    if (part.type === "tool-invocation" && isRecord(part.args)) return part.args;
+    if (part.type === "tool_use" && isRecord(part.input)) return part.input;
+    return null;
+}
+
 const TRUNCATION_SENTINEL = "...[truncated]";
 
 /**
@@ -259,6 +275,7 @@ export function createToolDropTarget(
      * makes the plan stop early and under-evict below the ceiling.
      */
     canDrop: () => boolean;
+    readInput: () => Record<string, unknown> | null;
 } {
     const drop = (): ToolDropResult => {
         const entry = index.get(compositeKey);
@@ -312,6 +329,16 @@ export function createToolDropTarget(
         canDrop: (): boolean => {
             const entry = index.get(compositeKey);
             return !!entry && entry.occurrences.length > 0 && entry.hasResult;
+        },
+        readInput: (): Record<string, unknown> | null => {
+            const entry = index.get(compositeKey);
+            if (!entry) return null;
+            for (const occurrence of entry.occurrences) {
+                if (occurrence.kind !== "invocation") continue;
+                const input = readToolPartInput(occurrence.part);
+                if (input) return input;
+            }
+            return null;
         },
     };
 }

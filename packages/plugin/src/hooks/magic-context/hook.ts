@@ -99,6 +99,7 @@ export interface MagicContextDeps {
         protected_tags: number;
         language?: string;
         ctx_reduce_enabled?: boolean;
+        smart_drops?: boolean;
         toast_duration_ms?: number;
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
@@ -546,6 +547,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         channel1StateBySession,
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
+        smartDrops: deps.config.smart_drops === true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
         commitClusterTrigger: deps.config.commit_cluster_trigger,
         historyRefreshSessions,

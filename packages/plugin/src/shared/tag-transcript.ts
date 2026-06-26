@@ -699,6 +699,15 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
         canDrop(): boolean {
             return occurrences.length > 0;
         },
+        // Non-mutating read of the invocation input (the tool_use occurrence
+        // carries the arguments). Used by smart-drops supersession selection.
+        readInput(): Record<string, unknown> | null {
+            for (const occ of occurrences) {
+                const input = occ.part.getToolInput?.();
+                if (input) return input;
+            }
+            return null;
+        },
         message: {
             info: { id: messageId, role },
             parts: [],

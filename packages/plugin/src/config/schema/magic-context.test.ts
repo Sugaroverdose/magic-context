@@ -64,6 +64,7 @@ describe("MagicContextConfigSchema", () => {
                 },
                 temporal_awareness: false,
                 keep_subagents: false,
+                smart_drops: false,
                 caveman_text_compression: {
                     enabled: false,
                     min_chars: 500,
