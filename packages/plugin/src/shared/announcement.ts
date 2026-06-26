@@ -31,7 +31,7 @@ export const ANNOUNCEMENT_VERSION = "0.29.0";
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    'New \'smart_drops\' option (opt-in, off by default): on long, edit-heavy sessions it reclaims more context by dropping tool output a later call made obsolete (superseded edits, old todowrite/ctx_reduce, spent status calls) instead of only the oldest. When off, the prompt is byte-identical to before. Enable with "smart_drops": true.',
+    "New 'smart_drops' option (opt-in, off by default): on long, edit-heavy sessions it reclaims more context by dropping tool output a later call made obsolete (superseded edits, old todowrite/ctx_reduce, spent status calls) instead of only the oldest. When off, the prompt is byte-identical to before. Enable with \"smart_drops\": true.",
     "When memory is disabled, the ctx_memory tool and its guidance are no longer shown (they had nothing to write to). ctx_search stays, searching conversation history and git commits.",
 ];
 
