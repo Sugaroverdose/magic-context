@@ -63,6 +63,7 @@ export const MAINTAIN_DOCS_SYSTEM_PROMPT = `You are a documentation maintainer f
 
 ## Rules
 - **NEVER touch protected regions.** Any content between \`<!-- mc:protected START ... -->\` and \`<!-- mc:protected END -->\` is hand-authored and cache-critical. Reproduce it BYTE-FOR-BYTE — do not edit, reword, reorder, summarize, trim, or drop a single line, and keep the marker comments. Only a human edits that region.
+- **Preserve an existing doc's structure, voice, and density.** When a doc already exists, it is the source of truth for shape: keep its headings, ordering, level of detail, and writing style. Make the SMALLEST edits that bring it back in sync with the code. NEVER reshape hand-written prose into a generic template, collapse a dense section into bullet stubs, or drop hard-won detail (specific invariants, edge cases, mechanism descriptions) because it does not fit a standard layout. A doc denser and more specific than a template is BETTER, not worse: leave it that way.
 - **Be prescriptive** ("Use X pattern", not "X pattern is used"). **Current state only** — no temporal language, no history.
 - **Verify before writing** — read the actual files, never guess. All file paths in the docs must point to files that exist.`;
 
@@ -227,8 +228,8 @@ export function buildMaintainDocsPrompt(
         : "No previous dream timestamp — treat this as a full analysis.";
 
     const modeIntro = hasAny
-        ? `Some docs already exist. Update only the sections affected by recent changes. Do NOT rewrite unchanged sections.`
-        : `No docs exist yet. Create both ARCHITECTURE.md and STRUCTURE.md from scratch using the templates below.`;
+        ? `Some docs already exist and are the source of truth for shape. Make SURGICAL \`edit\` changes to only the sections affected by recent code changes; preserve every other section, the existing structure, and the existing density verbatim. Do NOT regenerate a whole file, do NOT reshape prose into a template, and do NOT use the templates below (they are for creation only). If nothing material changed, change nothing.`
+        : `No docs exist yet. Create both ARCHITECTURE.md and STRUCTURE.md from scratch using the templates below as a STARTING shape, then go deeper than the template wherever the code warrants it.`;
 
     return `## Task: Maintain Codebase Documentation
 
@@ -244,15 +245,16 @@ ${modeIntro}
 ### Process
 
 1. **Check what changed.** ${gitSinceClause}
-2. **Read existing docs** (if they exist) to understand current state.
+2. **Read existing docs** (if they exist) IN FULL to understand their current structure, depth, and voice; you will preserve all of it except what code changes force you to touch.
 3. **Explore the codebase** to verify and update:
    - Directory structure: \`find . -type d -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/dist/*' | head -60\`
    - Entry points: \`ls src/index.* src/main.* 2>/dev/null\`
    - Key imports: \`grep -r "^import\\|^export" src/ --include="*.ts" | head -80\`
-4. **Write or update** using the Write tool. Always write to project root, NOT to .planning/.
+4. **Apply the change.** If the doc EXISTS: use \`edit\` for the specific sections that drifted, never rewrite the whole file with \`write\`. If the doc is MISSING: create it with \`write\`. Always at project root, NOT \`.planning/\`.
 
 ### Rules
 - **NEVER touch protected regions**: any content between \`<!-- mc:protected START ... -->\` and \`<!-- mc:protected END -->\` is hand-authored and cache-critical. Reproduce it BYTE-FOR-BYTE in your rewrite — do not edit, reword, reorder, summarize, trim, or drop a single line of it, and keep the marker comments themselves. Only a human edits that region.
+- **Preserve existing structure and density**: when a doc exists, keep its headings, ordering, level of detail, and voice. Make the smallest edits that re-sync it with the code. NEVER flatten dense hand-written prose into the generic template, collapse a detailed section into bullet stubs, or drop specific invariants/edge-cases/mechanism detail because it does not match a standard layout. Denser and more specific than the template is BETTER.
 - **Be prescriptive**: "Use X pattern" not "X pattern is used"
 - **Always include file paths** in backticks
 - **Write current state only**: no temporal language, no history
