@@ -24,15 +24,15 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.28.0";
+export const ANNOUNCEMENT_VERSION = "0.29.0";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    'New \'language\' option: set a top-level 2-letter language code (e.g. "tr" or "es") and Magic Context writes its summaries, memories, and guidance in that language, while keeping all structure (tags, categories, code, paths) in English. User-level only, off by default.',
-    "The ctx_reduce reminder now reflects how much tool output is actually reclaimable, instead of escalating to 'urgent' just because you're near compaction. It also no longer suggests dropping the agent's task list or tiny status outputs.",
+    'New \'smart_drops\' option (opt-in, off by default): on long, edit-heavy sessions it reclaims more context by dropping tool output a later call made obsolete (superseded edits, old todowrite/ctx_reduce, spent status calls) instead of only the oldest. When off, the prompt is byte-identical to before. Enable with "smart_drops": true.',
+    "When memory is disabled, the ctx_memory tool and its guidance are no longer shown (they had nothing to write to). ctx_search stays, searching conversation history and git commits.",
 ];
 
 /**
