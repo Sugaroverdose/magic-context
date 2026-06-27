@@ -39,6 +39,7 @@ import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { type ConflictResult, detectConflicts } from "./shared/conflict-detector";
 import { getMagicContextStorageDir } from "./shared/data-path";
+import { registerExitAbort, unregisterExitAbort } from './shared/exit-abort-registry';
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
@@ -69,9 +70,10 @@ const server: Plugin = async (ctx) => {
     // (historian/dreamer/sidekick/migration) instead of deleting on success.
     setKeepSubagents(pluginConfig.keep_subagents === true);
     const autoUpdateAbort = new AbortController();
-    process.once("exit", () => {
-        autoUpdateAbort.abort();
-    });
+    // Abort on process exit via the shared single-listener registry. Registering
+    // a process.once("exit") here directly would add one listener PER plugin
+    // instance, and OpenCode Desktop runs many in one process (Node warns past 10).
+    registerExitAbort(autoUpdateAbort);
 
     // Surface config validation warnings to user and log
     if (pluginConfig.configWarnings?.length) {
@@ -396,6 +398,9 @@ const server: Plugin = async (ctx) => {
                 if (!isDisposedInstanceDirectory(ownInstanceDirectory, disposedDirectory)) return;
                 try {
                     autoUpdateAbort.abort();
+                    // Drop it from the exit-abort registry so disposed instances'
+                    // controllers aren't retained there for the process lifetime.
+                    unregisterExitAbort(autoUpdateAbort);
                 } catch {
                     // best-effort
                 }
