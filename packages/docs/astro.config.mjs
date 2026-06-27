@@ -1,7 +1,6 @@
 // @ts-check
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
-import starlightThemeObsidian from "starlight-theme-obsidian";
 import { remarkBaseLinks } from "./remark-base-links.mjs";
 
 // https://astro.build/config
@@ -16,7 +15,6 @@ export default defineConfig({
     },
     integrations: [
         starlight({
-            plugins: [starlightThemeObsidian({ graph: false, backlinks: false })],
             customCss: ["./src/styles/reference-tables.css"],
             title: "Magic Context",
             description:
