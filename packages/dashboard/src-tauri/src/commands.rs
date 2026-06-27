@@ -715,15 +715,15 @@ pub async fn get_available_models() -> Vec<String> {
             .collect()
     };
 
-    // `--pure` (global option, before the subcommand) lists models WITHOUT
-    // loading external plugins. A plain `opencode models` boots the full
-    // runtime and loads every configured plugin; the AFT plugin in particular
-    // spawns a native indexer daemon that then orphans and pegs CPU after this
-    // short-lived discovery process exits. `--pure` keeps built-in provider
-    // auth (so the model list is still correct) while skipping external plugin
-    // side effects entirely.
+    // Use the plain `opencode models` command, NOT `--pure`. `--pure` skips all
+    // external plugins, including the auth/provider plugins that register the
+    // user's configured providers (e.g. anthropic, google), so under `--pure`
+    // the dropdowns silently omit exactly the models the user set up. The plain
+    // command lists every provider. It does not run any tool, so plugins that
+    // start background work only on a tool call (rather than at plugin load) are
+    // not triggered by a model listing.
     for bin in &candidates {
-        if let Some(text) = run_bounded_binary(bin, &["--pure", "models"]).await {
+        if let Some(text) = run_bounded_binary(bin, &["models"]).await {
             let models = parse(&text);
             if !models.is_empty() {
                 return models;
@@ -733,7 +733,7 @@ pub async fn get_available_models() -> Vec<String> {
 
     if cfg!(target_os = "windows") {
         if let Some(bin) = resolve_via_where("opencode").await {
-            if let Some(text) = run_bounded_binary(&bin, &["--pure", "models"]).await {
+            if let Some(text) = run_bounded_binary(&bin, &["models"]).await {
                 let models = parse(&text);
                 if !models.is_empty() {
                     return models;
@@ -744,7 +744,7 @@ pub async fn get_available_models() -> Vec<String> {
 
     // Login-shell fallback for version-manager (mise/nvm/fnm) installs the
     // hardcoded candidates can't enumerate — see run_via_login_shell.
-    if let Some(text) = run_via_login_shell("opencode --pure models".to_string()).await {
+    if let Some(text) = run_via_login_shell("opencode models".to_string()).await {
         return parse(&text);
     }
 
