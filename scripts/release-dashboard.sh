@@ -256,7 +256,11 @@ fi
 # Sanity: the run succeeded, so every leg uploaded its asset. Confirm the count
 # before publishing (a defensive check, not a wait — the run is already green).
 ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
-MIN_ASSETS=10
+# A full run produces 25 assets (6 platforms × installers/sigs + latest.json).
+# A floor of 24 catches an architecture split (which yields ~12-14), the failure
+# mode where the matrix legs landed on two separate releases. The single
+# create-release job now prevents that, but keep the count as a backstop.
+MIN_ASSETS=24
 if [[ "$ASSET_COUNT" -lt "$MIN_ASSETS" ]]; then
   echo "  ⚠ Workflow succeeded but only $ASSET_COUNT/$MIN_ASSETS assets are attached."
   echo "  → https://github.com/cortexkit/magic-context/releases/tag/$TAG"
