@@ -200,6 +200,18 @@ pub struct Primer {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct PrimerCandidate {
+    pub id: i64,
+    pub project_path: String,
+    pub question: String,
+    pub session_id: String,
+    pub source_compartment_start: Option<i64>,
+    pub source_compartment_end: Option<i64>,
+    pub source_message_time: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct CategoryCount {
     pub category: String,
     pub count: i64,
@@ -2685,6 +2697,46 @@ pub fn get_primers(
             source_candidate_ids: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+        })
+    };
+    if let Some(project) = project {
+        stmt.query_map(params![project], map_row)?.collect()
+    } else {
+        stmt.query_map([], map_row)?.collect()
+    }
+}
+
+/// Read-only view of pending primer candidates (questions the historian emitted
+/// that have not yet recurred enough to promote). Newest first. Degrades to an
+/// empty list on pre-vN databases that lack the table.
+pub fn get_primer_candidates(
+    conn: &Connection,
+    project: Option<&str>,
+) -> Result<Vec<PrimerCandidate>, rusqlite::Error> {
+    if !table_exists(conn, "primer_candidates") {
+        return Ok(Vec::new());
+    }
+    let sql = if project.is_some() {
+        "SELECT id, project_path, question, session_id, source_compartment_start, source_compartment_end, source_message_time, created_at
+         FROM primer_candidates
+         WHERE project_path = ?1
+         ORDER BY source_message_time DESC, id DESC"
+    } else {
+        "SELECT id, project_path, question, session_id, source_compartment_start, source_compartment_end, source_message_time, created_at
+         FROM primer_candidates
+         ORDER BY project_path ASC, source_message_time DESC, id DESC"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> Result<PrimerCandidate, rusqlite::Error> {
+        Ok(PrimerCandidate {
+            id: row.get(0)?,
+            project_path: row.get(1)?,
+            question: row.get(2)?,
+            session_id: row.get(3)?,
+            source_compartment_start: row.get(4)?,
+            source_compartment_end: row.get(5)?,
+            source_message_time: row.get(6)?,
+            created_at: row.get(7)?,
         })
     };
     if let Some(project) = project {

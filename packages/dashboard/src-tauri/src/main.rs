@@ -32,6 +32,7 @@ fn main() {
             commands::get_memories,
             commands::get_memory_stats,
             commands::get_primers,
+            commands::get_primer_candidates,
             commands::update_memory_status,
             commands::update_memory_content,
             commands::update_memory_category,

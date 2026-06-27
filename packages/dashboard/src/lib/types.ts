@@ -71,6 +71,17 @@ export interface Primer {
   updated_at: number;
 }
 
+export interface PrimerCandidate {
+  id: number;
+  project_path: string;
+  question: string;
+  session_id: string;
+  source_compartment_start: number | null;
+  source_compartment_end: number | null;
+  source_message_time: number;
+  created_at: number;
+}
+
 export interface CategoryCount {
   category: string;
   count: number;

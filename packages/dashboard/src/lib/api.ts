@@ -17,6 +17,7 @@ import type {
   Note,
   PagedSessions,
   Primer,
+  PrimerCandidate,
   ProjectRow,
   SessionDetail,
   SessionFact,
@@ -73,6 +74,10 @@ export async function getMemoryStats(params?: {
 
 export async function getPrimers(project?: string): Promise<Primer[]> {
   return invoke("get_primers", { project: project ?? null });
+}
+
+export async function getPrimerCandidates(project?: string): Promise<PrimerCandidate[]> {
+  return invoke("get_primer_candidates", { project: project ?? null });
 }
 
 export async function workspaceSchemaReady(): Promise<boolean> {
