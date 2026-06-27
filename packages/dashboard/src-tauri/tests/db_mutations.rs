@@ -751,7 +751,7 @@ fn test_update_memory_category_collision() {
         [],
     )
     .unwrap();
-    let id2 = conn.last_insert_rowid();
+    // Memory 2 exists with category NAMING; we don't need its id below.
 
     // Try to update Memory 1's category to NAMING. This should collide with Memory 2.
     let res = db::update_memory_category(&mut conn, id1, "NAMING");

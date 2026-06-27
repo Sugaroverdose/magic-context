@@ -273,12 +273,6 @@ async function withQuietConsole<T>(fn: () => Promise<T>): Promise<T> {
 // because the missing package affects the whole install, not one model.
 let nativeRuntimeMissing = false;
 
-/** Whether local embeddings have been disabled this process due to a missing
- * native runtime (issue #128). Used by callers/tests to detect the degraded state. */
-export function isLocalEmbeddingRuntimeMissing(): boolean {
-    return nativeRuntimeMissing;
-}
-
 export function isNativeRuntimeMissingError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error ?? "");
     const lower = message.toLowerCase();

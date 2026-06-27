@@ -1,6 +1,6 @@
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { ensureColumn, healAllNullColumns } from "./storage-db";
+import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
 /**
