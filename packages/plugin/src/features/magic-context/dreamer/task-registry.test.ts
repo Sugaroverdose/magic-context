@@ -1,11 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, test } from "bun:test";
-import {
-    CANONICAL_DREAM_TASKS,
-    isCanonicalDreamTask,
-    MEMORY_DOMAIN_TASKS,
-} from "./task-registry";
+import { CANONICAL_DREAM_TASKS, isCanonicalDreamTask, MEMORY_DOMAIN_TASKS } from "./task-registry";
 
 describe("dreamer task registry", () => {
     test("classify-memories is canonical, memory-domain, and ordered after curate", () => {

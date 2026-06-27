@@ -44,4 +44,3 @@ export function describePiPackageEntry(entry: unknown): string {
         return String(entry);
     }
 }
-

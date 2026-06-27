@@ -115,8 +115,8 @@ export default function Primers(props: PrimersProps = {}) {
                   <span class="empty-state-icon">❓</span>
                   <span>No primers promoted yet.</span>
                   <span style={{ "font-size": "12px", "margin-top": "4px" }}>
-                    Durable standing questions about how this project works, surfaced as they
-                    recur across days.
+                    Durable standing questions about how this project works, surfaced as they recur
+                    across days.
                   </span>
                 </div>
               }
@@ -143,8 +143,8 @@ export default function Primers(props: PrimersProps = {}) {
                   <span class="empty-state-icon">📝</span>
                   <span>No pending candidates.</span>
                   <span style={{ "font-size": "12px", "margin-top": "4px" }}>
-                    The historian records standing questions here; one is promoted to a primer
-                    once it recurs on a later day.
+                    The historian records standing questions here; one is promoted to a primer once
+                    it recurs on a later day.
                   </span>
                 </div>
               }

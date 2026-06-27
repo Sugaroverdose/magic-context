@@ -39,7 +39,7 @@ import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { type ConflictResult, detectConflicts } from "./shared/conflict-detector";
 import { getMagicContextStorageDir } from "./shared/data-path";
-import { registerExitAbort, unregisterExitAbort } from './shared/exit-abort-registry';
+import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
