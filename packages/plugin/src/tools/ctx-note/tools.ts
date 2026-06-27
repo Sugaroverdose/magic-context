@@ -202,7 +202,10 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
         },
         async execute(args: CtxNoteArgs, toolContext) {
             const sessionId = toolContext.sessionID;
-            const action = args.action ?? (typeof args.content === "string" ? "write" : "read");
+            // Infer write only on NON-EMPTY content. GPT-family models fill every
+            // optional param (content:"" for a read), so a bare `typeof === "string"`
+            // check would mis-infer `write` and then reject the empty content.
+            const action = args.action ?? (args.content?.trim() ? "write" : "read");
 
             // Resolve the session's actual project from `toolContext.directory`
             // each call. OpenCode's top-level `ctx.directory` (the launch dir)

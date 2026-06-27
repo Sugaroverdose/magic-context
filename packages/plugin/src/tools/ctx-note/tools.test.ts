@@ -60,6 +60,24 @@ describe("createCtxNoteTools", () => {
         expect(readResult).toContain("Remember the user prefers build on integrate.");
     });
 
+    it("defaults to read (not write) when content is an empty string and no action is given", async () => {
+        // GPT-family models fill every optional param, so a read arrives as
+        // { content: "", surface_condition: "" } with no action. That must
+        // default to read, not infer write and reject the empty content.
+        await tools.ctx_note.execute(
+            { action: "write", content: "An existing note" },
+            toolContext(),
+        );
+        const result = await tools.ctx_note.execute(
+            { content: "", surface_condition: "" },
+            toolContext(),
+        );
+
+        expect(result).not.toContain("'content' is required");
+        expect(result).toContain("## Session Notes");
+        expect(result).toContain("An existing note");
+    });
+
     it("anchors a note to the live message-tail ordinal and renders it with an expand hint", async () => {
         db.prepare(
             "INSERT INTO message_history_index (session_id, last_indexed_ordinal, updated_at) VALUES (?, ?, ?)",

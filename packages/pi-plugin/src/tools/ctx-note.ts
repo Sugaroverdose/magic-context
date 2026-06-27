@@ -188,9 +188,11 @@ export function createCtxNoteTool(
 		parameters: ParamsSchema,
 		async execute(_toolCallId, params: CtxNoteParams, _signal, _onUpdate, ctx) {
 			const sessionId = ctx.sessionManager.getSessionId();
+			// Infer write only on NON-EMPTY content. GPT-family models fill every
+			// optional param (content:"" for a read), so a bare `typeof === "string"`
+			// check would mis-infer `write` and then reject the empty content.
 			const action =
-				params.action ??
-				(typeof params.content === "string" ? "write" : "read");
+				params.action ?? (params.content?.trim() ? "write" : "read");
 
 			if (action === "write") {
 				const content = params.content?.trim();
