@@ -72,3 +72,7 @@ packages/plugin/scripts/test-historian-prompt.ts
 # artifacts (historian dumps) + a fenced .gitignore under .cortexkit/.
 # This is local runtime state, never source.
 .cortexkit/
+
+# Internal SUBC-migration design docs / specs (not public)
+docs/cache-policy/
+docs/specs/
