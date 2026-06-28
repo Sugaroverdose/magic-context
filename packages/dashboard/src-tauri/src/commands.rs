@@ -646,32 +646,11 @@ fn opencode_cli_candidates() -> Vec<String> {
     // GUI apps do not inherit every shell PATH, so keep this list in one place
     // for model discovery and install-state detection.
     if cfg!(target_os = "windows") {
-        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let mut list = Vec::new();
-        if !userprofile.is_empty() {
-            list.push(format!("{}\\.opencode\\bin\\opencode.exe", userprofile));
-        }
-        if !appdata.is_empty() {
-            list.push(format!("{}\\npm\\opencode.cmd", appdata));
-            list.push(format!("{}\\npm\\opencode.exe", appdata));
-        }
-        if !localappdata.is_empty() {
-            list.push(format!(
-                "{}\\Microsoft\\WinGet\\Links\\opencode.exe",
-                localappdata
-            ));
-        }
-        if !userprofile.is_empty() {
-            list.push(format!("{}\\scoop\\shims\\opencode.exe", userprofile));
-        }
-        if !localappdata.is_empty() {
-            list.push(format!("{}\\opencode\\bin\\opencode.exe", localappdata));
-        }
-        list.push("opencode".to_string());
-        list.push("opencode.exe".to_string());
-        list
+        windows_opencode_candidates(
+            std::env::var("USERPROFILE").ok().as_deref(),
+            std::env::var("APPDATA").ok().as_deref(),
+            std::env::var("LOCALAPPDATA").ok().as_deref(),
+        )
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         vec![
@@ -685,6 +664,46 @@ fn opencode_cli_candidates() -> Vec<String> {
             format!("{}/.volta/bin/opencode", home),
         ]
     }
+}
+
+/// Windows OpenCode CLI candidates, as absolute paths tried directly (so they
+/// work even though a GUI launch does not inherit the user's shell PATH). Pure
+/// over its env inputs so it can be unit-tested without touching process env.
+///
+/// pnpm is the key #149 addition: pnpm installs global bins under
+/// `%LOCALAPPDATA%\pnpm\<name>.cmd` (its store) AND links them into
+/// `%LOCALAPPDATA%\pnpm\bin\<name>.cmd` (the dir it puts on PATH). Neither is on
+/// a GUI process's PATH, so `where.exe` misses them; listing the absolute paths
+/// here finds them. A direct `.cmd` launch works on Windows (verified), so no
+/// `cmd /C` wrapper is needed.
+fn windows_opencode_candidates(
+    userprofile: Option<&str>,
+    appdata: Option<&str>,
+    localappdata: Option<&str>,
+) -> Vec<String> {
+    let mut list = Vec::new();
+    if let Some(p) = userprofile.filter(|s| !s.is_empty()) {
+        list.push(format!("{p}\\.opencode\\bin\\opencode.exe"));
+    }
+    if let Some(p) = appdata.filter(|s| !s.is_empty()) {
+        list.push(format!("{p}\\npm\\opencode.cmd"));
+        list.push(format!("{p}\\npm\\opencode.exe"));
+    }
+    if let Some(p) = localappdata.filter(|s| !s.is_empty()) {
+        // pnpm: both the bin-link dir (on PATH for shells) and the store root.
+        list.push(format!("{p}\\pnpm\\bin\\opencode.cmd"));
+        list.push(format!("{p}\\pnpm\\opencode.cmd"));
+        list.push(format!("{p}\\Microsoft\\WinGet\\Links\\opencode.exe"));
+    }
+    if let Some(p) = userprofile.filter(|s| !s.is_empty()) {
+        list.push(format!("{p}\\scoop\\shims\\opencode.exe"));
+    }
+    if let Some(p) = localappdata.filter(|s| !s.is_empty()) {
+        list.push(format!("{p}\\opencode\\bin\\opencode.exe"));
+    }
+    list.push("opencode".to_string());
+    list.push("opencode.exe".to_string());
+    list
 }
 
 fn opencode_desktop_settings_paths(
@@ -1278,8 +1297,8 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 mod tests {
     use super::{
         opencode_desktop_detected_for_env, parse_pi_models_output, pick_first_line,
-        prepare_embedding_probe_options, run_bounded_binary, DesktopPlatform, OpencodeDesktopEnv,
-        OPENCODE_DESKTOP_APP_IDS,
+        prepare_embedding_probe_options, run_bounded_binary, windows_opencode_candidates,
+        DesktopPlatform, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::path::{Path, PathBuf};
@@ -1425,73 +1444,62 @@ mod tests {
         );
     }
 
-    // Exploratory probe for #149: can the dashboard's discovery path execute a
-    // pnpm/npm `.cmd` shim at all? Rust's Command (like every CreateProcessW
-    // caller) does not run batch files directly, so a resolved `opencode.cmd`
-    // may fail to launch even when discovery FINDS it. Run on Windows CI with:
-    //   cargo test --ignored --nocapture win_cmd_shim_execution_probe
-    // It prints the raw outcomes; the fix is then asserted by a real regression
-    // test once the mechanism is confirmed.
+    // #149 regression: the discovery path must be able to LAUNCH a `.cmd` shim
+    // (pnpm/npm install opencode as opencode.cmd). Verified on windows-latest
+    // that Rust's Command runs a `.cmd` directly, so the fix is purely adding the
+    // pnpm path to the candidate list (no `cmd /C` wrapper). This asserts that
+    // run_bounded_binary actually executes a `.cmd`, so a future regression (or a
+    // Rust/Windows behavior change) is caught. Windows-only.
     #[cfg(windows)]
     #[tokio::test]
-    #[ignore = "manual Windows discovery probe; run with --ignored --nocapture"]
-    async fn win_cmd_shim_execution_probe() {
+    async fn win_run_bounded_binary_executes_cmd_shim() {
         let dir = tempfile::tempdir().expect("tempdir");
         let shim = dir.path().join("opencode.cmd");
         std::fs::write(&shim, "@echo off\r\necho probe-opencode 9.9.9\r\n").expect("write shim");
-        let shim_str = shim.to_string_lossy().to_string();
-        println!("\n[probe] shim at: {shim_str}");
-
-        // 1. What the REAL discovery path does: run_bounded_binary(<.cmd>, ...).
-        //    It swallows the launch error, so a None here means "could not run".
-        let via_helper = run_bounded_binary(&shim_str, &["--version"]).await;
-        println!("[probe] run_bounded_binary(.cmd) -> {via_helper:?}");
-
-        // 2. Raw Command on the .cmd to expose the actual OS error kind.
-        let raw = tokio::process::Command::new(&shim_str)
-            .arg("--version")
-            .output()
-            .await;
-        match &raw {
-            Ok(o) => println!(
-                "[probe] raw Command(.cmd): launched status={} stdout={:?}",
-                o.status,
-                String::from_utf8_lossy(&o.stdout).trim()
-            ),
-            Err(e) => println!(
-                "[probe] raw Command(.cmd): FAILED kind={:?} msg={e}",
-                e.kind()
-            ),
-        }
-
-        // 3. The proposed fix path: cmd /C <.cmd>.
-        let via_cmd = tokio::process::Command::new("cmd")
-            .args(["/C", &shim_str, "--version"])
-            .output()
-            .await;
-        match &via_cmd {
-            Ok(o) => println!(
-                "[probe] cmd /C .cmd: launched status={} stdout={:?}",
-                o.status,
-                String::from_utf8_lossy(&o.stdout).trim()
-            ),
-            Err(e) => println!("[probe] cmd /C .cmd: FAILED {e}"),
-        }
-
-        // 4. where.exe sanity: CI has full PATH, so this isolates the failure to
-        //    execution rather than discovery (the GUI PATH-inheritance angle of
-        //    #149 cannot be reproduced in a shell-launched CI runner).
-        let where_out = tokio::process::Command::new("where.exe")
-            .arg("cmd")
-            .output()
-            .await;
-        println!(
-            "[probe] where.exe cmd -> {:?}",
-            where_out
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        let out = run_bounded_binary(&shim.to_string_lossy(), &["--version"]).await;
+        assert_eq!(
+            out.as_deref().map(str::trim),
+            Some("probe-opencode 9.9.9"),
+            "run_bounded_binary must launch a .cmd shim directly (got {out:?})"
         );
-        println!("[probe] done\n");
+    }
+
+    #[test]
+    fn windows_candidates_include_pnpm_global_bin() {
+        // #149: pnpm installs global bins at %LOCALAPPDATA%\pnpm\bin\<name>.cmd
+        // (and the store root). Both must be in the candidate list so discovery
+        // finds a pnpm-installed opencode that is never on a GUI process's PATH.
+        let list = windows_opencode_candidates(
+            Some("C:\\Users\\me"),
+            Some("C:\\Users\\me\\AppData\\Roaming"),
+            Some("C:\\Users\\me\\AppData\\Local"),
+        );
+        assert!(
+            list.iter()
+                .any(|c| c == "C:\\Users\\me\\AppData\\Local\\pnpm\\bin\\opencode.cmd"),
+            "missing pnpm bin-link candidate; got {list:?}"
+        );
+        assert!(
+            list.iter()
+                .any(|c| c == "C:\\Users\\me\\AppData\\Local\\pnpm\\opencode.cmd"),
+            "missing pnpm store-root candidate; got {list:?}"
+        );
+        // Existing coverage stays: npm, winget, scoop, the stock installer, and
+        // the bare-name PATH fallbacks.
+        assert!(list
+            .iter()
+            .any(|c| c == "C:\\Users\\me\\AppData\\Roaming\\npm\\opencode.cmd"));
+        assert!(list.contains(&"opencode".to_string()));
+    }
+
+    #[test]
+    fn windows_candidates_skip_empty_env_vars() {
+        // Unset/empty env vars must not yield malformed leading-separator paths.
+        let list = windows_opencode_candidates(None, Some(""), Some("C:\\L"));
+        assert!(list.iter().all(|c| !c.starts_with('\\')), "got {list:?}");
+        assert!(list.iter().any(|c| c == "C:\\L\\pnpm\\bin\\opencode.cmd"));
+        // No APPDATA -> no npm candidates.
+        assert!(list.iter().all(|c| !c.contains("\\npm\\")));
     }
 
     #[test]
