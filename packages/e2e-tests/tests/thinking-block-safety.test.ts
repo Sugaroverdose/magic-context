@@ -72,7 +72,12 @@ afterAll(async () => {
 function openContextDbWritable(): Database {
     // Plugin v0.16+ — shared cortexkit/magic-context path.
     const dbPath = join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
-    return new Database(dbPath, { readwrite: true });
+    const db = new Database(dbPath, { readwrite: true });
+    // The live plugin holds this same DB during the test; under loaded CI a write
+    // here can collide with it. Wait for the lock instead of failing immediately
+    // (SQLITE_BUSY), matching the other e2e tests that share the context DB.
+    db.query("PRAGMA busy_timeout = 5000").run();
+    return db;
 }
 
 interface AnthropicContentBlock {
