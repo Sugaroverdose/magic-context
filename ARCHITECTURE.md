@@ -11,7 +11,7 @@ Magic Context is an `@opencode-ai/plugin` (entry `src/index.ts`) that rewrites t
 - **Replay-everything for cache stability.** Every persistent message mutation (reasoning clearing, structural-noise / placeholder / image / merged-assistant stripping, caveman compression, synthetic-todowrite, drop placeholders, and smart-drop/edit-marker compressions) is re-applied deterministically on EVERY transform pass — including defer passes — so the wire bytes stay byte-identical and the provider prompt cache survives.
 - **Hidden subagents** (`historian`, `historian-editor`, `dreamer`, `sidekick`) do the heavy LLM work out of band; the transform itself does no LLM calls.
 - **Runtime SQLite backend** (`src/shared/sqlite.ts`): `bun:sqlite` under Bun, `node:sqlite` (`DatabaseSync`) under Node (Pi) and Electron (Desktop). The non-Bun branch adds a savepoint-aware `transaction()` shim and `readonly`→`readOnly` mapping; otherwise identical. No native module, no prebuild.
-- **Pi parity:** `packages/pi-plugin/` mirrors OpenCode semantics, importing shared core from `@magic-context/core`. Intentional divergences are tracked in `packages/pi-plugin/PARITY.md`.
+- **Pi parity:** `packages/pi-plugin/` mirrors OpenCode semantics, importing shared core from `@magic-context/core`. Intentional divergences are tracked in `packages/pi-plugin/PARITY.md`. Provider prefixes are translated between canonical (OpenCode) and Pi configuration models via `src/shared/harness-provider-map.ts` at configuration read/write edges to keep shared model configurations portable.
 
 ## Layers
 
@@ -20,7 +20,7 @@ Magic Context is an `@opencode-ai/plugin` (entry `src/index.ts`) that rewrites t
 - **Runtime** (`src/hooks/magic-context/`): the transform pipeline, postprocess phase, event/command handlers, system-prompt injection, compartment runners, decay rendering, strip-and-replay, nudges, m[0]/m[1] injection.
 - **Feature services** (`src/features/magic-context/`): storage, scheduler, tagger, memory, dreamer, sidekick, git-commit + message FTS indexes, unified search, overflow detection, migrations.
 - **Tools** (`src/tools/`): `ctx_reduce`, `ctx_expand`, `ctx_note`, `ctx_memory`, `ctx_search`. Gating: when `memory.enabled` is false, `ctx_memory` is not registered (on Pi, it registers but refuses queries for memory-off projects), and all memory-related guidance is stripped from the system prompt.
-- **Config + shared** (`src/config/`, `src/shared/`): Zod config (deep-merge raw JSONC before validation; invalid leaves fall back to defaults with warnings, never disable the plugin), logger, data paths, SQLite selector, harness id, RPC transport, conflict detector, tag-transcript primitive (shared with Pi).
+- **Config + shared** (`src/config/`, `src/shared/`): Zod config (deep-merge raw JSONC before validation; invalid leaves fall back to defaults with warnings, never disable the plugin), logger, data paths, SQLite selector, harness id, RPC transport, conflict detector, tag-transcript primitive (shared with Pi), provider-id translation map (`src/shared/harness-provider-map.ts`), and exit-abort listener coordinator (`src/shared/exit-abort-registry.ts`).
 - **TUI** (`src/tui/`): sidebar + `/ctx-status` / `/ctx-recomp` dialogs, RPC-backed; shipped as raw TS via the `./tui` export (not bundled into `dist/index.js`).
 - **CLI** (`packages/cli/`, separate `@cortexkit/magic-context` package): `npx` setup / doctor / migrate wizard.
 
@@ -136,7 +136,7 @@ Background maintenance (V2: per-task cron scheduling). A process-wide 15-min tim
 
 ## Storage & migrations
 
-`storage-db.ts` creates the schema and runs versioned migrations (`migrations.ts`, currently v1–v44). `LATEST_SUPPORTED_VERSION` is a schema fence — it MUST be bumped with every new migration (a unit test asserts it equals the highest migration), and a stale value makes the DB refuse to open after the migration applies. `ensureColumn()` + `healAllNullColumns()` backfill upgraded DBs even if a migration row is lost. New session-scoped tables must be added to `clearSession()`. A bulletproof `MAGIC_CONTEXT_TEST_DATA_DIR` guard keeps the test suite off the live DB (running `bun test` once migrated a live DB and fail-closed running binaries). SQLite binds must use SPREAD positional args, never the array form (`bun:sqlite` binds a lone array positionally; `node:sqlite` reads it as named params and throws).
+`storage-db.ts` creates the schema and runs versioned migrations (`migrations.ts`, currently v1–v49). `LATEST_SUPPORTED_VERSION` is a schema fence — it MUST be bumped with every new migration (a unit test asserts it equals the highest migration), and a stale value makes the DB refuse to open after the migration applies. Schema helpers `ensureColumn()` + `healAllNullColumns()` (defined in `storage-schema-helpers.ts` to prevent cycles between `storage-db` and `migrations`) backfill upgraded DBs even if a migration row is lost. New session-scoped tables must be added to `clearSession()`. A bulletproof `MAGIC_CONTEXT_TEST_DATA_DIR` guard keeps the test suite off the live DB (running `bun test` once migrated a live DB and fail-closed running binaries). SQLite binds must use SPREAD positional args, never the array form (`bun:sqlite` binds a lone array positionally; `node:sqlite` reads it as named params and throws).
 
 ## Session modes
 
