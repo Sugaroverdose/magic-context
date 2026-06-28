@@ -30,23 +30,34 @@ jobs:
         continue-on-error: true
         run: |
           npm install -g pnpm
-          pnpm add -g opencode-ai
+          # pnpm global installs need PNPM_HOME established first; `pnpm setup`
+          # writes it to the user env. Apply it to this process so `add -g` lands.
+          pnpm setup 2>&1 | Out-Host
+          if (-not $env:PNPM_HOME) { $env:PNPM_HOME = "$env:LOCALAPPDATA\pnpm" }
+          $env:PATH = "$env:PNPM_HOME;$env:PATH"
+          pnpm add -g opencode-ai 2>&1 | Out-Host
           Write-Host "PNPM_HOME=$env:PNPM_HOME"
-          Write-Host "LOCALAPPDATA=$env:LOCALAPPDATA"
-          Write-Host "--- pnpm dir contents ---"
-          Get-ChildItem -Recurse -Filter "opencode*" "$env:LOCALAPPDATA\pnpm" -ErrorAction SilentlyContinue | Select-Object FullName
-          Write-Host "--- where.exe opencode ---"
-          where.exe opencode
+          Write-Host "pnpm bin -g => $(pnpm bin -g 2>$null)"
+          Write-Host "--- opencode* under PNPM_HOME ---"
+          $shims = Get-ChildItem -Recurse -Filter "opencode*" "$env:PNPM_HOME" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          $shims | ForEach-Object { Write-Host $_ }
+          Write-Host "--- where.exe opencode (PATH includes pnpm now) ---"
+          where.exe opencode 2>&1 | Out-Host
+          # Capture the real .cmd shim absolute path for the next step (each run
+          # step is a fresh shell, so pass it via GITHUB_ENV rather than PATH).
+          $cmdShim = $shims | Where-Object { $_ -like "*opencode.cmd" } | Select-Object -First 1
+          if ($cmdShim) { "OPENCODE_SHIM=$cmdShim" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
 
       - name: Probe the real pnpm shim (direct vs cmd /C)
         shell: pwsh
         continue-on-error: true
         run: |
-          # Resolve the pnpm shim the way discovery would, then try to launch it
-          # via CreateProcessW (UseShellExecute=$false — identical to Rust's
-          # Command) vs through cmd /C.
-          $shim = (where.exe opencode 2>$null | Select-Object -First 1)
-          if (-not $shim) { Write-Host "no opencode on PATH; skipping"; exit 0 }
+          # Use the absolute pnpm shim path captured above. A GUI launch of the
+          # dashboard would NOT have pnpm on PATH (mechanism 1), so testing the
+          # absolute path is the faithful question: given the path, does a direct
+          # CreateProcessW launch (identical to Rust's Command) succeed?
+          $shim = $env:OPENCODE_SHIM
+          if (-not $shim) { Write-Host "pnpm opencode.cmd shim not found; skipping"; exit 0 }
           Write-Host "resolved shim: $shim"
 
           function Try-Launch($file, $arguments) {
