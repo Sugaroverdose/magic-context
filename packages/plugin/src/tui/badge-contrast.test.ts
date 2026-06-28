@@ -1,5 +1,43 @@
 import { describe, expect, test } from "bun:test";
-import { readableTextColorOn } from "./badge-contrast";
+import { badgeTextColor, readableTextColorOn } from "./badge-contrast";
+
+describe("badgeTextColor (AFT parity with #186 safety net)", () => {
+    // A purple/lavender accent on a dark theme: the badge label should be the
+    // theme background (the inverse-of-panel look), the same fixed token the AFT
+    // sidebar uses, so two sibling badges never disagree on the same accent.
+    const accent = { r: 0.6, g: 0.5, b: 0.9, a: 1 };
+
+    test("opaque distinct background is used verbatim as the label", () => {
+        const background = { r: 0.05, g: 0.05, b: 0.07, a: 1 }; // near-black dark theme
+        // Returns the SAME background token rather than a computed color.
+        expect(badgeTextColor(accent, background)).toBe(background);
+    });
+
+    test("light theme: background is used verbatim too (near-white label inverse)", () => {
+        const background = { r: 0.97, g: 0.97, b: 0.95, a: 1 };
+        expect(badgeTextColor(accent, background)).toBe(background);
+    });
+
+    test("transparent background (alpha 0) falls back to a visible pick (#186)", () => {
+        // background:"none" resolves to RGBA(0,0,0,0); using it as text would
+        // render the label invisible, so fall back to a contrast pick on accent.
+        const transparent = { r: 0, g: 0, b: 0, a: 0 };
+        const result = badgeTextColor(accent, transparent);
+        expect(result).not.toBe(transparent);
+        expect(result).toBe(readableTextColorOn(accent));
+    });
+
+    test("background ~= accent falls back to a visible pick", () => {
+        const sameAsAccent = { r: 0.6, g: 0.5, b: 0.9, a: 1 };
+        const result = badgeTextColor(accent, sameAsAccent);
+        expect(result).toBe(readableTextColorOn(accent));
+    });
+
+    test("missing alpha is treated as opaque", () => {
+        const background = { r: 0.05, g: 0.05, b: 0.07 };
+        expect(badgeTextColor(accent, background)).toBe(background);
+    });
+});
 
 describe("readableTextColorOn", () => {
     test("dark accent gets white text", () => {
