@@ -171,8 +171,14 @@ async function injectWasmOrtForElectron(): Promise<boolean> {
         try {
             const { createRequire: createRequireFn } = await import("node:module");
             const requireFn = createRequireFn(import.meta.url);
-            const pkgPath = requireFn.resolve("onnxruntime-web/package.json");
-            const distDir = join(dirname(pkgPath), "dist");
+            // Resolve the package's MAIN export ('.') rather than its
+            // package.json: onnxruntime-web ships an `exports` map that does NOT
+            // expose './package.json' (resolving it throws ERR_PACKAGE_PATH_NOT_
+            // EXPORTED), whereas '.' is always exported and lands inside dist/.
+            // Its dirname is the dist/ dir that holds the .wasm/.mjs assets. See
+            // issue #195.
+            const mainEntry = requireFn.resolve("onnxruntime-web");
+            const distDir = dirname(mainEntry);
             const wasmPathsPrefix = `${pathToFileURL(distDir).href}/`;
             if (ortWeb.env?.wasm) {
                 ortWeb.env.wasm.wasmPaths = wasmPathsPrefix;
@@ -226,7 +232,7 @@ type EmbeddingPipeline = {
 type CreateEmbeddingPipeline = (
     task: "feature-extraction",
     model: string,
-    options: { dtype: string },
+    options: { dtype: string; device?: string },
 ) => Promise<EmbeddingPipeline>;
 
 /**
@@ -421,7 +427,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 // evaluation time and uses whatever we provide instead of doing its
                 // own native-vs-web backend selection. No-op on plain Node/Bun.
                 // See: https://github.com/cortexkit/magic-context/issues/78
-                await injectWasmOrtForElectron();
+                const injectedWasmOrt = await injectWasmOrtForElectron();
 
                 // Non-literal import specifier prevents Bun from eagerly resolving
                 // @huggingface/transformers at plugin load time. Desktop sidecar spawns
@@ -490,9 +496,21 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                             // Passing `dtype: "fp32"` selects the full-precision ONNX
                             // model; the model file on disk is unchanged (~90MB for
                             // all-MiniLM-L6-v2).
+                            //
+                            // device: "auto" is REQUIRED when we injected our own ORT
+                            // via Symbol.for("onnxruntime") (the Electron WASM path):
+                            // transformers then skips its device-registration branch, so
+                            // supportedDevices stays []. Any concrete device (incl. the
+                            // "cpu" it defaults to under IS_NODE_ENV) fails the
+                            // supportedDevices.includes(device) check and throws
+                            // `Unsupported device: "cpu"`. "auto" returns supportedDevices
+                            // verbatim ([]) without that check, so onnxruntime-web uses its
+                            // own default (wasm) execution provider. Native Node/Bun keeps
+                            // the default selection (no device option). See issue #195.
                             const pipeline = await withQuietConsole(() =>
                                 createPipeline("feature-extraction", this.model, {
                                     dtype: "fp32",
+                                    ...(injectedWasmOrt ? { device: "auto" } : {}),
                                 }),
                             );
                             if (this.disposing) {
