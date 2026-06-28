@@ -726,7 +726,9 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
 
     const conflictResult = detectConflicts(process.cwd());
     const recentSessions = await collectRecentSessions();
-    const openCodeInstallKind = detectOpenCode().kind;
+    const openCodeDetection = detectOpenCode();
+    const openCodeInstallKind = openCodeDetection.kind;
+    const openCodeBinary = openCodeDetection.kind === "cli" ? openCodeDetection.binary : null;
 
     return {
         timestamp: new Date().toISOString(),
@@ -736,7 +738,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         pluginVersion,
         opencodeInstalled: openCodeInstallKind !== "none",
         opencodeInstallKind: openCodeInstallKind,
-        opencodeVersion: getOpenCodeVersion(),
+        opencodeVersion: getOpenCodeVersion(openCodeBinary),
         configPaths,
         opencodeConfigHasPlugin: configHasPluginEntry(opencodeConfig.value),
         tuiConfigHasPlugin: configHasPluginEntry(tuiConfig.value),

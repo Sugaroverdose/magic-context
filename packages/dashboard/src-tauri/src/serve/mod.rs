@@ -149,6 +149,10 @@ pub fn build_router(app_state: Arc<AppState>, options: &ServeOptions, token: Str
         .route("/invoke", post(invoke_handler))
         .route("/*path", any(api_not_found))
         .route_layer(middleware::from_fn_with_state(state.clone(), api_guard))
+        // /api responses carry transcripts, config, and mutation results: never
+        // let a browser (or intermediary) cache them. Static hashed assets stay
+        // cacheable; only this sub-tree is marked no-store.
+        .layer(middleware::from_fn(add_no_store_header))
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES));
 
     Router::new()
@@ -261,6 +265,15 @@ async fn api_guard(State(state): State<ServeState>, request: Request, next: Next
 async fn add_security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     insert_security_headers(response.headers_mut());
+    response
+}
+
+async fn add_no_store_header(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
     response
 }
 
@@ -744,6 +757,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body: Value = response.json().await.expect("json body");
         assert_eq!(body["error"], "Unknown command");
+    }
+
+    #[tokio::test]
+    async fn api_responses_are_marked_no_store() {
+        let server = spawn_test_server().await;
+
+        // A successful command response carries data and must not be cached.
+        let ok = invoke(&server, json!({ "cmd": "get_db_health", "args": {} })).await;
+        assert_eq!(
+            ok.headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string()),
+            Some("no-store".to_string()),
+        );
+
+        // Error responses are no-store too (they can echo arguments back).
+        let err = invoke(&server, json!({ "cmd": "missing_command", "args": {} })).await;
+        assert_eq!(
+            err.headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string()),
+            Some("no-store".to_string()),
+        );
     }
 
     #[tokio::test]

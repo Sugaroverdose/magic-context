@@ -269,7 +269,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             "Model auto-discovery needs the OpenCode CLI; you will enter models manually. Install the CLI to auto-populate: https://opencode.ai",
         );
     } else {
-        const version = getOpenCodeVersion();
+        const version = getOpenCodeVersion(detection.binary);
         s.stop(`OpenCode ${version ?? ""} detected`);
     }
 
@@ -278,8 +278,9 @@ export async function runSetup(dryRun = false): Promise<number> {
 
     // Only the CLI can enumerate the authed/resolved model list; Desktop-only
     // installs have no on-disk equivalent, so models stay empty and the model
-    // prompts fall back to free-text entry.
-    const allModels = detection.kind === "cli" ? getAvailableModels() : [];
+    // prompts fall back to free-text entry. Use the resolved binary path so a
+    // stock CLI that is not on PATH still enumerates.
+    const allModels = detection.kind === "cli" ? getAvailableModels(detection.binary) : [];
     if (allModels.length > 0) {
         s.stop(`Found ${allModels.length} models`);
     } else {

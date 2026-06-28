@@ -584,12 +584,39 @@ struct OpencodeDesktopEnv {
 
 impl OpencodeDesktopEnv {
     fn from_process() -> Self {
+        let home = env_path("HOME")
+            .or_else(|| env_path("USERPROFILE"))
+            .or_else(dirs::home_dir);
+        Self::resolve(
+            home,
+            env_path("APPDATA"),
+            env_path("LOCALAPPDATA"),
+            env_path("XDG_CONFIG_HOME"),
+            env_path("XDG_DATA_HOME"),
+        )
+    }
+
+    /// Derive the env from already-resolved roots. Falls back to home-derived
+    /// Windows AppData roots when those env vars are unset, so a Desktop user is
+    /// never misreported as having no OpenCode install just because %APPDATA% /
+    /// %LOCALAPPDATA% are absent in this process environment. Kept in lockstep
+    /// with the CLI's opencode-detect.ts fallbacks.
+    fn resolve(
+        home: Option<PathBuf>,
+        appdata: Option<PathBuf>,
+        localappdata: Option<PathBuf>,
+        xdg_config_home: Option<PathBuf>,
+        xdg_data_home: Option<PathBuf>,
+    ) -> Self {
+        let appdata = appdata.or_else(|| home.as_ref().map(|h| h.join("AppData").join("Roaming")));
+        let localappdata =
+            localappdata.or_else(|| home.as_ref().map(|h| h.join("AppData").join("Local")));
         Self {
-            home: env_path("HOME"),
-            appdata: env_path("APPDATA"),
-            localappdata: env_path("LOCALAPPDATA"),
-            xdg_config_home: env_path("XDG_CONFIG_HOME"),
-            xdg_data_home: env_path("XDG_DATA_HOME"),
+            home,
+            appdata,
+            localappdata,
+            xdg_config_home,
+            xdg_data_home,
             mac_system_applications: PathBuf::from("/Applications"),
         }
     }
@@ -1285,6 +1312,25 @@ mod tests {
                 "ai.opencode.desktop.dev",
             ]
         );
+    }
+
+    #[test]
+    fn windows_desktop_marker_detected_when_appdata_env_unset() {
+        // With %APPDATA% unset but home known, the Windows userData marker must
+        // still resolve from the home-derived AppData/Roaming fallback.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        let env = OpencodeDesktopEnv::resolve(Some(home.clone()), None, None, None, None);
+        write_file(
+            home.join("AppData")
+                .join("Roaming")
+                .join(OPENCODE_DESKTOP_APP_IDS[0])
+                .join("opencode.settings"),
+        );
+        assert!(opencode_desktop_detected_for_env(
+            DesktopPlatform::Windows,
+            &env
+        ));
     }
 
     #[test]
