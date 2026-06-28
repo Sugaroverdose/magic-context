@@ -224,6 +224,34 @@ jobs:
           echo "::error::latest.json never became available on release $TAG"
           exit 1
 
+      # Pin every asset URL to THIS tag's release. tauri-action writes
+      # /releases/latest/download/ URLs, but in this repo GitHub's "latest
+      # release" pointer belongs to the plugin train (v*), which carries no
+      # dashboard assets — so /latest/ URLs 404 and Desktop auto-update breaks.
+      # Rewrite to /releases/download/<TAG>/, which is immune to the pointer.
+      - name: Pin updater URLs to this release tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          FILE=_updater_publish/latest.json
+          python3 - "$TAG" "$FILE" <<'PY'
+          import json, sys
+          tag, path = sys.argv[1], sys.argv[2]
+          old = "/releases/latest/download/"
+          new = f"/releases/download/{tag}/"
+          d = json.load(open(path))
+          n = 0
+          for info in d.get("platforms", {}).values():
+              u = info.get("url", "")
+              if old in u:
+                  info["url"] = u.replace(old, new); n += 1
+          json.dump(d, open(path, "w"), indent=2)
+          print(f"pinned {n} url(s) to {new}")
+          # Fail closed: a manifest still carrying /latest/ URLs would ship broken.
+          assert not any(old in i.get("url", "") for i in d.get("platforms", {}).values()), \
+              "latest.json still has /releases/latest/download/ URLs after rewrite"
+          PY
+          cat "$FILE"
+
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
