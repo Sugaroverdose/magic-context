@@ -24,16 +24,14 @@ import { getMagicContextStorageDir } from "./data-path";
  * Bump only when there are user-visible changes worth a startup dialog.
  * Does NOT need to match the published package version.
  */
-export const ANNOUNCEMENT_VERSION = "0.30.0";
+export const ANNOUNCEMENT_VERSION = "0.30.1";
 
 /**
  * Short, user-facing bullet strings. Keep each line ~80 chars or shorter so the
  * TUI dialog renders cleanly without horizontal scroll on a typical terminal.
  */
 export const ANNOUNCEMENT_FEATURES: ReadonlyArray<string> = [
-    "Setup and doctor now recognize an OpenCode Desktop install that has no CLI on PATH, instead of reporting OpenCode as not installed (#196). Desktop-only users continue setup with manual model entry.",
-    "TUI sidebar badge color follows your theme again (#198): it uses the theme background like sibling badges, with a fallback so the label can't disappear on transparent themes.",
-    "doctor clears a stale plugin cache more reliably (#199): it compares against the plugin's latest published version and preserves the cache when offline.",
+    "Local embeddings work on OpenCode Desktop again (#195): /ctx-embed no longer fails with 'Unsupported device: cpu' on the Desktop app.",
 ];
 
 /**
