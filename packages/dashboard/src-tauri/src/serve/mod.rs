@@ -39,6 +39,7 @@ pub struct ServeState {
     token: Arc<str>,
     allowed_hosts: Arc<HashSet<String>>,
     allowed_origins: Arc<HashSet<String>>,
+    wildcard_bind: bool,
     subprocess_limit: Arc<Semaphore>,
 }
 
@@ -140,6 +141,7 @@ pub fn build_router(app_state: Arc<AppState>, options: &ServeOptions, token: Str
         token: Arc::from(token),
         allowed_hosts: Arc::new(allowed_hosts),
         allowed_origins: Arc::new(allowed_origins),
+        wildcard_bind: options.host.is_unspecified(),
         subprocess_limit: Arc::new(Semaphore::new(SUBPROCESS_CONCURRENCY_LIMIT)),
     };
 
@@ -386,27 +388,44 @@ fn allowed_origins(hosts: &HashSet<String>) -> HashSet<String> {
 }
 
 fn host_allowed(headers: &HeaderMap, state: &ServeState) -> bool {
-    let Some(host) = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-    else {
+    let Some(host) = request_host(headers) else {
         return false;
     };
-    state
-        .allowed_hosts
-        .contains(&host.trim().to_ascii_lowercase())
+    if state.wildcard_bind {
+        // A wildcard bind can be reached through any local interface address, so a fixed
+        // Host list would reject the operator's actual LAN URL.
+        return true;
+    }
+    state.allowed_hosts.contains(&host)
 }
 
 fn origin_allowed(headers: &HeaderMap, state: &ServeState) -> bool {
     let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
+        .map(normalize_header_value)
     else {
         return true;
     };
-    state
-        .allowed_origins
-        .contains(&origin.trim().to_ascii_lowercase())
+    if state.wildcard_bind {
+        let Some(host) = request_host(headers) else {
+            return false;
+        };
+        return origin == format!("http://{host}");
+    }
+    state.allowed_origins.contains(&origin)
+}
+
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_header_value)
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_header_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 pub(crate) fn authorization_valid(headers: &HeaderMap, expected_token: &str) -> bool {
@@ -563,14 +582,22 @@ mod tests {
     }
 
     async fn spawn_test_server() -> TestServer {
+        spawn_test_server_with_options(DEFAULT_HOST, false).await
+    }
+
+    async fn spawn_remote_test_server() -> TestServer {
+        spawn_test_server_with_options(IpAddr::V4(Ipv4Addr::UNSPECIFIED), true).await
+    }
+
+    async fn spawn_test_server_with_options(host: IpAddr, allow_remote: bool) -> TestServer {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("test listener");
         let port = listener.local_addr().expect("local addr").port();
         let options = ServeOptions {
-            host: DEFAULT_HOST,
+            host,
             port,
-            allow_remote: false,
+            allow_remote,
         };
         let token = "a".repeat(64);
         let app = build_router(Arc::new(state_without_db()), &options, token.clone());
@@ -842,6 +869,71 @@ mod tests {
                 invoke(&server, json!({ "cmd": cmd, "args": { "program": "sh" } })).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[tokio::test]
+    async fn route_accepts_loopback_host_header() {
+        let server = spawn_test_server().await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/invoke", server.base_url))
+            .bearer_auth(&server.token)
+            .header(reqwest::header::HOST, format!("127.0.0.1:{}", server.port))
+            .json(&json!({ "cmd": "get_db_health", "args": {} }))
+            .send()
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn remote_route_accepts_wildcard_host_without_origin() {
+        let server = spawn_remote_test_server().await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/invoke", server.base_url))
+            .bearer_auth(&server.token)
+            .header(
+                reqwest::header::HOST,
+                format!("192.168.1.5:{}", server.port),
+            )
+            .json(&json!({ "cmd": "get_db_health", "args": {} }))
+            .send()
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn remote_route_rejects_cross_origin_for_wildcard_host() {
+        let server = spawn_remote_test_server().await;
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/invoke", server.base_url))
+            .bearer_auth(&server.token)
+            .header(
+                reqwest::header::HOST,
+                format!("192.168.1.5:{}", server.port),
+            )
+            .header(reqwest::header::ORIGIN, "http://evil.test")
+            .json(&json!({ "cmd": "get_db_health", "args": {} }))
+            .send()
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn remote_route_accepts_same_origin_for_wildcard_host() {
+        let server = spawn_remote_test_server().await;
+        let host = format!("192.168.1.5:{}", server.port);
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/invoke", server.base_url))
+            .bearer_auth(&server.token)
+            .header(reqwest::header::HOST, &host)
+            .header(reqwest::header::ORIGIN, format!("http://{host}"))
+            .json(&json!({ "cmd": "get_db_health", "args": {} }))
+            .send()
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
