@@ -350,14 +350,18 @@ function ConfigForm(props: {
   const models = () => props.models;
   const showManualModelHint = () =>
     props.opencodeInstallState === "desktop" || models().length === 0;
+  // The "Desktop detected" wording is only accurate when detection actually
+  // reported a Desktop-only install. An empty model list with the CLI present
+  // (e.g. `opencode models` returned nothing) gets the neutral phrasing.
   const manualModelHint = () => (
     <Show when={showManualModelHint()}>
       <span
         class="config-field-desc"
         style={{ color: "var(--text-muted)", "font-style": "italic" }}
       >
-        OpenCode Desktop detected, CLI not installed. Type a model id manually, or install the
-        OpenCode CLI to auto-populate models.
+        {props.opencodeInstallState === "desktop"
+          ? "OpenCode Desktop detected, CLI not installed. Type a model id manually, or install the OpenCode CLI to auto-populate models."
+          : "No models found. Type a model id manually, or install/configure the OpenCode CLI to auto-populate models."}
       </span>
     </Show>
   );
