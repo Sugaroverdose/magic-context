@@ -20,9 +20,12 @@ jobs:
 
       # --- Faithful probe: uses the dashboard crate's REAL tokio::process::Command
       #     path via run_bounded_binary, and prints raw outcomes. ---
-      - name: Rust probe (real discovery path on a temp .cmd)
+      # Regression test (asserts run_bounded_binary launches a .cmd directly) +
+      # the pure pnpm-candidate tests. This is the durable Windows coverage for
+      # #149; the manual pnpm-layout steps below are corroborating only.
+      - name: Rust tests (Windows .cmd execution + pnpm candidates)
         working-directory: packages/dashboard/src-tauri
-        run: cargo test win_cmd_shim_execution_probe -- --ignored --nocapture
+        run: cargo test win_run_bounded_binary_executes_cmd_shim windows_candidates -- --nocapture
 
       # --- Real-world reproduction: a pnpm-global opencode, exactly like #149. ---
       - name: Confirm pnpm global .cmd shim layout (#149 mechanism 1)
