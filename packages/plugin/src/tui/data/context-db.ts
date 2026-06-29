@@ -5,18 +5,12 @@
 import os from "node:os";
 import path from "node:path";
 import { MagicContextRpcClient } from "../../shared/rpc-client";
-import type {
-    EmbedDetail,
-    RpcNotificationMessage,
-    SidebarSnapshot,
-    StatusDetail,
-} from "../../shared/rpc-types";
+import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 
 export type { EmbedDetail, SidebarSnapshot, StatusDetail };
 
 let rpcClient: MagicContextRpcClient | null = null;
 let rpcGeneration = 0;
-const lastReceivedNotificationIdBySession = new Map<string, number>();
 
 function getStorageDir(): string {
     // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode
@@ -31,9 +25,9 @@ function getStorageDir(): string {
 export function initRpcClient(directory: string): void {
     const storageDir = getStorageDir();
     // Bump the generation before replacing the client so late notification
-    // responses from a disposed client cannot repopulate cleared cursors.
+    // responses from a disposed client are ignored (the WS socket observes the
+    // new generation and abandons its in-flight connect).
     rpcGeneration += 1;
-    lastReceivedNotificationIdBySession.clear();
     rpcClient = new MagicContextRpcClient(storageDir, directory);
 }
 
@@ -41,14 +35,19 @@ export function getRpcGeneration(): number {
     return rpcGeneration;
 }
 
+/** The live RPC client (for the WS notification socket's endpoint discovery).
+ *  Null before init / after close. */
+export function getRpcClient(): MagicContextRpcClient | null {
+    return rpcClient;
+}
+
 /** Clean up the RPC client. */
 export function closeRpc(): void {
     // Closing invalidates any already-issued RPC calls; their callbacks must
-    // observe the new generation and avoid advancing stale notification cursors.
+    // observe the new generation and abandon (the WS socket checks it too).
     rpcGeneration += 1;
     rpcClient?.reset();
     rpcClient = null;
-    lastReceivedNotificationIdBySession.clear();
 }
 
 const EMPTY_SNAPSHOT: SidebarSnapshot = {
@@ -311,13 +310,6 @@ export async function loadToastDurationMs(): Promise<number> {
     }
 }
 
-export interface TuiMessage {
-    id: number;
-    type: string;
-    payload: Record<string, unknown>;
-    sessionId?: string;
-}
-
 /**
  * Fetch the current startup announcement from the server, if any.
  * Returns `{show: false}` when there's nothing to announce or when the
@@ -358,51 +350,5 @@ export async function markAnnounced(): Promise<boolean> {
         return result.ok === true;
     } catch {
         return false;
-    }
-}
-
-/** Poll for pending server→TUI notifications via RPC. */
-export async function consumeTuiMessages(sessionId: string): Promise<TuiMessage[]> {
-    if (!rpcClient) return [];
-    try {
-        const result = await rpcClient.call<{ messages: RpcNotificationMessage[] }>(
-            "pending-notifications",
-            // Pass the TUI's active session so the server only drains
-            // notifications scoped to it (or global ones). Without this, a
-            // notification for another session served by the same process (e.g.
-            // OpenCode Desktop on the same project) could surface here. The
-            // cursor is per-session and is advanced by the poller only after it
-            // has delivered the returned batch.
-            {
-                lastReceivedId: lastReceivedNotificationIdBySession.get(sessionId) ?? 0,
-                sessionId,
-            },
-        );
-        return (result.messages ?? []).map((m) => ({
-            id: m.id,
-            type: m.type,
-            payload: m.payload,
-            sessionId: m.sessionId,
-        }));
-    } catch {
-        return [];
-    }
-}
-
-/**
- * Advance the delivered-message cursor for one active TUI session.
- * Callers must pass only the contiguous handled prefix of the drained batch;
- * this helper remains empty-safe and monotonic for that prefix.
- */
-export function markTuiMessagesHandled(sessionId: string, messages: TuiMessage[]): void {
-    const previous = lastReceivedNotificationIdBySession.get(sessionId) ?? 0;
-    let next = previous;
-    for (const message of messages) {
-        if (message.id > next) {
-            next = message.id;
-        }
-    }
-    if (next > previous) {
-        lastReceivedNotificationIdBySession.set(sessionId, next);
     }
 }

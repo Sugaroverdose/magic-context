@@ -9,12 +9,35 @@ import {
     unlinkSync,
     writeFileSync,
 } from "node:fs";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
+import type { Server, ServerWebSocket } from "bun";
 import { log } from "./logger";
+import {
+    drainNotifications,
+    type NotificationSink,
+    registerNotificationSink,
+} from "./rpc-notifications";
 import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+/** Max body for an HTTP /rpc call. Matches the previous node:http guard. */
+const MAX_BODY_BYTES = 1_048_576;
+/** A WS client that doesn't authenticate within this window is closed. */
+const WS_AUTH_TIMEOUT_MS = 5_000;
+/** WS close code for an auth failure (private; client treats every close as
+ *  expected and reconnects after rediscovery, so the exact code is advisory). */
+const WS_CLOSE_UNAUTHORIZED = 4401;
+
+/** Per-socket state carried on `ServerWebSocket.data`. */
+interface WsData {
+    authed: boolean;
+    sessionId?: string;
+    /** Removes this socket's sink from the notification registry. */
+    unregister?: () => void;
+    /** Fires if the client never sends a valid hello. */
+    authTimer?: ReturnType<typeof setTimeout>;
+}
 
 /**
  * Constant-time bearer-token comparison. `timingSafeEqual` throws on
@@ -29,17 +52,32 @@ function tokensMatch(presented: string, expected: string): boolean {
     return timingSafeEqual(a, b);
 }
 
+/**
+ * Plugin-private localhost RPC server for TUI ↔ server-plugin communication.
+ *
+ * Runs on Bun (the OpenCode server runner is a Bun Worker), so it uses
+ * `Bun.serve` to host BOTH:
+ *  - HTTP request/reply routes (`/health`, `/rpc/<method>`) — the TUI's snapshot
+ *    and dialog-result calls, which are event-driven, not idle; and
+ *  - a WebSocket endpoint (`/ws`) — a single persistent connection per TUI over
+ *    which the server PUSHES notifications (dialog/toast actions). This replaces
+ *    the old 500ms HTTP poll, whose new-connection-per-tick cost was the source
+ *    of idle TUI CPU (#200). Pi never imports this module, so `Bun.serve` is safe.
+ */
 export class MagicContextRpcServer {
-    private server: Server | null = null;
+    private server: Server<WsData> | null = null;
     private port = 0;
     private handlers = new Map<string, RpcHandler>();
     private portFilePath: string;
     private portDir: string;
     private startedAt = Date.now();
+    /** Every authenticated WS socket, so dispose can close them all. */
+    private sockets = new Set<ServerWebSocket<WsData>>();
     // Unguessable per-process bearer token, published in the (user-private) port
-    // file and required on every non-health RPC call. Defends side-effecting
-    // endpoints (recomp/upgrade/dismiss) against any local process or
-    // browser-origin script that merely discovers/guesses the port.
+    // file and required on every non-health RPC call AND in the WS hello. Defends
+    // side-effecting endpoints (recomp/upgrade/dismiss) and the push channel
+    // against any local process or browser-origin script that merely
+    // discovers/guesses the port.
     private readonly token = randomBytes(32).toString("hex");
 
     constructor(storageDir: string, directory: string) {
@@ -54,84 +92,110 @@ export class MagicContextRpcServer {
 
     /** Start the server on a random port, write port to disk. */
     async start(): Promise<number> {
-        return new Promise((resolve, reject) => {
-            const server = createServer((req, res) => this.dispatch(req, res));
-
-            server.on("error", (err) => {
-                log(`[rpc] server error: ${err.message}`);
-                reject(err);
-            });
-
-            server.listen(0, "127.0.0.1", () => {
-                const addr = server.address();
-                if (!addr || typeof addr === "string") {
-                    reject(new Error("Failed to get server address"));
-                    return;
-                }
-                this.port = addr.port;
-                this.server = server;
-
-                // Write a per-process port file atomically. Multi-instance
-                // OpenCode is supported: TUI discovery scans all live pid files
-                // and picks the most recent instead of cross-wiring via one
-                // shared project file.
-                try {
-                    this.warnIfOtherLiveInstance();
-                    const dir = dirname(this.portFilePath);
-                    // The port file holds the per-process bearer token that
-                    // gates side-effecting RPC endpoints (recomp/upgrade/
-                    // dismiss). Under the default umask 0o022 a plain write
-                    // lands at 0o644 in a 0o755 dir — world-readable, so any
-                    // local UID could read the token and drive those endpoints,
-                    // defeating the auth defense. Restrict both: dir 0o700,
-                    // file 0o600. renameSync preserves the tmp file's mode, so
-                    // the 0o600 on the write covers the final file.
-                    mkdirSync(dir, { recursive: true, mode: 0o700 });
-                    // mkdirSync's mode only applies on CREATION — a dir left by an
-                    // older build (or default 0o755 umask) keeps its loose perms, so
-                    // chmod it defensively so the bearer token isn't world-readable.
-                    try {
-                        chmodSync(dir, 0o700);
-                    } catch {
-                        // best-effort
-                    }
-                    const tmpPath = `${this.portFilePath}.tmp`;
-                    // A stale tmp from a crashed write could exist with loose perms;
-                    // writeFileSync's mode only applies on create, so remove it first.
-                    try {
-                        rmSync(tmpPath, { force: true });
-                    } catch {
-                        // best-effort
-                    }
-                    writeFileSync(
-                        tmpPath,
-                        JSON.stringify({
-                            port: this.port,
-                            pid: process.pid,
-                            started_at: this.startedAt,
-                            token: this.token,
-                        }),
-                        { encoding: "utf-8", mode: 0o600 },
-                    );
-                    renameSync(tmpPath, this.portFilePath);
-                    // renameSync preserves the tmp's mode, but chmod the final path
-                    // defensively in case the token file pre-existed with loose perms.
-                    try {
-                        chmodSync(this.portFilePath, 0o600);
-                    } catch {
-                        // best-effort
-                    }
-                    log(`[rpc] server listening on 127.0.0.1:${this.port}`);
-                } catch (err) {
-                    log(`[rpc] failed to write port file: ${err}`);
-                }
-
-                resolve(this.port);
-            });
-
-            // Don't keep the process alive just for the RPC server
-            server.unref();
+        const self = this;
+        const server = Bun.serve<WsData>({
+            port: 0,
+            hostname: "127.0.0.1",
+            fetch(req, srv) {
+                return self.handleFetch(req, srv);
+            },
+            websocket: {
+                open(ws) {
+                    // Close the socket if it doesn't authenticate promptly. A
+                    // never-authenticated socket holds no sink and is harmless,
+                    // but we don't want to keep raw connections open forever.
+                    ws.data.authTimer = setTimeout(() => {
+                        if (!ws.data.authed) ws.close(WS_CLOSE_UNAUTHORIZED, "auth timeout");
+                    }, WS_AUTH_TIMEOUT_MS);
+                },
+                message(ws, raw) {
+                    self.handleWsMessage(ws, raw);
+                },
+                close(ws) {
+                    if (ws.data.authTimer) clearTimeout(ws.data.authTimer);
+                    ws.data.unregister?.();
+                    self.sockets.delete(ws);
+                },
+            },
         });
+
+        this.server = server;
+        this.port = server.port ?? 0;
+
+        // Write a per-process port file atomically. Multi-instance OpenCode is
+        // supported: TUI discovery scans all live pid files and picks the most
+        // recent instead of cross-wiring via one shared project file.
+        try {
+            this.warnIfOtherLiveInstance();
+            const dir = dirname(this.portFilePath);
+            // The port file holds the per-process bearer token that gates
+            // side-effecting RPC endpoints and the push channel. Under the default
+            // umask 0o022 a plain write lands at 0o644 in a 0o755 dir —
+            // world-readable, so any local UID could read the token. Restrict both:
+            // dir 0o700, file 0o600.
+            mkdirSync(dir, { recursive: true, mode: 0o700 });
+            try {
+                chmodSync(dir, 0o700);
+            } catch {
+                // best-effort
+            }
+            const tmpPath = `${this.portFilePath}.tmp`;
+            // A stale tmp from a crashed write could exist with loose perms;
+            // writeFileSync's mode only applies on create, so remove it first.
+            try {
+                rmSync(tmpPath, { force: true });
+            } catch {
+                // best-effort
+            }
+            // Synchronous write so the renameSync below sees a fully-written file
+            // (a 0o600 mode keeps the bearer token out of world-readable reach;
+            // renameSync preserves the tmp's mode for the final path).
+            writeFileSync(
+                tmpPath,
+                JSON.stringify({
+                    port: this.port,
+                    pid: process.pid,
+                    started_at: this.startedAt,
+                    token: this.token,
+                }),
+                { encoding: "utf-8", mode: 0o600 },
+            );
+            renameSync(tmpPath, this.portFilePath);
+            try {
+                chmodSync(this.portFilePath, 0o600);
+            } catch {
+                // best-effort
+            }
+            log(`[rpc] server listening on 127.0.0.1:${this.port}`);
+        } catch (err) {
+            log(`[rpc] failed to write port file: ${err}`);
+        }
+
+        return this.port;
+    }
+
+    /** Stop the server: close every socket, stop accepting, remove port file. */
+    stop(): void {
+        for (const ws of this.sockets) {
+            try {
+                if (ws.data.authTimer) clearTimeout(ws.data.authTimer);
+                ws.data.unregister?.();
+                ws.close();
+            } catch {
+                // best-effort
+            }
+        }
+        this.sockets.clear();
+        if (this.server) {
+            // `stop(true)` closes active connections too, not just the listener.
+            this.server.stop(true);
+            this.server = null;
+        }
+        try {
+            unlinkSync(this.portFilePath);
+        } catch {
+            // Intentional: port file may already be gone
+        }
     }
 
     private warnIfOtherLiveInstance(): void {
@@ -150,94 +214,129 @@ export class MagicContextRpcServer {
         }
     }
 
-    /** Stop the server and clean up port file. */
-    stop(): void {
-        if (this.server) {
-            this.server.close();
-            this.server = null;
-        }
-        try {
-            unlinkSync(this.portFilePath);
-        } catch {
-            // Intentional: port file may already be gone
-        }
-    }
+    /** HTTP route handler (Bun fetch). Returns a Response, or undefined when the
+     *  request was upgraded to a WebSocket. */
+    private async handleFetch(req: Request, srv: Server<WsData>): Promise<Response | undefined> {
+        const url = new URL(req.url);
 
-    private dispatch(req: IncomingMessage, res: ServerResponse): void {
-        const url = req.url ?? "";
+        // WebSocket upgrade — the persistent push channel.
+        if (url.pathname === "/ws") {
+            const ok = srv.upgrade(req, { data: { authed: false } });
+            if (ok) return undefined;
+            return new Response("upgrade failed", { status: 400 });
+        }
 
         // No wildcard CORS: the only legitimate client is the in-process TUI
-        // client, which is not a browser origin. Omitting
-        // Access-Control-Allow-Origin makes browsers refuse to read responses,
-        // closing the CSRF-style read path a malicious local page could use.
-
-        if (req.method === "GET" && url === "/health") {
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true, pid: process.pid }));
-            return;
+        // client, not a browser origin.
+        if (req.method === "GET" && url.pathname === "/health") {
+            return json({ ok: true, pid: process.pid });
         }
 
-        if (req.method !== "POST" || !url.startsWith("/rpc/")) {
-            res.writeHead(404);
-            res.end("Not Found");
-            return;
+        if (req.method !== "POST" || !url.pathname.startsWith("/rpc/")) {
+            return new Response("Not Found", { status: 404 });
         }
 
         // Require the per-process bearer token on every side-effecting call.
-        // The legitimate TUI client reads it from the same port file it used to
-        // discover the port; a process that only guessed the port cannot.
-        // Constant-time compare so a local attacker can't byte-probe the token
-        // via response-timing (length-guard first, since timingSafeEqual throws
-        // on length mismatch).
-        const auth = req.headers.authorization;
+        const auth = req.headers.get("authorization");
         const presented = typeof auth === "string" ? auth.replace(/^Bearer\s+/i, "") : "";
         if (!tokensMatch(presented, this.token)) {
-            res.writeHead(401, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Unauthorized" }));
-            req.resume();
-            return;
+            return json({ error: "Unauthorized" }, 401);
         }
 
-        const method = url.slice(5); // strip "/rpc/"
+        const method = url.pathname.slice(5); // strip "/rpc/"
         const handler = this.handlers.get(method);
         if (!handler) {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: `Unknown method: ${method}` }));
+            return json({ error: `Unknown method: ${method}` }, 404);
+        }
+
+        const bodyText = await req.text();
+        if (bodyText.length > MAX_BODY_BYTES) {
+            return new Response("Request too large", { status: 413 });
+        }
+        let params: Record<string, unknown> = {};
+        if (bodyText.length > 0) {
+            try {
+                params = JSON.parse(bodyText);
+            } catch {
+                return json({ error: "Invalid JSON" }, 400);
+            }
+        }
+
+        try {
+            const result = await handler(params);
+            return json(result);
+        } catch (err) {
+            log(`[rpc] handler error: ${method} => ${err}`);
+            return json({ error: String(err) }, 500);
+        }
+    }
+
+    /** WS message handler: hello (auth + sink registration + backlog drain) and
+     *  ack (cursor advance → queue prune). All other messages are ignored. */
+    private handleWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
+        let msg: { type?: string; token?: string; sessionId?: string; lastReceivedId?: number };
+        try {
+            msg = JSON.parse(typeof raw === "string" ? raw : raw.toString("utf8"));
+        } catch {
             return;
         }
 
-        let body = "";
-        req.on("data", (chunk: Buffer) => {
-            body += chunk.toString();
-            if (body.length > 1_048_576) {
-                res.writeHead(413);
-                res.end("Request too large");
-                req.destroy();
-            }
-        });
-
-        req.on("end", () => {
-            let params: Record<string, unknown> = {};
-            try {
-                if (body.length > 0) {
-                    params = JSON.parse(body);
-                }
-            } catch {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Invalid JSON" }));
+        if (msg.type === "hello") {
+            if (!tokensMatch(typeof msg.token === "string" ? msg.token : "", this.token)) {
+                ws.send(JSON.stringify({ type: "error", error: "unauthorized" }));
+                ws.close(WS_CLOSE_UNAUTHORIZED, "bad token");
                 return;
             }
+            if (ws.data.authTimer) {
+                clearTimeout(ws.data.authTimer);
+                ws.data.authTimer = undefined;
+            }
+            ws.data.authed = true;
+            ws.data.sessionId =
+                typeof msg.sessionId === "string" && msg.sessionId.length > 0
+                    ? msg.sessionId
+                    : undefined;
 
-            handler(params)
-                .then((result) => {
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify(result));
-                })
-                .catch((err) => {
-                    log(`[rpc] handler error: ${method} => ${err}`);
-                    res.writeHead(500, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ error: String(err) }));
-                });
-        });
+            // Register a live sink so future pushes reach this socket immediately.
+            const sink: NotificationSink = {
+                sessionId: ws.data.sessionId,
+                send: (notification) => {
+                    ws.send(JSON.stringify({ type: "notification", notification }));
+                },
+            };
+            ws.data.unregister = registerNotificationSink(sink);
+            this.sockets.add(ws);
+
+            // Deliver any backlog the client hasn't seen (at-least-once). The
+            // client sends its highest-handled id in the hello; reconnects after a
+            // dropped socket re-deliver from here.
+            const lastReceivedId = Number(msg.lastReceivedId ?? 0);
+            const backlog = drainNotifications(
+                Number.isFinite(lastReceivedId) ? lastReceivedId : 0,
+                ws.data.sessionId,
+            );
+            for (const notification of backlog) {
+                ws.send(JSON.stringify({ type: "notification", notification }));
+            }
+            ws.send(JSON.stringify({ type: "hello-ack" }));
+            return;
+        }
+
+        if (msg.type === "ack") {
+            // Advance the cursor → prune acked notifications from the queue so it
+            // doesn't grow during a long-lived connection. Cheap, event-driven.
+            const lastReceivedId = Number(msg.lastReceivedId ?? 0);
+            if (Number.isFinite(lastReceivedId) && lastReceivedId > 0) {
+                drainNotifications(lastReceivedId, ws.data.sessionId);
+            }
+        }
     }
+}
+
+/** JSON Response helper. */
+function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+    });
 }

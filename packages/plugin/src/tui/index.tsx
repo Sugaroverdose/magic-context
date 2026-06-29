@@ -6,7 +6,8 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type EmbedDetail, type TuiMessage, type StatusDetail } from "./data/context-db"
+import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade, type EmbedDetail, type StatusDetail } from "./data/context-db"
+import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -869,128 +870,77 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     // only when keymap is missing.
     registerCommandPaletteEntries(api)
 
-    // Poll for server→TUI messages: toasts and dialog requests.
-    // The poller owns cursor advancement so notifications are acked only after
-    // they are accepted for the still-active session and delivered to the UI.
-    let pollInFlight = false
-    const messagePoller = setInterval(() => {
-        // Scope the drain to the TUI's active session so notifications tagged for
-        // a different session (served by the same RPC process) are not consumed
-        // here. Do not poll on non-session routes: a session-scoped action fetched
-        // while sessionless could otherwise be acked without being shown.
-        // Avoid overlapping read-only drains: the server re-delivers until acked,
-        // so a second in-flight poll can fetch and dispatch the same batch twice.
-        if (pollInFlight) return
-
+    // Receive server→TUI notifications (toasts + dialog requests) over a single
+    // persistent WebSocket, pushed the instant the server queues them. This
+    // replaces the old 500ms HTTP poll whose new-connection-per-tick cost was the
+    // source of idle TUI CPU (#200). The socket carries the active session in its
+    // hello so the server scopes delivery; here we re-check the active session per
+    // notification (it can change between queue and delivery) before acting.
+    const handleNotification = async (n: SocketNotification): Promise<boolean> => {
         const requestedSessionId = getSessionId(api)
-        if (!requestedSessionId) return
+        const generation = getRpcGeneration()
+        // A session-scoped notification only applies while we're viewing that
+        // session; global (session-less) ones always apply. Returning false leaves
+        // it unacked so a TUI on the right session (or a later switch back) still
+        // gets it.
+        if (n.sessionId && requestedSessionId && n.sessionId !== requestedSessionId) {
+            return false
+        }
+        if (n.type === "toast") {
+            const p = n.payload
+            showToast(api, {
+                message: String(p.message ?? ""),
+                variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",
+                durationOverrideMs:
+                    typeof p.duration === "number" && Number.isFinite(p.duration)
+                        ? p.duration
+                        : undefined,
+            })
+            return true
+        }
+        if (n.type !== "action") return false
+        const action = n.payload?.action
+        const stillActive = () =>
+            getRpcGeneration() === generation && getSessionId(api) === requestedSessionId
+        if (action === "show-status-dialog") {
+            return stillActive() && (await showStatusDialog(api, requestedSessionId))
+        }
+        if (action === "show-recomp-dialog") {
+            return stillActive() && (await showRecompDialog(api, requestedSessionId))
+        }
+        if (action === "show-upgrade-dialog") {
+            const resume =
+                n.payload?.resume === true
+                    ? {
+                          stagedCount: Number(n.payload?.stagedCount ?? 0),
+                          stagedThrough: Number(n.payload?.stagedThrough ?? 0),
+                      }
+                    : undefined
+            return stillActive() && showUpgradeDialog(api, resume, requestedSessionId)
+        }
+        if (action === "show-embed-dialog") {
+            return stillActive() && (await showEmbedDialog(api, requestedSessionId))
+        }
+        if (action === "show-flush-dialog") {
+            const flushMsg = String(n.payload?.message ?? "Flushed.")
+            return stillActive() && showResultDialog(api, "Flush", flushMsg)
+        }
+        if (action === "show-result-dialog") {
+            const title = String(n.payload?.title ?? "Magic Context")
+            const body = String(n.payload?.message ?? "")
+            return stillActive() && showResultDialog(api, title, body)
+        }
+        return false
+    }
 
-        pollInFlight = true
-        const pollGeneration = getRpcGeneration()
-        void consumeTuiMessages(requestedSessionId).then(async (messages) => {
-            if (unifiedToastDurationMs === DEFAULT_TOAST_DURATION_MS) {
-                void refreshToastDurationMs()
-            }
-            // The dialog handlers read the current session when they run. If the
-            // user switched routes while the RPC was in flight, drop this whole
-            // batch without advancing the cursor; the next poll for the new
-            // session will fetch the right notifications.
-            // Ignore late responses from an older RPC client generation; close/init
-            // clears cursors and stale callbacks must not recreate them.
-            if (getRpcGeneration() !== pollGeneration) return
-
-            if (getSessionId(api) !== requestedSessionId) return
-
-            const orderedMessages = [...messages].sort((a, b) => a.id - b.id)
-            const handledMessageIds = new Set<number>()
-            for (const msg of orderedMessages) {
-                // A dialog helper earlier in this batch may have awaited; re-check
-                // the route before EACH message so a later action/toast in the same
-                // batch can't paint into a session the user switched to mid-batch
-                // (the pre-batch + pre-ack guards alone don't cover mid-batch awaits).
-                if (getRpcGeneration() !== pollGeneration) return
-                if (getSessionId(api) !== requestedSessionId) return
-                // Drop any action/dialog whose sessionId doesn't match this TUI's
-                // active session (session-less/global notifications still apply).
-                if (
-                    msg.type === "action" &&
-                    msg.sessionId &&
-                    msg.sessionId !== requestedSessionId
-                ) {
-                    continue
-                }
-                if (msg.type === "toast") {
-                    const p = msg.payload
-                    showToast(api, {
-                        message: String(p.message ?? ""),
-                        variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",
-                        durationOverrideMs:
-                            typeof p.duration === "number" && Number.isFinite(p.duration)
-                                ? p.duration
-                                : undefined,
-                    })
-                    handledMessageIds.add(msg.id)
-                } else if (msg.type === "action") {
-                    const action = msg.payload?.action
-                    if (action === "show-status-dialog") {
-                        if (await showStatusDialog(api, requestedSessionId)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    } else if (action === "show-recomp-dialog") {
-                        if (await showRecompDialog(api, requestedSessionId)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    } else if (action === "show-upgrade-dialog") {
-                        const resume =
-                            msg.payload?.resume === true
-                                ? {
-                                      stagedCount: Number(msg.payload?.stagedCount ?? 0),
-                                      stagedThrough: Number(msg.payload?.stagedThrough ?? 0),
-                                  }
-                                : undefined
-                        if (showUpgradeDialog(api, resume, requestedSessionId)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    } else if (action === "show-embed-dialog") {
-                        if (await showEmbedDialog(api, requestedSessionId)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    } else if (action === "show-flush-dialog") {
-                        const flushMsg = String(msg.payload?.message ?? "Flushed.")
-                        if (showResultDialog(api, "Flush", flushMsg)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    } else if (action === "show-result-dialog") {
-                        const title = String(msg.payload?.title ?? "Magic Context")
-                        const body = String(msg.payload?.message ?? "")
-                        if (showResultDialog(api, title, body)) {
-                            handledMessageIds.add(msg.id)
-                        }
-                    }
-                }
-            }
-            const handledPrefixMessages: TuiMessage[] = []
-            for (const msg of orderedMessages) {
-                if (!handledMessageIds.has(msg.id)) break
-                handledPrefixMessages.push(msg)
-            }
-            // A dialog helper may have awaited more RPC work; re-check before
-            // acking so a dispose/reinit or route switch during that await cannot
-            // advance a stale cursor.
-            if (getRpcGeneration() !== pollGeneration) return
-            if (getSessionId(api) !== requestedSessionId) return
-
-            markTuiMessagesHandled(requestedSessionId, handledPrefixMessages)
-        }).catch(() => {
-            // Intentional: message polling should never crash the TUI
-        }).finally(() => {
-            pollInFlight = false
-        })
-    }, 500)
+    startNotificationSocket({
+        getSessionId: () => getSessionId(api),
+        onNotification: handleNotification,
+    })
 
     // Clean up on dispose
     api.lifecycle.onDispose(() => {
-        clearInterval(messagePoller)
+        stopNotificationSocket()
         closeRpc()
     })
 

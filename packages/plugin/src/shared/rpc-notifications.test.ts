@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { drainNotifications, isTuiConnected, pushNotification } from "./rpc-notifications";
+import {
+    drainNotifications,
+    isTuiConnected,
+    type NotificationSink,
+    pushNotification,
+    registerNotificationSink,
+} from "./rpc-notifications";
 
 describe("rpc notifications", () => {
     test("keeps messages queued until the client acks their id", () => {
@@ -45,17 +51,68 @@ describe("rpc notifications", () => {
         expect(poll.map((m) => m.type).sort()).toEqual(["x", "y"]);
     });
 
-    test("isTuiConnected is per-session: a TUI on session A does not mark session B connected", () => {
-        // A TUI draining for tuiA must not make tuiB's producers think a TUI is
-        // polling for tuiB (which would route tuiB's /ctx-status, upgrade
-        // reminder, etc. to the dialog path and lose them in the unrelated TUI).
-        // Use ids no other test drains so the per-session window is unambiguous.
-        drainNotifications(0, "ses_tuiA_only");
-        expect(isTuiConnected("ses_tuiA_only")).toBe(true);
-        expect(isTuiConnected("ses_tuiB_never_drained")).toBe(false);
-        // The session-less (global) query still reports recent activity for the
-        // legacy callers that have no session context.
+    test("isTuiConnected reflects live WS sinks per-session", () => {
+        // No sinks → nothing connected.
+        expect(isTuiConnected("ses_anything")).toBe(false);
+        expect(isTuiConnected()).toBe(false);
+
+        // A live sink scoped to session A marks ONLY A connected (so B's producers
+        // don't misroute B's /ctx-status / upgrade reminder to the dialog path and
+        // lose it in an unrelated TUI), and the global query is also "connected".
+        const unregister = registerNotificationSink({ sessionId: "ses_A", send: () => {} });
+        expect(isTuiConnected("ses_A")).toBe(true);
+        expect(isTuiConnected("ses_B")).toBe(false);
         expect(isTuiConnected()).toBe(true);
+
+        // Closing the socket removes the sink → disconnected again.
+        unregister();
+        expect(isTuiConnected("ses_A")).toBe(false);
+        expect(isTuiConnected()).toBe(false);
+    });
+
+    test("a session-less sink counts as connected for any session query", () => {
+        const unregister = registerNotificationSink({ sessionId: undefined, send: () => {} });
+        expect(isTuiConnected("ses_whatever")).toBe(true);
+        expect(isTuiConnected()).toBe(true);
+        unregister();
+    });
+
+    test("pushNotification fans out live to a matching sink and skips a foreign session", () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const received: string[] = [];
+        const sink: NotificationSink = {
+            sessionId: "ses_live",
+            send: (n) => received.push(n.type),
+        };
+        const unregister = registerNotificationSink(sink);
+
+        pushNotification("for-live", { action: "show-status-dialog" }, "ses_live");
+        pushNotification("for-other", { action: "show-status-dialog" }, "ses_other");
+        pushNotification("global", { action: "show-status-dialog" });
+
+        // The sink sees its own session + global, never the foreign session.
+        expect(received.sort()).toEqual(["for-live", "global"]);
+        unregister();
+    });
+
+    test("a dead sink (throwing send) does not block delivery to other sinks", () => {
+        drainNotifications(Number.MAX_SAFE_INTEGER);
+        const live: string[] = [];
+        const unregDead = registerNotificationSink({
+            sessionId: undefined,
+            send: () => {
+                throw new Error("socket dead");
+            },
+        });
+        const unregLive = registerNotificationSink({
+            sessionId: undefined,
+            send: (n) => live.push(n.type),
+        });
+        // Must not throw, and the live sink still receives it.
+        expect(() => pushNotification("resilient", { ok: true })).not.toThrow();
+        expect(live).toEqual(["resilient"]);
+        unregDead();
+        unregLive();
     });
 
     test("queue-cap eviction is session-fair: a noisy session cannot evict another session's newest unseen item", () => {

@@ -97,6 +97,20 @@ export class MagicContextRpcClient {
         }
     }
 
+    /** Resolve the live server's port + bearer token (for opening the WS push
+     *  channel). Reuses the same health-checked port-file discovery as `call`,
+     *  so the WS client and the HTTP client always agree on which server instance
+     *  (and token) to use. Returns null when no live server is found. */
+    async resolveEndpoint(): Promise<{ port: number; token: string | null } | null> {
+        try {
+            const port = await this.resolvePort();
+            if (port === null) return null;
+            return { port, token: this.token };
+        } catch {
+            return null;
+        }
+    }
+
     private async resolvePort(): Promise<number | null> {
         if (this.port && this.healthChecked) {
             return this.port;

@@ -44,7 +44,6 @@ import {
     shouldShowAnnouncement,
 } from "../shared/announcement";
 import { log } from "../shared/logger";
-import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
 import { applyStickySnapshotCache } from "./sidebar-snapshot-cache";
@@ -914,23 +913,10 @@ export function registerRpcHandlers(
         return { toastDurationMs: resolved };
     });
 
-    rpcServer.handle("pending-notifications", async (params) => {
-        const lastReceivedId = Number(params.lastReceivedId ?? 0);
-        // Scope drain to the TUI's active session so a notification tagged for a
-        // different session (e.g. an upgrade dialog triggered by another client
-        // sharing this process) is never delivered here. sessionId is optional
-        // for back-compat: an older TUI that omits it falls back to the previous
-        // unscoped behavior.
-        const sessionId =
-            typeof params.sessionId === "string" && params.sessionId.length > 0
-                ? params.sessionId
-                : undefined;
-        const notifications = drainNotifications(
-            Number.isFinite(lastReceivedId) ? lastReceivedId : 0,
-            sessionId,
-        );
-        return { messages: notifications } as unknown as Record<string, unknown>;
-    });
+    // Server→TUI notification delivery is no longer an HTTP poll. The TUI holds a
+    // persistent WebSocket (rpc-server `/ws`); the server pushes each queued
+    // notification over it and replays the unacked backlog on the hello. See
+    // rpc-server.ts + rpc-notifications.ts.
 
     // Startup announcement — called by the TUI plugin once per session to decide
     // whether to show the "What's new" dialog. We deliberately read state via
