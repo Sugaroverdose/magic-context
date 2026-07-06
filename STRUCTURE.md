@@ -1,16 +1,11 @@
 # Codebase Structure
 
-This repository is a monorepo containing TypeScript packages (under `packages/`) and Rust crates (under `crates/`).
+This repository is a monorepo containing TypeScript packages under `packages/`.
 
 ## Workspace Layout
 
 ```text
 [project-root]/
-├── crates/                 # Harness-agnostic Rust workspace (runs under subc daemon)
-│   ├── mc-core/            # Cache-stability core transform & classifier
-│   ├── mc-store/           # Durable cache-state store (SQLite backed)
-│   ├── mc-tokenizer/       # Claude BPE token estimator
-│   └── mc-module/          # The subc module (CK-in/CK-out protocol handler)
 ├── packages/               # TypeScript packages
 │   ├── plugin/             # OpenCode plugin package (published as @cortexkit/opencode-magic-context)
 │   ├── pi-plugin/          # Pi plugin package (published as @cortexkit/pi-magic-context)
@@ -20,7 +15,6 @@ This repository is a monorepo containing TypeScript packages (under `packages/`)
 │   └── e2e-tests/          # End-to-end integration tests
 ├── scripts/                # Local maintenance, release, and install scripts
 ├── docs/                   # Workspace design references for major subsystems
-├── Cargo.toml              # Rust workspace configuration
 ├── package.json            # Monorepo workspace configuration
 └── STRUCTURE.md            # This file
 ```
@@ -93,21 +87,13 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 - Contains: `MEMORY-DESIGN.md` (memory subsystem design notes), plus `animation*/` subdirectories holding Remotion projects and renders for the README animation, and `archive/` for retired design documents.
 - Key files: `docs/MEMORY-DESIGN.md`, `docs/animation/`
 
-**Rust Workspace (`crates/`):**
-- Purpose: Implement the harness-agnostic core transform, tokenizer, state database, and subc communication module in Rust.
-- Contains: The following Rust packages:
-  - `crates/mc-core/`: Core cache-stability transform and classification logic.
-  - `crates/mc-store/`: Durable SQLite session database schema, metadata, and CAS transitions.
-  - `crates/mc-tokenizer/`: tiktoken BPE-based token count estimator.
-  - `crates/mc-module/`: The `subc` protocol adapter, autonomous historian coordinator, and client.
-
 **Pi Sibling Package (`packages/pi-plugin/`):**
 - Purpose: Provide the Pi plugin implementation, mirroring OpenCode semantics and runtime features.
 - Contains: Context transform pipeline, subagent runners, custom system-prompt caching, and Pi-specific commands.
 
 ## Key File Locations
 
-Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` and Rust paths are relative to the project root.
+Unless specified otherwise, paths are relative to `packages/plugin/`.
 
 **Entry Points:**
 - `src/index.ts`: Register the plugin, hidden agents (`historian`, `historian-editor`, `dreamer`, `sidekick`), hooks, commands, tools, RPC server, dream-schedule timer, and the auto-update checker.
@@ -115,7 +101,6 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `packages/cli/src/index.ts`: Unified setup/doctor/migrate entry for the separate `@cortexkit/magic-context` package.
 - `packages/cli/src/lib/embedding-runtime.ts`: Probe the presence of the `onnxruntime-node` package and native platform binaries to verify local embedding runtime health.
 - `packages/pi-plugin/src/index.ts`: Entry point for the Pi-specific plugin registering context handlers and hooks.
-- `crates/mc-module/src/main.rs`: Entry point for the `subc` daemon module.
 
 **Configuration:**
 - `src/config/index.ts`: Load and merge config files with field-level fallback for invalid leaves; collect warnings rather than disable the plugin.
@@ -154,13 +139,6 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `src/shared/exit-abort-registry.ts`: Provide a process-wide coordinator to abort active controllers without exceeding listener caps.
 - `packages/pi-plugin/src/context-handler.ts`: Core context transform and hook handler for the Pi plugin.
 - `packages/pi-plugin/src/subagent-runner.ts`: Win32/POSIX-safe subagent executor with command-line length cap mitigations.
-- `crates/mc-module/src/transform.rs`: Evaluates transform passes and applies modifications like metadata tag injection and history compaction in Rust.
-- `crates/mc-module/src/historian.rs`: Evaluates pressure and schedules/runs incremental historian summarizations in Rust.
-- `crates/mc-module/src/injection.rs`: Builds the `m0`/`m1` structures and injects synthetic message parts in Rust.
-- `crates/mc-module/src/boundary.rs`: Resolves the boundary between compactable history and the protected tail in Rust.
-- `crates/mc-module/src/codec/`: Decode harness-specific JSON messages (OpenCode, Pi) into canonical `CkIngressMessage` values and encode them back using harness model codecs.
-- `crates/mc-module/src/healing.rs`: Define serializer healing profiles and gate tail mutations for verbatim-tail consumers to prevent phantom reclaims.
-- `crates/mc-module/src/selection.rs`: Implement tail-reduction selection to decide which tail items to reduce and produce their `ReductionDecision`s.
 
 **Tests:** Co-locate tests with source as `src/**/*.test.ts`, for example `src/hooks/magic-context/hook.test.ts`, `src/tools/ctx-memory/tools.test.ts`, and `src/features/magic-context/migrations-v11.test.ts`. End-to-end coverage lives in the separate `packages/e2e-tests/` workspace.
 
@@ -183,10 +161,6 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 **New tool:** add `src/tools/[tool-name]/`, export it from the tool entry, and register it in `src/plugin/tool-registry.ts`. Remember to wire conditional schema narrowing for primary-vs-dreamer-only actions inside `tools.ts` if the tool has restricted actions.
 
 **New built-in slash command:** add the command definition in `src/features/builtin-commands/commands.ts` and handle execution in `src/hooks/magic-context/command-handler.ts`. If the command needs a native TUI dialog, also push a notification via `pushNotification()` in `src/plugin/rpc-handlers.ts` and consume it in `src/tui/index.tsx`.
-
-**New Rust transform logic or state mutation:** add it in `crates/mc-core/src/` if it is general cache-stability or classification math, or `crates/mc-store/src/` if it affects durable schemas or database mutations, or `crates/mc-module/src/transform.rs` if it is a transform pass operation.
-
-**New Rust subc route handler or daemon command:** add it in `crates/mc-module/src/lib.rs` and wire it from `crates/mc-module/src/main.rs`.
 
 **New Pi-plugin specific hook or adapter:** add it in `packages/pi-plugin/src/` (and ensure parity with OpenCode counterparts under `packages/plugin/`).
 
