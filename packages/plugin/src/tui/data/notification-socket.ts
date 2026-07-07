@@ -51,9 +51,21 @@ let opts: NotificationSocketOptions | null = null;
 /** Generation of the rpc client at connect time; a dispose/reinit bumps it and
  *  invalidates an in-flight socket so its late callbacks are ignored. */
 let connectGeneration = 0;
-/** Highest handled notification id (sent in hello so a reconnect re-delivers the
- *  unhandled backlog; sent in ack so the server prunes the queue). */
-let lastHandledId = 0;
+
+const GLOBAL_CURSOR_KEY = "global";
+const SESSION_CURSOR_PREFIX = "session:";
+const MAX_DEDUPED_NOTIFICATION_IDS = 500;
+
+/**
+ * Notification ids are process-global, but acknowledgement cursors are scoped. A
+ * high id consumed in session A must not become the prune watermark for session B;
+ * global notifications also carry their own cursor so they cannot skip session
+ * backlog. The id set de-dupes at-least-once re-delivery when a reconnect sends
+ * a session cursor that is intentionally lower than the global cursor.
+ */
+const lastHandledIdByCursor = new Map<string, number>();
+const handledNotificationIds = new Set<number>();
+const handledNotificationIdOrder: number[] = [];
 
 /** Open the persistent notification socket. Idempotent: a second call while open
  *  is a no-op. Reconnects on its own after any drop. */
@@ -118,8 +130,10 @@ async function connect(): Promise<void> {
 
     let ws: WebSocket;
     try {
-        ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/ws`);
+        const tokenQuery = `?token=${encodeURIComponent(endpoint.token ?? "")}`;
+        ws = new WebSocket(`ws://127.0.0.1:${endpoint.port}/ws${tokenQuery}`);
     } catch {
+        client.reset();
         scheduleReconnect();
         return;
     }
@@ -137,6 +151,7 @@ async function connect(): Promise<void> {
     });
 
     const onDown = () => {
+        client.reset();
         if (socket === ws) {
             socket = null;
             helloedSession = null;
@@ -155,7 +170,8 @@ function sendHello(ws: WebSocket, token: string | null): void {
             type: "hello",
             token: token ?? "",
             sessionId,
-            lastReceivedId: lastHandledId,
+            lastReceivedId: cursorForKey(cursorKeyForSession(sessionId)),
+            globalLastReceivedId: cursorForKey(GLOBAL_CURSOR_KEY),
         }),
     );
 }
@@ -180,6 +196,11 @@ async function handleSocketMessage(ws: WebSocket, raw: string): Promise<void> {
             // session, or a later switch back, should still get it). Just skip.
             return;
         }
+        if (handledNotificationIds.has(notification.id)) {
+            sendAck(ws, notification);
+            return;
+        }
+
         let consumed = false;
         try {
             consumed = await Promise.resolve(opts?.onNotification(notification) ?? false);
@@ -188,17 +209,13 @@ async function handleSocketMessage(ws: WebSocket, raw: string): Promise<void> {
         }
         // A dispose/reinit during an awaited dialog handler invalidates this socket.
         if (socket !== ws || getRpcGeneration() !== connectGeneration) return;
-        if (consumed && notification.id > lastHandledId) {
-            lastHandledId = notification.id;
-            // Ack so the server prunes the queue during this long-lived connection.
-            // (The id also rides the next reconnect hello via lastReceivedId, so a
-            // dropped ack just re-delivers an already-consumed item, which the
-            // handlers are idempotent against.)
-            try {
-                ws.send(JSON.stringify({ type: "ack", lastReceivedId: lastHandledId }));
-            } catch {
-                // best-effort; reconnect hello re-syncs via lastReceivedId
-            }
+        if (consumed) {
+            rememberHandledId(notification.id);
+            advanceCursor(notificationCursorKey(notification), notification.id);
+            // Ack only the notification's own cursor scope. A dropped ack is safe:
+            // the next hello sends the same per-scope cursors and duplicates are
+            // ignored locally.
+            sendAck(ws, notification);
         }
         return;
     }
@@ -212,6 +229,54 @@ async function handleSocketMessage(ws: WebSocket, raw: string): Promise<void> {
             // best-effort
         }
     }
+}
+
+function cursorKeyForSession(sessionId: string | null | undefined): string {
+    return sessionId ? `${SESSION_CURSOR_PREFIX}${sessionId}` : GLOBAL_CURSOR_KEY;
+}
+
+function notificationCursorKey(notification: SocketNotification): string {
+    return notification.sessionId
+        ? `${SESSION_CURSOR_PREFIX}${notification.sessionId}`
+        : GLOBAL_CURSOR_KEY;
+}
+
+function cursorForKey(key: string): number {
+    return lastHandledIdByCursor.get(key) ?? 0;
+}
+
+function advanceCursor(key: string, id: number): void {
+    if (id > cursorForKey(key)) lastHandledIdByCursor.set(key, id);
+}
+
+function rememberHandledId(id: number): void {
+    if (handledNotificationIds.has(id)) return;
+    handledNotificationIds.add(id);
+    handledNotificationIdOrder.push(id);
+    while (handledNotificationIdOrder.length > MAX_DEDUPED_NOTIFICATION_IDS) {
+        const evicted = handledNotificationIdOrder.shift();
+        if (evicted !== undefined) handledNotificationIds.delete(evicted);
+    }
+}
+
+function sendAck(ws: WebSocket, notification: SocketNotification): void {
+    const lastReceivedId = cursorForKey(notificationCursorKey(notification));
+    const ack = notification.sessionId
+        ? { type: "ack", sessionId: notification.sessionId, lastReceivedId }
+        : { type: "ack", ackScope: "global", lastReceivedId };
+    try {
+        ws.send(JSON.stringify(ack));
+    } catch {
+        // best-effort; reconnect hello re-syncs via per-scope cursors
+    }
+}
+
+export function _resetNotificationSocketStateForTesting(): void {
+    stopNotificationSocket();
+    opts = null;
+    lastHandledIdByCursor.clear();
+    handledNotificationIds.clear();
+    handledNotificationIdOrder.length = 0;
 }
 
 /** Cheap session-change watcher: re-scope the socket only when the active session
