@@ -1,8 +1,10 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
+import { join } from "node:path";
 import {
 	acquireCompartmentLease,
+	COMPARTMENT_LEASE_TTL_MS,
 	releaseCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
@@ -22,6 +24,8 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
+import * as logger from "@magic-context/core/shared/logger";
 import {
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
@@ -273,6 +277,80 @@ describe("Pi /ctx-wrapup", () => {
 			releaseCompartmentLease(db, sessionId, foreignHolder);
 		} finally {
 			closeQuietly(db);
+		}
+	});
+
+	it("contains SQLITE_BUSY while releasing a wrapup compartment lease", async () => {
+		const { dir, cleanup } = createTestTempDir(
+			"mc-test-temp-dir-helper-",
+			"pi-wrapup-lease-release-",
+		);
+		const path = join(dir, "context.db");
+		const db = new Database(path);
+		initializeDatabase(db);
+		runMigrations(db);
+		db.exec("PRAGMA busy_timeout = 1");
+		const blocker = new Database(path);
+		blocker.exec("PRAGMA busy_timeout = 1");
+		const sessionId = "pi-wrapup-release-contention";
+		const now = 2_000_000;
+		const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
+		let holderId = "";
+		let resolveRun!: () => void;
+		const underlyingRun = new Promise<void>((resolve) => {
+			resolveRun = resolve;
+		});
+		const runPiHistorianForWrapup = mock(async (args) => {
+			holderId = args.compartmentLeaseHolderId ?? "";
+			const start = getLastCompartmentEndMessage(db, sessionId) + 1;
+			appendRange(
+				db,
+				sessionId,
+				start,
+				args.boundarySnapshot.eligibleEndOrdinal - 1,
+			);
+			await underlyingRun;
+		});
+		let blockerTransactionOpen = false;
+		let releaseFailure: string | undefined;
+		const logSpy = spyOn(logger, "sessionLog").mockImplementation(
+			(_sid, message) => {
+				if (!message.startsWith("lease release failed (")) return;
+				releaseFailure = message;
+				blocker.exec("ROLLBACK");
+				blockerTransactionOpen = false;
+			},
+		);
+		try {
+			const wrapup = runPiWrapup(
+				pi().api,
+				deps(db, { runPiHistorianForWrapup }),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+			while (runPiHistorianForWrapup.mock.calls.length === 0) await Promise.resolve();
+			expect(holderId).not.toBe("");
+
+			blocker.exec("BEGIN IMMEDIATE");
+			blockerTransactionOpen = true;
+			resolveRun();
+
+			await expect(wrapup).resolves.toContain("## Magic Wrapup");
+			expect(releaseFailure).toMatch(
+				/^lease release failed \(.+\); row expires on its TTL$/,
+			);
+			nowSpy.mockImplementation(() => now + COMPARTMENT_LEASE_TTL_MS + 1);
+			expect(
+				acquireCompartmentLease(db, sessionId, "replacement-holder"),
+			).not.toBeNull();
+		} finally {
+			if (blockerTransactionOpen) blocker.exec("ROLLBACK");
+			logSpy.mockRestore();
+			nowSpy.mockRestore();
+			closeQuietly(blocker);
+			closeQuietly(db);
+			cleanup();
 		}
 	});
 

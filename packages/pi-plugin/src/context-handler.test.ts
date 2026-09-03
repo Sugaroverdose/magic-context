@@ -97,7 +97,7 @@ describe("Pi pressure guards", () => {
 		expect(src).not.toContain("usagePercentage = 95;");
 	});
 	describe("two-pass tool reclaim source invariants", () => {
-		it("uses confirmed mutation booleans rather than executedWorkThisPass for the reclaim gate", () => {
+		it("only advances reclaim on a priced application opportunity", () => {
 			const src = readFileSync(
 				join(import.meta.dir, "context-handler.ts"),
 				"utf8",
@@ -105,8 +105,16 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate",
+				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
 			);
+			expect(src).toContain(
+				"const toolReclaimApplicationOpportunity =\n\t\ttoolReclaimExecutePass && alreadyMutatingThisPass",
+			);
+			expect(src).toContain(
+				"if (toolReclaimApplicationOpportunity && !emergencyDropEligible)",
+			);
+			expect(src).toContain("if (toolReclaimApplicationOpportunity) {");
+			expect(src).toContain("recentSupersessionOwnerMessageIds");
 			expect(src).toContain("heuristicsResult.droppedStaleReduceCalls");
 			expect(src).toContain("buildSyntheticToolReclaimOps");
 			expect(src).not.toContain(
@@ -4898,6 +4906,23 @@ describe("Pi branch projection cache", () => {
 });
 
 describe("maybeFireHistorian raw provider cleanup", () => {
+	it("contains spawned historian and cleanup failures before the parked finalizer", () => {
+		const src = readFileSync(
+			join(import.meta.dir, "context-handler.ts"),
+			"utf8",
+		);
+		const start = src.indexOf("function spawnPiHistorianRun");
+		const end = src.indexOf("function resolvePiAppendCompaction", start);
+		const body = src.slice(start, end);
+		const catchIndex = body.indexOf(".catch((error) => {");
+		const finallyIndex = body.indexOf(".finally(() => {");
+
+		expect(catchIndex).toBeGreaterThan(0);
+		expect(finallyIndex).toBeGreaterThan(catchIndex);
+		expect(body).toContain("pi historian finalizer failed");
+		expect(body).not.toContain("releaseCompartmentLease(db, sessionId, holderId)");
+	});
+
 	it("unregisters the raw-message provider in finally when no historian is spawned", () => {
 		const src = readFileSync(
 			join(import.meta.dir, "context-handler.ts"),

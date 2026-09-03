@@ -115,6 +115,51 @@ describe("applyPiHeuristicCleanup", () => {
 		}
 	});
 
+	it("keeps routine cleanup inert when only emergency selection may run", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-heuristic-routine-inert";
+			const messages = [
+				userMessage("read twice", 1),
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "read-call-a",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+						{
+							type: "toolCall",
+							id: "read-call-b",
+							name: "mcp_read",
+							arguments: { filePath: "src/a.ts" },
+						},
+					],
+					timestamp: 2,
+				},
+			];
+			const { transcript, targets } = tagMessages(sessionId, db, messages);
+
+			const result = applyPiHeuristicCleanup(sessionId, db, targets, messages, {
+				protectedTags: 0,
+				staleReduceStripEnabled: true,
+				routine: false,
+			});
+			transcript.commit();
+
+			expect(result.deduplicatedTools).toBe(0);
+			expect(
+				getTagsBySession(db, sessionId)
+					.filter((tag) => tag.type === "tool")
+					.map((tag) => tag.status),
+			).toEqual(["active", "active"]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("deduplicates same-owner parallel read calls with identical arguments", () => {
 		const db = createTestDb();
 		try {

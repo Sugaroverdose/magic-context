@@ -39,7 +39,7 @@ import type {
 import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_RENEWAL_MS,
-	releaseCompartmentLease,
+	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -160,6 +160,7 @@ import { modelAcceptsEmptyContent } from "@magic-context/core/hooks/magic-contex
 import {
 	buildEditSupersessionReclaim,
 	buildSupersessionReclaimOps,
+	recentSupersessionOwnerMessageIds,
 } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import {
@@ -443,6 +444,7 @@ const lastSeenProjectIdentityBySession = new Map<string, string>();
 const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
 const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
+const routinePressureAppliedBySession = new Map<string, boolean>();
 const firstContextPassSeenBySession = new Set<string>();
 const liveModelBySession = new Map<string, string>();
 const latestAssistantModelTimestampBySession = new Map<string, number>();
@@ -3653,7 +3655,7 @@ function spawnPiHistorianRun(args: {
 			// Close the cross-process check/lease race: /ctx-wrapup may have published
 			// its marker after the first check but before this process won the lease.
 			sessionLog(sessionId, "historian skipped: /ctx-wrapup became active");
-			releaseCompartmentLease(db, sessionId, holderId);
+			releaseCompartmentLeaseBestEffort(db, sessionId, holderId, sessionLog);
 			return;
 		}
 		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
@@ -3739,15 +3741,29 @@ function spawnPiHistorianRun(args: {
 			});
 		} finally {
 			clearInterval(renewal);
-			releaseCompartmentLease(db, sessionId, holderId);
+			releaseCompartmentLeaseBestEffort(db, sessionId, holderId, sessionLog);
 		}
-	})().finally(() => {
-		inFlightHistorian.delete(sessionId);
-		unregister();
-		if (isContextHandlerSessionActive(sessionId)) {
-			historian.onStatusChange?.(ctx, sessionId);
-		}
-	});
+	})()
+		.catch((error) => {
+			sessionLog(
+				sessionId,
+				`pi historian run failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		})
+		.finally(() => {
+			try {
+				inFlightHistorian.delete(sessionId);
+				unregister();
+				if (isContextHandlerSessionActive(sessionId)) {
+					historian.onStatusChange?.(ctx, sessionId);
+				}
+			} catch (error) {
+				sessionLog(
+					sessionId,
+					`pi historian finalizer failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		});
 	inFlightHistorian.set(sessionId, runPromise);
 	historian.onStatusChange?.(ctx, sessionId);
 }
@@ -4661,6 +4677,23 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			`pi m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"}${mismatch} executed=${foldExecutedThisPass}`,
 		);
 	}
+	// Primary sessions run routine age-sensitive cleanup only once during an
+	// unbroken stretch of execute/emergency pressure. Later passes still evaluate
+	// emergency drops, but another batch requires pressure to clear and rise again.
+	const emergencyDropEligible =
+		args.forceMaterialization === true ||
+		args.contextUsage.percentage >= forceMaterializationPercentage;
+	const executePressureEligible =
+		args.schedulerDecision === "execute" || emergencyDropEligible;
+	if (!executePressureEligible) {
+		routinePressureAppliedBySession.delete(args.sessionId);
+	} else if (!args.sessionMeta.isSubagent && alreadyRanHeuristicsThisTurn) {
+		routinePressureAppliedBySession.set(args.sessionId, true);
+	}
+	const routinePressureAlreadyApplied =
+		!args.sessionMeta.isSubagent &&
+		executePressureEligible &&
+		routinePressureAppliedBySession.get(args.sessionId) === true;
 	const historianRunning = inFlightHistorian.has(args.sessionId);
 	// A normal execute/deferred drain waits while the historian reads its raw
 	// snapshot. Only a fold that was persisted successfully may bypass the veto;
@@ -5091,6 +5124,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Mirrors OpenCode's `applyHeuristicCleanup` call in
 	// transform-postprocess-phase.ts.
 	let heuristicsExecuted = false;
+	let routineCleanupApplied = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
 	const tActiveTags = performance.now();
 	// Pending ops have already materialized above; reread active tags so the
@@ -5143,6 +5177,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			) {
 				clearEmergencyDropSample(args.db, args.sessionId);
 			}
+			// Replaying persisted drop state yields the same served bytes every pass,
+			// so it does not count as a new change. After the first pass under pressure,
+			// allow routine cleanup again only when new work was applied or a fold ran.
+			routineCleanupApplied =
+				args.sessionMeta.isSubagent ||
+				!routinePressureAlreadyApplied ||
+				hasPendingMaterializeSignal ||
+				deferredMaterialize ||
+				independentMutationBeforeHeuristics;
 			heuristicsResult = applyPiHeuristicCleanup(
 				args.sessionId,
 				args.db,
@@ -5150,6 +5193,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.messages,
 				{
 					protectedTags: args.protectedTags,
+					routine: routineCleanupApplied,
 					staleReduceStripEnabled: args.canUseEmptySentinels,
 					// Tiered emergency drop fires only at the derived force band AND when the
 					// ceiling is known. forceMaterialization already incorporates
@@ -5168,6 +5212,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				activeTags,
 				stableIdResolver,
 			);
+			if (!routineCleanupApplied && heuristicsResult.emergencyDroppedTools > 0) {
+				const ridingCleanup = applyPiHeuristicCleanup(
+					args.sessionId,
+					args.db,
+					targets,
+					args.messages,
+					{
+						protectedTags: args.protectedTags,
+						routine: true,
+						staleReduceStripEnabled: args.canUseEmptySentinels,
+						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
+					},
+					getActiveTagsBySession(args.db, args.sessionId),
+					stableIdResolver,
+				);
+				heuristicsResult = {
+					droppedTools: heuristicsResult.droppedTools + ridingCleanup.droppedTools,
+					deduplicatedTools:
+						heuristicsResult.deduplicatedTools + ridingCleanup.deduplicatedTools,
+					droppedInjections:
+						heuristicsResult.droppedInjections + ridingCleanup.droppedInjections,
+					droppedStaleReduceCalls:
+						heuristicsResult.droppedStaleReduceCalls +
+						ridingCleanup.droppedStaleReduceCalls,
+					emergencyDroppedTools: heuristicsResult.emergencyDroppedTools,
+					compressedTextTags:
+						heuristicsResult.compressedTextTags + ridingCleanup.compressedTextTags,
+					mutatedTextTags:
+						heuristicsResult.mutatedTextTags + ridingCleanup.mutatedTextTags,
+				};
+				routineCleanupApplied = true;
+			}
+			if (
+				routineCleanupApplied &&
+				!args.sessionMeta.isSubagent &&
+				executePressureEligible
+			) {
+				routinePressureAppliedBySession.set(args.sessionId, true);
+			}
 			const heuristicMutationCount =
 				heuristicsResult.droppedTools +
 				heuristicsResult.deduplicatedTools +
@@ -5241,7 +5324,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// materialization passes where heuristics DO run — leaving reasoning on the
 	// wire on a pass that already dropped tools (inconsistent + a missed
 	// same-pass mutation). shouldRunHeuristics is the broader, correct set.
-	if (args.reasoningClearing && shouldRunHeuristics) {
+	if (args.reasoningClearing && shouldRunHeuristics && routineCleanupApplied) {
 		const rollbackReasoning = captureReasoningMutationRollback(workingMessages);
 		try {
 			const tClearReasoning = performance.now();
@@ -5299,17 +5382,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const toolReclaimExecutePass = args.schedulerDecision === "execute";
 	const alreadyMutatingThisPass =
-		pendingOpsDidMutate || heuristicOrReasoningDidMutate;
-	const emergencyDropEligible =
-		args.forceMaterialization === true ||
-		args.contextUsage.percentage >= forceMaterializationPercentage;
+		pendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass;
+	const toolReclaimApplicationOpportunity =
+		toolReclaimExecutePass && alreadyMutatingThisPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
-	if (
-		toolReclaimExecutePass &&
-		alreadyMutatingThisPass &&
-		!emergencyDropEligible
-	) {
+	if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
 		const reclaimMeta = args.sessionMeta;
 		const syntheticPendingOps = buildSyntheticToolReclaimOps({
 			db: args.db,
@@ -5325,12 +5403,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// can qualify under more than one rule).
 		const editMarkerTagIds = new Set<number>();
 		if (args.smartDrops) {
+			const recentMessageIds = recentSupersessionOwnerMessageIds(
+				args.db,
+				args.sessionId,
+			);
 			const selectedIds = new Set(syntheticPendingOps.map((op) => op.tagId));
 			const supersessionOps = buildSupersessionReclaimOps({
 				db: args.db,
 				sessionId: args.sessionId,
 				targets,
 				pendingOps,
+				recentMessageIds,
 			});
 			for (const op of supersessionOps) {
 				if (!selectedIds.has(op.tagId)) {
@@ -5343,6 +5426,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				sessionId: args.sessionId,
 				targets,
 				pendingOps,
+				recentMessageIds,
 			});
 			for (const op of editReclaim.ops) {
 				// Drop wins over compress: only compress an edit no earlier rule
@@ -5416,7 +5500,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tTranscriptCommit = performance.now();
 	transcript.commit();
 	logTransformTiming(args.sessionId, "transcriptCommit", tTranscriptCommit);
-	if (toolReclaimExecutePass) {
+	if (toolReclaimApplicationOpportunity) {
 		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
 	}
 	if (autoReclaimTargetCount > 0) {
@@ -6230,6 +6314,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	clearPiInjectionTokenCountCache(sessionId);
 	clearPiChannel1State(sessionId);
 	lastHeuristicsTurnIdBySession.delete(sessionId);
+	routinePressureAppliedBySession.delete(sessionId);
 	lastSeenProjectIdentityBySession.delete(sessionId);
 	for (const [projectIdentity, sessions] of sessionsByProject) {
 		sessions.delete(sessionId);

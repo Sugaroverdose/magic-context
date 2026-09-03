@@ -6,7 +6,7 @@ import type {
 import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_RENEWAL_MS,
-	releaseCompartmentLease,
+	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import {
@@ -29,6 +29,7 @@ import {
 	resolveWrapupProtectedTailBoundary,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { sessionLog } from "@magic-context/core/shared/logger";
 import type { ModelInput } from "@magic-context/core/shared/model-resolution";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { COMPACTION_OFF_COMMAND_UNAVAILABLE } from "../compaction-off-pi";
@@ -453,7 +454,12 @@ export async function runPiWrapup(
 					});
 				} finally {
 					clearInterval(leaseRenewal);
-					releaseCompartmentLease(deps.db, sessionId, leaseHolder);
+					releaseCompartmentLeaseBestEffort(
+						deps.db,
+						sessionId,
+						leaseHolder,
+						sessionLog,
+					);
 				}
 
 				const afterEnd = getLastCompartmentEndMessage(deps.db, sessionId);

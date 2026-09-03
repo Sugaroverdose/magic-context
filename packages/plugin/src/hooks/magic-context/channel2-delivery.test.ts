@@ -326,6 +326,31 @@ describe("maybeDeliverChannel2", () => {
         });
     });
 
+    it("keeps the nudge row byte-identical when the same intent is served again", async () => {
+        useTempDataHome("ch2-byte-freeze-");
+        const db = openDatabase()!;
+        const sessionId = "ses-byte-freeze";
+        const payloads: string[] = [];
+        const promptAsync = mock(async (input: unknown) => {
+            const body = (input as { body: unknown }).body;
+            payloads.push(JSON.stringify(body));
+            return {};
+        });
+        const options = {
+            db,
+            client: fakeClient(promptAsync),
+            baseline: channel2Baseline(75_000, 100_000),
+        };
+
+        setChannel2NudgeState(db, sessionId, "pending");
+        expect(await maybeDeliverChannel2(sessionId, options)).toBe(true);
+        setChannel2NudgeState(db, sessionId, "pending");
+        expect(await maybeDeliverChannel2(sessionId, options)).toBe(true);
+
+        expect(payloads).toHaveLength(2);
+        expect(payloads[1]).toBe(payloads[0]);
+    });
+
     it("treats a lost post-send confirm CAS as unconfirmed without reverting to pending", async () => {
         useTempDataHome("ch2-confirm-lost-");
         const db = openDatabase()!;
