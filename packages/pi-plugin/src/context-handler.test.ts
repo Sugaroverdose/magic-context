@@ -97,7 +97,7 @@ describe("Pi pressure guards", () => {
 		expect(src).not.toContain("usagePercentage = 95;");
 	});
 	describe("two-pass tool reclaim source invariants", () => {
-		it("uses confirmed mutation booleans rather than executedWorkThisPass for the reclaim gate", () => {
+		it("only advances reclaim on a priced application opportunity", () => {
 			const src = readFileSync(
 				join(import.meta.dir, "context-handler.ts"),
 				"utf8",
@@ -105,8 +105,16 @@ describe("Pi pressure guards", () => {
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate",
+				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
 			);
+			expect(src).toContain(
+				"const toolReclaimApplicationOpportunity =\n\t\ttoolReclaimExecutePass && alreadyMutatingThisPass",
+			);
+			expect(src).toContain(
+				"if (toolReclaimApplicationOpportunity && !emergencyDropEligible)",
+			);
+			expect(src).toContain("if (toolReclaimApplicationOpportunity) {");
+			expect(src).toContain("recentSupersessionOwnerMessageIds");
 			expect(src).toContain("heuristicsResult.droppedStaleReduceCalls");
 			expect(src).toContain("buildSyntheticToolReclaimOps");
 			expect(src).not.toContain(

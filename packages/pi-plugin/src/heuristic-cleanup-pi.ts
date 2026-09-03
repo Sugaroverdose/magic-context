@@ -82,6 +82,8 @@ const DEDUP_SAFE_TOOLS = new Set([
 
 export interface PiHeuristicCleanupConfig {
 	protectedTags: number;
+	/** Run age-sensitive cleanup; emergency selection remains independent. */
+	routine?: boolean;
 	/**
 	 * Whether this pass may discover NEW stale ctx_reduce strips. Existing dropped
 	 * tags still replay through applyFlushedStatuses on every provider.
@@ -279,10 +281,10 @@ function collectStaleReduceCallIds(
  * goes through `TagTarget` and shared helpers).
  *
  * Run order matches OpenCode:
- *   1. Drop aged tools (or all tools when `dropAllTools=true`).
- *   2. Strip system injections from message tags.
- *   3. Tool dedup (drop older identical calls of read-only tools).
- *   4. Age-tier caveman text compression (when enabled).
+ *   1. Apply the emergency batch when supplied.
+ *   2. Strip stale ctx_reduce calls and system injections when routine cleanup is enabled.
+ *   3. Deduplicate tools when routine cleanup is enabled.
+ *   4. Apply age-tier caveman compression when routine cleanup is enabled.
  *
  * Each pass commits within its own `db.transaction` so partial
  * progress survives mid-pass failures.
@@ -321,6 +323,7 @@ export function applyPiHeuristicCleanup(
 	// single backward index seek (O(log N)).
 	const maxTag = getMaxTagNumberBySession(db, sessionId);
 	const protectedCutoff = maxTag - config.protectedTags;
+	const routine = config.routine !== false;
 	// Stale ctx_reduce removal uses the protected-tail window after first retaining
 	// the newest housekeeping exemplars; only older calls can become stale.
 	const toolAgeCutoff = protectedCutoff;
@@ -404,7 +407,7 @@ export function applyPiHeuristicCleanup(
 	}
 
 	// ── Pass 1b: stale ctx_reduce calls (Pi persisted-drop replay) ──────
-	const staleReduce = config.staleReduceStripEnabled
+	const staleReduce = routine && config.staleReduceStripEnabled
 		? collectStaleReduceCallIds(
 				piMessages,
 				buildMessageIdToMaxTagFromTargets(targets),
@@ -414,6 +417,7 @@ export function applyPiHeuristicCleanup(
 			)
 		: { composite: new Set<string>(), bareCallIds: new Set<string>() };
 	if (
+		routine &&
 		config.staleReduceStripEnabled &&
 		(staleReduce.composite.size > 0 || staleReduce.bareCallIds.size > 0)
 	) {
@@ -445,47 +449,51 @@ export function applyPiHeuristicCleanup(
 	}
 
 	// ── Pass 2: strip system injections from message tags ─────────────
-	db.transaction(() => {
-		for (const tag of tags) {
-			if (tag.status !== "active") continue;
-			if (tag.tagNumber > protectedCutoff) continue;
-			if (tag.type !== "message") continue;
+	if (routine) {
+		db.transaction(() => {
+			for (const tag of tags) {
+				if (tag.status !== "active") continue;
+				if (tag.tagNumber > protectedCutoff) continue;
+				if (tag.type !== "message") continue;
 
-			const target = targets.get(tag.tagNumber);
-			if (!target) continue;
+				const target = targets.get(tag.tagNumber);
+				if (!target) continue;
 
-			const content = target.getContent?.();
-			if (!content) continue;
+				const content = target.getContent?.();
+				if (!content) continue;
 
-			const stripped = stripSystemInjection(content);
-			if (stripped === null) continue;
-			const strippedSource = stripTagPrefix(stripped);
+				const stripped = stripSystemInjection(content);
+				if (stripped === null) continue;
+				const strippedSource = stripTagPrefix(stripped);
 
-			if (strippedSource.trim().length === 0) {
-				const dropResult = target.drop?.() ?? "absent";
-				const didReplace =
-					dropResult === "absent"
-						? target.setContent(`[dropped §${tag.tagNumber}§]`)
-						: false;
-				if (dropResult === "removed" || dropResult === "absent") {
-					replaceSourceContent(db, sessionId, tag.tagNumber, "");
-					updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
-					if (dropResult === "removed" || didReplace) {
+				if (strippedSource.trim().length === 0) {
+					const dropResult = target.drop?.() ?? "absent";
+					const didReplace =
+						dropResult === "absent"
+							? target.setContent(`[dropped §${tag.tagNumber}§]`)
+							: false;
+					if (dropResult === "removed" || dropResult === "absent") {
+						replaceSourceContent(db, sessionId, tag.tagNumber, "");
+						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+						if (dropResult === "removed" || didReplace) {
+							droppedInjections++;
+						}
+					}
+				} else {
+					const didSet = target.setContent(stripped);
+					if (didSet) {
+						replaceSourceContent(db, sessionId, tag.tagNumber, strippedSource);
 						droppedInjections++;
 					}
 				}
-			} else {
-				const didSet = target.setContent(stripped);
-				if (didSet) {
-					replaceSourceContent(db, sessionId, tag.tagNumber, strippedSource);
-					droppedInjections++;
-				}
 			}
-		}
-	})();
+		})();
+	}
 
 	// ── Pass 3: tool dedup (Pi-shape fingerprinter) ───────────────────
-	const toolFingerprints = buildPiToolFingerprints(piMessages, resolveStableId);
+	const toolFingerprints = routine
+		? buildPiToolFingerprints(piMessages, resolveStableId)
+		: new Map<string, string>();
 	if (toolFingerprints.size > 0) {
 		const tagsByCompositeKey = new Map<string, TagEntry>();
 		for (const tag of tags) {
@@ -542,7 +550,7 @@ export function applyPiHeuristicCleanup(
 	// ── Pass 4: age-tier caveman text compression ─────────────────────
 	let compressedTextTags = 0;
 	let mutatedTextTags = 0;
-	if (config.caveman?.enabled) {
+	if (routine && config.caveman?.enabled) {
 		const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
 			enabled: true,
 			minChars: config.caveman.minChars,
