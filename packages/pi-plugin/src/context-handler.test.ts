@@ -2124,6 +2124,42 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("ignores a late older assistant model event after a newer model has been pinned", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-interleaved-model-switch";
+		try {
+			const { persistPiMessageEndModelMeta } = await import("./index");
+			const cacheTtlConfig = {
+				default: "5m",
+				"anthropic/fable-5.1": "never",
+			};
+
+			persistPiMessageEndModelMeta({
+				db,
+				sessionId,
+				message: assistantMessage("new model", 2, {
+					provider: "anthropic",
+					model: "fable-5.1",
+				}),
+				cacheTtlConfig,
+			});
+			persistPiMessageEndModelMeta({
+				db,
+				sessionId,
+				message: assistantMessage("late old model", 1, {
+					provider: "anthropic",
+					model: "fable-5",
+				}),
+				cacheTtlConfig,
+			});
+
+			expect(getOrCreateSessionMeta(db, sessionId).cacheTtl).toBe("never");
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
 	it("tracks Pi observed safe input token high-water mark", async () => {
 		const db = createTestDb();
 		try {

@@ -8115,7 +8115,9 @@ fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, &str)> {
         return None;
     }
     match &block.wire.kind {
-        ck_wire::CkKind::Text { text } if block.role == "user" || block.role == "assistant" => {
+        ck_wire::CkKind::Text { text }
+            if block.role == "user" || (block.role == "assistant" && !text.trim().is_empty()) =>
+        {
             Some((TaggableKind::Message, text))
         }
         ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
@@ -25205,6 +25207,25 @@ pub(crate) mod tests {
         );
         assert_eq!(tail_bytes(&response, "m1"), "hello");
         assert!(s.load_tags_for_session("inert").unwrap().is_empty());
+    }
+
+    #[test]
+    fn opencode_tagging_surface_leaves_whitespace_only_assistant_framing_inert() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let request = active_opencode_req(
+            "opencode-whitespace-framing",
+            "cfg0",
+            vec![wire_item("assistant", "blank-assistant", 1, &["  \n\t"])],
+        );
+
+        let response = run(&s, &request, &spine());
+
+        assert_eq!(tail_bytes(&response, "blank-assistant"), "  \n\t");
+        assert!(s
+            .load_tags_for_session("opencode-whitespace-framing")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

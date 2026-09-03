@@ -328,6 +328,7 @@ export function persistPiMessageEndModelMeta(args: {
 		role?: string;
 		provider?: string;
 		model?: string;
+		timestamp?: number;
 	};
 	if (
 		msg.role !== "assistant" ||
@@ -339,7 +340,7 @@ export function persistPiMessageEndModelMeta(args: {
 		return;
 	}
 	const modelKey = canonicalPiModelKey(msg.provider, msg.model);
-	recordPiLiveModel(args.sessionId, modelKey);
+	if (!recordPiLiveModel(args.sessionId, modelKey, msg.timestamp)) return;
 	const cacheTtl = resolveCacheTtl(args.cacheTtlConfig, modelKey);
 	const currentMeta = getOrCreateSessionMeta(args.db, args.sessionId);
 	if (currentMeta.cacheTtl !== cacheTtl) {

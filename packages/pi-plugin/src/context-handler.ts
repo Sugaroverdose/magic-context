@@ -445,6 +445,7 @@ const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
 const firstContextPassSeenBySession = new Set<string>();
 const liveModelBySession = new Map<string, string>();
+const latestAssistantModelTimestampBySession = new Map<string, number>();
 const taggedStableMessageIdsBySession = new Map<string, Set<string>>();
 const taggersBySession = new Map<string, Tagger>();
 
@@ -803,8 +804,20 @@ export function signalPiSystemPromptRefreshForProject(
 	}
 }
 
-export function recordPiLiveModel(sessionId: string, modelKey: string): void {
+export function recordPiLiveModel(
+	sessionId: string,
+	modelKey: string,
+	assistantTimestamp?: number,
+): boolean {
+	if (typeof assistantTimestamp === "number" && Number.isFinite(assistantTimestamp)) {
+		const latestTimestamp = latestAssistantModelTimestampBySession.get(sessionId);
+		// Pi may replay terminal events after a newer assistant has already finished.
+		// Only the newest timestamp may move the model pin used by later context passes.
+		if (latestTimestamp !== undefined && assistantTimestamp < latestTimestamp) return false;
+		latestAssistantModelTimestampBySession.set(sessionId, assistantTimestamp);
+	}
 	liveModelBySession.set(sessionId, modelKey);
+	return true;
 }
 
 function summarizeTransformError(error: unknown): string {
@@ -6202,6 +6215,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	firstContextPassSeenBySession.delete(sessionId);
 	commitSeenLastPass.delete(sessionId);
 	liveModelBySession.delete(sessionId);
+	latestAssistantModelTimestampBySession.delete(sessionId);
 	taggedStableMessageIdsBySession.delete(sessionId);
 	const tagger = taggersBySession.get(sessionId);
 	if (tagger) {
