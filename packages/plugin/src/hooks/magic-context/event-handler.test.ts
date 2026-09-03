@@ -12,7 +12,9 @@ import {
 } from "../../features/magic-context/message-index-async";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
+    applyStrippedPlaceholderDelta,
     closeDatabase,
+    getHiddenSeamPlaceholderIds,
     getHistorianFailureState,
     getMaxCompressionDepth,
     getOrCreateSessionMeta,
@@ -1428,7 +1430,10 @@ describe("createEventHandler", () => {
         const deps = createDeps(new Map());
         const handler = createEventHandler(deps);
 
-        setStrippedPlaceholderIds(deps.db, "ses-stripped", new Set(["msg-keep", "msg-removed"]));
+        setStrippedPlaceholderIds(deps.db, "ses-stripped", new Set(["msg-keep"]));
+        applyStrippedPlaceholderDelta(deps.db, "ses-stripped", {
+            hiddenSeamAdd: ["msg-removed"],
+        });
 
         await handler({
             event: {
@@ -1440,6 +1445,7 @@ describe("createEventHandler", () => {
         expect(getStrippedPlaceholderIds(openDatabase(), "ses-stripped")).toEqual(
             new Set(["msg-keep"]),
         );
+        expect(getHiddenSeamPlaceholderIds(openDatabase(), "ses-stripped")).toEqual(new Set());
     });
 
     it("is a no-op for removed messages with no persisted references", async () => {

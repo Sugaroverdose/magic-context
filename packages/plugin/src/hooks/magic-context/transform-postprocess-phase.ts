@@ -10,6 +10,7 @@ import {
     getActiveTagsBySession,
     getAutoSearchHintDecisions,
     getChannel1NudgeState,
+    getHiddenSeamPlaceholderIds,
     getMaxM0MutationId,
     getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
@@ -47,6 +48,7 @@ import {
     getOldestActiveUnprotectedToolTags,
     getTagNumberByMessageId,
     getTailHygieneTags,
+    markTagsCompactedByMessageIds,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
 import type { Tagger } from "../../features/magic-context/tagger";
@@ -758,6 +760,8 @@ interface RunPostTransformPhaseArgs {
      * persist empty sentinels for placeholder-only assistant messages before then.
      */
     hiddenMessagesAtCompactionSeam?: MessageLike[];
+    /** All source rows removed by the in-memory trim; their fresh tags are never served. */
+    trimmedMessagesAtCompactionBoundary?: MessageLike[];
     didMutateFromFlushedStatuses: boolean;
     watermark: number;
     forceMaterializationPercentage: number;
@@ -1907,10 +1911,10 @@ export async function runPostTransformPhase(
 
     // Neutralize messages that are nothing but [dropped §N§] placeholders,
     // plus system-injected messages (notifications, reminders, internal markers).
-    // Both produce IDENTICAL empty-text-sentinel replacements that preserve array
-    // length between passes — cache-stable for both Anthropic-native (where
-    // OpenCode's upstream filter drops the empty parts at the wire) and proxy
-    // providers that hash the serialized message array.
+    // Canonical Anthropic uses empty sentinels that its adapter filters. A seam
+    // row hidden on the fold pass must instead be removed when replayed through a
+    // provider that rejects empty content; rendering `[dropped]` would introduce
+    // bytes that the fold never served.
     //
     // MUST run AFTER compartment injection: renderCompartmentInjection checks whether
     // messages[0] is a dropped placeholder to decide if it needs a synthetic carrier message.
@@ -1924,14 +1928,16 @@ export async function runPostTransformPhase(
     if (!compactionOff) {
         const tPlaceholder = performance.now();
         const persistedIds = getStrippedPlaceholderIds(args.db, args.sessionId);
+        const hiddenSeamIds = getHiddenSeamPlaceholderIds(args.db, args.sessionId);
 
-        // Step 1: Replay — re-apply sentinel to messages whose IDs were neutralized
-        // on a prior bust pass. Preserves array length — no splice.
+        // Step 1: Replay prior decisions. Ordinary rows keep provider-safe
+        // sentinels; non-Anthropic hidden-seam rows are removed to match the fold.
         if (persistedIds.size > 0) {
             const { replayed } = replaySentinelByMessageIds(
                 args.messages,
                 persistedIds,
                 args.resolvedProviderID,
+                hiddenSeamIds,
             );
             if (replayed > 0) {
                 sessionLog(
@@ -1987,12 +1993,25 @@ export async function runPostTransformPhase(
                 for (const id of addedIds) persistedIds.add(id);
                 // CAS delta (add) so a concurrent prune in a sibling process
                 // doesn't clobber these newly-discovered IDs.
-                applyStrippedPlaceholderDelta(args.db, args.sessionId, { add: addedIds });
+                applyStrippedPlaceholderDelta(args.db, args.sessionId, {
+                    add: addedIds,
+                    hiddenSeamAdd: [
+                        ...hiddenDroppedResult.sentineledIds,
+                        ...hiddenSystemInjectedResult.sentineledIds,
+                    ],
+                });
                 sessionLog(
                     args.sessionId,
                     `neutralized ${droppedResult.stripped} dropped + ${systemInjectedResult.stripped} system-injected messages + ${hiddenDroppedResult.stripped + hiddenSystemInjectedResult.stripped} hidden-at-marker-seam (${newlyNeutralized} new, ${persistedIds.size} total persisted)`,
                 );
             }
+        }
+
+        const trimmedMessageIds = (args.trimmedMessagesAtCompactionBoundary ?? [])
+            .map((message) => message.info.id)
+            .filter((id): id is string => typeof id === "string");
+        if (trimmedMessageIds.length > 0) {
+            markTagsCompactedByMessageIds(args.db, args.sessionId, trimmedMessageIds);
         }
         logTransformTiming(args.sessionId, "pp.placeholderNeutralize", tPlaceholder);
     }

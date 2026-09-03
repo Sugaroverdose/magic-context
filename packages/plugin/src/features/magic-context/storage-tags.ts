@@ -1530,6 +1530,44 @@ export function adoptPiFallbackMessageTag(
 }
 
 /**
+ * Retire tags minted from rows removed by an in-memory compartment trim. The
+ * rows never reach the served tail, so leaving them active would leak into
+ * reclaim hints and hygiene accounting. Repeated calls are idempotent.
+ */
+export function markTagsCompactedByMessageIds(
+    db: Database,
+    sessionId: string,
+    messageIds: Iterable<string>,
+): number {
+    const update = db.prepare(
+        `UPDATE tags
+         SET status = 'compacted'
+         WHERE session_id = ?
+           AND status IN ('active', 'dropped')
+           AND (
+               message_id = ?
+               OR message_id LIKE ? ESCAPE '\\'
+               OR message_id LIKE ? ESCAPE '\\'
+               OR tool_owner_message_id = ?
+           )`,
+    );
+    return db.transaction(() => {
+        let changed = 0;
+        for (const messageId of new Set(messageIds)) {
+            const escaped = escapeLikePattern(messageId);
+            changed += update.run(
+                sessionId,
+                messageId,
+                `${escaped}:p%`,
+                `${escaped}:file%`,
+                messageId,
+            ).changes;
+        }
+        return changed;
+    })();
+}
+
+/**
  * Delete every tag whose source content lives on `messageId`. This is
  * the `message.removed` event handler's primary cleanup path.
  *

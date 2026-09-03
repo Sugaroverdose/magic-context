@@ -2165,25 +2165,82 @@ export function setPersistedCompactionMarkerState(
 
 // ── Stripped placeholder message IDs ──
 
+/**
+ * A session may retain seam decisions while a deferred marker catches up, but
+ * the durable blob must not grow without limit when removal events are missed.
+ */
+export const MAX_STRIPPED_PLACEHOLDER_IDS = 4096;
+
+interface StrippedPlaceholderState {
+    ids: string[];
+    hiddenSeamIds: string[];
+}
+
+function parseStrippedPlaceholderState(raw: string | null | undefined): StrippedPlaceholderState {
+    if (!raw || raw.length === 0) return { ids: [], hiddenSeamIds: [] };
+    try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) {
+            return {
+                ids: parsed.filter((value): value is string => typeof value === "string"),
+                hiddenSeamIds: [],
+            };
+        }
+        if (parsed && typeof parsed === "object") {
+            const state = parsed as { ids?: unknown; hiddenSeamIds?: unknown };
+            return {
+                ids: Array.isArray(state.ids)
+                    ? state.ids.filter((value): value is string => typeof value === "string")
+                    : [],
+                hiddenSeamIds: Array.isArray(state.hiddenSeamIds)
+                    ? state.hiddenSeamIds.filter(
+                          (value): value is string => typeof value === "string",
+                      )
+                    : [],
+            };
+        }
+    } catch {
+        // Intentional: corrupt JSON → treat as empty.
+    }
+    return { ids: [], hiddenSeamIds: [] };
+}
+
+function parseStrippedBlob(raw: string | null | undefined): string[] {
+    if (!raw || raw.length === 0) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed)
+            ? parsed.filter((value): value is string => typeof value === "string")
+            : [];
+    } catch {
+        return [];
+    }
+}
+
+function serializeStrippedPlaceholderState(state: StrippedPlaceholderState): string {
+    if (state.ids.length === 0) return "";
+    if (state.hiddenSeamIds.length === 0) return JSON.stringify(state.ids);
+    return JSON.stringify(state);
+}
+
 export function getStrippedPlaceholderIds(db: Database, sessionId: string): Set<string> {
     const row = db
         .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
         .get(sessionId) as { stripped_placeholder_ids?: string } | null;
-    const raw = row?.stripped_placeholder_ids;
-    if (!raw || raw.length === 0) return new Set();
-    try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed))
-            return new Set(parsed.filter((v: unknown) => typeof v === "string"));
-    } catch {
-        // Intentional: corrupt JSON → treat as empty
-    }
-    return new Set();
+    return new Set(parseStrippedPlaceholderState(row?.stripped_placeholder_ids).ids);
+}
+
+export function getHiddenSeamPlaceholderIds(db: Database, sessionId: string): Set<string> {
+    const row = db
+        .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { stripped_placeholder_ids?: string } | null;
+    return new Set(parseStrippedPlaceholderState(row?.stripped_placeholder_ids).hiddenSeamIds);
 }
 
 export function setStrippedPlaceholderIds(db: Database, sessionId: string, ids: Set<string>): void {
     ensureSessionMetaRow(db, sessionId);
-    const json = ids.size > 0 ? JSON.stringify([...ids]) : "";
+    const bounded = [...ids].slice(-MAX_STRIPPED_PLACEHOLDER_IDS);
+    const json = bounded.length > 0 ? JSON.stringify(bounded) : "";
     db.prepare("UPDATE session_meta SET stripped_placeholder_ids = ? WHERE session_id = ?").run(
         json,
         sessionId,
@@ -2191,41 +2248,48 @@ export function setStrippedPlaceholderIds(db: Database, sessionId: string, ids: 
 }
 
 /**
- * Compare-and-swap a delta (add/remove) onto the persisted stripped-placeholder
- * set, retrying on a concurrent write so sibling OpenCode/Pi processes sharing
- * the session DB merge instead of clobbering each other's discovered IDs.
- *
- * The mutation is expressed as a delta (not a whole-set overwrite) precisely so
- * the CAS retry is meaningful: each attempt re-reads the current set, re-applies
- * `(current ∪ add) \ remove`, and CAS-writes against the exact bytes it read.
- * A whole-set overwrite would re-apply a stale-read-derived set and silently
- * undo a sibling's concurrent change.
- *
- * Returns true when the set ended in the intended state (incl. no-op), false
- * only when retries were exhausted.
+ * Compare-and-swap a delta onto persisted placeholder decisions. Hidden seam
+ * membership is stored beside the public id set so non-Anthropic replay can
+ * remove only rows that were absent from the fold wire.
  */
 export function applyStrippedPlaceholderDelta(
     db: Database,
     sessionId: string,
-    delta: { add?: Iterable<string>; remove?: Iterable<string> },
+    delta: {
+        add?: Iterable<string>;
+        remove?: Iterable<string>;
+        hiddenSeamAdd?: Iterable<string>;
+    },
 ): boolean {
     const add = delta.add ? [...delta.add] : [];
     const remove = delta.remove ? [...delta.remove] : [];
-    if (add.length === 0 && remove.length === 0) return true;
+    const hiddenSeamAdd = delta.hiddenSeamAdd ? [...delta.hiddenSeamAdd] : [];
+    if (add.length === 0 && remove.length === 0 && hiddenSeamAdd.length === 0) return true;
     ensureSessionMetaRow(db, sessionId);
 
     for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
         const row = db
             .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
             .get(sessionId) as { stripped_placeholder_ids?: string | null } | undefined;
-        // Keep the RAW stored value (NULL vs "") for the CAS predicate — SQLite's
-        // `IS` matches NULL and value equality alike, so we can compare against
-        // exactly what we read regardless of whether the column is NULL or "".
         const rawStored = row ? (row.stripped_placeholder_ids ?? null) : null;
-        const current = new Set<string>(parseStrippedBlob(rawStored));
+        const parsed = parseStrippedPlaceholderState(rawStored);
+        const current = new Set(parsed.ids);
+        const hiddenSeamIds = new Set(parsed.hiddenSeamIds);
         for (const id of add) current.add(id);
-        for (const id of remove) current.delete(id);
-        const nextBlob = current.size > 0 ? JSON.stringify([...current]) : "";
+        for (const id of hiddenSeamAdd) {
+            current.add(id);
+            hiddenSeamIds.add(id);
+        }
+        for (const id of remove) {
+            current.delete(id);
+            hiddenSeamIds.delete(id);
+        }
+        const boundedIds = [...current].slice(-MAX_STRIPPED_PLACEHOLDER_IDS);
+        const boundedSet = new Set(boundedIds);
+        const nextBlob = serializeStrippedPlaceholderState({
+            ids: boundedIds,
+            hiddenSeamIds: [...hiddenSeamIds].filter((id) => boundedSet.has(id)),
+        });
         if (nextBlob === (rawStored ?? "")) return true;
         const result = db
             .prepare(
@@ -2238,27 +2302,13 @@ export function applyStrippedPlaceholderDelta(
     return false;
 }
 
-function parseStrippedBlob(raw: string | null | undefined): string[] {
-    if (!raw || raw.length === 0) return [];
-    try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed))
-            return parsed.filter((v: unknown): v is string => typeof v === "string");
-    } catch {
-        // corrupt JSON → empty
-    }
-    return [];
-}
-
 export function removeStrippedPlaceholderId(
     db: Database,
     sessionId: string,
     messageId: string,
 ): boolean {
     const before = getStrippedPlaceholderIds(db, sessionId);
-    if (!before.has(messageId)) {
-        return false;
-    }
+    if (!before.has(messageId)) return false;
     applyStrippedPlaceholderDelta(db, sessionId, { remove: [messageId] });
     return true;
 }
