@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { findBoundaryUserMessage } from "../../features/magic-context/compaction-marker";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import {
@@ -42,6 +43,10 @@ import {
     MARKER_SUMMARY_TEXT,
     updateCompactionMarkerAfterPublication,
 } from "./compaction-marker-manager";
+import {
+    prepareCompartmentInjection,
+    selectHiddenMessagesAtCompactionSeam,
+} from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 import { reconcileMarkerRepresentation } from "./transform-postprocess-phase";
 
@@ -609,5 +614,61 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
             /OpenCode database not found/,
         );
         expect(existsSync(join(dataHome, "opencode", "opencode.db"))).toBe(false);
+    });
+});
+
+describe("assistant-ended marker seam geometry", () => {
+    it("selects exactly the rows between the required user marker and trim boundary", () => {
+        const dataHome = useTempDataHome("assistant-ended-marker-seam-");
+        const sessionId = "ses-assistant-ended-marker-seam";
+        const opencodeDb = createOpenCodeDb(dataHome);
+        insertMessage(opencodeDb, "older-assistant", sessionId, 1_000, "assistant");
+        insertMessage(opencodeDb, "marker-user", sessionId, 2_000, "user");
+        insertMessage(opencodeDb, "seam-assistant-a", sessionId, 3_000, "assistant");
+        insertMessage(opencodeDb, "seam-assistant-b", sessionId, 4_000, "assistant");
+        insertMessage(opencodeDb, "assistant-end", sessionId, 5_000, "assistant");
+        insertMessage(opencodeDb, "retained-user", sessionId, 6_000, "user");
+        closeQuietly(opencodeDb);
+
+        const db = openDatabase();
+        insertCompartment(db, sessionId, 5, "assistant-end");
+        const messages = [
+            { info: { id: "older-assistant", role: "assistant", sessionID: sessionId }, parts: [] },
+            { info: { id: "marker-user", role: "user", sessionID: sessionId }, parts: [] },
+            {
+                info: { id: "seam-assistant-a", role: "assistant", sessionID: sessionId },
+                parts: [],
+            },
+            {
+                info: { id: "seam-assistant-b", role: "assistant", sessionID: sessionId },
+                parts: [],
+            },
+            { info: { id: "assistant-end", role: "assistant", sessionID: sessionId }, parts: [] },
+            { info: { id: "retained-user", role: "user", sessionID: sessionId }, parts: [] },
+        ] as MessageLike[];
+        const beforeTrim = [...messages];
+        const prepared = prepareCompartmentInjection(db, sessionId, messages, true);
+        const markerBoundary = findBoundaryUserMessage(sessionId, "assistant-end");
+
+        // OpenCode filterCompacted requires the marker part on a user row, so the
+        // nearest user at-or-before an assistant compartment end is the boundary.
+        expect(markerBoundary?.id).toBe("marker-user");
+        const markerOrdinal = beforeTrim.findIndex(
+            (message) => message.info.id === markerBoundary?.id,
+        );
+        const trimOrdinal = beforeTrim.findIndex(
+            (message) => message.info.id === prepared?.compartmentEndMessageId,
+        );
+        expect(markerOrdinal).toBeLessThan(trimOrdinal);
+        const rowsBetween = beforeTrim
+            .slice(markerOrdinal + 1, trimOrdinal + 1)
+            .map((message) => message.info.id);
+        expect(rowsBetween).toEqual(["seam-assistant-a", "seam-assistant-b", "assistant-end"]);
+        expect(
+            selectHiddenMessagesAtCompactionSeam(
+                beforeTrim,
+                prepared?.skippedVisibleMessages ?? 0,
+            ).map((message) => message.info.id),
+        ).toEqual(rowsBetween);
     });
 });

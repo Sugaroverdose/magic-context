@@ -6,7 +6,9 @@ import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import {
     applyStrippedPlaceholderDelta,
+    getHiddenSeamPlaceholderIds,
     getStrippedPlaceholderIds,
+    MAX_STRIPPED_PLACEHOLDER_IDS,
     removeStrippedPlaceholderId,
     setStrippedPlaceholderIds,
 } from "./storage-meta-persisted";
@@ -66,6 +68,24 @@ describe("applyStrippedPlaceholderDelta (CAS)", () => {
         expect(removeStrippedPlaceholderId(db, ses, "zzz")).toBe(false);
         expect(removeStrippedPlaceholderId(db, ses, "a")).toBe(true);
         expect(getStrippedPlaceholderIds(db, ses)).toEqual(new Set());
+    });
+
+    it("bounds durable ids while retaining the newest seam decisions", () => {
+        const ids = Array.from(
+            { length: MAX_STRIPPED_PLACEHOLDER_IDS + 3 },
+            (_, index) => `message-${index}`,
+        );
+        applyStrippedPlaceholderDelta(db, ses, { hiddenSeamAdd: ids });
+
+        expect(getStrippedPlaceholderIds(db, ses).size).toBe(MAX_STRIPPED_PLACEHOLDER_IDS);
+        expect(getStrippedPlaceholderIds(db, ses).has("message-0")).toBe(false);
+        expect(getHiddenSeamPlaceholderIds(db, ses).has(ids.at(-1) ?? "")).toBe(true);
+    });
+
+    it("removes hidden seam classification with its source id", () => {
+        applyStrippedPlaceholderDelta(db, ses, { hiddenSeamAdd: ["seam"] });
+        expect(removeStrippedPlaceholderId(db, ses, "seam")).toBe(true);
+        expect(getHiddenSeamPlaceholderIds(db, ses)).toEqual(new Set());
     });
 
     it("merge semantics: a stale-read add does not undo a concurrent remove", () => {

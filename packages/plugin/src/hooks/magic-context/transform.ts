@@ -92,6 +92,7 @@ import type { LiveModelBySession } from "./hook-handlers";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
+    selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, projectLkgEntry, resolveLkgModelKeys } from "./lkg-replay";
@@ -1757,6 +1758,7 @@ export function createTransform(deps: TransformDeps) {
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;
         let rebuiltHistoryFromInitialPrepare = false;
         let hiddenMessagesAtCompactionSeam: MessageLike[] = [];
+        let trimmedMessagesAtCompactionBoundary: MessageLike[] = [];
         const messagesBeforeInitialPrepare =
             isCacheBusting && deferredHistoryWasPendingAtPassStart ? [...messages] : null;
         // Compaction-off bypasses compartment-history preparation entirely,
@@ -1776,9 +1778,15 @@ export function createTransform(deps: TransformDeps) {
                 deps.experimentalTemporalAwareness,
             );
             if (messagesBeforeInitialPrepare) {
-                hiddenMessagesAtCompactionSeam = messagesBeforeInitialPrepare.slice(
+                const skippedVisibleMessages =
+                    pendingCompartmentInjection?.skippedVisibleMessages ?? 0;
+                trimmedMessagesAtCompactionBoundary = messagesBeforeInitialPrepare.slice(
                     0,
-                    pendingCompartmentInjection?.skippedVisibleMessages ?? 0,
+                    skippedVisibleMessages,
+                );
+                hiddenMessagesAtCompactionSeam = selectHiddenMessagesAtCompactionSeam(
+                    messagesBeforeInitialPrepare,
+                    skippedVisibleMessages,
                 );
             }
             logTransformTiming(sessionId, "prepareCompartmentInjection", tInj);
@@ -2255,6 +2263,7 @@ export function createTransform(deps: TransformDeps) {
             emergencyCeilingTokens,
             pendingCompartmentInjection,
             hiddenMessagesAtCompactionSeam,
+            trimmedMessagesAtCompactionBoundary,
             didMutateFromFlushedStatuses,
             watermark,
             forceMaterializationPercentage,

@@ -142,39 +142,34 @@ export function isSentinel(part: unknown): boolean {
 }
 
 /**
- * Replay a previously-persisted set of message IDs by replacing each
- * matching message's parts with a single whole-message sentinel. Used to
- * keep the wire shape stable across defer passes when OpenCode rebuilds
- * messages from its DB — any message whose ID is in `ids` was
- * neutralized on a prior bust pass and should be neutralized again now.
- *
- * `providerID` controls which sentinel shape is installed (see
- * `makeWholeMessageSentinel`). Pass the live session's provider so the
- * replayed wire shape matches the fresh sentinelization on the current
- * pass — providers that don't filter empties get `[dropped]`, Anthropic
- * gets `""`.
- *
- * Returns the number of messages replayed + the set of IDs that were NOT
- * found in the current message array (caller can prune them from the
- * persisted set so we stop carrying stale IDs forever).
+ * Replay persisted whole-message decisions onto a fresh host projection.
+ * Canonical Anthropic keeps empty sentinels because its adapter filters them.
+ * For non-empty-sentinel providers, hidden seam rows are removed instead: they
+ * were absent on the fold pass, so removal is the only byte-identical replay.
  */
 export function replaySentinelByMessageIds(
     messages: Array<{ info: { id?: string }; parts: unknown[] }>,
     ids: Set<string>,
     providerID?: string,
+    hiddenSeamIds: ReadonlySet<string> = new Set(),
 ): { replayed: number; missingIds: string[] } {
     if (ids.size === 0) return { replayed: 0, missingIds: [] };
     const seen = new Set<string>();
     let replayed = 0;
-    for (const msg of messages) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const msg = messages[index];
         const id = msg.info.id;
         if (!id || !ids.has(id)) continue;
         seen.add(id);
-        // Idempotent skip — already neutralized on an earlier pass in this turn
+        if (!modelAcceptsEmptyContent(providerID) && hiddenSeamIds.has(id)) {
+            messages.splice(index, 1);
+            replayed += 1;
+            continue;
+        }
         if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
         msg.parts.length = 0;
         msg.parts.push(makeWholeMessageSentinel(providerID));
-        replayed++;
+        replayed += 1;
     }
     const missingIds: string[] = [];
     for (const id of ids) if (!seen.has(id)) missingIds.push(id);

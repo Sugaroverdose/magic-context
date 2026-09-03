@@ -308,6 +308,26 @@ export function trimMemoriesToBudget(
     return result;
 }
 
+/**
+ * Return only rows between OpenCode's marker boundary and the in-memory trim
+ * boundary. filterCompacted requires a user marker row, so an assistant-ended
+ * compartment can temporarily re-expose the assistant suffix after that user.
+ */
+export function selectHiddenMessagesAtCompactionSeam(
+    messagesBeforeTrim: MessageLike[],
+    skippedVisibleMessages: number,
+): MessageLike[] {
+    const trimmed = messagesBeforeTrim.slice(0, skippedVisibleMessages);
+    let markerBoundaryIndex = -1;
+    for (let index = trimmed.length - 1; index >= 0; index -= 1) {
+        if (trimmed[index]?.info.role === "user") {
+            markerBoundaryIndex = index;
+            break;
+        }
+    }
+    return markerBoundaryIndex < 0 ? [] : trimmed.slice(markerBoundaryIndex + 1);
+}
+
 export function prepareCompartmentInjection(
     db: Database,
     sessionId: string,
