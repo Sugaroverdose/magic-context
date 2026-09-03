@@ -40,6 +40,7 @@ import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_RENEWAL_MS,
 	releaseCompartmentLease,
+	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -3739,7 +3740,7 @@ function spawnPiHistorianRun(args: {
 			});
 		} finally {
 			clearInterval(renewal);
-			releaseCompartmentLease(db, sessionId, holderId);
+			releaseCompartmentLeaseBestEffort(db, sessionId, holderId, sessionLog);
 		}
 	})().finally(() => {
 		inFlightHistorian.delete(sessionId);
