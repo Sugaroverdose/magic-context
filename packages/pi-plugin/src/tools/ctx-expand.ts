@@ -120,13 +120,22 @@ export function createCtxExpandTool(
 
 			try {
 				// By-ordinal mode: full recovery of a single message from JSONL.
-				if (typeof params.message === "number" && params.message >= 1) {
+				if (params.message !== undefined) {
+					if (
+						typeof params.message !== "number" ||
+						!Number.isInteger(params.message) ||
+						params.message < 1
+					) {
+						return err("Error: message must be a positive integer.");
+					}
 					return ok(renderMessageByOrdinal(sessionId, params.message));
 				}
 
 				if (
 					typeof params.start !== "number" ||
 					typeof params.end !== "number" ||
+					!Number.isInteger(params.start) ||
+					!Number.isInteger(params.end) ||
 					params.start < 1 ||
 					params.end < params.start
 				) {
