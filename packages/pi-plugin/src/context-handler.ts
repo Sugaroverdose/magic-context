@@ -240,6 +240,7 @@ import {
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
+import { capturePiServedArray } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { stripPiProcessedImages } from "./strip-processed-images-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
@@ -3339,6 +3340,7 @@ export function registerPiContextHandler(
 			) {
 				assertTailHygieneLastWriter();
 			}
+			capturePiServedArray(sessionId, outputMessages);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};

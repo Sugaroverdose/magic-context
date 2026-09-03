@@ -1,0 +1,194 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	capturePiServedArray,
+	flushPiServedArrayLedger,
+} from "../src/served-array-ledger";
+import { __test } from "./analyze-pi-cache-busts";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+	for (const directory of temporaryDirectories.splice(0)) {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+function temporaryDirectory(label: string): string {
+	const directory = mkdtempSync(join(tmpdir(), label));
+	temporaryDirectories.push(directory);
+	return directory;
+}
+
+function assistant(
+	id: string,
+	timestamp: string,
+	usage: { input: number; cacheRead: number; cacheWrite: number },
+): Record<string, unknown> {
+	return {
+		type: "message",
+		id,
+		timestamp,
+		message: {
+			role: "assistant",
+			timestamp,
+			content: [{ type: "text", text: id }],
+			usage: { ...usage, output: 10, totalTokens: 999_999 },
+		},
+	};
+}
+
+function writeJsonl(
+	root: string,
+	project: string,
+	filename: string,
+	entries: readonly unknown[],
+): string {
+	const directory = join(root, project);
+	mkdirSync(directory, { recursive: true });
+	const filePath = join(directory, filename);
+	writeFileSync(
+		filePath,
+		`${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+	);
+	return filePath;
+}
+
+describe("Pi cache-bust analyzer discovery", () => {
+	test("discovers Pi and OMP layouts and uses the session header id", async () => {
+		const piRoot = temporaryDirectory("pi-cache-analyzer-pi-");
+		const ompRoot = temporaryDirectory("pi-cache-analyzer-omp-");
+		writeJsonl(piRoot, "--project--", "filename-is-not-id.jsonl", [
+			{
+				type: "session",
+				id: "pi-header-id",
+				timestamp: "2026-09-04T09:00:00Z",
+			},
+		]);
+		writeJsonl(ompRoot, "project", "also-not-id.jsonl", [
+			{ type: "title", title: "OMP title" },
+			{
+				type: "session",
+				id: "omp-header-id",
+				timestamp: "2026-09-04T09:00:00Z",
+			},
+		]);
+
+		const sessions = await __test.discoverPiSessionFiles([piRoot, ompRoot]);
+
+		expect(sessions.map((session) => session.sessionId).sort()).toEqual([
+			"omp-header-id",
+			"pi-header-id",
+		]);
+	});
+});
+
+describe("Pi cache-bust analyzer meter", () => {
+	test("detector control reports a known post-compaction collapse as BUST at the seam", () => {
+		const sessionRoot = temporaryDirectory("pi-cache-positive-session-");
+		const storageDir = temporaryDirectory("pi-cache-positive-ledger-");
+		const sessionId = "019e8905-post-compaction-control";
+		const entries = [
+			{ type: "session", id: sessionId, timestamp: "2026-09-04T09:59:00Z" },
+			assistant("a-prev", "2026-09-04T10:00:00Z", {
+				input: 1_924,
+				cacheRead: 185_856,
+				cacheWrite: 0,
+			}),
+			{
+				type: "compaction",
+				id: "compact-1",
+				timestamp: "2026-09-04T10:00:01Z",
+				firstKeptEntryId: "997b8008",
+			},
+			assistant("a-next", "2026-09-04T10:00:02Z", {
+				input: 95_420,
+				cacheRead: 16_896,
+				cacheWrite: 0,
+			}),
+		];
+		const filePath = writeJsonl(
+			sessionRoot,
+			"--project--",
+			"positive.jsonl",
+			entries,
+		);
+		const before = [
+			{ role: "system", content: "system" },
+			{ role: "user", content: [{ type: "text", text: "kept" }] },
+			{ role: "assistant", content: [{ type: "text", text: "old history" }] },
+		];
+		const after = [
+			before[0],
+			before[1],
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "compacted history" }],
+			},
+		];
+		capturePiServedArray(sessionId, before, {
+			storageDir,
+			now: new Date("2026-09-04T09:59:59Z"),
+		});
+		capturePiServedArray(sessionId, after, {
+			storageDir,
+			now: new Date("2026-09-04T10:00:01.500Z"),
+		});
+		flushPiServedArrayLedger();
+		const session = __test.parsePiSessionFile(filePath);
+		expect(session).toBeDefined();
+		const ledger = __test.loadLedger(sessionId, storageDir);
+
+		const rows = __test.analyzeJoinedPasses(
+			__test.joinPasses(ledger, session as NonNullable<typeof session>),
+		);
+
+		expect(rows[1].verdict).toBe("BUST");
+		expect(rows[1].current.ledger.first_divergence_message_index).toBe(2);
+		expect(rows[1].attribution).toContain("message[2] (compaction seam)");
+		expect(rows[1].rewrittenTokens).toBe(170_884);
+	});
+
+	test("uses input plus cache read and cache write as prior meter total", () => {
+		const sessionRoot = temporaryDirectory("pi-cache-meter-session-");
+		const storageDir = temporaryDirectory("pi-cache-meter-ledger-");
+		const sessionId = "meter-total";
+		const filePath = writeJsonl(sessionRoot, "project", "meter.jsonl", [
+			{ type: "session", id: sessionId },
+			assistant("a1", "2026-09-04T10:00:00Z", {
+				input: 20,
+				cacheRead: 10_000,
+				cacheWrite: 500,
+			}),
+			assistant("a2", "2026-09-04T10:00:02Z", {
+				input: 20,
+				cacheRead: 10_450,
+				cacheWrite: 50,
+			}),
+		]);
+		const served = [{ role: "user", content: "same" }];
+		capturePiServedArray(sessionId, served, {
+			storageDir,
+			now: new Date("2026-09-04T09:59:59Z"),
+		});
+		capturePiServedArray(sessionId, served, {
+			storageDir,
+			now: new Date("2026-09-04T10:00:01Z"),
+		});
+		flushPiServedArrayLedger();
+		const session = __test.parsePiSessionFile(filePath);
+		const rows = __test.analyzeJoinedPasses(
+			__test.joinPasses(
+				__test.loadLedger(sessionId, storageDir),
+				session as NonNullable<typeof session>,
+			),
+		);
+
+		expect(rows[1].prevTotal).toBe(10_520);
+		expect(rows[1].comparableRead).toBe(10_470);
+		expect(rows[1].verdict).toBe("STABLE");
+		expect(rows[1].attribution).toBe("identical digest");
+	});
+});

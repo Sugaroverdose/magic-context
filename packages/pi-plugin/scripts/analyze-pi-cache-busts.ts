@@ -1,0 +1,473 @@
+#!/usr/bin/env bun
+
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { getOmpSessionsRoot, getPiSessionsRoot } from "../../cli/src/lib/paths";
+import { getMagicContextStorageDir } from "../../plugin/src/shared/data-path";
+import {
+	getPiServedArrayLedgerPath,
+	type PiServedArrayDigestRecord,
+} from "../src/served-array-ledger";
+
+type Json = Record<string, unknown>;
+type Verdict = "BASE" | "BUST" | "STABLE";
+
+interface Args {
+	sessionPrefix: string;
+	piDir?: string;
+	ompDir?: string;
+	ledgerDir: string;
+	since?: string;
+	until?: string;
+	limit?: number;
+	allRows: boolean;
+}
+
+interface SessionEntryMarker {
+	ordinal: number;
+	line: number;
+	type: string;
+}
+
+interface PiUsageRow {
+	timestamp: number;
+	createdAt: string;
+	line: number;
+	ordinal: number;
+	messageId: string;
+	input: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
+}
+
+interface PiSessionFile {
+	sessionId: string;
+	path: string;
+	entries: SessionEntryMarker[];
+	usage: PiUsageRow[];
+}
+
+interface JoinedPass {
+	ledger: PiServedArrayDigestRecord;
+	usage: PiUsageRow;
+	intervening: SessionEntryMarker[];
+}
+
+interface AnalysisRow {
+	current: JoinedPass;
+	previous?: JoinedPass;
+	verdict: Verdict;
+	prevTotal?: number;
+	meterFloor?: number;
+	comparableRead?: number;
+	rewrittenTokens?: number;
+	attribution: string;
+}
+
+function asJson(value: unknown): Json | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Json)
+		: undefined;
+}
+
+function finiteNonnegative(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? value
+		: undefined;
+}
+
+function getAnyNumber(value: unknown, keys: readonly string[]): number {
+	const record = asJson(value);
+	if (!record) return 0;
+	for (const key of keys) {
+		const candidate = finiteNonnegative(record[key]);
+		if (candidate !== undefined) return candidate;
+	}
+	return 0;
+}
+
+function parseTimestamp(value: unknown): number {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value !== "string") return 0;
+	const numeric = Number(value);
+	if (Number.isFinite(numeric)) return numeric;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function resolveTimeBound(
+	value: string | undefined,
+	nowMs = Date.now(),
+): number | undefined {
+	if (!value) return undefined;
+	const duration = /^(\d+)(ms|s|m|h|d)$/.exec(value);
+	if (duration) {
+		const unitMs = {
+			ms: 1,
+			s: 1_000,
+			m: 60_000,
+			h: 3_600_000,
+			d: 86_400_000,
+		}[duration[2] as "ms" | "s" | "m" | "h" | "d"];
+		return nowMs - Number(duration[1]) * unitMs;
+	}
+	const parsed = Date.parse(value);
+	if (!Number.isFinite(parsed)) throw new Error(`Invalid time bound: ${value}`);
+	return parsed;
+}
+
+function parseArgs(argv: string[]): Args {
+	const args = argv.slice(2);
+	const getOpt = (name: string): string | undefined => {
+		const index = args.indexOf(name);
+		return index >= 0 && index + 1 < args.length ? args[index + 1] : undefined;
+	};
+	const valueOptions = new Set([
+		"--session",
+		"--pi-dir",
+		"--omp-dir",
+		"--ledger-dir",
+		"--since",
+		"--until",
+		"--limit",
+	]);
+	let positionalSession = "";
+	for (let index = 0; index < args.length; index += 1) {
+		const arg = args[index];
+		if (valueOptions.has(arg)) {
+			index += 1;
+			continue;
+		}
+		if (!arg.startsWith("--")) {
+			positionalSession = arg;
+			break;
+		}
+	}
+	const limitRaw = getOpt("--limit");
+	return {
+		sessionPrefix: getOpt("--session") ?? positionalSession,
+		piDir: getOpt("--pi-dir"),
+		ompDir: getOpt("--omp-dir"),
+		ledgerDir: getOpt("--ledger-dir") ?? getMagicContextStorageDir(),
+		since: getOpt("--since"),
+		until: getOpt("--until"),
+		limit: limitRaw ? Number.parseInt(limitRaw, 10) : undefined,
+		allRows: args.includes("--all-rows"),
+	};
+}
+
+function parsePiSessionFile(filePath: string): PiSessionFile | undefined {
+	let lines: string[];
+	try {
+		lines = readFileSync(filePath, "utf8").split("\n");
+	} catch {
+		return undefined;
+	}
+	let sessionId = "";
+	const entries: SessionEntryMarker[] = [];
+	const usage: PiUsageRow[] = [];
+	let ordinal = 0;
+	for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+		const raw = lines[lineIndex].trim();
+		if (!raw) continue;
+		let entry: Json;
+		try {
+			entry = JSON.parse(raw) as Json;
+		} catch {
+			continue;
+		}
+		const type = typeof entry.type === "string" ? entry.type : "unknown";
+		const marker = { ordinal, line: lineIndex + 1, type };
+		entries.push(marker);
+		ordinal += 1;
+		if (type === "session" && typeof entry.id === "string") {
+			sessionId = entry.id;
+			continue;
+		}
+		if (type !== "message") continue;
+		const message = asJson(entry.message);
+		if (message?.role !== "assistant") continue;
+		const usageValue = message.usage ?? message.tokens;
+		const usageRecord = asJson(usageValue);
+		if (!usageRecord) continue;
+		const cache = asJson(usageRecord.cache);
+		const input = getAnyNumber(usageRecord, ["input", "inputTokens"]);
+		const cacheRead = cache
+			? getAnyNumber(cache, ["read", "cacheRead", "cache_read"])
+			: getAnyNumber(usageRecord, ["cache_read", "cacheRead"]);
+		const cacheWrite = cache
+			? getAnyNumber(cache, ["write", "cacheWrite", "cache_write"])
+			: getAnyNumber(usageRecord, ["cache_write", "cacheWrite"]);
+		const timestamp =
+			parseTimestamp(message.timestamp) || parseTimestamp(entry.timestamp);
+		if (timestamp === 0) continue;
+		usage.push({
+			timestamp,
+			createdAt: new Date(timestamp).toISOString(),
+			line: lineIndex + 1,
+			ordinal: marker.ordinal,
+			messageId:
+				typeof entry.id === "string" ? entry.id : `line-${lineIndex + 1}`,
+			input,
+			cacheRead,
+			cacheWrite,
+			total: input + cacheRead + cacheWrite,
+		});
+	}
+	if (!sessionId) return undefined;
+	usage.sort(
+		(left, right) =>
+			left.timestamp - right.timestamp || left.ordinal - right.ordinal,
+	);
+	return { sessionId, path: filePath, entries, usage };
+}
+
+async function discoverPiSessionFiles(
+	roots: readonly string[],
+): Promise<PiSessionFile[]> {
+	const files: PiSessionFile[] = [];
+	const seenPaths = new Set<string>();
+	for (const root of roots) {
+		if (!root || !existsSync(root)) continue;
+		const glob = new Bun.Glob("**/*.jsonl");
+		for await (const relativePath of glob.scan({
+			cwd: root,
+			onlyFiles: true,
+		})) {
+			const filePath = join(root, relativePath);
+			if (seenPaths.has(filePath)) continue;
+			seenPaths.add(filePath);
+			const parsed = parsePiSessionFile(filePath);
+			if (parsed) files.push(parsed);
+		}
+	}
+	return files;
+}
+
+function validLedgerRecord(value: unknown): value is PiServedArrayDigestRecord {
+	const record = asJson(value);
+	return (
+		record?.version === 1 &&
+		typeof record.session_id === "string" &&
+		typeof record.pass_ts === "string" &&
+		typeof record.sequence === "number" &&
+		typeof record.message_count === "number" &&
+		typeof record.sha256 === "string" &&
+		Array.isArray(record.block_vectors)
+	);
+}
+
+function loadLedger(
+	sessionId: string,
+	storageDir: string,
+	since?: number,
+	until?: number,
+): PiServedArrayDigestRecord[] {
+	const ledgerPath = getPiServedArrayLedgerPath(sessionId, storageDir);
+	if (!existsSync(ledgerPath)) return [];
+	const records: PiServedArrayDigestRecord[] = [];
+	for (const raw of readFileSync(ledgerPath, "utf8").split("\n")) {
+		if (!raw.trim()) continue;
+		try {
+			const value = JSON.parse(raw);
+			if (!validLedgerRecord(value) || value.session_id !== sessionId) continue;
+			const timestamp = Date.parse(value.pass_ts);
+			if (!Number.isFinite(timestamp)) continue;
+			if (since !== undefined && timestamp < since) continue;
+			if (until !== undefined && timestamp > until) continue;
+			records.push(value);
+		} catch {
+			// A partial final append must not hide earlier complete observations.
+		}
+	}
+	records.sort(
+		(left, right) =>
+			Date.parse(left.pass_ts) - Date.parse(right.pass_ts) ||
+			left.sequence - right.sequence,
+	);
+	return records;
+}
+
+function entriesBetween(
+	entries: readonly SessionEntryMarker[],
+	previous: PiUsageRow | undefined,
+	current: PiUsageRow,
+): SessionEntryMarker[] {
+	if (!previous) return [];
+	return entries.filter(
+		(entry) =>
+			entry.ordinal > previous.ordinal && entry.ordinal < current.ordinal,
+	);
+}
+
+/** Match each assistant usage row to the latest context-pass ledger written before it. */
+function joinPasses(
+	ledgers: readonly PiServedArrayDigestRecord[],
+	session: PiSessionFile,
+): JoinedPass[] {
+	const joined: JoinedPass[] = [];
+	let ledgerIndex = 0;
+	let previousUsage: PiUsageRow | undefined;
+	for (const usage of session.usage) {
+		let candidate: PiServedArrayDigestRecord | undefined;
+		while (
+			ledgerIndex < ledgers.length &&
+			Date.parse(ledgers[ledgerIndex].pass_ts) <= usage.timestamp
+		) {
+			candidate = ledgers[ledgerIndex];
+			ledgerIndex += 1;
+		}
+		if (!candidate) {
+			previousUsage = usage;
+			continue;
+		}
+		joined.push({
+			ledger: candidate,
+			usage,
+			intervening: entriesBetween(session.entries, previousUsage, usage),
+		});
+		previousUsage = usage;
+	}
+	return joined;
+}
+
+function vectorAt(
+	record: PiServedArrayDigestRecord,
+	index: number,
+): string | undefined {
+	const offset = index - record.block_vector_start;
+	return offset >= 0 ? record.block_vectors[offset] : undefined;
+}
+
+function digestAttribution(previous: JoinedPass, current: JoinedPass): string {
+	if (current.ledger.sha256 === previous.ledger.sha256)
+		return "identical digest";
+	const divergence = current.ledger.first_divergence_message_index;
+	if (divergence === null)
+		return "digest changed; divergence unavailable after restart";
+	if (divergence < 0) return "digest changed; divergence index unavailable";
+	const seam = current.intervening.some((entry) => entry.type === "compaction")
+		? " (compaction seam)"
+		: "";
+	const previousVector = vectorAt(previous.ledger, divergence) ?? "before-tail";
+	const currentVector = vectorAt(current.ledger, divergence) ?? "before-tail";
+	return `message[${divergence}]${seam}: ${previousVector} -> ${currentVector}`;
+}
+
+function analyzeJoinedPasses(joined: readonly JoinedPass[]): AnalysisRow[] {
+	return joined.map((current, index) => {
+		if (index === 0) {
+			return { current, verdict: "BASE", attribution: "first joined pass" };
+		}
+		const previous = joined[index - 1];
+		const prevTotal = previous.usage.total;
+		const meterFloor = prevTotal - Math.max(64, previous.usage.input);
+		const comparableRead = current.usage.cacheRead + current.usage.input;
+		const bust = comparableRead < meterFloor;
+		return {
+			current,
+			previous,
+			verdict: bust ? "BUST" : "STABLE",
+			prevTotal,
+			meterFloor,
+			comparableRead,
+			rewrittenTokens: bust ? prevTotal - current.usage.cacheRead : undefined,
+			attribution: digestAttribution(previous, current),
+		};
+	});
+}
+
+function fmtTime(iso: string): string {
+	return iso.replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+}
+
+function meterCell(row: AnalysisRow): string {
+	if (row.verdict === "BASE") return "(first joined pass)";
+	const rewritten =
+		row.rewrittenTokens === undefined
+			? ""
+			: `; rewritten≈${row.rewrittenTokens.toLocaleString()}`;
+	return `read=${row.current.usage.cacheRead.toLocaleString()} + input=${row.current.usage.input.toLocaleString()} = ${row.comparableRead?.toLocaleString()}; floor=${row.meterFloor?.toLocaleString()} (prevTotal=${row.prevTotal?.toLocaleString()})${rewritten}`;
+}
+
+async function main(): Promise<void> {
+	const options = parseArgs(process.argv);
+	if (!options.sessionPrefix) {
+		console.error(
+			"usage: bun scripts/analyze-pi-cache-busts.ts <sessionIdPrefix> | --session <prefix> [--pi-dir <path>] [--omp-dir <path>] [--ledger-dir <MC data dir>] [--since ISO|duration] [--until ISO|duration] [--limit N] [--all-rows]",
+		);
+		process.exit(1);
+	}
+	const roots = [
+		options.piDir ?? getPiSessionsRoot(),
+		options.ompDir ?? getOmpSessionsRoot(),
+	].filter((root, index, all) => all.indexOf(root) === index);
+	const sessions = (await discoverPiSessionFiles(roots)).filter((session) =>
+		session.sessionId.startsWith(options.sessionPrefix),
+	);
+	if (sessions.length === 0) {
+		console.error(
+			`No Pi/OMP JSONL session found for prefix "${options.sessionPrefix}" in ${roots.join(", ")}`,
+		);
+		process.exit(1);
+	}
+	if (sessions.length > 1) {
+		console.error(
+			`Ambiguous session prefix "${options.sessionPrefix}": ${sessions.map((session) => session.sessionId).join(", ")}`,
+		);
+		process.exit(1);
+	}
+	const session = sessions[0];
+	const since = resolveTimeBound(options.since);
+	const until = resolveTimeBound(options.until);
+	let ledgers = loadLedger(session.sessionId, options.ledgerDir, since, until);
+	if (options.limit && ledgers.length > options.limit) {
+		ledgers = ledgers.slice(ledgers.length - options.limit);
+	}
+	if (ledgers.length === 0) {
+		console.error(
+			`No served-array digest records found for ${session.sessionId} at ${getPiServedArrayLedgerPath(session.sessionId, options.ledgerDir)}`,
+		);
+		process.exit(1);
+	}
+	const rows = analyzeJoinedPasses(joinPasses(ledgers, session));
+	console.log(`Session: ${session.sessionId}`);
+	console.log(`JSONL:   ${session.path}`);
+	console.log(`Digests: ${ledgers.length}`);
+	console.log("");
+	console.log(
+		"Meter rule: BUST when cacheRead + current input < prevTotal - ε, where prevTotal is prior input + cacheRead + cacheWrite and ε=max(64, prior input). The meter decides the verdict; the served-array digest attributes changed bytes.",
+	);
+	console.log(
+		"time(UTC)            | verdict | meter                                                                  | first divergence",
+	);
+	console.log(
+		"---------------------|---------|------------------------------------------------------------------------|-----------------",
+	);
+	let busts = 0;
+	for (const row of rows) {
+		if (row.verdict === "BUST") busts += 1;
+		if (!options.allRows && row.verdict !== "BUST") continue;
+		console.log(
+			`${fmtTime(row.current.usage.createdAt).padEnd(21)} | ${row.verdict.padEnd(7)} | ${meterCell(row).padEnd(70)} | ${row.attribution}`,
+		);
+	}
+	console.log("");
+	console.log(
+		`${busts} metered bust(s) across ${rows.length} joined pass(es).${options.allRows ? "" : " (STABLE rows hidden; pass --all-rows to show them.)"}`,
+	);
+}
+
+export const __test = {
+	analyzeJoinedPasses,
+	digestAttribution,
+	discoverPiSessionFiles,
+	joinPasses,
+	loadLedger,
+	parseArgs,
+	parsePiSessionFile,
+	resolveTimeBound,
+};
+
+if (import.meta.main) await main();
