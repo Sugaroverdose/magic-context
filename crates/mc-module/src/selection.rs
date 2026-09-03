@@ -34,6 +34,8 @@ use crate::transform::{utf16_len, utf16_prefix, ReductionDecision};
 
 /// `todowrite`: keep the newest 1 (the live plan is the newest todo state).
 const TODOWRITE_KEEP: usize = 1;
+/// Distinct recent message owners retained as continuation context.
+const SUPERSESSION_RECENT_MESSAGE_WINDOW: usize = 20;
 /// Recent `ctx_reduce` arcs retained as visible housekeeping exemplars.
 const CTX_REDUCE_KEEP: usize = 3;
 /// Zero-value meta tools whose every occurrence is droppable.
@@ -795,12 +797,50 @@ fn newest_ctx_reduce_arc_ids(arcs: &[&ToolArc]) -> HashSet<String> {
         .collect()
 }
 
+/// Derive the continuation floor from the complete mutable tail. Blocks behind the
+/// module's coverage boundary are already frozen and cannot be supersession candidates,
+/// while every candidate and every newer owner remains in `items`.
+fn recent_supersession_owner_message_ids(items: &[SelItem], arcs: &[ToolArc]) -> HashSet<String> {
+    let owner_by_arc = arcs
+        .iter()
+        .filter_map(|arc| Some((arc.arc_id.as_str(), arc.owner_message_id.as_ref()?.as_str())))
+        .collect::<HashMap<_, _>>();
+    let mut latest_ordinal_by_owner = HashMap::<&str, u64>::new();
+    for item in items {
+        let owner = match item.arc_id.as_deref() {
+            Some(arc_id) => owner_by_arc.get(arc_id).copied(),
+            None => item_message_id(item),
+        };
+        let Some(owner) = owner else {
+            continue;
+        };
+        latest_ordinal_by_owner
+            .entry(owner)
+            .and_modify(|ordinal| *ordinal = (*ordinal).max(item.ordinal))
+            .or_insert(item.ordinal);
+    }
+    let mut newest_first = latest_ordinal_by_owner.into_iter().collect::<Vec<_>>();
+    newest_first.sort_by(|(left_owner, left_ordinal), (right_owner, right_ordinal)| {
+        right_ordinal
+            .cmp(left_ordinal)
+            .then_with(|| right_owner.cmp(left_owner))
+    });
+    newest_first
+        .into_iter()
+        .take(SUPERSESSION_RECENT_MESSAGE_WINDOW)
+        .map(|(owner, _)| owner.to_string())
+        .collect()
+}
+
 /// 1.1 Control-plane supersession + 1.2 edit supersession (the smart_drops selectors).
 /// Newest-arc-first, per tool name: todowrite keep-1, ctx_reduce keep-K, zero-value
 /// meta drop-all, ctx_note drop-on-zero-value-action; edit/write older-per-file →
 /// edit_marker. Returns per-arc intents so the caller expands + shapes them. Active
 /// (non-reduced, client-executed) arcs only.
-fn select_supersession(arcs: &[&ToolArc]) -> HashMap<String, ArcIntent> {
+fn select_supersession(
+    arcs: &[&ToolArc],
+    recent_message_ids: &HashSet<String>,
+) -> HashMap<String, ArcIntent> {
     let mut intents: HashMap<String, ArcIntent> = HashMap::new();
     // Newest-arc-first for keep-N and newest-per-file semantics.
     let mut newest_first: Vec<&&ToolArc> = arcs.iter().collect();
@@ -820,9 +860,15 @@ fn select_supersession(arcs: &[&ToolArc]) -> HashMap<String, ArcIntent> {
         if is_edit_tool(name) {
             if let Some(fp) = read_input_str(&arc.input, FILE_PATH_KEYS) {
                 if seen_file.contains(&fp) {
-                    intents
-                        .entry(arc.arc_id.clone())
-                        .or_insert(ArcIntent { edit_marker: true });
+                    if arc
+                        .owner_message_id
+                        .as_ref()
+                        .is_some_and(|owner| !recent_message_ids.contains(owner))
+                    {
+                        intents
+                            .entry(arc.arc_id.clone())
+                            .or_insert(ArcIntent { edit_marker: true });
+                    }
                 } else {
                     seen_file.insert(fp); // newest edit to this file stays full
                 }
@@ -844,7 +890,12 @@ fn select_supersession(arcs: &[&ToolArc]) -> HashMap<String, ArcIntent> {
         } else {
             false
         };
-        if is_drop_target {
+        if is_drop_target
+            && arc
+                .owner_message_id
+                .as_ref()
+                .is_some_and(|owner| !recent_message_ids.contains(owner))
+        {
             // A full drop supersedes an edit_marker for the same arc (drop wins).
             intents.insert(arc.arc_id.clone(), ArcIntent { edit_marker: false });
         }
@@ -1192,6 +1243,7 @@ pub(crate) fn select_reductions_with_outcome(
         .map(|item| item.id.clone())
         .collect();
     let arcs = group_arcs(items, frozen_keys);
+    let supersession_recent_message_ids = recent_supersession_owner_message_ids(items, &arcs);
     let incomplete_arc_ids = arcs
         .iter()
         .filter(|arc| arc.result_ids.is_empty())
@@ -1263,7 +1315,7 @@ pub(crate) fn select_reductions_with_outcome(
             if cfg.smart_drops && (!emergency_arc_ids.is_empty() || !two_pass_arc_ids.is_empty()) {
                 // A superseded arc remains eligible while the ride gate is shut, so the count
                 // observed when it next opens summarizes everything accumulated between rides.
-                let intents = select_supersession(&active_arcs);
+                let intents = select_supersession(&active_arcs, &supersession_recent_message_ids);
                 eligible_supersession_arc_ids =
                     Some(intents.keys().cloned().collect::<HashSet<_>>());
                 for (arc_id, intent) in intents {
@@ -1294,7 +1346,7 @@ pub(crate) fn select_reductions_with_outcome(
             if cfg.smart_drops && (ctx.supersession_ride_available || !two_pass_arc_ids.is_empty())
             {
                 // Count the exact selector output before overlap precedence removes members.
-                let intents = select_supersession(&active_arcs);
+                let intents = select_supersession(&active_arcs, &supersession_recent_message_ids);
                 eligible_supersession_arc_ids =
                     Some(intents.keys().cloned().collect::<HashSet<_>>());
                 for (arc_id, intent) in intents {
@@ -2572,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn supersession_floor_tracks_active_tag_window_on_thirty_arc_fixture() {
+    fn supersession_floors_compose_on_thirty_arc_fixture() {
         let mut items = Vec::new();
         for n in 1..=30u64 {
             let call_id = format!("c{n}");
@@ -2589,14 +2641,10 @@ mod tests {
         let mut ctx = base_ctx(PassClass::Execute);
         ctx.pass_already_busting = true;
         ctx.supersession_ride_available = true;
-        // On this fixture the old owner-message floor and the active-tag floor differ:
-        //
-        // | floor basis          | supersession admits | retains                 |
-        // | owner-message K=20   | c1..c10             | c11..c30                |
-        // | active odd tool tags | c2,c4,..,c28        | c1,c3,..,c29 plus c30   |
-        //
-        // A tool tag is carried by its result block. Protecting that one block must retain
-        // the complete arc rather than partially rewriting the untagged call block.
+        // The owner-message floor retains c11..c30, while the active odd tool-tag
+        // floor retains every odd arc. The two floors compose, so only the old even
+        // arcs c2..c10 remain eligible. Protecting one result block must retain the
+        // complete arc rather than partially rewriting the untagged call block.
         for n in (1..30u64).step_by(2) {
             ctx.tag_window_protected_block_ids
                 .insert(result_block_id(&format!("c{n}")));
@@ -2613,10 +2661,45 @@ mod tests {
             .filter_map(|decision| decision.target_id.split('#').next())
             .map(str::to_string)
             .collect::<HashSet<_>>();
-        let expected = (2..30u64)
+        let expected = (2..=10u64)
             .step_by(2)
             .map(|n| format!("c{n}"))
             .collect::<HashSet<_>>();
+
+        assert_eq!(admitted, expected);
+        assert_eq!(decisions.len(), expected.len() * 2);
+    }
+
+    #[test]
+    fn supersession_preserves_newest_twenty_message_owners_without_tag_window_help() {
+        let mut items = Vec::new();
+        for n in 1..=30u64 {
+            let call_id = format!("c{n}");
+            items.push(tool_call(
+                &call_id,
+                n,
+                "edit",
+                serde_json::json!({"filePath":"a.ts","oldString":format!("edit-{n}")}),
+                500,
+            ));
+            items.push(tool_result(&call_id, n, "edit", 100));
+        }
+
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.pass_already_busting = true;
+        ctx.supersession_ride_available = true;
+        let decisions = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
+        let admitted = decisions
+            .iter()
+            .filter_map(|decision| decision.target_id.split('#').next())
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let expected = (1..=10u64).map(|n| format!("c{n}")).collect::<HashSet<_>>();
 
         assert_eq!(admitted, expected);
         assert_eq!(decisions.len(), expected.len() * 2);
