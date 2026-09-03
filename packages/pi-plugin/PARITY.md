@@ -798,6 +798,25 @@ a separate future design based on a stable cross-fork identity.
 
 ---
 
+## 26. Last-known-good replay is shared across harnesses
+
+Both harnesses capture every successfully applied transform representation and
+persist it in the shared schema-v81 `lkg_slots` table. A transient
+`SQLITE_BUSY`/`SQLITE_LOCKED` failure replays that representation plus the raw
+new tail; schema-fence, migration-guard, and storage-open failures remain loud
+fail-closed startup refusals and never enter the replay lane.
+
+OpenCode keys the validated prefix with native message ids. Pi uses the stable
+`SessionEntry.id` values from its JSONL branch projection, requiring exact id
+sequence and content equality through the prior pass's anchor before appending
+the pristine native `AgentMessage[]` tail. Pi captures the served JSON bytes
+synchronously but defers SHA-256 digests and durable persistence with
+`setImmediate`, with the same synchronous next-pass re-arm after an async
+capture failure. Successful SOFT+ passes refresh the slot even when they did not
+perform a HARD cache bust, preventing a long-lived stale recovery prefix.
+
+---
+
 ## Maintenance
 
 Update this file whenever a deliberate Pi↔OpenCode divergence is introduced or
