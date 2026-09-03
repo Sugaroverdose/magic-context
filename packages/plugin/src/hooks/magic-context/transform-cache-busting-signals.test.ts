@@ -25,6 +25,8 @@ import {
     closeDatabase,
     getOrCreateSessionMeta,
     getPendingOps,
+    getStrippedPlaceholderIds,
+    getTagsBySession,
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
@@ -523,6 +525,96 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         expect(JSON.stringify(secondMessages[0])).toBe(firstWire);
         expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
         expect(deferredMaterializationSessions.has(sessionId)).toBe(true);
+    });
+
+    it("freezes placeholder-only messages removed by a marker-consuming rebuild", async () => {
+        useTempDataHome("ctx-busting-marker-seam-");
+        const sessionId = "ses-marker-seam-hidden-prefix";
+        const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const deferredMaterializationSessions = new Set<string>();
+        const sourceMessages = (): TestMessage[] => [
+            {
+                info: { id: "hidden-assistant-a", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "old assistant a" }],
+            },
+            {
+                info: { id: "hidden-user-a", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "old user a" }],
+            },
+            {
+                info: { id: "hidden-assistant-b", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "old assistant b" }],
+            },
+            {
+                info: { id: "fold-boundary", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "fold through here" }],
+            },
+            {
+                info: { id: "retained-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "retain me" }],
+            },
+        ];
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "execute" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            deferredHistoryRefreshSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+        });
+
+        await transform({}, { messages: sourceMessages() });
+        const hiddenTags = getTagsBySession(db, sessionId).filter(
+            (tag) =>
+                tag.messageId === "hidden-assistant-a:p0" ||
+                tag.messageId === "hidden-assistant-b:p0",
+        );
+        expect(hiddenTags).toHaveLength(2);
+        for (const tag of hiddenTags) queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 4,
+                    startMessageId: "hidden-assistant-a",
+                    endMessageId: "fold-boundary",
+                    title: "folded prefix",
+                    content: "folded content",
+                },
+            ],
+            [],
+        );
+        deferredHistoryRefreshSessions.add(sessionId);
+        deferredMaterializationSessions.add(sessionId);
+
+        const foldMessages = sourceMessages();
+        await transform({}, { messages: foldMessages });
+
+        expect(foldMessages.some((message) => message.info.id === "hidden-assistant-a")).toBe(
+            false,
+        );
+        expect(foldMessages.some((message) => message.info.id === "hidden-assistant-b")).toBe(
+            false,
+        );
+        expect(getStrippedPlaceholderIds(db, sessionId)).toEqual(
+            new Set(["hidden-assistant-a", "hidden-assistant-b"]),
+        );
     });
 
     it("Fable 5.1 variant change keeps the next pass deferred and pending ops untouched", async () => {

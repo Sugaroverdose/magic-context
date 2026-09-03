@@ -751,6 +751,13 @@ interface RunPostTransformPhaseArgs {
      */
     emergencyCeilingTokens?: number;
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
+    /**
+     * Messages trimmed while this transform rebuilds history. OpenCode rebuilds
+     * the next request from the boundary written later in this pass, so some rows
+     * can be absent now and return next time. Keep their objects long enough to
+     * persist empty sentinels for placeholder-only assistant messages before then.
+     */
+    hiddenMessagesAtCompactionSeam?: MessageLike[];
     didMutateFromFlushedStatuses: boolean;
     watermark: number;
     forceMaterializationPercentage: number;
@@ -1953,14 +1960,29 @@ export async function runPostTransformPhase(
                 protectedTailStart,
                 args.resolvedProviderID,
             );
+            const hiddenMessages = args.hiddenMessagesAtCompactionSeam ?? [];
+            const hiddenDroppedResult = stripDroppedPlaceholderMessages(
+                hiddenMessages,
+                args.resolvedProviderID,
+            );
+            const hiddenSystemInjectedResult = stripSystemInjectedMessages(
+                hiddenMessages,
+                hiddenMessages.length,
+                args.resolvedProviderID,
+            );
 
             const newlyNeutralized =
-                droppedResult.sentineledIds.length + systemInjectedResult.sentineledIds.length;
+                droppedResult.sentineledIds.length +
+                systemInjectedResult.sentineledIds.length +
+                hiddenDroppedResult.sentineledIds.length +
+                hiddenSystemInjectedResult.sentineledIds.length;
 
             if (newlyNeutralized > 0) {
                 const addedIds = [
                     ...droppedResult.sentineledIds,
                     ...systemInjectedResult.sentineledIds,
+                    ...hiddenDroppedResult.sentineledIds,
+                    ...hiddenSystemInjectedResult.sentineledIds,
                 ];
                 for (const id of addedIds) persistedIds.add(id);
                 // CAS delta (add) so a concurrent prune in a sibling process
@@ -1968,7 +1990,7 @@ export async function runPostTransformPhase(
                 applyStrippedPlaceholderDelta(args.db, args.sessionId, { add: addedIds });
                 sessionLog(
                     args.sessionId,
-                    `neutralized ${droppedResult.stripped} dropped + ${systemInjectedResult.stripped} system-injected messages (${newlyNeutralized} new, ${persistedIds.size} total persisted)`,
+                    `neutralized ${droppedResult.stripped} dropped + ${systemInjectedResult.stripped} system-injected messages + ${hiddenDroppedResult.stripped + hiddenSystemInjectedResult.stripped} hidden-at-marker-seam (${newlyNeutralized} new, ${persistedIds.size} total persisted)`,
                 );
             }
         }

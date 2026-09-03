@@ -1756,6 +1756,9 @@ export function createTransform(deps: TransformDeps) {
 
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;
         let rebuiltHistoryFromInitialPrepare = false;
+        let hiddenMessagesAtCompactionSeam: MessageLike[] = [];
+        const messagesBeforeInitialPrepare =
+            isCacheBusting && deferredHistoryWasPendingAtPassStart ? [...messages] : null;
         // Compaction-off bypasses compartment-history preparation entirely,
         // even when historical compartment rows exist: no <session-history>
         // render, no raw-tail trim, no boundary splice, no marker write.
@@ -1772,6 +1775,12 @@ export function createTransform(deps: TransformDeps) {
                 deps.memoryConfig?.injectionBudgetTokens,
                 deps.experimentalTemporalAwareness,
             );
+            if (messagesBeforeInitialPrepare) {
+                hiddenMessagesAtCompactionSeam = messagesBeforeInitialPrepare.slice(
+                    0,
+                    pendingCompartmentInjection?.skippedVisibleMessages ?? 0,
+                );
+            }
             logTransformTiming(sessionId, "prepareCompartmentInjection", tInj);
 
             // ── Drain historyRefreshSessions (one-shot semantics) ──
@@ -1870,7 +1879,17 @@ export function createTransform(deps: TransformDeps) {
                 // maintained either way so heuristics and drops continue to work;
                 // only the agent-visible prefix is gated.
                 const skipPrefixInjection = !ctxReduceCallable;
-                const result = tagMessages(sessionId, messages, deps.tagger, db, {
+                // History preparation trims a prefix before the compaction marker is
+                // written later in this pass. OpenCode uses that new marker to build
+                // the next request, where rows hidden only from this transform can
+                // return. Tag the pre-trim objects now so persisted drops mutate them
+                // and postprocess can save their empty-sentinel decisions. Ordinary
+                // passes keep the smaller post-trim walk.
+                const messagesForTagging =
+                    messagesBeforeInitialPrepare && hiddenMessagesAtCompactionSeam.length > 0
+                        ? messagesBeforeInitialPrepare
+                        : messages;
+                const result = tagMessages(sessionId, messagesForTagging, deps.tagger, db, {
                     skipPrefixInjection,
                 });
                 targets = result.targets;
@@ -2235,6 +2254,7 @@ export function createTransform(deps: TransformDeps) {
             protectedTags: deps.protectedTags,
             emergencyCeilingTokens,
             pendingCompartmentInjection,
+            hiddenMessagesAtCompactionSeam,
             didMutateFromFlushedStatuses,
             watermark,
             forceMaterializationPercentage,
