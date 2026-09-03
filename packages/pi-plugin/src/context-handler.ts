@@ -222,6 +222,14 @@ import {
 } from "./pi-context-limit";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import {
+	clearPiLkgSessionState,
+	createPiLkgCoordinator,
+	isTransientPiStorageError,
+	type PiLkgPassSnapshot,
+	piStorageErrorReason,
+	reconcilePiLkgEntryIds,
+} from "./pi-lkg";
+import {
 	formatPiPressureForLog,
 	resolvePiPressureSnapshot,
 } from "./pi-pressure";
@@ -293,6 +301,12 @@ let mutationGateObserverForTests:
 			shouldRunReasoningCleanup: boolean;
 	  }) => void)
 	| undefined;
+let lkgRecoveryLogObserverForTests: ((message: string) => void) | undefined;
+
+function logPiLkgRecovery(sessionId: string, message: string): void {
+	lkgRecoveryLogObserverForTests?.(message);
+	sessionLog(sessionId, message);
+}
 
 export const __test = {
 	isPiHardCacheExpired,
@@ -360,6 +374,14 @@ export const __test = {
 		mutationGateObserverForTests = fn;
 		return () => {
 			mutationGateObserverForTests = undefined;
+		};
+	},
+	setLkgRecoveryLogObserverForTests(
+		fn: typeof lkgRecoveryLogObserverForTests,
+	): () => void {
+		lkgRecoveryLogObserverForTests = fn;
+		return () => {
+			lkgRecoveryLogObserverForTests = undefined;
 		};
 	},
 };
@@ -2060,6 +2082,7 @@ export function registerPiContextHandler(
 	baseOptions: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
+	const lkgCoordinator = createPiLkgCoordinator(baseOptions.db);
 
 	// Pi can switch projects mid-process (`/cd`, multi-root). A scheduler is
 	// pure (config in, decision out — no per-session state), so it's safe to
@@ -2085,7 +2108,11 @@ export function registerPiContextHandler(
 
 	pi.on("context", async (event, ctx) => {
 		const transformStartTime = performance.now();
+		let rawMessageCount = 0;
 		let sessionIdForError: string | undefined;
+		let lkgPassSnapshot: PiLkgPassSnapshot | undefined;
+		let lkgCompactionOff = baseOptions.compactionOff === true;
+		let lkgEmergencyRecoveryArmed = false;
 		try {
 			const tFindSession = performance.now();
 			const sessionId = resolveSessionId(ctx);
@@ -2098,7 +2125,8 @@ export function registerPiContextHandler(
 			}
 			sessionIdForError = sessionId;
 			const projectDirectory = ctx.cwd;
-			const fullWireMessageCount = event.messages.length;
+			rawMessageCount = event.messages.length;
+			const fullWireMessageCount = rawMessageCount;
 
 			// Resolve the effective options for THIS pass's project. On a `/cd`
 			// switch this picks up the switched-into checkout's config (caller
@@ -2108,6 +2136,7 @@ export function registerPiContextHandler(
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
+			lkgCompactionOff = options.compactionOff === true;
 			const projectIdentity =
 				resolveProjectIdentityForSession(
 					projectDirectory,
@@ -2163,6 +2192,23 @@ export function registerPiContextHandler(
 								branchEntries,
 							);
 			const strictEntryIds = resolvedEntryIds ? [...resolvedEntryIds] : null;
+			const lkgEntryIds = reconcilePiLkgEntryIds(
+				strictEntryIds,
+				alignedEntryIds,
+			);
+			const lkgModelKey = resolvePiContextModelKey(ctx) ?? null;
+			const lkgContextModel = (ctx as { model?: { provider?: unknown } }).model;
+			const lkgProviderKey =
+				typeof lkgContextModel?.provider === "string"
+					? lkgContextModel.provider
+					: null;
+			lkgPassSnapshot = lkgCoordinator.beginPass({
+				sessionId,
+				messages: event.messages,
+				entryIds: lkgEntryIds,
+				modelKey: lkgModelKey,
+				providerKey: lkgProviderKey,
+			});
 			if (
 				strictEntryIds &&
 				branchEntries &&
@@ -2471,6 +2517,7 @@ export function registerPiContextHandler(
 					);
 				}
 				emergencyRecoveryArmed = overflowState.needsEmergencyRecovery;
+				lkgEmergencyRecoveryArmed = emergencyRecoveryArmed;
 				needsEmergencyBump =
 					overflowState.needsEmergencyRecovery && usagePercentage < 95;
 			} catch (err) {
@@ -3340,6 +3387,15 @@ export function registerPiContextHandler(
 			) {
 				assertTailHygieneLastWriter();
 			}
+			if (!lkgCompactionOff && lkgPassSnapshot) {
+				lkgCoordinator.captureAppliedPass({
+					snapshot: lkgPassSnapshot,
+					outputMessages,
+					// Refresh every successful SOFT/SOFT+ pass; a cache-busting pass
+					// first invalidates the stale representation until the async capture lands.
+					cacheBusting: result.bustedThisPass,
+				});
+			}
 			capturePiServedArray(sessionId, outputMessages);
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
@@ -3351,11 +3407,53 @@ export function registerPiContextHandler(
 				throw err;
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
+			const transientStorageFailure = isTransientPiStorageError(err);
+			if (
+				transientStorageFailure &&
+				sessionIdForError &&
+				lkgPassSnapshot &&
+				!lkgCompactionOff &&
+				!lkgEmergencyRecoveryArmed
+			) {
+				try {
+					const replay = lkgCoordinator.replay(lkgPassSnapshot);
+					if (replay.ok) {
+						const reason = piStorageErrorReason(err);
+						logPiLkgRecovery(
+							sessionIdForError,
+							`TRANSIENT STORAGE FAILURE ${reason}: LKG replay served ${replay.messages.length} messages instead of raw ${rawMessageCount}`,
+						);
+						capturePiServedArray(sessionIdForError, replay.messages);
+						return { messages: replay.messages } as unknown as {
+							messages: typeof event.messages;
+						};
+					}
+					logPiLkgRecovery(
+						sessionIdForError,
+						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); serving raw ${rawMessageCount}-message input`,
+					);
+				} catch (replayError) {
+					logPiLkgRecovery(
+						sessionIdForError,
+						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); serving raw ${rawMessageCount}-message input`,
+					);
+				}
+			} else if (transientStorageFailure && sessionIdForError) {
+				const refusal = lkgCompactionOff
+					? "compaction_off"
+					: lkgEmergencyRecoveryArmed
+						? "lkg_emergency_armed"
+						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
+				logPiLkgRecovery(
+					sessionIdForError,
+					`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); serving raw ${rawMessageCount}-message input`,
+				);
+			}
 			log(
 				`[magic-context][pi] context handler failed (continuing without mutation): ${message}`,
 				stack,
 			);
-			if (sessionIdForError) {
+			if (sessionIdForError && !transientStorageFailure) {
 				// baseOptions.db (not the per-pass `options`, which is scoped to
 				// the try). The DB handle is shared across all projects.
 				persistLastTransformErrorIfChanged(
@@ -6290,6 +6388,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 // Do not add DB clearSession here.
 export function clearContextHandlerSession(sessionId: string): void {
 	invalidateTrueRawTokenCache({ sessionId, reason: "pi.branch.changed" });
+	clearPiLkgSessionState(sessionId);
 	activeContextHandlerSessions.delete(sessionId);
 	clearAutoSearchForPiSession(sessionId);
 	lastEmergencyNotificationAtMs.delete(sessionId);
