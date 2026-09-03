@@ -559,6 +559,65 @@ describe("stripped placeholder replay across temporary marker windows", () => {
         expect(resumedMessages[0]?.parts).toEqual([{ type: "text", text: "" }]);
         expect(getStrippedPlaceholderIds(db, sessionId).has(assistantId)).toBe(true);
     });
+
+    it("pre-freezes hidden assistant separators before a marker advance", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-placeholder-marker-hidden-separators";
+        const user = (id: string, tag: number): MessageLike =>
+            ({
+                info: { id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: `[dropped §${tag}§]` }],
+            }) as unknown as MessageLike;
+        const assistant = (id: string, tag: number): MessageLike =>
+            ({
+                info: { id, role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: `[dropped §${tag}§]` }],
+            }) as unknown as MessageLike;
+
+        const foldMessages = [user("user-a", 74389), user("user-b", 74398), user("user-c", 74407)];
+        const hiddenAssistants = [assistant("assistant-a", 74393), assistant("assistant-b", 74400)];
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, foldMessages, {
+                schedulerDecision: "execute",
+                schedulerDeferReason: null,
+                resolvedProviderID: "anthropic",
+                hiddenMessagesAtCompactionSeam: hiddenAssistants,
+            }),
+        );
+        const foldWire = serializeAnthropicVisibleRoleGroups(foldMessages);
+        expect(JSON.parse(foldWire)).toEqual([
+            {
+                role: "user",
+                parts: [
+                    { type: "text", text: "[dropped §74389§]" },
+                    { type: "text", text: "[dropped §74398§]" },
+                    { type: "text", text: "[dropped §74407§]" },
+                ],
+            },
+        ]);
+        expect(getStrippedPlaceholderIds(db, sessionId)).toEqual(
+            new Set(["assistant-a", "assistant-b"]),
+        );
+
+        const replayMessages = [
+            user("user-a", 74389),
+            assistant("assistant-a", 74393),
+            user("user-b", 74398),
+            assistant("assistant-b", 74400),
+            user("user-c", 74407),
+        ];
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, replayMessages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+
+        expect(replayMessages[1]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(replayMessages[3]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(serializeAnthropicVisibleRoleGroups(replayMessages)).toBe(foldWire);
+    });
 });
 
 describe("deferred compaction marker representation", () => {
