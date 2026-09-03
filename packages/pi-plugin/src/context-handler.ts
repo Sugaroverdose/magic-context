@@ -39,7 +39,6 @@ import type {
 import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_RENEWAL_MS,
-	releaseCompartmentLease,
 	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
@@ -3656,7 +3655,7 @@ function spawnPiHistorianRun(args: {
 			// Close the cross-process check/lease race: /ctx-wrapup may have published
 			// its marker after the first check but before this process won the lease.
 			sessionLog(sessionId, "historian skipped: /ctx-wrapup became active");
-			releaseCompartmentLease(db, sessionId, holderId);
+			releaseCompartmentLeaseBestEffort(db, sessionId, holderId, sessionLog);
 			return;
 		}
 		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
@@ -3744,13 +3743,27 @@ function spawnPiHistorianRun(args: {
 			clearInterval(renewal);
 			releaseCompartmentLeaseBestEffort(db, sessionId, holderId, sessionLog);
 		}
-	})().finally(() => {
-		inFlightHistorian.delete(sessionId);
-		unregister();
-		if (isContextHandlerSessionActive(sessionId)) {
-			historian.onStatusChange?.(ctx, sessionId);
-		}
-	});
+	})()
+		.catch((error) => {
+			sessionLog(
+				sessionId,
+				`pi historian run failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		})
+		.finally(() => {
+			try {
+				inFlightHistorian.delete(sessionId);
+				unregister();
+				if (isContextHandlerSessionActive(sessionId)) {
+					historian.onStatusChange?.(ctx, sessionId);
+				}
+			} catch (error) {
+				sessionLog(
+					sessionId,
+					`pi historian finalizer failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		});
 	inFlightHistorian.set(sessionId, runPromise);
 	historian.onStatusChange?.(ctx, sessionId);
 }

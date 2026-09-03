@@ -4906,6 +4906,23 @@ describe("Pi branch projection cache", () => {
 });
 
 describe("maybeFireHistorian raw provider cleanup", () => {
+	it("contains spawned historian and cleanup failures before the parked finalizer", () => {
+		const src = readFileSync(
+			join(import.meta.dir, "context-handler.ts"),
+			"utf8",
+		);
+		const start = src.indexOf("function spawnPiHistorianRun");
+		const end = src.indexOf("function resolvePiAppendCompaction", start);
+		const body = src.slice(start, end);
+		const catchIndex = body.indexOf(".catch((error) => {");
+		const finallyIndex = body.indexOf(".finally(() => {");
+
+		expect(catchIndex).toBeGreaterThan(0);
+		expect(finallyIndex).toBeGreaterThan(catchIndex);
+		expect(body).toContain("pi historian finalizer failed");
+		expect(body).not.toContain("releaseCompartmentLease(db, sessionId, holderId)");
+	});
+
 	it("unregisters the raw-message provider in finally when no historian is spawned", () => {
 		const src = readFileSync(
 			join(import.meta.dir, "context-handler.ts"),
