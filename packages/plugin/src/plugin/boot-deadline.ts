@@ -1,6 +1,15 @@
 export type BootPhaseResult<T> =
     | { status: "completed"; value: T; elapsedMs: number }
-    | { status: "timed_out"; elapsedMs: number };
+    | {
+          status: "timed_out";
+          elapsedMs: number;
+          /**
+           * The still-running operation. A slow-but-healthy phase (a busy
+           * migration lock on a loaded box) must be adopted when it finally
+           * settles rather than leaving the process fail-closed for its lifetime.
+           */
+          pending: Promise<T>;
+      };
 
 /**
  * Keep an awaited plugin boot phase from holding OpenCode's plugin loader forever.
@@ -23,7 +32,7 @@ export async function runBootPhaseWithDeadline<T>(
             report(
                 `[magic-context] boot phase '${phase}' exceeded its ${timeoutMs}ms deadline; host startup will continue with Magic Context fail-closed`,
             );
-            resolve({ status: "timed_out", elapsedMs });
+            resolve({ status: "timed_out", elapsedMs, pending: running });
         }, timeoutMs);
     });
     const completed = running.then<BootPhaseResult<T>>((value) => ({

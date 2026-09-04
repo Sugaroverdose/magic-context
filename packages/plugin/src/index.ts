@@ -275,6 +275,23 @@ const server: Plugin = async (ctx) => {
         }
     }
 
+    // A hooks phase that merely ran long (a contended migration lock can take
+    // ~60s on a loaded box) still finishes with real hooks; adopt them the moment
+    // they settle instead of leaving every primary session fail-closed until a
+    // re-probe happens to run — and never open storage a second time while the
+    // first open is still in flight.
+    if (hooksPhase.status === "timed_out") {
+        void hooksPhase.pending.then((late) => {
+            if (magicContextRuntime.magicContext || !late.magicContext) return;
+            magicContextRuntime.magicContext = late.magicContext;
+            magicContextRuntime.rustToolBackends = late.rustToolBackends;
+            failClosed.clear();
+            log(
+                "[magic-context] boot hooks phase settled after its deadline; Magic Context runtime installed and fail-closed cleared",
+            );
+        });
+    }
+
     const tryReopenStorage = async (): Promise<boolean> => {
         if (magicContextRuntime.magicContext) {
             failClosed.clear();

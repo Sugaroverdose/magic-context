@@ -20,6 +20,22 @@ describe("boot phase deadline", () => {
         ]);
     });
 
+    test("a phase that merely runs long hands its late value to the caller", async () => {
+        // The contended-migration-lock shape: the open outlives the deadline but
+        // succeeds. The caller must be able to adopt that value, otherwise a slow
+        // box turns into a process-lifetime fail-closed session.
+        const result = await runBootPhaseWithDeadline(
+            "hooks",
+            () => new Promise<string>((resolve) => setTimeout(() => resolve("real hooks"), 40)),
+            10,
+            () => {},
+        );
+
+        expect(result.status).toBe("timed_out");
+        if (result.status !== "timed_out") return;
+        await expect(result.pending).resolves.toBe("real hooks");
+    });
+
     test("returns a completed phase value and timing", async () => {
         const result = await runBootPhaseWithDeadline(
             "rpc",
