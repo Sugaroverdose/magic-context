@@ -208,6 +208,75 @@ if [[ -f "$DB_PATH" ]]; then
 fi
 
 # ----------------------------------------------------------------------
+# DUAL_INSTANCE_BOOT keeps one real OpenCode server active for this project
+# while a second OpenCode process boots against the same MC database. A separate
+# SQLite connection holds a representative BEGIN IMMEDIATE write lock so this
+# harness exercises startup diagnostics and lock behavior together.
+# ----------------------------------------------------------------------
+section "Phase 3: DUAL_INSTANCE_BOOT — shared project and contended MC database"
+
+DUAL_STORAGE="$HOME/.local/share/cortexkit/magic-context"
+DUAL_A_MC=/tmp/dual-instance-a-mc.log
+DUAL_B_MC=/tmp/dual-instance-b-mc.log
+DUAL_A_LOG=/tmp/dual-instance-a.log
+DUAL_B_LOG=/tmp/dual-instance-b.log
+rm -f "$DUAL_A_MC" "$DUAL_B_MC" "$DUAL_A_LOG" "$DUAL_B_LOG"
+
+MAGIC_CONTEXT_STORAGE_DIR="$DUAL_STORAGE" MAGIC_CONTEXT_LOG_PATH="$DUAL_A_MC" \
+    opencode serve --hostname 127.0.0.1 --port 4098 >"$DUAL_A_LOG" 2>&1 &
+DUAL_A_PID=$!
+for _ in $(seq 1 150); do
+    if curl -fsS --max-time 0.2 http://127.0.0.1:4098/doc >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
+curl -fsSG --max-time 20 --data-urlencode "directory=/test/project" \
+    http://127.0.0.1:4098/config >/tmp/dual-instance-a-config.json 2>/dev/null || true
+for _ in $(seq 1 150); do
+    [[ -s "$DUAL_A_MC" ]] && break
+    sleep 0.1
+done
+check "instance A loaded Magic Context for the project" "test -s $DUAL_A_MC"
+
+# Keep a write transaction open long enough to overlap instance B's storage
+# initialization. WAL readers remain available; current-schema boot must avoid
+# acquiring a migration write lock merely to discover that no migration exists.
+({ echo "PRAGMA busy_timeout=1000; BEGIN IMMEDIATE;"; sleep 6; echo "COMMIT;"; } | \
+    sqlite3 "$DB_PATH" >/tmp/dual-instance-holder.log 2>&1) &
+DUAL_HOLDER_PID=$!
+sleep 0.2
+DUAL_STARTED_MS=$(date +%s%3N)
+set +e
+MAGIC_CONTEXT_STORAGE_DIR="$DUAL_STORAGE" MAGIC_CONTEXT_LOG_PATH="$DUAL_B_MC" \
+    timeout --signal=KILL 20 opencode debug config >"$DUAL_B_LOG" 2>&1 &
+DUAL_B_PID=$!
+DUAL_FIRST_LOG_MS=-1
+for _ in $(seq 1 300); do
+    if [[ -s "$DUAL_B_MC" ]]; then
+        DUAL_FIRST_LOG_MS=$(( $(date +%s%3N) - DUAL_STARTED_MS ))
+        break
+    fi
+    kill -0 "$DUAL_B_PID" 2>/dev/null || break
+    sleep 0.1
+done
+wait "$DUAL_B_PID"
+DUAL_B_EXIT=$?
+set -e
+wait "$DUAL_HOLDER_PID" 2>/dev/null || true
+DUAL_READY_MS=$(( $(date +%s%3N) - DUAL_STARTED_MS ))
+DUAL_RPC_FILE_COUNT=$(find "$DUAL_STORAGE/rpc" -type f -name 'port-*.json' 2>/dev/null | wc -l || true)
+kill "$DUAL_A_PID" 2>/dev/null || true
+wait "$DUAL_A_PID" 2>/dev/null || true
+
+echo "  instance B first Magic Context log: ${DUAL_FIRST_LOG_MS}ms"
+echo "  instance B host config ready: ${DUAL_READY_MS}ms (exit=$DUAL_B_EXIT)"
+check "instance B emits boot: entering before contention" \
+    "test \"$DUAL_FIRST_LOG_MS\" -ge 0 && grep -q '\[magic-context\] boot: entering pid=' $DUAL_B_MC"
+check "instance B completes while instance A remains active" "test \"$DUAL_B_EXIT\" -eq 0"
+check "instance B stays inside the 20s host-start cap" "test \"$DUAL_READY_MS\" -lt 20000"
+check "instance A published project-scoped RPC discovery" \
+    "test \"$DUAL_RPC_FILE_COUNT\" -gt 0"
+
+# ----------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------
 section "Summary"

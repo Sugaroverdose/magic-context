@@ -235,6 +235,39 @@ describe("explicit shared storage resolution", () => {
         closeDatabase();
     });
 
+    it("installs a finite boot busy timeout before the first schema read", async () => {
+        useTempDataHome("storage-db-boot-busy-timeout-");
+        const db = await openDatabaseAsync({ busyTimeoutMs: 37 });
+
+        expect(db).not.toBeNull();
+        const timeout = db!.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+        expect(timeout.timeout).toBe(37);
+        closeDatabase();
+    });
+
+    it("bounds the first schema read behind another connection's exclusive lock", async () => {
+        const dir = makeTempDir("storage-db-exclusive-lock-");
+        const dbPath = join(dir, "context.db");
+        expect(openDatabase(dbPath)).not.toBeNull();
+        closeDatabase();
+
+        const holder = new Database(dbPath);
+        holder.exec("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE");
+        const startedAt = performance.now();
+        try {
+            const opened = await openDatabaseAsync({ dbPath, busyTimeoutMs: 35 });
+            const elapsedMs = performance.now() - startedAt;
+            expect(elapsedMs).toBeLessThan(1_000);
+            if (opened) {
+                const timeout = opened.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+                expect(timeout.timeout).toBe(35);
+            }
+        } finally {
+            holder.exec("ROLLBACK");
+            closeQuietly(holder);
+        }
+    });
+
     it("reports bounded boot phase timings for an async open", async () => {
         const dataHome = useTempDataHome("storage-db-boot-timing-");
         let timings: { openMs: number; guardMs: number; migrateMs: number } | undefined;
