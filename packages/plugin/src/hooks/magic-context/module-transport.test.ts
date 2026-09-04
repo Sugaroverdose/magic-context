@@ -25,7 +25,11 @@ import {
     type SubcClient,
 } from "@cortexkit/subc-client";
 
-import { __moduleTransportTest, SubcModuleTransport } from "./module-transport";
+import {
+    __moduleTransportTest,
+    SubcModuleTransport,
+    transformColdStartExecuteTimeoutMs,
+} from "./module-transport";
 
 class FakeServerReader {
     private buffered = Buffer.alloc(0);
@@ -432,6 +436,13 @@ describe("SubcModuleTransport", () => {
         expect(performance.now() - startedAt).toBeLessThan(1_000);
         expect(connectionCount).toBe(2);
         expect(requestCount).toBe(2);
+    });
+
+    it("scales cold execution for ENGRAM and ASTRO while retaining a bounded ceiling", () => {
+        expect(transformColdStartExecuteTimeoutMs(0)).toBe(30_000);
+        expect(transformColdStartExecuteTimeoutMs(7_400)).toBe(44_800);
+        expect(transformColdStartExecuteTimeoutMs(9_600)).toBe(49_200);
+        expect(transformColdStartExecuteTimeoutMs(100_000)).toBe(120_000);
     });
 
     it("uses a cold-start deadline only for a completed transform page series", async () => {

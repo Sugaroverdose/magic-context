@@ -25,6 +25,7 @@ import {
     peekDeferredExecutePending,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
+    setPendingCompactionMarkerState,
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
     updateSessionMeta,
@@ -399,11 +400,104 @@ export function replayRustModeBindingMismatchStrips(args: {
  * The persisted compaction summary is restored with the same canonicalizer as the
  * TypeScript lane, then note and recall anchors are replayed onto the native result.
  */
+export interface RustMaterializedCompactionBoundary {
+    /** Durable module row returned by the same transform response as this boundary. */
+    rowVersion: number;
+    /** Last raw block ordinal included in the module's materialized baseline. */
+    ordinal: number;
+    /** OpenCode message id owning the last covered flat block. */
+    endMessageId: string;
+}
+
+/**
+ * Use the boundary carried in the module response as OpenCode's compaction target;
+ * do not replace it with a target read later from status. Store that target in the
+ * local pending blob, advance it only forward in session metadata, and clear it only
+ * when compare-and-swap confirms that the pending value has not changed.
+ */
+export function applyRustModeDeferredCompactionMarker(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    boundary: RustMaterializedCompactionBoundary;
+    sessionDirectory?: string;
+}): void {
+    const { boundary } = args;
+    if (
+        !Number.isSafeInteger(boundary.rowVersion) ||
+        boundary.rowVersion <= 0 ||
+        !Number.isSafeInteger(boundary.ordinal) ||
+        boundary.ordinal < 0 ||
+        boundary.endMessageId.length === 0
+    ) {
+        sessionLog(args.sessionId, "rust compaction-marker: invalid materialized boundary ignored");
+        return;
+    }
+
+    let target: PendingCompactionMarker = {
+        ordinal: boundary.ordinal,
+        endMessageId: boundary.endMessageId,
+        publishedAt: Date.now(),
+    };
+    args.db.transaction(() => {
+        const persisted = getPersistedCompactionMarkerState(args.db, args.sessionId);
+        const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+        if (pending && pending.ordinal > target.ordinal) {
+            target = pending;
+            return;
+        }
+        if (
+            pending &&
+            pending.ordinal === target.ordinal &&
+            pending.endMessageId === target.endMessageId
+        ) {
+            target = pending;
+            return;
+        }
+        if (persisted && persisted.boundaryOrdinal >= target.ordinal && pending === null) return;
+        setPendingCompactionMarkerState(args.db, args.sessionId, target);
+    })();
+
+    const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
+    if (!pending || pending.ordinal > boundary.ordinal) return;
+    const outcome = applyDeferredCompactionMarker(
+        args.db,
+        args.sessionId,
+        pending,
+        args.sessionDirectory,
+        {
+            rowVersion: boundary.rowVersion,
+            ordinal: boundary.ordinal,
+            endMessageId: boundary.endMessageId,
+        },
+    );
+    switch (outcome.kind) {
+        case "applied":
+        case "already-current":
+        case "stale-skip":
+            if (!clearPendingCompactionMarkerStateIf(args.db, args.sessionId, pending)) {
+                sessionLog(
+                    args.sessionId,
+                    `rust compaction-marker drain: CAS lost after module row ${boundary.rowVersion}; newer pending target retained`,
+                );
+            }
+            break;
+        case "retryable-failure":
+            sessionLog(
+                args.sessionId,
+                `rust compaction-marker drain: retryable failure after module row ${boundary.rowVersion}; pending target retained`,
+                outcome.error,
+            );
+            break;
+    }
+}
+
 export function runRustModePostprocess(args: {
     db: ContextDatabase;
     sessionId: string;
     messages: MessageLike[];
     projectPath?: string;
+    sessionDirectory?: string;
+    materializedBoundary?: RustMaterializedCompactionBoundary;
     fullFeatureMode: boolean;
     compactionOff?: boolean;
     resolvedProviderID?: string;
@@ -412,8 +506,13 @@ export function runRustModePostprocess(args: {
     trailingBlankNewestAssistantId?: string;
     tagger: Tagger;
     ctxReduceAvailability: CtxReduceAvailabilityVerdict;
-}): { thinkingBindingRecovery: { flagTarget: string; messageId: string } | null } {
-    if (!args.fullFeatureMode || args.compactionOff) return { thinkingBindingRecovery: null };
+}): {
+    thinkingBindingRecovery: { flagTarget: string; messageId: string } | null;
+    markerAt: string | null;
+} {
+    if (!args.fullFeatureMode || args.compactionOff) {
+        return { thinkingBindingRecovery: null, markerAt: null };
+    }
     // Test doubles and older integrations may return the legacy bare message shape.
     // The host-side sticky phase only applies to OpenCode MessageLike objects, so leave
     // those responses untouched instead of treating a missing `info` object as a failure.
@@ -425,7 +524,15 @@ export function runRustModePostprocess(args: {
                 !isRecord((message as { info?: unknown }).info),
         )
     ) {
-        return { thinkingBindingRecovery: null };
+        return { thinkingBindingRecovery: null, markerAt: null };
+    }
+    if (args.materializedBoundary) {
+        applyRustModeDeferredCompactionMarker({
+            db: args.db,
+            sessionId: args.sessionId,
+            boundary: args.materializedBoundary,
+            sessionDirectory: args.sessionDirectory,
+        });
     }
     reconcileMarkerRepresentation(
         args.messages,
@@ -552,7 +659,11 @@ export function runRustModePostprocess(args: {
         }
         stripReasoningFromAssistantIds(args.messages, args.resolvedProviderID, recoveryMessageIds);
     }
-    return { thinkingBindingRecovery };
+    const marker = getPersistedCompactionMarkerState(args.db, args.sessionId);
+    return {
+        thinkingBindingRecovery,
+        markerAt: marker?.targetEndMessageId ?? marker?.boundaryMessageId ?? null,
+    };
 }
 
 function dropMarkerSummaryTag(

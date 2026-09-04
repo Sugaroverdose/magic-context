@@ -393,6 +393,32 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         }
     });
 
+    it("content-addresses a cold page series so a completed result is adoptable", () => {
+        const body = {
+            method: "transform",
+            session_id: "ses-adopt-completed",
+            input: Array.from({ length: 80 }, (_, index) => ({
+                mid: `m${index}`,
+                ordinal: index + 1,
+                ck: { text: "x".repeat(8_000) },
+            })),
+        };
+
+        const first = buildPagedModuleTransformPayloads(body);
+        const retry = buildPagedModuleTransformPayloads(structuredClone(body));
+        const changed = buildPagedModuleTransformPayloads({
+            ...body,
+            input: [...body.input, { mid: "changed", ordinal: 81, ck: { text: "changed" } }],
+        });
+        const id = first[0]?.page.transform_page_id;
+
+        expect(first.length).toBeGreaterThan(1);
+        expect(retry.map(({ page }) => page.transform_page_id)).toEqual(
+            first.map(({ page }) => page.transform_page_id),
+        );
+        expect(changed[0]?.page.transform_page_id).not.toBe(id);
+    });
+
     it("pages a 30,000-entry tool-input key-order map and bounds the scalar tail", () => {
         const toolInputKeyOrders = Object.fromEntries(
             Array.from({ length: 30_000 }, (_, index) => [

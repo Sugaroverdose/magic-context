@@ -775,6 +775,80 @@ describe("deferred compaction marker representation", () => {
         expect(rustMessages).toEqual(tsMessages);
     });
 
+    it("applies a Rust materialized boundary on its serving pass and replays identical bytes", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-rust-marker-reverse-edge";
+        createOpenCodeDbWithoutMessages("postprocess-rust-marker-");
+        const opencodeDb = new Database(
+            join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db"),
+        );
+        opencodeDb
+            .prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run(
+                "msg-boundary",
+                sessionId,
+                1_000,
+                1_000,
+                JSON.stringify({ role: "user", time: { created: 1_000 } }),
+            );
+        opencodeDb.close();
+        const source = [
+            {
+                info: { role: "user", sessionID: sessionId, syntheticHead: true },
+                parts: [
+                    {
+                        type: "text",
+                        text: "<session-history>stable</session-history>",
+                        synthetic: true,
+                    },
+                ],
+            },
+            {
+                info: { id: "tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "new turn" }],
+            },
+        ] as unknown as MessageLike[];
+        const first = structuredClone(source);
+        const applied = runRustModePostprocess({
+            db,
+            sessionId,
+            messages: first,
+            sessionDirectory: process.env.XDG_DATA_HOME,
+            materializedBoundary: {
+                rowVersion: 7,
+                ordinal: 10,
+                endMessageId: "msg-boundary",
+            },
+            fullFeatureMode: true,
+            tagger: createTagger(),
+            ctxReduceAvailability: { callable: false, frozen: true },
+        });
+
+        expect(applied.markerAt).toBe("msg-boundary");
+        expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
+        const marker = getPersistedCompactionMarkerState(db, sessionId);
+        expect(marker?.targetEndMessageId).toBe("msg-boundary");
+        expect(first.find((message) => message.info.summary === true)?.info).toMatchObject({
+            summary: true,
+            finish: "stop",
+        });
+        const firstBytes = JSON.stringify(first);
+
+        const replay = structuredClone(source);
+        runRustModePostprocess({
+            db,
+            sessionId,
+            messages: replay,
+            fullFeatureMode: true,
+            tagger: createTagger(),
+            ctxReduceAvailability: { callable: false, frozen: true },
+        });
+        expect(JSON.stringify(replay)).toBe(firstBytes);
+    });
+
     it("keeps a provisional marker untagged and freezes the callable tag choice", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
