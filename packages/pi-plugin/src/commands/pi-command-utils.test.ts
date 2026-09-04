@@ -45,6 +45,66 @@ describe("ctx-status entries", () => {
 		expect(sent).toBe(0);
 	});
 
+	it("keeps a real prompt newest at Pi and OMP turn boundaries", () => {
+		type ParkedMessage = { content: string };
+		const createHarness = () => {
+			const entries: Array<{ type: string; data: unknown }> = [
+				{ type: "user", data: "real prompt" },
+			];
+			const parked: ParkedMessage[] = [];
+			const answered: string[] = [];
+			return {
+				entries,
+				answered,
+				appendEntry(type: string, data?: unknown) {
+					entries.push({ type, data });
+				},
+				sendMessage(
+					message: ParkedMessage,
+					options?: { triggerTurn?: boolean },
+				) {
+					if (options?.triggerTurn === false) parked.push(message);
+				},
+				finishTurn() {
+					for (const message of parked.splice(0)) {
+						entries.push({ type: "user", data: message.content });
+						answered.push(message.content);
+					}
+				},
+			};
+		};
+
+		const parkedControl = createHarness();
+		parkedControl.sendMessage(
+			{ content: "Embedding history…" },
+			{ triggerTurn: false },
+		);
+		parkedControl.finishTurn();
+		expect(parkedControl.entries.at(-1)).toEqual({
+			type: "user",
+			data: "Embedding history…",
+		});
+		expect(parkedControl.answered).toEqual(["Embedding history…"]);
+
+		for (const harness of ["pi", "omp"] as const) {
+			const current = createHarness();
+			sendCtxStatusMessage(current as unknown as PiMessageSender, {
+				title: "Magic Embed",
+				text: `Embedding history on ${harness}…`,
+				level: "info",
+			});
+			current.finishTurn();
+			expect(current.entries.at(-1)?.type).toBe(CTX_STATUS_CUSTOM_TYPE);
+			expect(
+				current.entries.findLast((entry) => entry.type === "user"),
+			).toEqual({
+				type: "user",
+				data: "real prompt",
+			});
+			expect(current.answered).toEqual([]);
+		}
+	});
+
 	it("registers one ctx-status entry renderer and ignores malformed data", () => {
 		let customType = "";
 		let renderer:

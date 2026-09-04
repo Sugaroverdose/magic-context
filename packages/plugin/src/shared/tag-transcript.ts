@@ -62,6 +62,7 @@ import {
     byteSize,
     prependTag,
     stripTagPrefix,
+    stripWellFormedLeadingTagPrefix,
 } from "../hooks/magic-context/tag-content-primitives";
 import type { TagTarget } from "../hooks/magic-context/tag-messages";
 import type { Transcript, TranscriptPart } from "./transcript";
@@ -814,6 +815,16 @@ interface TagTextPartArgs {
 function tagTextPart(args: TagTextPartArgs): void {
     const identityStart = args.timing ? performance.now() : 0;
     const text = args.part.getText() ?? "";
+    // Pi and OMP can expose provider framing as assistant text blocks. Treat a
+    // previously prefixed blank as blank too, so MC never turns inert framing
+    // into a tag-bearing part that later strip logic could mistake for content.
+    if (
+        args.message.info.role === "assistant" &&
+        stripWellFormedLeadingTagPrefix(text).trim().length === 0
+    ) {
+        if (args.timing) args.timing.identity += performance.now() - identityStart;
+        return;
+    }
     const contentId = args.contentId;
     const reusableTagId = args.reuseIdentity
         ? args.tagger.getTag(args.sessionId, contentId, "message")

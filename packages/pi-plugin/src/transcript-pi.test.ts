@@ -75,6 +75,58 @@ describe("createPiTranscript", () => {
 		expect(transcript.getOutputMessages()).toBe(messages);
 	});
 
+	it("leaves Pi and OMP whitespace-only assistant framing untagged after peeling MC tags", () => {
+		const vectors = [
+			{
+				harness: "pi",
+				message: assistantMessage("  \n\t", 11),
+				expectedText: "  \n\t",
+			},
+			{
+				harness: "omp",
+				message: {
+					role: "assistant" as const,
+					content: [{ type: "text" as const, text: "§77§  \n\t" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-fable-5-1",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					stopReason: "stop",
+					timestamp: 11,
+				},
+				expectedText: "§77§  \n\t",
+			},
+		] as const;
+
+		for (const vector of vectors) {
+			const db = createTestDb();
+			try {
+				const sessionId = `ses-${vector.harness}-blank-framing`;
+				const tagger = createTagger();
+				tagger.initFromDb(sessionId, db);
+				const transcript = createPiTranscript(
+					[vector.message] as never,
+					sessionId,
+					[`entry-${vector.harness}-assistant`],
+				);
+
+				const { targets } = tagTranscript(sessionId, transcript, tagger, db);
+				transcript.commit();
+
+				expect(targets.size).toBe(0);
+				expect(textOf(transcript.getOutputMessages()[0] as never)).toBe(
+					vector.expectedText,
+				);
+				const stored = db
+					.prepare("SELECT COUNT(*) AS count FROM tags WHERE session_id = ?")
+					.get(sessionId) as { count: number };
+				expect(stored.count).toBe(0);
+			} finally {
+				closeQuietly(db);
+			}
+		}
+	});
+
 	it("injects tag prefixes into user, assistant, and folded tool-result text", () => {
 		const messages = [
 			userMessage("user text", 10),

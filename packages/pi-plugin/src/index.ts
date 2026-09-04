@@ -91,7 +91,7 @@ import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path"
 import { setHarness } from "@magic-context/core/shared/harness";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { setKeepSubagents } from "@magic-context/core/shared/keep-subagents";
-import { log } from "@magic-context/core/shared/logger";
+import { flushLogger, log } from "@magic-context/core/shared/logger";
 import { resolveHistorianModel } from "@magic-context/core/shared/model-resolution";
 import {
 	createPromptSurfaceGuidanceEpochCache,
@@ -155,6 +155,7 @@ import {
 import { loadDefaultPiSessionApi } from "./dreamer/pi-session-api";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
+import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import { resolvePiUsableContextLimit } from "./pi-context-limit";
 import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
@@ -186,6 +187,7 @@ import {
 
 const PI_HARNESS_KIND = resolvePiHarnessKind();
 const PREFIX = `[magic-context][${PI_HARNESS_KIND}]`;
+const PI_BOOT_DEADLINE_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // In-process child guard (issue #247)
@@ -780,6 +782,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	}
 	const unregisterPiSubagentInitContext = registerPiSubagentInitContext(pi);
 	registerPiSubagentInitContextCleanup(pi, unregisterPiSubagentInitContext);
+
+	// Flush before any filesystem or SQLite work. A boot lock that outlives the
+	// regular logger's batching interval must still leave a diagnostic breadcrumb.
+	log(`${PREFIX} boot: entering pid=${process.pid} dir=${process.cwd()}`);
+	flushLogger();
 	beginBootQuietPeriod();
 
 	// Resolve the user-tier storage policy before opening the shared database.
@@ -788,6 +795,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const bootProjectDir = process.cwd();
 	ensureConfigLocationsMigrated(bootProjectDir);
 	const bootConfig = loadPiConfig({ cwd: bootProjectDir });
+	if (!bootConfig.config.enabled) {
+		info("plugin DISABLED via config (enabled: false) — skipping registration");
+		return;
+	}
 	reloadWindowOverlay(bootConfig.config.models?.window_overlay_path);
 	setStoragePrivatePermissionEnforcement(
 		bootConfig.config.storage.enforce_private_permissions,
@@ -799,90 +810,96 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	const storageDir = getMagicContextStorageDir();
 	const dbPath = join(storageDir, "context.db");
-
-	let db: ContextDatabase | null | undefined;
 	let openFailureCause: string | null = null;
-	try {
-		db = await openDatabaseAsync();
-	} catch (err) {
-		openFailureCause = err instanceof Error ? err.message : String(err);
-		db = null;
-	}
-
-	// openDatabase() returns null on the schema fence (DB newer than this binary).
-	// Genuine open/migration exceptions are caught above. Either way Magic Context
-	// cannot operate — when fail_closed_blocking is on (default), register a loud
-	// blocking surface instead of silently skipping hooks (native compaction).
-	if (!db) {
-		const projectDirForConfig = process.cwd();
-		ensureConfigLocationsMigrated(projectDirForConfig);
-		const early = loadPiConfig({ cwd: projectDirForConfig });
-		if (!early.config.enabled) {
-			info(
-				"plugin DISABLED via config (enabled: false) — skipping registration",
-			);
-			return;
+	const openStorage = async (): Promise<ContextDatabase | null> => {
+		try {
+			return await openDatabaseAsync();
+		} catch (error) {
+			openFailureCause = error instanceof Error ? error.message : String(error);
+			return null;
 		}
+	};
+	const unavailableReason = (): FailClosedReason => {
 		const migration = getMigrationOnOpenRefusal();
 		const blockingProcesses =
 			migration?.blockingProcesses ??
 			migration?.serverPids.map((pid) => ({ kind: "process" as const, pid })) ??
 			[];
 		const fence = getSchemaFenceRejection();
-		const reason: FailClosedReason =
-			migration && blockingProcesses.length > 0
-				? {
-						kind: "migration_guard",
-						persistedVersion: migration.persistedVersion,
-						supportedVersion: migration.supportedVersion,
-						blockingProcesses,
-					}
-				: fence
-					? {
-							kind: "schema_fence",
-							persistedVersion: fence.persistedVersion,
-							supportedVersion: fence.supportedVersion,
-						}
-					: {
-							kind: "storage_failure",
-							cause: migration?.unreadableFile
-								? `migration guard could not read RPC discovery file ${migration.unreadableFile}`
-								: (openFailureCause ??
-									`storage unavailable at ${dbPath} (cache schema newer than this binary, or open failed)`),
-						};
-		if (
-			early.config.fail_closed_blocking === false ||
-			!isCompactionEnabled(early.config)
-		) {
-			warn(
-				`Magic Context (pi) storage unavailable at ${dbPath}: ${formatFailClosedBlockingMessage(reason)}. ` +
-					"fail_closed_blocking=false — degrading silently (hooks not registered).",
-			);
-			return;
+		if (migration && blockingProcesses.length > 0) {
+			return {
+				kind: "migration_guard",
+				persistedVersion: migration.persistedVersion,
+				supportedVersion: migration.supportedVersion,
+				blockingProcesses,
+			};
 		}
-		warn(
-			`Magic Context (pi) storage unavailable at ${dbPath}: ${formatFailClosedBlockingMessage(reason)}`,
-		);
-		let fullRuntimeStarted = false;
-		registerPiFailClosedSurface(pi, {
-			reason,
-			tryReopen: async () => {
-				try {
-					return await openDatabaseAsync();
-				} catch {
-					return null;
-				}
-			},
-			onRecovered: async (recoveredDb) => {
-				if (fullRuntimeStarted) return;
-				fullRuntimeStarted = true;
-				await startPiMagicContextRuntime(pi, recoveredDb, dbPath);
-			},
-		});
-		return;
-	}
+		if (fence) {
+			return {
+				kind: "schema_fence",
+				persistedVersion: fence.persistedVersion,
+				supportedVersion: fence.supportedVersion,
+			};
+		}
+		return {
+			kind: "storage_failure",
+			cause: migration?.unreadableFile
+				? `migration guard could not read RPC discovery file ${migration.unreadableFile}`
+				: (openFailureCause ??
+					`storage unavailable at ${dbPath} (cache schema newer than this binary, or open failed)`),
+		};
+	};
 
-	await startPiMagicContextRuntime(pi, db, dbPath);
+	const bootResult = await bootPiRuntimeWithDeadline<
+		ContextDatabase,
+		FailClosedReason
+	>({
+		deadlineMs: PI_BOOT_DEADLINE_MS,
+		openStorage,
+		startRuntime: (db) => startPiMagicContextRuntime(pi, db, dbPath),
+		unavailableReason,
+		deadlineReason: {
+			kind: "storage_failure",
+			cause: `Pi storage boot phase exceeded its ${PI_BOOT_DEADLINE_MS}ms deadline`,
+		},
+		registerFailClosed: (registration) => {
+			if (
+				bootConfig.config.fail_closed_blocking === false ||
+				!isCompactionEnabled(bootConfig.config)
+			) {
+				warn(
+					`Magic Context (${PI_HARNESS_KIND}) storage unavailable at ${dbPath}: ${formatFailClosedBlockingMessage(registration.reason)}. ` +
+						"fail_closed_blocking=false — degrading silently (hooks not registered).",
+				);
+				return {
+					adoptRecovered: async (recoveredDb) => {
+						try {
+							await registration.onRecovered(recoveredDb);
+							info(
+								"storage boot settled after its deadline; full Magic Context runtime installed",
+							);
+							return true;
+						} catch (error) {
+							warn(
+								`late storage adoption failed: ${error instanceof Error ? error.message : String(error)}`,
+							);
+							return false;
+						}
+					},
+				};
+			}
+			warn(
+				`Magic Context (${PI_HARNESS_KIND}) storage unavailable at ${dbPath}: ${formatFailClosedBlockingMessage(registration.reason)}`,
+			);
+			return registerPiFailClosedSurface(pi, registration);
+		},
+		report: log,
+	});
+
+	// The timed-out phase owns a caught late-adoption promise. Returning here is
+	// what releases the host extension loader; a healthy late open installs the
+	// runtime through the registered recovery surface.
+	if (bootResult.status !== "ready") return;
 }
 
 /**

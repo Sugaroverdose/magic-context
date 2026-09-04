@@ -1509,3 +1509,31 @@ describe("loadPluginConfigDetailed — prompt-surface registration owner", () =>
         }
     });
 });
+
+describe("shared per-harness config loading", () => {
+    it("lets OpenCode load Pi and OMP agent blocks without schema recovery warnings", () => {
+        const config = loadWithUserConfig(
+            JSON.stringify({
+                historian: {
+                    opencode: { model: "anthropic/opencode-historian" },
+                    pi: { model: "anthropic/pi-historian", thinking_level: "high" },
+                    omp: { model: "anthropic/omp-historian", thinking_level: "auto" },
+                },
+                dreamer: {
+                    opencode: { model: "anthropic/opencode-dreamer" },
+                    pi: { model: "anthropic/pi-dreamer", thinking_level: "medium" },
+                    omp: { model: "anthropic/omp-dreamer", thinking_level: "inherit" },
+                },
+            }),
+        );
+
+        expect(config.configWarnings).toBeUndefined();
+        expect(config.historian?.omp).toEqual({
+            model: "anthropic/omp-historian",
+            thinking_level: "auto",
+        });
+        expect(resolveHistorianModel(config, "opencode").primary?.model).toBe(
+            "anthropic/opencode-historian",
+        );
+    });
+});

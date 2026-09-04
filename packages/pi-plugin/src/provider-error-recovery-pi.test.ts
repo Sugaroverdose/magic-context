@@ -82,8 +82,9 @@ describe("Pi provider failure recovery", () => {
 		expect(getMergedReasoningStrippedIds(database, sessionId)).toContain(
 			"binding_mismatch:entry-a1",
 		);
+		if (!applied) throw new Error("binding recovery was not applied");
 		expect(
-			clearThinkingBindingRecoveryIf(database, sessionId, applied!.flagTarget),
+			clearThinkingBindingRecoveryIf(database, sessionId, applied.flagTarget),
 		).toBe(true);
 
 		const restarted = fableMessages();
@@ -98,6 +99,29 @@ describe("Pi provider failure recovery", () => {
 			}),
 		).toBeNull();
 		expect(JSON.stringify(restarted)).toBe(JSON.stringify(first));
+	});
+
+	it("arms the same recovery from OMP's wrapped message_end error text", () => {
+		const database = db();
+		const sessionId = "omp-fable-binding-recovery";
+		const event = handlePiProviderFailure({
+			db: database,
+			sessionId,
+			message: {
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-fable-5-1",
+				stopReason: "error",
+				errorStatus: 400,
+				errorMessage:
+					'400 {"type":"error","error":{"type":"invalid_request_error","message":"thinking block is bound to a different conversation"}}\nraw-http-request=/tmp/http-400-requests/request.json',
+			},
+		});
+
+		expect(event).toEqual({ kind: "thinking_binding", armed: true });
+		expect(getThinkingBindingRecoveryTarget(database, sessionId)).toBe(
+			"newest_reasoning_bearing_assistant",
+		);
 	});
 
 	it("persists a provider overflow limit that the next Pi pass consumes", () => {
@@ -115,7 +139,10 @@ describe("Pi provider failure recovery", () => {
 			},
 		});
 		expect(event).toMatchObject({ kind: "overflow", reportedLimit: 64_000 });
-		const detectedContextLimit = getOverflowState(database, sessionId).detectedContextLimit;
+		const detectedContextLimit = getOverflowState(
+			database,
+			sessionId,
+		).detectedContextLimit;
 		expect(
 			resolvePiUsableContextLimit({
 				rawContextWindow: 200_000,

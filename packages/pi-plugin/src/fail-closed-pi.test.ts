@@ -132,4 +132,33 @@ describe("registerPiFailClosedSurface", () => {
 		).resolves.toBeUndefined();
 		expect(opens).toBe(1);
 	});
+
+	it("keeps blocking until late runtime installation completes, then releases both hooks", async () => {
+		const fake = createFakePi();
+		let finishRuntime!: () => void;
+		const runtimeInstalled = new Promise<void>((resolve) => {
+			finishRuntime = resolve;
+		});
+		const fakeDb = { __test: true } as unknown as ContextDatabase;
+		const surface = registerPiFailClosedSurface(fake.pi as never, {
+			reason: { kind: "storage_failure", cause: "boot deadline" },
+			tryReopen: async () => fakeDb,
+			onRecovered: async () => runtimeInstalled,
+		});
+
+		const adoption = surface.adoptRecovered(fakeDb);
+		await Promise.resolve();
+		await expect(fake.emit("session_before_compact", {}, {})).resolves.toEqual({
+			cancel: true,
+		});
+
+		finishRuntime();
+		await expect(adoption).resolves.toBe(true);
+		await expect(
+			fake.emit("context", { messages: [] }, {}),
+		).resolves.toBeUndefined();
+		await expect(
+			fake.emit("session_before_compact", {}, {}),
+		).resolves.toBeUndefined();
+	});
 });
