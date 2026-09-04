@@ -268,7 +268,7 @@ describe("message-index-async", () => {
             message("m-3", 3, "gamma later incremental succeeds"),
         ];
         scheduleReconciliation(db, "ses-hole", () => [fullHistory[0]!]);
-        await wait(20);
+        await waitUntil(() => isSessionReconciled("ses-hole"));
         expect(isSessionReconciled("ses-hole")).toBe(true);
 
         scheduleIncrementalIndex(db, "ses-hole", "m-2", () => fullHistory[1] ?? null);
@@ -316,7 +316,7 @@ describe("message-index-async", () => {
             message("m-2", 2, "recovered after marker failure"),
         ];
         scheduleReconciliation(db, "ses-marker-failure", () => [history[0]!]);
-        await wait(20);
+        await waitUntil(() => isSessionReconciled("ses-marker-failure"));
         expect(isSessionReconciled("ses-marker-failure")).toBe(true);
 
         const originalPrepare = db.prepare.bind(db);
@@ -426,7 +426,7 @@ describe("message-index-async", () => {
 
     it("clearSessionTracking releases module state", async () => {
         scheduleReconciliation(db, "ses-track", () => [message("m-1", 1, "alpha")]);
-        await wait(20);
+        await waitUntil(() => isSessionReconciled("ses-track"));
         expect(isSessionReconciled("ses-track")).toBe(true);
 
         clearSessionTracking("ses-track");
