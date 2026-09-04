@@ -709,6 +709,58 @@ describe("Rust mode authority adapter", () => {
         }
     });
 
+    it("replays LKG when a defer pass reports frozen-prefix divergence", async () => {
+        const sessionId = `rust-defer-prefix-guard-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const stableNative = makeMessages(sessionId);
+        stableNative[0]!.parts = [{ type: "text", text: "stable frozen prefix" }];
+        const divergentNative = makeMessages(sessionId);
+        divergentNative[0]!.parts = [{ type: "text", text: "restart-only frozen prefix" }];
+        const responses = [
+            {
+                decision: "HARD",
+                scheduler_decision: "execute",
+                row_version: 1,
+                native_messages: stableNative,
+            },
+            {
+                decision: "SOFT+",
+                scheduler_decision: "defer",
+                scheduler_defer_reason: "scheduler_defer",
+                row_version: 2,
+                first_divergence: {
+                    index: 1,
+                    block_id_old: "mc_m1#0",
+                    block_id_new: "mc_m1#0",
+                    kind: "content_changed",
+                    approx_token_depth: 100,
+                },
+                native_messages: divergentNative,
+            },
+        ];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform" ? responses.shift()! : { ok: true },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            scheduleLkgCapture: (capture) => capture(),
+        });
+        const firstInput = makeMessages(sessionId);
+        const firstOutput = { messages: [...firstInput] as unknown[] };
+        await transform.run(sessionId, firstInput, firstOutput, makeMeta(db, sessionId));
+        const stableOutput = JSON.stringify(firstOutput.messages);
+
+        const secondInput = makeMessages(sessionId);
+        const secondOutput = { messages: [...secondInput] as unknown[] };
+        await transform.run(sessionId, secondInput, secondOutput, makeMeta(db, sessionId));
+
+        expect(JSON.stringify(secondOutput.messages)).toBe(stableOutput);
+        expect(transform.getState(sessionId).lkgRepresentationFrozen).toBe(true);
+    });
+
     it("keeps host-only trailing blank stripping at a three-pass raw-ingress fixed point", async () => {
         const sessionId = `rust-host-strip-fixed-point-${Date.now()}`;
         sessions.push(sessionId);
@@ -1886,6 +1938,38 @@ describe("Rust mode authority adapter", () => {
         expect(transformBodies.at(-1)?.tool_present).toBe(true);
         expect(transformBodies.at(-1)?.todo_tool_present).toBe(true);
         expect(capabilityInvalidations).toBe(1);
+        expect(output.messages).toEqual(native);
+    });
+
+    it("reconciles the restarted module before retrying a full transform", async () => {
+        const sessionId = `rust-restart-resync-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        installRawProvider(sessionId);
+        const calls: string[] = [];
+        const native = [{ role: "assistant", parts: [{ type: "text", text: "stable" }] }];
+        let firstTransform = true;
+        const moduleClient: RustModeModuleClient = {
+            invalidateStateSyncCapabilities: () => undefined,
+            call: async ({ method }) => {
+                calls.push(method);
+                if (method === "state_sync") return { ok: true };
+                if (method !== "transform") return { ok: true };
+                if (firstTransform) {
+                    firstTransform = false;
+                    return { status: "need_full_sync" };
+                }
+                return { native_messages: native };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = makeMessages(sessionId);
+        const output = { messages: messages as unknown[] };
+
+        await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
+
+        expect(calls).toEqual(["state_sync", "transform", "state_sync", "transform"]);
         expect(output.messages).toEqual(native);
     });
 

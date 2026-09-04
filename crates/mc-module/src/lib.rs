@@ -26234,6 +26234,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn defer_keeps_frozen_prefix_divergence_unacknowledged_across_restart_passes() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
+        let request_body = request(vec![ck("m1", 1, "hello")]);
+        let initial = call_transform_request(&handler, request_body.clone()).await;
+        assert_eq!(initial["status"], "ok", "{initial}");
+
+        let mut loaded = store.load("ses").unwrap();
+        let m1 = loaded
+            .core
+            .frozen_units
+            .iter_mut()
+            .find(|unit| unit.key == "m1")
+            .expect("initial render stores m1");
+        m1.frozen_payload.push_str("\nrestart-only drift");
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+
+        let restarted = McHandler::with_producer_factory_config_resolver(
+            Arc::new(TestProducerFactory {
+                state: Arc::new(ProducerState::default()),
+            }),
+            default_test_config(),
+            Arc::new(MissingSessionResolver),
+        );
+        restarted.store.set(Arc::clone(&store)).ok().unwrap();
+        restarted.bind_route(7, binding(project.to_str().unwrap(), "ses"));
+
+        let first_after_restart = call_transform_request(&restarted, request_body.clone()).await;
+        let second_after_restart = call_transform_request(&restarted, request_body).await;
+
+        for response in [&first_after_restart, &second_after_restart] {
+            assert_eq!(response["decision"], "SOFT+", "{response}");
+            assert!(response["materialize_reason"].is_null(), "{response}");
+            assert_eq!(
+                response["first_divergence"]["block_id_old"], "mc_m1#0",
+                "{response}"
+            );
+            assert_eq!(
+                response["first_divergence"]["kind"], "content_changed",
+                "{response}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn status_distinguishes_current_and_historical_divergence() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());

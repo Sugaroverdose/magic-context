@@ -158,6 +158,7 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
                 }
             })();
 
+            await h.subc.restartModule();
             await Bun.sleep(700);
             const markerPassesBefore = h.readRustPasses().length;
             await h.sendPrompt(sessionId, probe, { messageID: probeMessageId });
@@ -165,18 +166,41 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
             const markerInput = markerPasses.at(-1)!.inputCount;
             const markerSerialized = h.lastMainWireSerialized();
             const markerHash = sha256(markerSerialized);
+            const markerProbe = (await h.listMessages(sessionId))
+                .filter(
+                    (message) =>
+                        message.info?.role === "user" &&
+                        message.parts?.some((part) => part.type === "text" && part.text === probe),
+                )
+                .at(-1)?.info?.id;
+            expect(markerProbe).toBe(probeMessageId);
+            await h.revertMessage(sessionId, markerProbe!);
+
+            const replayPassesBefore = h.readRustPasses().length;
+            await h.sendPrompt(sessionId, probe, { messageID: probeMessageId });
+            const replayPasses = await h.waitForRustPasses(replayPassesBefore + 1);
+            const replaySerialized = h.lastMainWireSerialized();
+            const replayHash = sha256(replaySerialized);
 
             console.log(`rust marker byte identity control sha256=${controlHash}`);
-            console.log(`rust marker byte identity applied sha256=${markerHash}`);
+            console.log(`rust marker byte identity post-restart-1 sha256=${markerHash}`);
+            console.log(`rust marker byte identity post-restart-2 sha256=${replayHash}`);
             expect(controlInput).toBeGreaterThan(markerInput);
-            if (controlHash !== markerHash) {
-                const firstDifference = [...controlSerialized].findIndex(
-                    (character, index) => character !== markerSerialized[index],
-                );
+            expect(replayPasses.at(-1)!.inputCount).toBe(markerInput);
+            if (controlHash !== markerHash || markerHash !== replayHash) {
+                const firstDifference =
+                    controlHash !== markerHash
+                        ? [...controlSerialized].findIndex(
+                              (character, index) => character !== markerSerialized[index],
+                          )
+                        : [...markerSerialized].findIndex(
+                              (character, index) => character !== replaySerialized[index],
+                          );
                 throw new Error(
                     `wire bytes diverged at ${firstDifference}: ` +
                         `control=${JSON.stringify(controlSerialized.slice(firstDifference, firstDifference + 500))} ` +
-                        `applied=${JSON.stringify(markerSerialized.slice(firstDifference, firstDifference + 500))}`,
+                        `postRestart1=${JSON.stringify(markerSerialized.slice(firstDifference, firstDifference + 500))} ` +
+                        `postRestart2=${JSON.stringify(replaySerialized.slice(firstDifference, firstDifference + 500))}`,
                 );
             }
             opencodeDb.close();

@@ -2658,18 +2658,70 @@ export function createRustModeTransform(
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
                 if (needFullSync) {
-                    // A module restart can retain durable state while changing the accepted
-                    // state-sync shape, so the next sync must re-probe its capabilities.
+                    // The module restarted and rejected the generation used by the state sync
+                    // above. Synchronize the new process before requesting the full response;
+                    // otherwise this pass may use incomplete restored state while the next pass
+                    // uses the complete state, producing inconsistent output.
                     options.moduleClient.invalidateStateSyncCapabilities?.();
+                    const recoveryCachedCapabilities =
+                        options.moduleClient.getCachedStateSyncCapabilities;
+                    const recoveryStateSyncCapabilities =
+                        options.moduleClient.stateSyncCapabilities;
+                    const recoverySyncStartedAt = performance.now();
+                    try {
+                        const recoverySync = await syncModuleState({
+                            client: {
+                                call: callModule,
+                                getCachedStateSyncCapabilities: recoveryCachedCapabilities
+                                    ? () => recoveryCachedCapabilities.call(options.moduleClient)
+                                    : undefined,
+                                stateSyncCapabilities: recoveryStateSyncCapabilities
+                                    ? (capabilityArgs) =>
+                                          recoveryStateSyncCapabilities.call(
+                                              options.moduleClient,
+                                              capabilityArgs,
+                                          )
+                                    : undefined,
+                            },
+                            state,
+                            pass: syncPass,
+                            projectRoot,
+                            force: true,
+                            options: {
+                                authority: true,
+                                authorityState: state.memoryAuthorityReady ? "MODULE" : undefined,
+                                authoritySeqAdoption,
+                            },
+                        });
+                        stateSyncRetryBusy = recoverySync.status === "retry_busy";
+                    } catch (error) {
+                        // If a compatibility seed cannot be built, including when an older
+                        // module provides a seed that is too large, retain the recovery path that
+                        // sends the complete arrays. Retry state synchronization on a later pass.
+                        sessionLog(
+                            sessionId,
+                            "restart state reconciliation failed; continuing with full transform retry:",
+                            error,
+                        );
+                    } finally {
+                        logStage(
+                            sessionId,
+                            "stateSync",
+                            recoverySyncStartedAt,
+                            timings,
+                            "retry=full reason=need_full_sync",
+                        );
+                    }
                 } else {
                     sessionLog(
                         sessionId,
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
                 }
-                // A wire-cache miss or an invalid successful response says nothing about
-                // context.db state. Retry the transform with complete arrays, but do not
-                // re-seed durable state; that costs tens of seconds on giant sessions.
+                // Retry the transform with complete arrays. A restart-triggered miss was
+                // reconciled with durable state above, so reseeding is appropriate there. A
+                // malformed native response does not prove that the module restarted; retry it
+                // without reseeding state.
                 state.forceFullWire = true;
                 if (wireDelta) {
                     const retryOrdinalStartedAt = performance.now();
@@ -2819,6 +2871,24 @@ export function createRustModeTransform(
                 // so the previous last-known-good (LKG) snapshot is already stale.
                 decisionUpper === "SOFT" ||
                 !explicitDecision;
+            const deferredFirstDivergence = isRecord(response.first_divergence)
+                ? response.first_divergence
+                : undefined;
+            const deferredFrozenPrefixDivergence =
+                !cacheBustingPass &&
+                [
+                    deferredFirstDivergence?.block_id_old,
+                    deferredFirstDivergence?.block_id_new,
+                ].some((blockId) => blockId === "mc_m0#0" || blockId === "mc_m1#0");
+            if (deferredFrozenPrefixDivergence) {
+                // The module keeps the fingerprint from its last served response until an
+                // explicit cache invalidation. Freeze the host representation as well, so losing
+                // the process-local cache cannot change m0/m1 during either the first or a later
+                // deferred pass after restart.
+                state.lkgRepresentationFrozen = true;
+                state.forceFullWire = true;
+                sessionLog(sessionId, "deferred frozen-prefix divergence; replaying LKG");
+            }
             const materializedBoundary = materializedCompactionBoundary(response);
             let appliedMessages: unknown[];
             let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;

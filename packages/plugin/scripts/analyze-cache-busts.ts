@@ -56,6 +56,7 @@ interface Snapshot {
     createdAt: string;
     session: string;
     messagesCount: number;
+    wireBytes: number;
     segments: Segment[];
     usage?: MeterUsage;
     orderCreatedAt: string;
@@ -370,6 +371,10 @@ function loadSnapshots(opts: ReturnType<typeof parseArgs>): Snapshot[] {
             createdAt,
             session,
             messagesCount: typeof bodyMeta?.messagesCount === "number" ? bodyMeta.messagesCount : -1,
+            wireBytes:
+                typeof meta.bodyBytes === "number"
+                    ? meta.bodyBytes
+                    : Buffer.byteLength(JSON.stringify(body)),
             segments: buildSegments(body),
             usage: loadMeterUsage(responsePath),
             orderCreatedAt: dumpName?.createdAt ?? createdAt,
@@ -554,10 +559,10 @@ function main(): void {
     console.log("Dashboard times are local (UTC+2); table times are UTC.");
     console.log("Meter rule: shortRead when cacheRead + current input < prevTotal - ε, where ε=max(64, previous input). A short read is BUST only when bytes diverge before the current tail breakpoint; otherwise it is LATENCY.");
     console.log(
-        "time(UTC)          | segs | verdict          | meter                                                  | meterVsBytes | first-divergence                | prevBytes → curBytes        | cachedPrefix@breakpoint",
+        "time(UTC)          | segs | verdict          | meter                                                  | meterVsBytes | first-divergence                | prevWireBytes → curWireBytes | cachedPrefix@breakpoint",
     );
     console.log(
-        "-------------------|------|------------------|--------------------------------------------------------|--------------|---------------------------------|-----------------------------|------------------------",
+        "-------------------|------|------------------|--------------------------------------------------------|--------------|---------------------------------|------------------------------|------------------------",
     );
 
     let bustCount = 0;
@@ -586,9 +591,8 @@ function main(): void {
         const attribution = segment
             ? `${segment.id} (bytes ${row.byteVerdict})`
             : `(identical; bytes ${row.byteVerdict})`;
-        const previousPrefix = cachedPrefixBytes(previous.segments, previous.segments.length);
         const currentPrefix = cachedPrefixBytes(row.current.segments, index);
-        const byteDelta = `${previousPrefix.bytes.toLocaleString()}B → ${currentPrefix.bytes.toLocaleString()}B`;
+        const byteDelta = `${previous.wireBytes.toLocaleString()}B → ${row.current.wireBytes.toLocaleString()}B`;
         const verdictLabel =
             row.verdict === "UNMETERED"
                 ? `UNMETERED (bytes ${row.byteVerdict})`

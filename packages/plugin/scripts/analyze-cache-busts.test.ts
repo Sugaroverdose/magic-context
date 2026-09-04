@@ -123,6 +123,24 @@ describe("analyze-cache-bust dump discovery", () => {
         expect(snapshots.every((snapshot) => snapshot.session === session)).toBe(true);
     });
 
+    test("records actual request bytes independently of cached-prefix attribution", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-bust-wire-bytes-"));
+        tempDirs.push(dir);
+        const session = "ses_wireBytesFixture";
+        const body = bodyWithTail("wire byte payload");
+        writeDump(
+            dir,
+            `2026-09-02T08-46-03-306Z-000002-${session}`,
+            "2026-09-02T08:46:03.306Z",
+            session,
+            body,
+        );
+
+        expect(snapshotsFor(dir, session)[0]?.wireBytes).toBe(
+            Buffer.byteLength(JSON.stringify(body)),
+        );
+    });
+
     test("resolves relative --since durations", () => {
         expect(__test.resolveTimeBound("30m", 1_800_000)).toBe("1970-01-01T00:00:00.000Z");
         expect(__test.resolveTimeBound("2026-09-02T08:30:00Z", 0)).toBe(
