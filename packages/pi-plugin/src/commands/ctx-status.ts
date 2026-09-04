@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getMostRecentTaskRunAt } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
@@ -11,6 +12,7 @@ import { getOverflowState } from "@magic-context/core/features/magic-context/sto
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
 import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-status";
+import type { ConfigParseFailure } from "@magic-context/core/shared/config-diagnostics";
 import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
@@ -43,6 +45,9 @@ export interface RegisterCtxStatusDeps {
 	dreamer?: { runnable?: boolean; scheduleSummary?: string };
 	/** User-owned profile selected for the project, after config resolution. */
 	activeProfile?: string;
+	cacheTtlConfig?: MagicContextConfig["cache_ttl"];
+	cacheTtlConfigured?: boolean;
+	configParseFailures?: ConfigParseFailure[];
 }
 
 export type CtxStatusRuntimeDeps = Omit<
@@ -156,6 +161,12 @@ export function registerCtxStatusCommand(
 					windowGeometry,
 					resolveTailHygieneStatus(getPiChannel1Baseline(sessionId)),
 					pressure,
+					false,
+					{
+						cacheTtlConfig: currentDeps.cacheTtlConfig ?? "5m",
+						cacheTtlConfigured: currentDeps.cacheTtlConfigured === true,
+						configParseFailures: currentDeps.configParseFailures ?? [],
+					},
 				);
 				const details = buildStatusDetails(currentDeps, sessionId);
 				const profileStatus = currentDeps.activeProfile ?? "none";

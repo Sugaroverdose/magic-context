@@ -19,6 +19,7 @@ import {
     getMagicContextStorageDir,
     getMagicContextStorageResolution,
 } from "@magic-context/core/shared/data-path";
+import { parseJsoncRecovering } from "@magic-context/core/shared/jsonc-parser";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import {
@@ -767,7 +768,13 @@ export async function runDoctor(
                 text: raw.text,
                 configPath: paths.magicContextConfig,
             }).text;
-            parse(substituted);
+            const parsed = parseJsoncRecovering(substituted);
+            const issue = parsed.issues[0];
+            if (issue) {
+                throw new Error(
+                    `${paths.magicContextConfig}:${issue.line}:${issue.column}: ${issue.message} (runtime recovery does not make the file valid)`,
+                );
+            }
             pass("magic-context.jsonc parses as valid JSONC");
         } catch (err) {
             fail(

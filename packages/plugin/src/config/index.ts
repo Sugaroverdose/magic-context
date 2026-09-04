@@ -1,6 +1,15 @@
 import { existsSync } from "node:fs";
 
-import { detectConfigFile, isPrototypePollutionKey, parseJsonc } from "../shared/jsonc-parser";
+import {
+    CONFIG_WARNING_CLASS,
+    type ConfigParseFailure,
+    type ConfigWarningDetail,
+} from "../shared/config-diagnostics";
+import {
+    detectConfigFile,
+    isPrototypePollutionKey,
+    parseJsoncRecovering,
+} from "../shared/jsonc-parser";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../shared/prompt-surface";
 import { setWindowOverlayPath } from "../shared/window-geometry";
@@ -28,6 +37,11 @@ import { substituteConfigVariables } from "./variable";
 
 export interface MagicContextPluginConfig extends MagicContextConfig {
     disabled_hooks?: string[];
+    /** Runtime-only diagnostics; never read from user config. */
+    configParseFailures?: ConfigParseFailure[];
+    configWarningDetails?: ConfigWarningDetail[];
+    /** Whether cache_ttl existed in resolved raw config rather than coming from Zod defaults. */
+    cacheTtlConfigured?: boolean;
     command?: Record<
         string,
         {
@@ -74,6 +88,8 @@ interface LoadedConfigFile {
     config: Record<string, unknown>;
     /** Warnings from {env:} / {file:} substitution, with config-path prefix applied. */
     warnings: string[];
+    parseFailures: ConfigParseFailure[];
+    warningDetails: ConfigWarningDetail[];
 }
 
 export type LoadOutcome =
@@ -95,6 +111,9 @@ export interface LoadResultDetailed {
     };
     substitutionFailures: Array<{ keyPath: string; source: "user" | "project"; message: string }>;
     recoveredTopLevelKeys: string[];
+    configParseFailures: ConfigParseFailure[];
+    warningDetails: ConfigWarningDetail[];
+    cacheTtlConfigured: boolean;
 }
 
 interface LoadedConfigFileDetailed extends LoadedConfigFile {
@@ -118,10 +137,13 @@ function loadConfigFileDetailed(
         rawText = raw.text;
         rawWarnings = raw.warnings;
     } catch (error) {
+        const message = `failed to read config: ${error instanceof Error ? error.message : String(error)}`;
         return {
             config: {},
-            warnings: [
-                `${configPath}: failed to read config: ${error instanceof Error ? error.message : String(error)}`,
+            warnings: [`${configPath}: ${message}`],
+            parseFailures: [],
+            warningDetails: [
+                { warningClass: CONFIG_WARNING_CLASS.FILE_IO, source, path: configPath, message },
             ],
             outcome: "project-file-io-error",
             source,
@@ -135,32 +157,71 @@ function loadConfigFileDetailed(
             isProjectConfig: source === "project",
         });
         const rejectedKeyPaths: string[] = [];
-        const config = parseJsonc<Record<string, unknown>>(substituted.text, {
+        const parsed = parseJsoncRecovering<Record<string, unknown>>(substituted.text, {
             onRejectedKey: (path) => rejectedKeyPaths.push(path.join(".")),
         });
+        const config =
+            parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
+                ? parsed.value
+                : {};
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (path) =>
                 `Ignored unsafe config key "${path}" (security: prototype-pollution keys are not allowed).`,
         );
+        const firstIssue = parsed.issues[0];
+        const recovered = firstIssue !== undefined && Object.keys(config).length > 0;
+        const parseFailures: ConfigParseFailure[] = firstIssue
+            ? [
+                  {
+                      warningClass: CONFIG_WARNING_CLASS.FILE_PARSE,
+                      source,
+                      path: configPath,
+                      line: firstIssue.line,
+                      column: firstIssue.column,
+                      message: firstIssue.message,
+                      recovered,
+                      warning: `${configPath}:${firstIssue.line}:${firstIssue.column}: ${firstIssue.message}; ${recovered ? "recovered values were applied, but the file must be fixed." : "using defaults for this file."}`,
+                  },
+              ]
+            : [];
         return {
             config,
-            warnings: [...rawWarnings, ...substituted.warnings, ...unsafeKeyWarnings].map(
-                (warning) => `${configPath}: ${warning}`,
-            ),
+            warnings: [
+                ...parseFailures.map((failure) => failure.warning),
+                ...rawWarnings.map((warning) => `${configPath}: ${warning}`),
+                ...substituted.warnings.map((warning) => `${configPath}: ${warning}`),
+                ...unsafeKeyWarnings.map((warning) => `${configPath}: ${warning}`),
+            ],
+            parseFailures,
+            warningDetails: parseFailures,
             outcome:
-                rejectedKeyPaths.length > 0
-                    ? "schema-recovery"
-                    : substituted.warnings.length > 0
-                      ? "substitution-failure"
-                      : "ok",
+                parseFailures.length > 0
+                    ? "project-file-parse-error"
+                    : rejectedKeyPaths.length > 0
+                      ? "schema-recovery"
+                      : substituted.warnings.length > 0
+                        ? "substitution-failure"
+                        : "ok",
             source,
         };
     } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const warning = `${configPath}:1:1: ${message}; using defaults for this file.`;
+        const failure: ConfigParseFailure = {
+            warningClass: CONFIG_WARNING_CLASS.FILE_PARSE,
+            source,
+            path: configPath,
+            line: 1,
+            column: 1,
+            message,
+            recovered: false,
+            warning,
+        };
         return {
             config: {},
-            warnings: [
-                `${configPath}: failed to load config: ${error instanceof Error ? error.message : String(error)}`,
-            ],
+            warnings: [warning],
+            parseFailures: [failure],
+            warningDetails: [failure],
             outcome: "project-file-parse-error",
             source,
         };
@@ -621,10 +682,12 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     }
 
     const recoveredTopLevelKeys: string[] = [];
+    const cacheTtlConfigured = Object.hasOwn(mergedRaw, "cache_ttl");
     const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
     if (profileResolution.activeProfile) config.profile = profileResolution.activeProfile;
     setOutputReserveConfig(config.output_reserve);
     setWindowOverlayPath(config.models?.window_overlay_path);
+    const leafValidationWarnings = [...(config.configWarnings ?? [])];
     if (config.configWarnings?.length) {
         allWarnings.push(
             ...config.configWarnings.map((w) => {
@@ -653,6 +716,21 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         ...bindSubstitutionFailures(userLoaded),
         ...bindSubstitutionFailures(projectLoaded),
     ];
+    const configParseFailures = [
+        ...(userLoaded?.parseFailures ?? []),
+        ...(projectLoaded?.parseFailures ?? []),
+    ];
+    const warningDetails: ConfigWarningDetail[] = [
+        ...(userLoaded?.warningDetails ?? []),
+        ...(projectLoaded?.warningDetails ?? []),
+        ...leafValidationWarnings.map((message) => ({
+            warningClass: CONFIG_WARNING_CLASS.INVALID_LEAF,
+            message,
+        })),
+    ];
+    config.configParseFailures = configParseFailures;
+    config.configWarningDetails = warningDetails;
+    config.cacheTtlConfigured = cacheTtlConfigured;
     const sources = {
         userConfig:
             userLoaded?.outcome ??
@@ -669,5 +747,8 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
+        configParseFailures,
+        warningDetails,
+        cacheTtlConfigured,
     };
 }

@@ -60,6 +60,7 @@ function printUsage(): void {
     console.log("    doctor           Check and fix configuration issues");
     console.log("    doctor --force   Force-clear plugin cache");
     console.log("    doctor --issue   Collect diagnostics and open a GitHub issue");
+    console.log("    doctor --issue --report <path>  Write diagnostics without prompting");
     console.log("    doctor --clear   Interactive cache cleanup picker");
     console.log("    doctor --check-v22-backfill       Show v22 memory backfill status");
     console.log("    doctor --retry-v22-backfill       Retry failed v22 memory backfill rows");
@@ -148,9 +149,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
             }
             const { runDoctor } = await import("./commands/doctor");
             const rekeyV22DirIdentity = valueAfter(rest, "--rekey-v22-dir-identity");
+            const report = valueAfter(rest, "--report");
             return runDoctor({
                 force: rest.includes("--force"),
-                issue: rest.includes("--issue"),
+                issue: rest.includes("--issue") || report !== null,
+                ...(report !== null ? { report } : {}),
                 clear: rest.includes("--clear"),
                 checkV22Backfill: rest.includes("--check-v22-backfill"),
                 retryV22Backfill: rest.includes("--retry-v22-backfill"),

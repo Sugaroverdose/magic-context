@@ -24,13 +24,17 @@ import {
 } from "@magic-context/core/config/schema/magic-context";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import {
+	CONFIG_WARNING_CLASS,
+	type ConfigParseFailure,
+	type ConfigWarningDetail,
+} from "@magic-context/core/shared/config-diagnostics";
+import {
 	isPrototypePollutionKey,
-	sanitizeParsedJson,
+	parseJsoncRecovering,
 } from "@magic-context/core/shared/jsonc-parser";
 import { setOutputReserveConfig } from "@magic-context/core/shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "@magic-context/core/shared/prompt-surface";
 import { setWindowOverlayPath } from "@magic-context/core/shared/window-geometry";
-import { parse as parseCommentJson } from "comment-json";
 
 export interface LoadPiConfigOptions {
 	cwd?: string;
@@ -42,6 +46,9 @@ export interface LoadPiConfigResult {
 	registrationPromptSurface: PromptSurfaceConfig;
 	warnings: string[];
 	loadedFromPaths: string[];
+	configParseFailures: ConfigParseFailure[];
+	warningDetails: ConfigWarningDetail[];
+	cacheTtlConfigured: boolean;
 }
 
 export type LoadOutcome =
@@ -71,6 +78,8 @@ interface LoadedConfigFile {
 	scope: "user" | "project";
 	config: Record<string, unknown>;
 	warnings: string[];
+	parseFailures: ConfigParseFailure[];
+	warningDetails: ConfigWarningDetail[];
 	loadOutcome: LoadOutcome;
 }
 
@@ -108,9 +117,31 @@ function loadConfigFile(
 	path: string,
 	scope: "user" | "project",
 ): LoadedConfigFile | null {
+	let raw: ReturnType<typeof loadRawConfigFile>;
 	try {
-		const raw = loadRawConfigFile({ configPath: path, tier: scope });
+		raw = loadRawConfigFile({ configPath: path, tier: scope });
 		if (!raw) return null;
+	} catch (error) {
+		const message = `failed to read config: ${error instanceof Error ? error.message : String(error)}`;
+		return {
+			path,
+			scope,
+			config: {},
+			warnings: [`${path}: ${message}`],
+			parseFailures: [],
+			warningDetails: [
+				{
+					warningClass: CONFIG_WARNING_CLASS.FILE_IO,
+					source: scope,
+					path,
+					message,
+				},
+			],
+			loadOutcome: "project-file-io-error",
+		};
+	}
+
+	try {
 		const substituted = substituteConfigVariables({
 			text: raw.text,
 			configPath: path,
@@ -119,43 +150,81 @@ function loadConfigFile(
 			isProjectConfig: scope === "project",
 		});
 		const rejectedKeyPaths: string[] = [];
-		const config = sanitizeParsedJson(
-			parseCommentJson(substituted.text) as Record<string, unknown>,
-			{ onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")) },
+		const parsed = parseJsoncRecovering<Record<string, unknown>>(
+			substituted.text,
+			{
+				onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+			},
 		);
+		const config =
+			parsed.value &&
+			typeof parsed.value === "object" &&
+			!Array.isArray(parsed.value)
+				? parsed.value
+				: {};
 		const unsafeKeyWarnings = rejectedKeyPaths.map(
 			(keyPath) =>
 				`Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
 		);
+		const firstIssue = parsed.issues[0];
+		const recovered =
+			firstIssue !== undefined && Object.keys(config).length > 0;
+		const parseFailures: ConfigParseFailure[] = firstIssue
+			? [
+					{
+						warningClass: CONFIG_WARNING_CLASS.FILE_PARSE,
+						source: scope,
+						path,
+						line: firstIssue.line,
+						column: firstIssue.column,
+						message: firstIssue.message,
+						recovered,
+						warning: `${path}:${firstIssue.line}:${firstIssue.column}: ${firstIssue.message}; ${recovered ? "recovered values were applied, but the file must be fixed." : "using defaults for this file."}`,
+					},
+				]
+			: [];
 		return {
 			path,
 			scope,
 			config,
 			warnings: [
-				...raw.warnings,
-				...substituted.warnings,
-				...unsafeKeyWarnings,
-			].map((warning) => `${path}: ${warning}`),
+				...parseFailures.map((failure) => failure.warning),
+				...raw.warnings.map((warning) => `${path}: ${warning}`),
+				...substituted.warnings.map((warning) => `${path}: ${warning}`),
+				...unsafeKeyWarnings.map((warning) => `${path}: ${warning}`),
+			],
+			parseFailures,
+			warningDetails: parseFailures,
 			loadOutcome:
-				rejectedKeyPaths.length > 0
-					? "schema-recovery"
-					: substituted.warnings.length > 0
-						? "substitution-failure"
-						: "ok",
+				parseFailures.length > 0
+					? "project-file-parse-error"
+					: rejectedKeyPaths.length > 0
+						? "schema-recovery"
+						: substituted.warnings.length > 0
+							? "substitution-failure"
+							: "ok",
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		const warning = `${path}:1:1: ${message}; using defaults for this file.`;
+		const failure: ConfigParseFailure = {
+			warningClass: CONFIG_WARNING_CLASS.FILE_PARSE,
+			source: scope,
+			path,
+			line: 1,
+			column: 1,
+			message,
+			recovered: false,
+			warning,
+		};
 		return {
 			path,
 			scope,
 			config: {},
-			warnings: [
-				`${path}: failed to load config: ${message}; using defaults for this file.`,
-			],
-			loadOutcome:
-				typeof (error as { code?: unknown }).code === "string"
-					? "project-file-io-error"
-					: "project-file-parse-error",
+			warnings: [warning],
+			parseFailures: [failure],
+			warningDetails: [failure],
+			loadOutcome: "project-file-parse-error",
 		};
 	}
 }
@@ -339,122 +408,15 @@ function parsePiConfig(
 export function loadPiConfig(
 	opts: LoadPiConfigOptions = {},
 ): LoadPiConfigResult {
-	const cwd = opts.cwd ?? process.cwd();
-	const loadedFiles: LoadedConfigFile[] = [];
-	const warnings: string[] = [];
-	const legacySources = resolveLegacyConfigSources(cwd);
-	const harnessLegacy = resolveLegacyConfigSourcesForHarness(cwd, "pi");
-
-	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-	const projectLegacyFallback = projectPath
-		? null
-		: resolvePiLegacyFallback(harnessLegacy.project);
-	const projectReadPath = projectPath ?? projectLegacyFallback?.path;
-	if (projectReadPath) {
-		const loaded = loadConfigFile(projectReadPath, "project");
-		if (loaded) loadedFiles.push(loaded);
-	}
-	const legacyProjectUnmigrated =
-		!projectPath &&
-		!projectLegacyFallback &&
-		legacySources.project.some((source) => existsSync(source.path));
-
-	const userPath = resolveFirstExisting(getUserConfigPaths());
-	const userLegacyFallback = userPath
-		? null
-		: resolvePiLegacyFallback(harnessLegacy.user);
-	const userReadPath = userPath ?? userLegacyFallback?.path;
-	if (userReadPath) {
-		const loaded = loadConfigFile(userReadPath, "user");
-		if (loaded) loadedFiles.push(loaded);
-	}
-	const legacyUserUnmigrated =
-		!userPath &&
-		!userLegacyFallback &&
-		legacySources.user.some((source) => existsSync(source.path));
-
-	if (userLegacyFallback) {
-		warnings.push(
-			`[user config] reading legacy config from ${userLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
-		);
-	} else if (legacyUserUnmigrated) {
-		warnings.push(
-			"[user config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
-		);
-	}
-
-	if (projectLegacyFallback) {
-		warnings.push(
-			`[project config] reading legacy config from ${projectLegacyFallback.path} until migration completes; run \`npx @cortexkit/magic-context doctor\` to consolidate into the shared CortexKit location.`,
-		);
-	} else if (legacyProjectUnmigrated) {
-		warnings.push(
-			"[project config] legacy Magic Context config exists but the shared CortexKit config is absent; embedding registration is paused until config migration completes.",
-		);
-	}
-
-	const mergeFiles = [...loadedFiles].sort((a, b) => {
-		if (a.scope === b.scope) return 0;
-		return a.scope === "user" ? -1 : 1;
-	});
-	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config ?? {};
-	const projectLoaded = mergeFiles.find((f) => f.scope === "project");
-	let projectRaw: Record<string, unknown> = {};
-
-	for (const loaded of mergeFiles) {
-		const prefix =
-			loaded.scope === "user" ? "[user config]" : "[project config]";
-		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-		if (loaded.scope !== "project") continue;
-		projectRaw = { ...loaded.config };
-		for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-			warnings.push(`${prefix} ${warning}`);
-		}
-	}
-
-	const profileResolution = resolveConfigProfile({ userRaw, projectRaw });
-	warnings.push(
-		...profileResolution.warnings.map((warning) => `[config] ${warning}`),
-	);
-	const trustedProfiledRaw = mergeRawConfigs(
-		profileResolution.userBase,
-		profileResolution.overlay,
-	);
-	let rawConfig = trustedProfiledRaw;
-	// Threshold trust boundary is relative to the user/profile effective config.
-	const trustedBaseConfig = parsePiConfig(trustedProfiledRaw).config;
-	if (projectLoaded) {
-		rawConfig = mergeRawConfigs(rawConfig, profileResolution.projectBase);
-		for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-			projectRaw,
-			rawConfig,
-			profileResolution.userBase,
-		)) {
-			warnings.push(`[project config] ${warning}`);
-		}
-		for (const warning of constrainProjectThresholdOverrides({
-			mergedRaw: rawConfig,
-			projectRaw: profileResolution.projectBase,
-			trustedBaseConfig,
-		})) {
-			warnings.push(`[project config] ${warning}`);
-		}
-	}
-
-	const parsed = parsePiConfig(rawConfig);
-	if (profileResolution.activeProfile)
-		parsed.config.profile = profileResolution.activeProfile;
-	setOutputReserveConfig(parsed.config.output_reserve);
-	setWindowOverlayPath(parsed.config.models?.window_overlay_path);
-	warnings.push(
-		...parsed.warnings.map((warning) => `[merged config] ${warning}`),
-	);
-
+	const detailed = loadPiConfigDetailed(opts);
 	return {
-		config: parsed.config,
-		registrationPromptSurface: trustedBaseConfig.prompt_surface,
-		warnings,
-		loadedFromPaths: loadedFiles.map((loaded) => loaded.path),
+		config: detailed.config,
+		registrationPromptSurface: detailed.registrationPromptSurface,
+		warnings: detailed.warnings,
+		loadedFromPaths: detailed.loadedFromPaths,
+		configParseFailures: detailed.configParseFailures,
+		warningDetails: detailed.warningDetails,
+		cacheTtlConfigured: detailed.cacheTtlConfigured,
 	};
 }
 
@@ -622,6 +584,7 @@ export function loadPiConfigDetailed(
 	}
 
 	const recoveredTopLevelKeys: string[] = [];
+	const cacheTtlConfigured = Object.hasOwn(rawConfig, "cache_ttl");
 	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
 	if (profileResolution.activeProfile)
 		parsed.config.profile = profileResolution.activeProfile;
@@ -635,6 +598,16 @@ export function loadPiConfigDetailed(
 	const projectLoaded = loadedFiles.find(
 		(loaded) => loaded.scope === "project",
 	);
+	const configParseFailures = loadedFiles.flatMap(
+		(loaded) => loaded.parseFailures,
+	);
+	const warningDetails: ConfigWarningDetail[] = [
+		...loadedFiles.flatMap((loaded) => loaded.warningDetails),
+		...parsed.warnings.map((message) => ({
+			warningClass: CONFIG_WARNING_CLASS.INVALID_LEAF,
+			message,
+		})),
+	];
 	const sources = {
 		userConfig:
 			userLoaded?.loadOutcome ??
@@ -661,5 +634,8 @@ export function loadPiConfigDetailed(
 		sources,
 		substitutionFailures,
 		recoveredTopLevelKeys,
+		configParseFailures,
+		warningDetails,
+		cacheTtlConfigured,
 	};
 }

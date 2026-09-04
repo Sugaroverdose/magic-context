@@ -1,4 +1,7 @@
-import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
+import {
+    DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+    type MagicContextConfig,
+} from "../../config/schema/magic-context";
 import { getCompartments } from "../../features/magic-context/compartment-storage";
 import type {
     DreamTaskBacklogMap,
@@ -9,6 +12,11 @@ import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
+import { formatCacheTtlDisplay, resolveCacheTtlDisplay } from "../../shared/cache-ttl-display";
+import {
+    type ConfigParseFailure,
+    formatConfigParseStatusLine,
+} from "../../shared/config-diagnostics";
 import { getMagicContextStorageResolution } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
 import { formatThresholdClampNote } from "../../shared/format-threshold";
@@ -73,6 +81,11 @@ export function executeStatus(
     tailHygiene?: TailHygieneStatus,
     contextUsage?: { inputTokens: number; percentage: number },
     rustMode = false,
+    display?: {
+        cacheTtlConfig: MagicContextConfig["cache_ttl"];
+        cacheTtlConfigured: boolean;
+        configParseFailures: ConfigParseFailure[];
+    },
 ): string {
     // Single source of truth — resolver tells us both the effective percentage AND
     // which config source won (tokens vs percentage). Previously /ctx-status
@@ -98,13 +111,20 @@ export function executeStatus(
         const droppedTags = tags.filter((t) => t.status === "dropped");
         const totalBytes = activeTags.reduce((sum, t) => sum + t.byteSize, 0);
 
+        const ttlDisplay = resolveCacheTtlDisplay({
+            configured: display?.cacheTtlConfig ?? "5m",
+            configuredExplicitly: display?.cacheTtlConfigured === true,
+            modelKey: liveModelKey,
+            sessionValue: meta.cacheTtl,
+            sessionModelKey: meta.lastObservedModelKey,
+        });
         let ttlMs: number;
         try {
-            ttlMs = parseCacheTtl(meta.cacheTtl);
+            ttlMs = parseCacheTtl(ttlDisplay.value);
         } catch (error) {
             sessionLog(
                 sessionId,
-                `invalid cache_ttl "${meta.cacheTtl}" in ctx-status; falling back to default 5m`,
+                `invalid cache_ttl "${ttlDisplay.value}" in ctx-status; falling back to default 5m`,
                 error,
             );
             ttlMs = parseCacheTtl("5m");
@@ -126,7 +146,12 @@ export function executeStatus(
                   ? Math.round(displayInputTokens / (displayPercentage / 100))
                   : 0;
 
+        const parseFailureLines = (display?.configParseFailures ?? []).map(
+            formatConfigParseStatusLine,
+        );
         const lines: string[] = [
+            ...parseFailureLines,
+            ...(parseFailureLines.length > 0 ? [""] : []),
             "## Magic Status",
             "",
             `**Session:** ${sessionId}`,
@@ -145,7 +170,7 @@ export function executeStatus(
                 ? ["### Last Transform Error", `- ${meta.lastTransformError}`, ""]
                 : []),
             "### Cache TTL",
-            `- Configured: ${meta.cacheTtl}`,
+            `- ${formatCacheTtlDisplay(ttlDisplay)}`,
             `- Last response: ${meta.lastResponseTime > 0 ? `${Math.round(elapsed / 1000)}s ago` : "never"}`,
             `- Remaining: ${cacheExpired ? "expired" : ttlMs === Number.POSITIVE_INFINITY ? "never (MC never assumes expiry — external cache-keep)" : `${Math.round(remainingMs / 1000)}s`}`,
             `- Queue will auto-execute: ${cacheExpired ? "yes (cache expired)" : ttlMs === Number.POSITIVE_INFINITY ? `when context >= ${executeThresholdPercentage}%` : `when TTL expires or context >= ${executeThresholdPercentage}%`}`,

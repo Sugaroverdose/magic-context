@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
+import { CONFIG_WARNING_CLASS, type ConfigParseFailure } from "../../shared/config-diagnostics";
 import { Database } from "../../shared/sqlite";
 import { executeStatus } from "./execute-status";
 import { estimateTokens } from "./read-session-formatting";
@@ -114,12 +115,57 @@ describe("executeStatus", () => {
 
         const status = executeStatus(db, SESSION_ID, 20);
 
-        expect(status).toContain("- Configured: never");
+        expect(status).toContain("- Cache TTL: never (session)");
         expect(status).toContain(
             "- Remaining: never (MC never assumes expiry — external cache-keep)",
         );
         expect(status).toContain("never (MC never assumes expiry");
         expect(status).not.toContain("Infinity");
+        db.close();
+    });
+
+    test("puts parse failure first and shows configured TTL without mutating the session row", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        getOrCreateSessionMeta(db, SESSION_ID);
+        const failure: ConfigParseFailure = {
+            warningClass: CONFIG_WARNING_CLASS.FILE_PARSE,
+            source: "user",
+            path: "/tmp/magic-context.jsonc",
+            line: 1,
+            column: 1,
+            message: "invalid symbol",
+            recovered: true,
+            warning: "/tmp/magic-context.jsonc:1:1: invalid symbol",
+        };
+
+        const status = executeStatus(
+            db,
+            SESSION_ID,
+            20,
+            undefined,
+            "anthropic/claude-opus-5",
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            false,
+            {
+                cacheTtlConfig: { default: "5m", "anthropic/claude-opus-5": "1h" },
+                cacheTtlConfigured: true,
+                configParseFailures: [failure],
+            },
+        );
+
+        expect(status.split("\n")[0]).toBe(
+            "Config: PARSE FAILED (/tmp/magic-context.jsonc:1:1) — recovered values applied; fix the file",
+        );
+        expect(status).toContain("Cache TTL: 1h (config for anthropic/claude-opus-5)");
+        expect(getOrCreateSessionMeta(db, SESSION_ID).cacheTtl).toBe("5m");
         db.close();
     });
 

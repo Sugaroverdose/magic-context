@@ -2121,7 +2121,9 @@ describe("registerPiContextHandler", () => {
 			});
 
 			expect(canonicalModelKey).toBe("openai/gpt-5.6-sol");
-			expect(getOrCreateSessionMeta(db, "ses-context").cacheTtl).toBe("never");
+			const meta = getOrCreateSessionMeta(db, "ses-context");
+			expect(meta.cacheTtl).toBe("never");
+			expect(meta.lastObservedModelKey).toBe("openai/gpt-5.6-sol");
 			expect(
 				resolvePromptSurface(
 					{ default: "full", models: { "openai/gpt-5.6-sol": "light" } },

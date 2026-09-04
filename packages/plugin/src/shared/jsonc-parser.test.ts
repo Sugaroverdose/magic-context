@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { parseJsonc } from "./jsonc-parser";
+import { parseJsonc, parseJsoncRecovering } from "./jsonc-parser";
 
 describe("parseJsonc prototype-pollution hardening", () => {
     it("rejects dangerous keys recursively, including inside arrays", () => {
@@ -29,5 +29,18 @@ describe("parseJsonc prototype-pollution hardening", () => {
         expect(items).toEqual([{ safe: 3 }, { safe: 4 }]);
         expect(Object.getPrototypeOf(items[0])).toBe(Object.prototype);
         expect("polluted" in items[0]).toBe(false);
+    });
+
+    it("preserves hardening when tolerant recovery encounters __proto__", () => {
+        const rejected: string[] = [];
+        const parsed = parseJsoncRecovering<Record<string, unknown>>(
+            '\\{\n"__proto__":{"polluted":true},"cache_ttl":"1h"}',
+            { onRejectedKey: (path) => rejected.push(path.join(".")) },
+        );
+
+        expect(parsed.value).toEqual({ cache_ttl: "1h" });
+        expect(parsed.issues[0]).toMatchObject({ line: 1, column: 1 });
+        expect(rejected).toContain("__proto__");
+        expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
     });
 });

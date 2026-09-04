@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
-import type { DreamerConfig, SidekickConfig } from "../../config/schema/magic-context";
+import type {
+    DreamerConfig,
+    MagicContextConfig,
+    SidekickConfig,
+} from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
 import { getDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-gates";
@@ -16,6 +20,7 @@ import { getCompartments, getOrCreateSessionMeta } from "../../features/magic-co
 import type { RustSessionStatus } from "../../plugin/rpc-handlers";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
+import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import type { StatusDetail } from "../../shared/rpc-types";
 import type { Database } from "../../shared/sqlite";
@@ -559,6 +564,9 @@ export function createMagicContextCommandHandler(deps: {
     historyBudgetPercentage?: number;
     commitClusterTrigger?: { enabled: boolean; min_clusters: number };
     getLiveModelKey?: (sessionId: string) => string | undefined;
+    cacheTtlConfig?: MagicContextConfig["cache_ttl"];
+    cacheTtlConfigured?: boolean;
+    configParseFailures?: ConfigParseFailure[];
     /** Builds the status payload shared with the TUI dialog for a chat-only fallback. */
     getStatusDetail?: (sessionId: string, moduleStatus?: RustSessionStatus) => StatusDetail;
     /** Optional live context limit resolver — used for tokens-based threshold display. */
@@ -872,6 +880,11 @@ export function createMagicContextCommandHandler(deps: {
                             tailHygiene,
                             undefined,
                             Boolean(rustMode),
+                            {
+                                cacheTtlConfig: deps.cacheTtlConfig ?? "5m",
+                                cacheTtlConfigured: deps.cacheTtlConfigured === true,
+                                configParseFailures: deps.configParseFailures ?? [],
+                            },
                         );
                         const moduleStatus = rustStatus
                             ? `\n\n${formatRustStatusText(rustStatus)}`

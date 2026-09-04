@@ -50,6 +50,41 @@ describe("Pi status dialog", () => {
 		}
 	});
 
+	it("shows live config TTL before the first Pi message_end", () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-status-config-ttl";
+			const ctx = {
+				...fakeContext(sessionId),
+				model: {
+					provider: "anthropic",
+					id: "claude-opus-5",
+					contextWindow: 200_000,
+					maxTokens: 20_000,
+				},
+			};
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				ctx as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+					cacheTtlConfig: {
+						default: "5m",
+						"anthropic/claude-opus-5": "1h",
+					},
+					cacheTtlConfigured: true,
+				},
+				sessionId,
+			);
+
+			expect(detail.cacheTtl).toBe("1h");
+			expect(detail.cacheTtlSource).toBe("config");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("includes the active profile in status-dialog data", () => {
 		const db = createTestDb();
 		try {
