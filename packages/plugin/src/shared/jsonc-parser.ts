@@ -1,6 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 
-import { type ParseError, parse as parseJsoncDocument, printParseErrorCode } from "jsonc-parser";
+import {
+    type ParseError,
+    parse as parseJsoncDocument,
+    printParseErrorCode,
+} from "jsonc-parser/lib/esm/main.js";
+// ^ Deep ESM import on purpose, same as jsonc-edit.ts: the package's "main" is a
+// UMD bundle whose runtime-relative requires (`./impl/format`) survive bundling
+// verbatim and crash the plugin at boot. The build:dists load-probe gate exists
+// to catch exactly this; do not import the bare package name.
 
 export function stripJsonComments(content: string): string {
     let result = "";
