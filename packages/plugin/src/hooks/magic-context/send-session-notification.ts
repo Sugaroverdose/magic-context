@@ -35,6 +35,12 @@ const flushingIgnoredNotifications = new Set<string>();
 let midTurnDetector = (sessionId: string): boolean => shouldHoldIgnoredNotification(sessionId);
 let notificationServerUrl: string | undefined;
 let noticeDeleter: ((sessionId: string, messageId: string) => Promise<boolean>) | undefined;
+let notificationDiagnosticObserverForTests: ((message: string) => void) | undefined;
+
+function notificationDiagnostic(sessionId: string, message: string): void {
+    notificationDiagnosticObserverForTests?.(message);
+    sessionLog(sessionId, message);
+}
 
 function queueIgnoredNotification(notification: QueuedIgnoredNotification): void {
     const queued = queuedIgnoredNotifications.get(notification.sessionId) ?? [];
@@ -47,6 +53,17 @@ function queueIgnoredNotification(notification: QueuedIgnoredNotification): void
         );
     }
     queuedIgnoredNotifications.set(notification.sessionId, queued);
+}
+
+function holdIgnoredNotification(
+    notification: QueuedIgnoredNotification,
+    checkpoint: "before target checks" | "during target checks" | "before append",
+): void {
+    queueIgnoredNotification(notification);
+    notificationDiagnostic(
+        notification.sessionId,
+        `ignored notification held ${checkpoint} (session active); queued`,
+    );
 }
 
 async function trySendTuiToast(
@@ -95,12 +112,16 @@ export const __ignoredNotificationTest = {
         midTurnDetector = (sessionId: string): boolean => shouldHoldIgnoredNotification(sessionId);
         notificationServerUrl = undefined;
         noticeDeleter = undefined;
+        notificationDiagnosticObserverForTests = undefined;
     },
     setMidTurnDetector(detector: (sessionId: string) => boolean): void {
         midTurnDetector = detector;
     },
     setNoticeDeleter(deleter: (sessionId: string, messageId: string) => Promise<boolean>): void {
         noticeDeleter = deleter;
+    },
+    setDiagnosticObserver(observer: (message: string) => void): void {
+        notificationDiagnosticObserverForTests = observer;
     },
 };
 
@@ -178,7 +199,10 @@ async function sendIgnoredMessageNow(
     // A final active-run check closes the window created by the title/context
     // lookups below. The normal caller checks before entering this function too.
     if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
+        holdIgnoredNotification(
+            { client, sessionId, text, params, forcePersist },
+            "during target checks",
+        );
         return "queued";
     }
 
@@ -197,7 +221,10 @@ async function sendIgnoredMessageNow(
     // active run that began during title lookup or prompt-context resolution
     // from receiving a new user row.
     if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
+        holdIgnoredNotification(
+            { client, sessionId, text, params, forcePersist },
+            "during target checks",
+        );
         return "queued";
     }
 
@@ -244,7 +271,7 @@ async function sendIgnoredMessageNow(
     // The context lookup above can yield to a newly started run. Check directly
     // before the SDK call so the final mutation gate covers that last window too.
     if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
+        holdIgnoredNotification({ client, sessionId, text, params, forcePersist }, "before append");
         return "queued";
     }
 
@@ -364,7 +391,12 @@ async function revertNoticeIfUnsafe(notification: {
     if (!midTurnDetector(notification.sessionId)) return false;
     if (notification.messageId) {
         const deleted = await deleteNoticeMessage(notification.sessionId, notification.messageId);
-        if (!deleted) {
+        if (deleted) {
+            notificationDiagnostic(
+                notification.sessionId,
+                `notice rolled back (deleted row ${notification.messageId}); queued for idle delivery`,
+            );
+        } else {
             sessionLog(
                 notification.sessionId,
                 "failed to roll back a notice that landed while a run was active",
@@ -407,7 +439,10 @@ export async function sendIgnoredMessage(
     // row as the latest user turn. Do not create that invisible chronology entry
     // while a run is in flight or an unanswered real prompt exists.
     if (midTurnDetector(sessionId)) {
-        queueIgnoredNotification({ client, sessionId, text, params, forcePersist });
+        holdIgnoredNotification(
+            { client, sessionId, text, params, forcePersist },
+            "before target checks",
+        );
         return "queued";
     }
 

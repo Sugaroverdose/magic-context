@@ -15,8 +15,18 @@ import {
 	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { log } from "@magic-context/core/shared/logger";
 
 import { clearPiLkgSessionState } from "./pi-lkg";
+
+function reportBindingRecovery(
+	sessionId: string,
+	report: ((message: string) => void) | undefined,
+	message: string,
+): void {
+	if (report) report(message);
+	else log(`[magic-context][${sessionId}] ${message}`);
+}
 
 export type PiProviderFailureResult =
 	| { kind: "none" }
@@ -35,6 +45,7 @@ export function handlePiProviderFailure(args: {
 	message: unknown;
 	compactionOff?: boolean;
 	thinkingBindingRecoveryEnabled?: boolean;
+	report?: (message: string) => void;
 }): PiProviderFailureResult {
 	if (!args.message || typeof args.message !== "object")
 		return { kind: "none" };
@@ -68,6 +79,11 @@ export function handlePiProviderFailure(args: {
 			armThinkingBindingRecovery(args.db, args.sessionId);
 			clearPiLkgSessionState(args.sessionId);
 			dropSlot(args.sessionId, "thinking-binding-recovery-arm");
+			reportBindingRecovery(
+				args.sessionId,
+				args.report,
+				`Fable thinking-binding recovery armed from message_end target=${NEWEST_REASONING_BEARING_ASSISTANT}`,
+			);
 		}
 		return { kind: "thinking_binding", armed: enabled };
 	}
@@ -157,6 +173,7 @@ export function applyPiThinkingBindingRecovery(args: {
 	entryIds: readonly (string | undefined)[];
 	provider?: string;
 	model?: string;
+	report?: (message: string) => void;
 }): PiThinkingBindingApplication | null {
 	if (args.provider?.toLowerCase() !== "anthropic") return null;
 	const frozenEntryIds = new Set<string>();
@@ -199,6 +216,11 @@ export function applyPiThinkingBindingRecovery(args: {
 			) {
 				frozenEntryIds.add(entryId);
 				applied = { flagTarget, entryId };
+				reportBindingRecovery(
+					args.sessionId,
+					args.report,
+					`Fable thinking-binding recovery consumed on context pass target=${flagTarget} entry=${entryId}`,
+				);
 			}
 		}
 	}

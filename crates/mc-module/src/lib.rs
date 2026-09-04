@@ -21912,6 +21912,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn runtime_store_error_preserves_distinct_failure_codes_in_status_and_health() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let baseline = call_transform_request(&handler, request(vec![ck("m1", 1, "one")])).await;
+        assert_eq!(baseline["status"], "ok", "{baseline}");
+
+        handler
+            .runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .insert(
+                "ses".to_string(),
+                RuntimeStoreError {
+                    code: "store_write_failed".to_string(),
+                    message: "first diagnostic".to_string(),
+                    at_ms: 101,
+                },
+            );
+        let status =
+            call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
+
+        handler
+            .runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .insert(
+                "ses".to_string(),
+                RuntimeStoreError {
+                    code: "store_unavailable".to_string(),
+                    message: "second diagnostic".to_string(),
+                    at_ms: 202,
+                },
+            );
+        let health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+
+        assert_eq!(status["runtime_store_error"]["code"], "store_write_failed");
+        assert_eq!(status["runtime_store_error"]["message"], "first diagnostic");
+        assert_eq!(status["runtime_store_error"]["at_ms"], 101);
+        assert_eq!(health["runtime_store_error"]["code"], "store_unavailable");
+        assert_eq!(
+            health["runtime_store_error"]["message"],
+            "second diagnostic"
+        );
+        assert_eq!(health["runtime_store_error"]["at_ms"], 202);
+        assert_ne!(
+            status["runtime_store_error"]["code"], health["runtime_store_error"]["code"],
+            "runtime store diagnostics must preserve the failure arm rather than a constant code"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn guidance_variant_no_reduce_omits_reduce_and_hashes_differ() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());

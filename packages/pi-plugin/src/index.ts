@@ -2296,10 +2296,6 @@ async function startPiMagicContextRuntime(
 						recovery.reportedLimit ?? "?"
 					} provenance=${recovery.reportedLimitProvenance ?? "?"} pattern=${recovery.matchedPattern ?? "?"}`,
 				);
-			} else if (recovery.kind === "thinking_binding" && recovery.armed) {
-				log(
-					`[magic-context][${sessionId}] Fable thinking-binding recovery armed from message_end`,
-				);
 			}
 		} catch (err) {
 			warn("message_end: provider failure classification failed:", err);

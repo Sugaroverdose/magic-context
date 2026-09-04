@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
     createBootBudget,
+    emitBootEnteringBreadcrumb,
+    formatBootPhaseDiagnostics,
     runBootPhaseWithDeadline,
     runBootPhaseWithinBudget,
 } from "./boot-deadline";
@@ -88,5 +90,58 @@ describe("boot phase deadline", () => {
         expect(result.status).toBe("completed");
         if (result.status === "completed") expect(result.value).toBe(42);
         expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
+    });
+
+    test("flushes the entering breadcrumb with the real process and directory values", () => {
+        const events: string[] = [];
+
+        emitBootEnteringBreadcrumb(
+            4312,
+            "/work/incident-checkout",
+            (message) => events.push(`report:${message}`),
+            () => events.push("flush"),
+        );
+
+        expect(events).toEqual([
+            "report:[magic-context] boot: entering pid=4312 dir=/work/incident-checkout",
+            "flush",
+        ]);
+    });
+
+    test("phase diagnostics distinguish elapsed work and the exhausted phase", () => {
+        const quiet = formatBootPhaseDiagnostics({
+            configMs: 0,
+            conflictMs: 0,
+            guardMs: 0,
+            openMs: 0,
+            migrateMs: 0,
+            hooksMs: 0,
+            rpcMs: 0,
+            postMs: 0,
+            totalMs: 0,
+            budgetMs: 15_000,
+            deadlinePhase: null,
+        });
+        const exhausted = formatBootPhaseDiagnostics({
+            configMs: 1.4,
+            conflictMs: 2.5,
+            guardMs: 3.6,
+            openMs: 4.7,
+            migrateMs: 5.8,
+            hooksMs: 6.9,
+            rpcMs: 7.1,
+            postMs: 8.2,
+            totalMs: 39.3,
+            budgetMs: 15_000,
+            deadlinePhase: "hooks",
+        });
+
+        expect(quiet).toBe(
+            "[magic-context] boot phases: config=0ms conflict=0ms guard=0ms open=0ms migrate=0ms hooks=0ms rpc=0ms post=0ms total=0ms budget=15000ms deadline_phase=none",
+        );
+        expect(exhausted).toBe(
+            "[magic-context] boot phases: config=1ms conflict=3ms guard=4ms open=5ms migrate=6ms hooks=7ms rpc=7ms post=8ms total=39ms budget=15000ms deadline_phase=hooks",
+        );
+        expect(exhausted).not.toBe(quiet);
     });
 });

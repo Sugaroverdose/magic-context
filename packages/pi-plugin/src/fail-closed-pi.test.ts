@@ -140,20 +140,29 @@ describe("registerPiFailClosedSurface", () => {
 			finishRuntime = resolve;
 		});
 		const fakeDb = { __test: true } as unknown as ContextDatabase;
+		const diagnostics: string[] = [];
 		const surface = registerPiFailClosedSurface(fake.pi as never, {
 			reason: { kind: "storage_failure", cause: "boot deadline" },
 			tryReopen: async () => fakeDb,
 			onRecovered: async () => runtimeInstalled,
+			report: (message) => diagnostics.push(message),
 		});
 
 		const adoption = surface.adoptRecovered(fakeDb);
 		await Promise.resolve();
+		expect(diagnostics).toEqual([
+			"[magic-context][pi] fail-closed blocking surface registered (storage_failure); primary turns will error until storage recovers or the build is upgraded",
+		]);
 		await expect(fake.emit("session_before_compact", {}, {})).resolves.toEqual({
 			cancel: true,
 		});
 
 		finishRuntime();
 		await expect(adoption).resolves.toBe(true);
+		expect(diagnostics).toEqual([
+			"[magic-context][pi] fail-closed blocking surface registered (storage_failure); primary turns will error until storage recovers or the build is upgraded",
+			"[magic-context][pi] storage recovered; full Magic Context runtime installed and fail-closed cleared",
+		]);
 		await expect(
 			fake.emit("context", { messages: [] }, {}),
 		).resolves.toBeUndefined();

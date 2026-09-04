@@ -235,13 +235,20 @@ describe("explicit shared storage resolution", () => {
         closeDatabase();
     });
 
-    it("installs a finite boot busy timeout before the first schema read", async () => {
+    it("reports the same finite boot busy timeout installed before the first schema read", async () => {
         useTempDataHome("storage-db-boot-busy-timeout-");
-        const db = await openDatabaseAsync({ busyTimeoutMs: 37 });
+        const diagnostics: string[] = [];
+        const db = await openDatabaseAsync({
+            busyTimeoutMs: 0,
+            onBootBusyTimeout: (message) => diagnostics.push(message),
+        });
 
         expect(db).not.toBeNull();
         const timeout = db!.prepare("PRAGMA busy_timeout").get() as { timeout: number };
-        expect(timeout.timeout).toBe(37);
+        expect(timeout.timeout).toBe(0);
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0]).toContain(`timeout=${timeout.timeout}ms`);
+        expect(diagnostics[0]).toContain(`path=${getDatabasePath(db!)}`);
         closeDatabase();
     });
 

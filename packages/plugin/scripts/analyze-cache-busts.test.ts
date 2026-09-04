@@ -132,6 +132,60 @@ describe("analyze-cache-bust dump discovery", () => {
 });
 
 describe("analyze-cache-bust provider meter verdicts", () => {
+    test("discriminates one metered bust from one latency row", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-bust-discrimination-"));
+        tempDirs.push(dir);
+        const bustSession = "ses_bustDiscrimination";
+        const latencySession = "ses_latencyDiscrimination";
+
+        writeDump(
+            dir,
+            `2026-09-02T04-47-20-000Z-000001-${bustSession}`,
+            "2026-09-02T04:47:20.000Z",
+            bustSession,
+            bodyWithBreakpointMessage("stable predecessor"),
+            responseUsage({ cache_read_input_tokens: 387_595, input_tokens: 4 }),
+        );
+        writeDump(
+            dir,
+            `2026-09-02T04-47-29-000Z-000002-${bustSession}`,
+            "2026-09-02T04:47:29.000Z",
+            bustSession,
+            bodyWithBreakpointMessage("rewritten breakpoint"),
+            responseUsage({
+                cache_read_input_tokens: 267_383,
+                cache_creation_input_tokens: 120_212,
+                input_tokens: 4,
+            }),
+        );
+
+        const unchangedBody = bodyWithTailCheckpoint("unchanged tail");
+        writeDump(
+            dir,
+            `2026-09-02T04-48-00-000Z-000001-${latencySession}`,
+            "2026-09-02T04:48:00.000Z",
+            latencySession,
+            unchangedBody,
+            responseUsage({ cache_creation_input_tokens: 300_000, input_tokens: 2 }),
+        );
+        writeDump(
+            dir,
+            `2026-09-02T04-48-01-000Z-000002-${latencySession}`,
+            "2026-09-02T04:48:01.000Z",
+            latencySession,
+            unchangedBody,
+            responseUsage({ cache_read_input_tokens: 100_000, input_tokens: 2 }),
+        );
+
+        const bust = __test.analyzeSnapshots(snapshotsFor(dir, bustSession))[1];
+        const latency = __test.analyzeSnapshots(snapshotsFor(dir, latencySession))[1];
+
+        expect([bust.verdict, latency.verdict]).toEqual(["BUST", "LATENCY"]);
+        expect(bust.byteVerdict).toBe("BUST");
+        expect(latency.byteVerdict).toBe("STABLE");
+        expect(bust.rewrittenTokens).not.toBe(latency.rewrittenTokens);
+    });
+
     test("classifies a breakpoint rewrite as a metered bust", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-meter-"));
         tempDirs.push(dir);
