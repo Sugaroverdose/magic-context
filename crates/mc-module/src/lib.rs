@@ -228,7 +228,11 @@ pub enum BindingError {
 pub const DEFAULT_MODULE_ID: &str = "magic-context";
 
 const TRANSFORM_HEALTH_LANE: &str = "transform";
-const TRANSFORM_WEDGE_THRESHOLD_MS: u64 = 120_000;
+// Emergency historian work continues in its spawned task, but a transform may wait only long
+// enough to finish before the caller's transport deadline. Sharing one budget across the busy
+// join and inline-refire arms prevents their individual deadlines from stacking.
+const TRANSFORM_HISTORIAN_FOLLOWUP_BUDGET: Duration = Duration::from_secs(20);
+const TRANSFORM_WEDGE_THRESHOLD_MS: u64 = 30_000;
 const STORE_OPEN_IDLE: u8 = 0;
 const STORE_OPENING: u8 = 1;
 const STORE_OPEN_WAITING: u8 = 2;
@@ -475,14 +479,15 @@ impl DispatchHealth {
         } else {
             HealthStatus::Ok
         };
+        let state = if stale { "stuck" } else { "advancing" };
         let detail = if stale {
             if queue_stale && !heartbeat_stale {
                 format!(
-                    "{TRANSFORM_HEALTH_LANE} lane queue stale; oldest queued item is {stale_age_ms}ms old; in-flight={in_flight}; consecutive errors={consecutive_errors}"
+                    "{TRANSFORM_HEALTH_LANE} lane stuck: queue stale; oldest queued item is {stale_age_ms}ms old; in-flight={in_flight}; consecutive errors={consecutive_errors}"
                 )
             } else {
                 format!(
-                    "{TRANSFORM_HEALTH_LANE} lane heartbeat stale by {stale_age_ms}ms; in-flight={in_flight}; consecutive errors={consecutive_errors}"
+                    "{TRANSFORM_HEALTH_LANE} lane stuck: heartbeat stale by {stale_age_ms}ms; in-flight={in_flight}; consecutive errors={consecutive_errors}"
                 )
             }
         } else if consecutive_errors > 0 {
@@ -499,6 +504,8 @@ impl DispatchHealth {
             detail: Some(detail),
             metrics: Some(json!({
                 "lane": TRANSFORM_HEALTH_LANE,
+                "state": state,
+                "stuck": stale,
                 "last_dispatch_started_at_ms": started,
                 "last_dispatch_completed_at_ms": completed,
                 "in_flight_count": in_flight,
@@ -3169,6 +3176,8 @@ pub struct McHandler {
     #[cfg(test)]
     between_transform_and_prepare: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    transform_historian_followup_budget: Mutex<Option<Duration>>,
+    #[cfg(test)]
     wrapup_operation_budget: Mutex<Option<Duration>>,
     #[cfg(test)]
     unknown_module_retry_delay: Mutex<Option<Duration>>,
@@ -3646,6 +3655,8 @@ impl McHandler {
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
             #[cfg(test)]
+            transform_historian_followup_budget: Mutex::new(None),
+            #[cfg(test)]
             wrapup_operation_budget: Mutex::new(None),
             #[cfg(test)]
             unknown_module_retry_delay: Mutex::new(None),
@@ -3908,6 +3919,7 @@ impl McHandler {
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
+            transform_historian_followup_budget: Mutex::new(None),
             wrapup_operation_budget: Mutex::new(None),
             unknown_module_retry_delay: Mutex::new(None),
             status_snapshot_hook: Mutex::new(None),
@@ -5544,7 +5556,19 @@ impl McHandler {
         }
     }
 
-    /// Drive a firing for an emergency pass, bounded by the completion-wait budget.
+    fn transform_historian_followup_budget(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(budget) = *self
+            .transform_historian_followup_budget
+            .lock()
+            .expect("transform historian follow-up budget mutex")
+        {
+            return budget;
+        }
+        TRANSFORM_HISTORIAN_FOLLOWUP_BUDGET
+    }
+
+    /// Drive a firing for an emergency pass within the transform's remaining follow-up budget.
     ///
     /// The firing runs as a SPAWNED task and this method awaits its JoinHandle with a
     /// timeout, for two reasons:
@@ -5558,11 +5582,24 @@ impl McHandler {
     ///   would instead strand durable state for crash recovery to repair.
     async fn run_historian_firing_inline(
         &self,
+        session_id: &str,
         task: HistorianFiringTask,
+        wait_budget: Duration,
     ) -> Result<historian::HistorianDriveOutcome, historian::HistorianDriveError> {
         let factory = Arc::clone(&self.producer_factory);
         let handle = tokio::spawn(Self::execute_historian_firing_task(factory, task));
-        match tokio::time::timeout(historian::completion_wait_budget(), handle).await {
+        let wait_started_at = Instant::now();
+        eprintln!(
+            "mc-pass-stage session={session_id} stage=historian_inline_wait event=begin budget_ms={}",
+            wait_budget.as_millis()
+        );
+        let waited = tokio::time::timeout(wait_budget, handle).await;
+        eprintln!(
+            "mc-pass-stage session={session_id} stage=historian_inline_wait event=end outcome={} elapsed_ms={:.1}",
+            if waited.is_ok() { "completed" } else { "timed_out" },
+            wait_started_at.elapsed().as_secs_f64() * 1_000.0
+        );
+        match waited {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(join_err)) => Err(historian::HistorianDriveError::Producer(
                 HistorianProducerError::RunFailed {
@@ -5580,11 +5617,22 @@ impl McHandler {
 
     async fn await_live_historian_completion(
         &self,
+        session_id: &str,
         completion: LiveHistorianCompletionWait,
+        wait_budget: Duration,
     ) -> bool {
-        tokio::time::timeout(historian::completion_wait_budget(), completion)
-            .await
-            .is_ok()
+        let wait_started_at = Instant::now();
+        eprintln!(
+            "mc-pass-stage session={session_id} stage=historian_busy_wait event=begin budget_ms={}",
+            wait_budget.as_millis()
+        );
+        let completed = tokio::time::timeout(wait_budget, completion).await.is_ok();
+        eprintln!(
+            "mc-pass-stage session={session_id} stage=historian_busy_wait event=end outcome={} elapsed_ms={:.1}",
+            if completed { "completed" } else { "timed_out" },
+            wait_started_at.elapsed().as_secs_f64() * 1_000.0
+        );
+        completed
     }
 
     fn wrapup_operation_budget(&self) -> Duration {
@@ -8521,6 +8569,13 @@ impl McHandler {
         {
             hook();
         }
+        let transform_followup_deadline =
+            handler_started_at + self.transform_historian_followup_budget();
+        let remaining_followup_budget = || {
+            transform_followup_deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO)
+        };
         let mut trigger_timings = HistorianTriggerTimings::default();
         let diagnostics = if parsed.is_subagent {
             historian_no_fire_diagnostics(
@@ -8551,7 +8606,14 @@ impl McHandler {
                     diagnostics,
                     completion,
                 } => {
-                    if self.await_live_historian_completion(completion).await {
+                    if self
+                        .await_live_historian_completion(
+                            &parsed.session_id,
+                            completion,
+                            remaining_followup_budget(),
+                        )
+                        .await
+                    {
                         result = match run_transform() {
                             Ok(result) => result,
                             Err(e) => return reject_transform(e),
@@ -8576,7 +8638,14 @@ impl McHandler {
                             PreparedHistorianAction::Busy { diagnostics, .. } => diagnostics,
                             PreparedHistorianAction::FireReady(prepared) => {
                                 let diagnostics = prepared.diagnostics.clone();
-                                match self.run_historian_firing_inline(prepared.task).await {
+                                match self
+                                    .run_historian_firing_inline(
+                                        &parsed.session_id,
+                                        prepared.task,
+                                        remaining_followup_budget(),
+                                    )
+                                    .await
+                                {
                                     Ok(_) => {
                                         result = match run_transform() {
                                             Ok(result) => result,
@@ -8602,7 +8671,14 @@ impl McHandler {
                 }
                 PreparedHistorianAction::FireReady(prepared) => {
                     let diagnostics = prepared.diagnostics.clone();
-                    match self.run_historian_firing_inline(prepared.task).await {
+                    match self
+                        .run_historian_firing_inline(
+                            &parsed.session_id,
+                            prepared.task,
+                            remaining_followup_budget(),
+                        )
+                        .await
+                    {
                         Ok(_) => {
                             result = match run_transform() {
                                 Ok(result) => result,
@@ -18156,6 +18232,34 @@ mod tests {
         assert_eq!(metrics["heartbeat_stale"], json!(true));
         assert_eq!(metrics["in_flight_count"], json!(1));
         assert_eq!(metrics["completion_lag_ms"], json!(150_000));
+        assert_eq!(metrics["state"], json!("stuck"));
+        assert_eq!(metrics["stuck"], json!(true));
+    }
+
+    #[test]
+    fn transform_health_stuck_bound_is_typed_and_constant_fenced() {
+        assert_eq!(TRANSFORM_WEDGE_THRESHOLD_MS, 30_000);
+        let health = DispatchHealth::new();
+        health
+            .last_dispatch_started_at_ms
+            .store(1, Ordering::Relaxed);
+        health.in_flight_count.store(1, Ordering::Relaxed);
+
+        let within_bound = health.report(30_001);
+        assert_eq!(within_bound.status, HealthStatus::Ok);
+        let within_metrics = within_bound.metrics.unwrap();
+        assert_eq!(within_metrics["state"], json!("advancing"));
+        assert_eq!(within_metrics["stuck"], json!(false));
+
+        let past_bound = health.report(30_002);
+        assert_eq!(past_bound.status, HealthStatus::Degraded);
+        assert!(past_bound
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("lane stuck")));
+        let stuck_metrics = past_bound.metrics.unwrap();
+        assert_eq!(stuck_metrics["state"], json!("stuck"));
+        assert_eq!(stuck_metrics["stuck"], json!(true));
     }
 
     #[test]
@@ -29898,6 +30002,36 @@ mod tests {
 
         assert!(response["action"].is_string());
         assert!(m0_text(&response).contains("autonomous summary"));
+        wait_for_idle(&store).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_stuck_historian_is_bounded_and_next_transform_succeeds() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        *handler
+            .transform_historian_followup_budget
+            .lock()
+            .expect("transform historian follow-up budget mutex") = Some(Duration::from_secs(1));
+        let messages = big_messages();
+
+        let started_at = Instant::now();
+        let first = call_transform_with_usage(&handler, messages.clone(), 48_000, 50_000).await;
+        assert!(first["action"].is_string());
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert!(started_at.elapsed() >= Duration::from_secs(1));
+        assert!(started_at.elapsed() < Duration::from_secs(5));
+
+        let retry_started_at = Instant::now();
+        let retry = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
+        assert!(retry["action"].is_string());
+        assert!(retry_started_at.elapsed() < Duration::from_secs(5));
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
         wait_for_idle(&store).await;
     }
 
