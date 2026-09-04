@@ -56,7 +56,7 @@
       "minLength": 1
     },
     "profiles": {
-      "description": "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
+      "description": "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
       "type": "object",
       "propertyNames": {
         "type": "string",
@@ -222,6 +222,103 @@
                 },
                 "additionalProperties": false,
                 "description": "Strict profile-only Pi model-selection block."
+              },
+              "omp": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary OMP model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "OMP model ID (for example, provider/model)."
+                          },
+                          "thinking_level": {
+                            "description": "OMP thinking level for this entry.",
+                            "type": "string",
+                            "enum": [
+                              "off",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max",
+                              "inherit",
+                              "auto"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback OMP model entries.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "OMP model ID (for example, provider/model)."
+                            },
+                            "thinking_level": {
+                              "description": "OMP thinking level for this entry.",
+                              "type": "string",
+                              "enum": [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max",
+                                "inherit",
+                                "auto"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "thinking_level": {
+                    "description": "OMP thinking level for the primary model entry.",
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max",
+                      "inherit",
+                      "auto"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict profile-only OMP model-selection block."
               }
             },
             "additionalProperties": false
@@ -383,6 +480,103 @@
                 },
                 "additionalProperties": false,
                 "description": "Strict profile-only Pi model-selection block."
+              },
+              "omp": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary OMP model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "OMP model ID (for example, provider/model)."
+                          },
+                          "thinking_level": {
+                            "description": "OMP thinking level for this entry.",
+                            "type": "string",
+                            "enum": [
+                              "off",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max",
+                              "inherit",
+                              "auto"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback OMP model entries.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "OMP model ID (for example, provider/model)."
+                            },
+                            "thinking_level": {
+                              "description": "OMP thinking level for this entry.",
+                              "type": "string",
+                              "enum": [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max",
+                                "inherit",
+                                "auto"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "thinking_level": {
+                    "description": "OMP thinking level for the primary model entry.",
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max",
+                      "inherit",
+                      "auto"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict profile-only OMP model-selection block."
               }
             },
             "additionalProperties": false
@@ -434,7 +628,7 @@
       }
     },
     "historian": {
-      "description": "Historian metadata plus independent strict OpenCode and Pi execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode or historian.pi.",
+      "description": "Historian metadata plus independent strict OpenCode, Pi, and OMP execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode, historian.pi, or historian.omp.",
       "type": "object",
       "properties": {
         "temperature": {
@@ -712,6 +906,103 @@
           "additionalProperties": false,
           "description": "Strict Pi model-resolution block. It accepts no OpenCode vocabulary."
         },
+        "omp": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "description": "Primary OMP model entry.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string",
+                      "description": "OMP model ID (for example, provider/model)."
+                    },
+                    "thinking_level": {
+                      "description": "OMP thinking level for this entry.",
+                      "type": "string",
+                      "enum": [
+                        "off",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "inherit",
+                        "auto"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "fallback_models": {
+              "description": "Ordered fallback OMP entries.",
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "description": "OMP model ID (for example, provider/model)."
+                      },
+                      "thinking_level": {
+                        "description": "OMP thinking level for this entry.",
+                        "type": "string",
+                        "enum": [
+                          "off",
+                          "minimal",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          "inherit",
+                          "auto"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "model"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "thinking_level": {
+              "description": "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "type": "string",
+              "enum": [
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "inherit",
+                "auto"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "description": "Strict OMP model-resolution block. It accepts no OpenCode vocabulary."
+        },
         "two_pass": {
           "default": false,
           "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",
@@ -735,7 +1026,7 @@
       }
     },
     "dreamer": {
-      "description": "Dreamer metadata and scheduling plus independent strict OpenCode and Pi execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block.",
+      "description": "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block.",
       "type": "object",
       "properties": {
         "temperature": {
@@ -1190,6 +1481,211 @@
           "additionalProperties": false,
           "description": "Strict Pi dreamer model-resolution block. It accepts no OpenCode vocabulary."
         },
+        "omp": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "description": "Primary OMP model entry.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "model": {
+                      "type": "string",
+                      "description": "OMP model ID (for example, provider/model)."
+                    },
+                    "thinking_level": {
+                      "description": "OMP thinking level for this entry.",
+                      "type": "string",
+                      "enum": [
+                        "off",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "inherit",
+                        "auto"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "model"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "fallback_models": {
+              "description": "Ordered fallback OMP entries.",
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "description": "OMP model ID (for example, provider/model)."
+                      },
+                      "thinking_level": {
+                        "description": "OMP thinking level for this entry.",
+                        "type": "string",
+                        "enum": [
+                          "off",
+                          "minimal",
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max",
+                          "inherit",
+                          "auto"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "model"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "thinking_level": {
+              "description": "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+              "type": "string",
+              "enum": [
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "inherit",
+                "auto"
+              ]
+            },
+            "tasks": {
+              "description": "OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes.",
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "OMP model entry for this task.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "OMP model ID (for example, provider/model)."
+                          },
+                          "thinking_level": {
+                            "description": "OMP thinking level for this entry.",
+                            "type": "string",
+                            "enum": [
+                              "off",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max",
+                              "inherit",
+                              "auto"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered OMP fallback entries for this task.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "OMP model ID (for example, provider/model)."
+                            },
+                            "thinking_level": {
+                              "description": "OMP thinking level for this entry.",
+                              "type": "string",
+                              "enum": [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max",
+                                "inherit",
+                                "auto"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "thinking_level": {
+                    "description": "OMP thinking level for this task's primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max",
+                      "inherit",
+                      "auto"
+                    ]
+                  },
+                  "timeout_minutes": {
+                    "description": "Minutes allowed for this task before it is aborted.",
+                    "type": "number",
+                    "minimum": 5
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false,
+          "description": "Strict OMP dreamer model-resolution block. It accepts no OpenCode vocabulary."
+        },
         "tasks": {
           "default": {
             "map-memories": {
@@ -1416,7 +1912,7 @@
               "additionalProperties": false
             }
           },
-          "description": "Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks or dreamer.pi.tasks."
+          "description": "Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks, dreamer.pi.tasks, or dreamer.omp.tasks."
         },
         "inject_docs": {
           "default": true,

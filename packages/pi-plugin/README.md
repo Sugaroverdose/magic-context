@@ -74,7 +74,7 @@ Verify with:
 npx @cortexkit/magic-context@latest doctor --harness omp
 ```
 
-OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-pi/*` runtime. Magic Context also re-invokes the current host executable for historian, dreamer, and sidekick children, so OMP children remain OMP processes.
+OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-pi/*` runtime. Magic Context identifies OMP from `@oh-my-pi/pi-utils`'s in-process `APP_NAME` through the running host's module graph, not from an executable basename, so compiled and symlinked launches behave the same. It also re-invokes the current host executable for historian, dreamer, and sidekick children, so OMP children remain OMP processes.
 
 ---
 
@@ -96,6 +96,9 @@ Session discovery follows the active host. Relative `pi.subagent_extensions` are
   "historian": {
     "pi": {
       "model": "anthropic/claude-haiku-4-5"
+    },
+    "omp": {
+      "model": { "model": "opencode/claude-haiku-4-5", "thinking_level": "auto" }
     }
   },
   "embedding": {
@@ -103,6 +106,8 @@ Session discovery follows the active host. Relative `pi.subagent_extensions` are
   }
 }
 ```
+
+OMP uses `historian.omp ?? historian.pi` and `dreamer.omp ?? dreamer.pi`; leaving the OMP blocks absent preserves existing Pi-compatible configuration. OMP supports `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `inherit`, and `auto` thinking levels.
 
 For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — OpenCode, Pi, and OMP share the same schema.
 

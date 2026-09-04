@@ -32,6 +32,7 @@ export default function DreamerProjectConfigPanel(props: {
   project: DreamerProject;
   opencodeModels: string[];
   piModels: string[];
+  ompModels: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -117,7 +118,7 @@ export default function DreamerProjectConfigPanel(props: {
     try {
       let nextConfig = patchDreamerTasksJsonc(configFile()?.content ?? "", effectiveTasks() ?? {});
       const overrides = modelTaskOverrides();
-      for (const target of ["opencode", "pi"] as const) {
+      for (const target of ["opencode", "pi", "omp"] as const) {
         if (hasOwn(overrides, target)) {
           nextConfig = patchDreamerTasksJsonc(
             nextConfig,
@@ -209,6 +210,13 @@ export default function DreamerProjectConfigPanel(props: {
                 >
                   Pi
                 </button>
+                <button
+                  type="button"
+                  class={`tab-pill ${harness() === "omp" ? "active" : ""}`}
+                  onClick={() => setHarness("omp")}
+                >
+                  OMP
+                </button>
               </div>
               <DreamerTasksField
                 value={effectiveTasks()}
@@ -222,7 +230,13 @@ export default function DreamerProjectConfigPanel(props: {
                   setModelTaskOverrides((previous) => ({ ...previous, [harness()]: next }));
                   setDirty(true);
                 }}
-                models={harness() === "opencode" ? props.opencodeModels : props.piModels}
+                models={
+                  harness() === "opencode"
+                    ? props.opencodeModels
+                    : harness() === "omp"
+                      ? props.ompModels
+                      : props.piModels
+                }
               />
             </Show>
           </Show>

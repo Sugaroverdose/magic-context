@@ -1,3 +1,5 @@
+import type { HarnessId } from "./harness";
+
 /**
  * Harness-agnostic transcript interface.
  *
@@ -229,7 +231,7 @@ export interface Transcript {
      *   compaction marker injection).
      * - Test assertions confirming the right adapter ran.
      */
-    readonly harness: "opencode" | "pi";
+    readonly harness: HarnessId;
 
     /**
      * Commit accumulated mutations to the underlying source array.

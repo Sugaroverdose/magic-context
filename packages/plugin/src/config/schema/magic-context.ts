@@ -36,6 +36,12 @@ export const PiThinkingLevelSchema = z
     .optional();
 export type PiThinkingLevel = z.infer<typeof PiThinkingLevelSchema>;
 
+/** OMP accepts Pi's thinking levels plus host-managed inheritance and automatic selection. */
+export const OmpThinkingLevelSchema = z
+    .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max", "inherit", "auto"])
+    .optional();
+export type OmpThinkingLevel = z.infer<typeof OmpThinkingLevelSchema>;
+
 /** Pi-only child-process controls. This block is intentionally optional so an
  * absent allowlist preserves Pi's normal extension discovery behavior. */
 export const PiConfigSchema = z
@@ -157,6 +163,9 @@ export const PER_HARNESS_MIGRATION_INVENTORY = {
     },
 } as const;
 
+/** Harness keys that own independent hidden-agent model-selection blocks. */
+export const PER_HARNESS_MODEL_KEYS = ["opencode", "pi", "omp"] as const;
+
 /** OpenCode entry objects permit `variant` and reject Pi-only `thinking_level`. */
 const OcEntryObjectSchema = z
     .object({
@@ -176,6 +185,16 @@ const PiEntryObjectSchema = z
     .strict();
 export const PiEntrySchema = z.union([z.string(), PiEntryObjectSchema]);
 export type PiEntry = z.infer<typeof PiEntrySchema>;
+
+/** OMP entry objects use Pi's qualifier vocabulary, including OMP-only auto/inherit. */
+const OmpEntryObjectSchema = z
+    .object({
+        model: z.string().describe("OMP model ID (for example, provider/model)."),
+        thinking_level: OmpThinkingLevelSchema.describe("OMP thinking level for this entry."),
+    })
+    .strict();
+export const OmpEntrySchema = z.union([z.string(), OmpEntryObjectSchema]);
+export type OmpEntry = z.infer<typeof OmpEntrySchema>;
 
 /** Strict model-resolution block used by historian.opencode. */
 export const OpenCodeHarnessBlockSchema = z
@@ -215,6 +234,22 @@ export const PiHarnessBlockSchema = z
     .strict()
     .describe("Strict Pi model-resolution block. It accepts no OpenCode vocabulary.");
 export type PiHarnessBlock = z.infer<typeof PiHarnessBlockSchema>;
+
+/** Strict model-resolution block used by historian.omp. */
+export const OmpHarnessBlockSchema = z
+    .object({
+        model: OmpEntrySchema.optional().describe("Primary OMP model entry."),
+        fallback_models: z
+            .array(OmpEntrySchema)
+            .optional()
+            .describe("Ordered fallback OMP entries."),
+        thinking_level: OmpThinkingLevelSchema.describe(
+            "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+        ),
+    })
+    .strict()
+    .describe("Strict OMP model-resolution block. It accepts no OpenCode vocabulary.");
+export type OmpHarnessBlock = z.infer<typeof OmpHarnessBlockSchema>;
 
 /** Strict OpenCode-only execution override for one dreamer task. */
 export const OpenCodeTaskExecutionSchema = z
@@ -258,6 +293,26 @@ export const PiTaskExecutionSchema = z
     })
     .strict();
 export type PiTaskExecution = z.infer<typeof PiTaskExecutionSchema>;
+
+/** Strict OMP-only execution override for one dreamer task. */
+export const OmpTaskExecutionSchema = z
+    .object({
+        model: OmpEntrySchema.optional().describe("OMP model entry for this task."),
+        fallback_models: z
+            .array(OmpEntrySchema)
+            .optional()
+            .describe("Ordered OMP fallback entries for this task."),
+        thinking_level: OmpThinkingLevelSchema.describe(
+            "OMP thinking level for this task's primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+        ),
+        timeout_minutes: z
+            .number()
+            .min(5)
+            .optional()
+            .describe("Minutes allowed for this task before it is aborted."),
+    })
+    .strict();
+export type OmpTaskExecution = z.infer<typeof OmpTaskExecutionSchema>;
 
 /** Strict OpenCode harness block for dreamer execution and task overrides. */
 export const DreamerOpenCodeHarnessBlockSchema = z
@@ -310,6 +365,28 @@ export const DreamerPiHarnessBlockSchema = z
     .describe("Strict Pi dreamer model-resolution block. It accepts no OpenCode vocabulary.");
 export type DreamerPiHarnessBlock = z.infer<typeof DreamerPiHarnessBlockSchema>;
 
+/** Strict OMP harness block for dreamer execution and task overrides. */
+export const DreamerOmpHarnessBlockSchema = z
+    .object({
+        model: OmpEntrySchema.optional().describe("Primary OMP model entry."),
+        fallback_models: z
+            .array(OmpEntrySchema)
+            .optional()
+            .describe("Ordered fallback OMP entries."),
+        thinking_level: OmpThinkingLevelSchema.describe(
+            "OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+        ),
+        tasks: z
+            .record(z.string(), OmpTaskExecutionSchema)
+            .optional()
+            .describe(
+                "OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes.",
+            ),
+    })
+    .strict()
+    .describe("Strict OMP dreamer model-resolution block. It accepts no OpenCode vocabulary.");
+export type DreamerOmpHarnessBlock = z.infer<typeof DreamerOmpHarnessBlockSchema>;
+
 /**
  * A profile may select models but must not alter execution policy. Keep this
  * separate from the full harness schemas, whose dreamer blocks also admit task
@@ -342,16 +419,31 @@ const ProfilePiModelBlockSchema = z
     })
     .strict()
     .describe("Strict profile-only Pi model-selection block.");
+const ProfileOmpModelBlockSchema = z
+    .object({
+        model: OmpEntrySchema.optional().describe("Primary OMP model entry."),
+        fallback_models: z
+            .array(OmpEntrySchema)
+            .optional()
+            .describe("Ordered fallback OMP model entries."),
+        thinking_level: OmpThinkingLevelSchema.describe(
+            "OMP thinking level for the primary model entry.",
+        ),
+    })
+    .strict()
+    .describe("Strict profile-only OMP model-selection block.");
 const ProfileHistorianSchema = z
     .object({
         opencode: ProfileOpenCodeModelBlockSchema.optional(),
         pi: ProfilePiModelBlockSchema.optional(),
+        omp: ProfileOmpModelBlockSchema.optional(),
     })
     .strict();
 const ProfileDreamerSchema = z
     .object({
         opencode: ProfileOpenCodeModelBlockSchema.optional(),
         pi: ProfilePiModelBlockSchema.optional(),
+        omp: ProfileOmpModelBlockSchema.optional(),
     })
     .strict();
 const ProfileSidekickSchema = AgentOverrideConfigSchema.pick({
@@ -502,7 +594,7 @@ export const DreamTasksSchema = z
         ),
     })
     .describe(
-        "Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks or dreamer.pi.tasks.",
+        "Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks, dreamer.pi.tasks, or dreamer.omp.tasks.",
     );
 
 const AgentMetadataSchema = AgentOverrideConfigSchema.pick({
@@ -519,10 +611,11 @@ const AgentMetadataSchema = AgentOverrideConfigSchema.pick({
     maxTokens: true,
 });
 
-/** Combined dreamer metadata plus two independent strict execution blocks. */
+/** Combined dreamer metadata plus independent strict execution blocks. */
 export const DreamerConfigSchema = AgentMetadataSchema.extend({
     opencode: DreamerOpenCodeHarnessBlockSchema.optional(),
     pi: DreamerPiHarnessBlockSchema.optional(),
+    omp: DreamerOmpHarnessBlockSchema.optional(),
     tasks: DreamTasksSchema.default(() => DreamTasksSchema.parse({})),
     inject_docs: z
         .boolean()
@@ -544,11 +637,12 @@ export type SidekickConfig = NonNullable<z.infer<typeof SidekickConfigSchema>>;
 
 /**
  * Historian metadata remains harness-independent. Only model resolution moves to
- * the strict opencode and pi blocks; two_pass and disallowed_tools stay here.
+ * the strict opencode, pi, and omp blocks; two_pass and disallowed_tools stay here.
  */
 export const HistorianConfigSchema = AgentMetadataSchema.extend({
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),
+    omp: OmpHarnessBlockSchema.optional(),
     two_pass: z
         .boolean()
         .default(false)
@@ -986,13 +1080,13 @@ export const MagicContextConfigSchema = z
                 "Select a named user-owned model profile. A valid project name overrides this user default; an empty string, null, or other non-string project value is ignored with a warning so the user selection still applies. Unknown names warn and use the base configuration.",
             ),
         profiles: ConfigProfilesSchema.optional().describe(
-            "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
+            "User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles.",
         ),
         historian: HistorianConfigSchema.describe(
-            "Historian metadata plus independent strict OpenCode and Pi execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode or historian.pi.",
+            "Historian metadata plus independent strict OpenCode, Pi, and OMP execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode, historian.pi, or historian.omp.",
         ),
         dreamer: DreamerConfigSchema.optional().describe(
-            "Dreamer metadata and scheduling plus independent strict OpenCode and Pi execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block.",
+            "Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block.",
         ),
         smart_notes: z
             .object({

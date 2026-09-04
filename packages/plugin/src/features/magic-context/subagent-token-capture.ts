@@ -1,4 +1,5 @@
 import { describeError } from "../../shared/error-message";
+import type { HarnessId } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import {
@@ -22,7 +23,7 @@ export interface LastAssistantModel {
 export interface ChildInvocationRecordInput {
     db: Database | null;
     parentSessionId: string;
-    harness: "opencode" | "pi";
+    harness: HarnessId;
     subagent: SubagentKind;
     startedAt: number;
     endedAt?: number;

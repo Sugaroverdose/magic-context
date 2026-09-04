@@ -497,7 +497,7 @@ async function sweepProject(
         // worktree the shared git:<sha> identity might resolve to).
         const runtimeConfigs = buildDreamTaskRuntimeConfigs(
             dreamerConfig,
-            "opencode",
+            reg.harness,
             reg.language,
             reg.mural?.model,
         );

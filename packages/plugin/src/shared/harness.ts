@@ -2,7 +2,7 @@
  * Identifier for the host harness this plugin is running inside.
  *
  * Magic Context's SQLite database lives at a vendor-scoped path
- * (`~/.local/share/cortexkit/magic-context/`) so OpenCode and Pi can share
+ * (`~/.local/share/cortexkit/magic-context/`) so OpenCode, Pi, and OMP can share
  * project memories, embedding cache, dreamer runs, and other project-scoped
  * state. Session-scoped tables carry a `harness` column populated from this
  * module so we can disambiguate which harness wrote each session row,
@@ -13,13 +13,13 @@
  * happens:
  * - OpenCode plugin: relies on the default ("opencode") — no setHarness call
  *   needed
- * - Pi plugin: calls `setHarness("pi")` before opening the database
+ * - Pi-compatible plugin: resolves the host and calls `setHarness("pi" | "omp")` before opening the database
  *
  * NEVER read this from configuration or session state — it is a
  * boot-time constant per plugin instance. Cross-harness leakage is a
  * correctness bug, not a feature.
  */
-export type HarnessId = "opencode" | "pi";
+export type HarnessId = "opencode" | "pi" | "omp";
 
 let currentHarness: HarnessId = "opencode";
 let harnessLocked = false;

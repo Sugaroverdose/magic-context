@@ -2,7 +2,6 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import {
-    type ConfigHarness,
     cortexKitUserConfigBasePath,
     resolveLegacyConfigSourcesForHarness,
 } from "../config/migrate-config-location";
@@ -13,6 +12,7 @@ import {
     CTX_REDUCE_LIGHT_DESCRIPTION,
     CTX_SEARCH_LIGHT_DESCRIPTION,
 } from "../tools/light-descriptions";
+import type { HarnessId } from "./harness";
 import { piModelRefToCanonical } from "./harness-provider-map";
 import { detectConfigFile } from "./jsonc-parser";
 import {
@@ -88,7 +88,7 @@ export interface PromptSurfaceRuntime {
 }
 
 export interface CreatePromptSurfaceRuntimeOptions {
-    harness?: ConfigHarness;
+    harness?: HarnessId;
     directory?: string;
     /** Explicit test/integration seam; production derives the USER config directory. */
     userConfigDirectory?: string;
@@ -105,7 +105,7 @@ function resolveUserConfigDirectory(options: CreatePromptSurfaceRuntimeOptions):
     if (options.harness) {
         const legacy = resolveLegacyConfigSourcesForHarness(
             options.directory ?? process.cwd(),
-            options.harness,
+            options.harness === "omp" ? "pi" : options.harness,
         ).user.find((source) => existsSync(source.path));
         if (legacy) return dirname(legacy.path);
     }

@@ -111,7 +111,7 @@ export interface SessionSummary {
   is_subagent: boolean;
 }
 
-export type Harness = "opencode" | "pi" | "claude_code" | "codex";
+export type Harness = "opencode" | "pi" | "omp" | "claude_code" | "codex";
 
 export interface SessionFilter {
   harness?: Harness;
@@ -487,6 +487,7 @@ export type OpencodeInstallState = "cli" | "desktop" | "none";
 export interface ModelCatalogs {
   opencode: string[];
   pi: string[];
+  omp: string[];
 }
 
 export interface ProjectConfigEntry {

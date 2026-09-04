@@ -32,6 +32,7 @@ import {
 import * as loggerModule from "@magic-context/core/shared/logger";
 import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-runner";
 
+import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { __test, PiSubagentRunner } from "./subagent-runner";
 
 const baseOptions: SubagentRunOptions = {
@@ -58,10 +59,12 @@ const OMP_ALLOWLISTABLE_TOOLS: Readonly<Record<string, true>> = {
 };
 
 beforeEach(() => {
+	__setPiHarnessKindForTesting(undefined);
 	__test.resetProviderFormCache();
 });
 
 afterEach(() => {
+	__setPiHarnessKindForTesting(undefined);
 	closeDatabase();
 	__resetSchemaFenceStateForTests();
 });
@@ -657,6 +660,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("uses PI_CODING_AGENT_DIR only for a positively identified OMP host", () => {
+		__setPiHarnessKindForTesting("omp");
 		const root = mkdtempSync(join(homedir(), ".mc-omp-host-test-"));
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 		const previousPackageDir = process.env.PI_PACKAGE_DIR;
@@ -687,6 +691,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("uses the OMP default agent dir when PI_CODING_AGENT_DIR is unset", () => {
+		__setPiHarnessKindForTesting("omp");
 		const root = mkdtempSync(join(homedir(), ".mc-omp-default-host-test-"));
 		const previous = {
 			agentDir: process.env.PI_CODING_AGENT_DIR,
@@ -730,6 +735,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("gives a named OMP profile precedence over a stale agent-dir override", () => {
+		__setPiHarnessKindForTesting("omp");
 		const root = mkdtempSync(join(homedir(), ".mc-omp-profile-host-test-"));
 		const previous = {
 			agentDir: process.env.PI_CODING_AGENT_DIR,
@@ -795,6 +801,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("emits only OMP-supported startup flags and tool names on an OMP host", () => {
+		__setPiHarnessKindForTesting("omp");
 		const root = mkdtempSync(join(homedir(), ".mc-omp-argv-test-"));
 		const previousPackageDir = process.env.PI_PACKAGE_DIR;
 		writeFileSync(

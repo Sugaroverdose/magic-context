@@ -35,11 +35,11 @@ export const RENDERED_PREFIXES: readonly string[] = [
   // Historian
   "history_budget_percentage",
   "historian_timeout_ms",
-  // The OpenCode and Pi configuration editors each render separate harness-specific blocks.
+  // The OpenCode, Pi, and OMP editors each render separate harness-specific blocks.
   "historian",
   "commit_cluster_trigger",
   // Dreamer (panel renders a curated subset of the agent-override schema)
-  // Dreamer renders shared schedules plus OpenCode and Pi model task blocks.
+  // Dreamer renders shared schedules plus OpenCode, Pi, and OMP model task blocks.
   "dreamer",
   // Sidekick (panel renders a curated subset)
   "sidekick.model",

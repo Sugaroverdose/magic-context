@@ -61,6 +61,7 @@ import { log } from "@magic-context/core/shared/logger";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import { loadPiConfig } from "./config";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { registerMagicContextTools } from "./tools";
 
 const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
@@ -68,12 +69,9 @@ const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
 let openedDb: ContextDatabase | undefined;
 
 export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
-	// Mark this Pi process as a Magic Context subagent in the shared
-	// harness state. session-scoped writes from any code path that
-	// reaches the shared core will tag rows with harness='pi' the same
-	// way the main extension does — but in practice subagents shouldn't
-	// be writing session-scoped state at all.
-	setHarness("pi");
+	// Keep any unexpected session-scoped child write attributed to its actual
+	// Pi-compatible host, even though hidden children normally avoid those writes.
+	setHarness(resolvePiHarnessKind());
 
 	pi.registerFlag(SUBAGENT_DREAMER_ACTIONS_FLAG, {
 		description:

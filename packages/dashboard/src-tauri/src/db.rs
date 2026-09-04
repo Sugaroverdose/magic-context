@@ -317,6 +317,7 @@ pub struct SessionSummary {
 pub enum Harness {
     Opencode,
     Pi,
+    Omp,
     ClaudeCode,
     Codex,
 }
@@ -326,13 +327,14 @@ impl Harness {
         match self {
             Self::Opencode => "opencode",
             Self::Pi => "pi",
+            Self::Omp => "omp",
             Self::ClaudeCode => "claude_code",
             Self::Codex => "codex",
         }
     }
 
     fn has_magic_context_plugin_state(self) -> bool {
-        matches!(self, Self::Opencode | Self::Pi)
+        matches!(self, Self::Opencode | Self::Pi | Self::Omp)
     }
 
     fn uses_codex_no_write_cache_model(self) -> bool {
@@ -347,6 +349,7 @@ impl std::str::FromStr for Harness {
         match value.to_ascii_lowercase().as_str() {
             "opencode" => Ok(Self::Opencode),
             "pi" => Ok(Self::Pi),
+            "omp" => Ok(Self::Omp),
             "claude_code" | "claude-code" | "claudecode" | "cc" => Ok(Self::ClaudeCode),
             "codex" => Ok(Self::Codex),
             other => Err(format!("unknown harness: {other}")),
@@ -1099,40 +1102,53 @@ pub fn load_raw_db_cache_events(
     rows.collect()
 }
 
-/// Load Pi cache events from JSONL session files. Mirrors the per-session
-/// windowing the OpenCode SQL path does so a single noisy Pi session cannot
-/// monopolize the global view, and emits the same `RawDbCacheEvent` shape as
-/// OpenCode so downstream `build_db_cache_events` works unchanged.
+/// Load Pi-compatible cache events from JSONL session files. Each native
+/// session root keeps its own harness identity while sharing the parser.
 pub fn load_raw_pi_cache_events(
     limit: usize,
     since_timestamp: Option<i64>,
 ) -> Vec<RawDbCacheEvent> {
-    let per_session_limit = limit;
-    let global_cap = limit.saturating_mul(10);
-    let mut all_rows: Vec<RawDbCacheEvent> = Vec::new();
+    let mut all_rows = load_raw_pi_compatible_cache_events(
+        Harness::Pi,
+        pi_sessions::scan_pi_session_dir(),
+        limit,
+        since_timestamp,
+    );
+    all_rows.extend(load_raw_pi_compatible_cache_events(
+        Harness::Omp,
+        pi_sessions::scan_omp_session_dir(),
+        limit,
+        since_timestamp,
+    ));
+    all_rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp));
+    all_rows.truncate(limit.saturating_mul(10));
+    all_rows
+}
 
-    for meta in pi_sessions::scan_pi_compatible_session_dir() {
+fn load_raw_pi_compatible_cache_events(
+    harness: Harness,
+    sessions: Vec<pi_sessions::PiSessionMeta>,
+    limit: usize,
+    since_timestamp: Option<i64>,
+) -> Vec<RawDbCacheEvent> {
+    let mut all_rows = Vec::new();
+    for meta in sessions {
         let Some(detail) = pi_sessions::read_pi_session_detail(&meta.jsonl_path) else {
             continue;
         };
-        // Pi message timestamps are ms-since-epoch; the OpenCode side uses ms too,
-        // so we keep them in the same unit and on the same time axis.
         let mut session_rows: Vec<RawDbCacheEvent> = detail
             .messages
             .iter()
             .filter(|message| message.role == "assistant")
             .filter_map(|message| {
                 let usage = message.usage.as_ref()?;
-                if usage.total == 0 {
+                if usage.total == 0
+                    || since_timestamp.is_some_and(|since| message.timestamp_ms <= since)
+                {
                     return None;
                 }
-                if let Some(since) = since_timestamp {
-                    if message.timestamp_ms <= since {
-                        return None;
-                    }
-                }
                 Some(RawDbCacheEvent {
-                    harness: Harness::Pi,
+                    harness,
                     message_id: message.entry_id.clone(),
                     session_id: meta.session_id.clone(),
                     timestamp: message.timestamp_ms,
@@ -1147,15 +1163,10 @@ pub fn load_raw_pi_cache_events(
                 })
             })
             .collect();
-        // Per-session newest-first window so a long Pi session still surfaces
-        // its latest events on the merged timeline.
-        session_rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-        session_rows.truncate(per_session_limit);
+        session_rows.sort_by_key(|row| std::cmp::Reverse(row.timestamp));
+        session_rows.truncate(limit);
         all_rows.extend(session_rows);
     }
-
-    all_rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
-    all_rows.truncate(global_cap);
     all_rows
 }
 
@@ -1506,26 +1517,27 @@ fn build_db_cache_events_with_attribution(
         }
     }
 
-    // Pi-side: a Pi session has its true-first assistant message in our window
-    // when our window-earliest timestamp for that Pi session is also the
-    // earliest assistant timestamp in the underlying JSONL file. Read each Pi
-    // session's first assistant timestamp once and compare.
+    // Pi and OMP use the same JSONL shape but remain separate cache lanes.
     let mut pi_true_first: HashSet<(Harness, String)> = HashSet::new();
-    let pi_sessions_in_window: Vec<String> = earliest_ts_in_window
+    let pi_sessions_in_window: Vec<(Harness, String)> = earliest_ts_in_window
         .iter()
-        .filter(|((h, _), _)| matches!(h, Harness::Pi))
-        .map(|((_, sid), _)| sid.clone())
+        .filter(|((h, _), _)| matches!(h, Harness::Pi | Harness::Omp))
+        .map(|((harness, sid), _)| (*harness, sid.clone()))
         .collect();
     if !pi_sessions_in_window.is_empty() {
-        // Build a lookup of Pi session_id -> jsonl path so we don't re-scan
-        // the directory per session.
-        let pi_meta_by_id: HashMap<String, std::path::PathBuf> =
-            pi_sessions::scan_pi_compatible_session_dir()
+        let pi_meta_by_id: HashMap<(Harness, String), std::path::PathBuf> =
+            pi_sessions::scan_pi_session_dir()
                 .into_iter()
-                .map(|m| (m.session_id, m.jsonl_path))
+                .map(|meta| ((Harness::Pi, meta.session_id), meta.jsonl_path))
+                .chain(
+                    pi_sessions::scan_omp_session_dir()
+                        .into_iter()
+                        .map(|meta| ((Harness::Omp, meta.session_id), meta.jsonl_path)),
+                )
                 .collect();
-        for sid in pi_sessions_in_window {
-            let Some(path) = pi_meta_by_id.get(&sid) else {
+        for (harness, sid) in pi_sessions_in_window {
+            let key = (harness, sid.clone());
+            let Some(path) = pi_meta_by_id.get(&key) else {
                 continue;
             };
             let Some(detail) = pi_sessions::read_pi_session_detail(path) else {
@@ -1534,17 +1546,17 @@ fn build_db_cache_events_with_attribution(
             let db_earliest = detail
                 .messages
                 .iter()
-                .filter(|m| {
-                    m.role == "assistant" && m.usage.as_ref().map(|u| u.total > 0).unwrap_or(false)
+                .filter(|message| {
+                    message.role == "assistant"
+                        && message.usage.as_ref().is_some_and(|usage| usage.total > 0)
                 })
-                .map(|m| m.timestamp_ms)
+                .map(|message| message.timestamp_ms)
                 .min();
-            if let (Some(db_earliest), Some(window_earliest)) = (
-                db_earliest,
-                earliest_ts_in_window.get(&(Harness::Pi, sid.clone())),
-            ) {
+            if let (Some(db_earliest), Some(window_earliest)) =
+                (db_earliest, earliest_ts_in_window.get(&key))
+            {
                 if *window_earliest <= db_earliest {
-                    pi_true_first.insert((Harness::Pi, sid));
+                    pi_true_first.insert(key);
                 }
             }
         }
@@ -2253,10 +2265,15 @@ pub fn load_cache_session_titles(
         }
     }
 
-    for meta in pi_sessions::scan_pi_compatible_session_dir() {
-        let key = (Harness::Pi, meta.session_id.clone());
-        if keys.contains(&key) {
-            titles.insert(key, clean_pi_title(meta.session_name, &meta.first_message));
+    for (harness, sessions) in [
+        (Harness::Pi, pi_sessions::scan_pi_session_dir()),
+        (Harness::Omp, pi_sessions::scan_omp_session_dir()),
+    ] {
+        for meta in sessions {
+            let key = (harness, meta.session_id.clone());
+            if keys.contains(&key) {
+                titles.insert(key, clean_pi_title(meta.session_name, &meta.first_message));
+            }
         }
     }
     for meta in external_cache_sessions::scan_claude_code_session_dir() {
@@ -2279,7 +2296,7 @@ pub fn load_cache_subagent_flags(
     keys: &HashSet<(Harness, String)>,
 ) -> HashMap<(Harness, String), bool> {
     let mut out = HashMap::new();
-    for harness in [Harness::Opencode, Harness::Pi] {
+    for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
         if keys.iter().any(|(h, _)| *h == harness) {
             for (session_id, is_subagent) in load_subagent_map_for_harness(harness) {
                 let key = (harness, session_id);
@@ -2303,7 +2320,7 @@ pub fn get_session_cache_stats_from_db(
     // cards and chart, so the 1s reconcile never recomputes global aggregates.
     let mut pre_cap_subagent_flags = HashMap::new();
     if hide_subagents {
-        for harness in [Harness::Opencode, Harness::Pi] {
+        for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
             if harness_filter.map_or(true, |filter| filter == harness) {
                 pre_cap_subagent_flags.extend(
                     load_subagent_map_for_harness(harness)
@@ -2320,7 +2337,7 @@ pub fn get_session_cache_stats_from_db(
         .collect();
     let includes_harness = |harness| harness_filter.map_or(true, |filter| filter == harness);
 
-    let (mut sessions, pi_sessions, claude_sessions, codex_sessions) =
+    let (mut sessions, pi_sessions, omp_sessions, claude_sessions, codex_sessions) =
         std::thread::scope(|scope| {
             let opencode = scope.spawn(|| {
                 if includes_harness(Harness::Opencode) {
@@ -2331,7 +2348,14 @@ pub fn get_session_cache_stats_from_db(
             });
             let pi = scope.spawn(|| {
                 if includes_harness(Harness::Pi) {
-                    pi_sessions::scan_pi_compatible_cache_session_dir()
+                    pi_sessions::scan_pi_cache_session_dir()
+                } else {
+                    Vec::new()
+                }
+            });
+            let omp = scope.spawn(|| {
+                if includes_harness(Harness::Omp) {
+                    pi_sessions::scan_omp_cache_session_dir()
                 } else {
                     Vec::new()
                 }
@@ -2353,12 +2377,19 @@ pub fn get_session_cache_stats_from_db(
             (
                 opencode.join().unwrap_or_default(),
                 pi.join().unwrap_or_default(),
+                omp.join().unwrap_or_default(),
                 claude.join().unwrap_or_default(),
                 codex.join().unwrap_or_default(),
             )
         });
     sessions.extend(pi_sessions.into_iter().map(|meta| CacheSessionListEntry {
         harness: Harness::Pi,
+        session_id: meta.session_id,
+        last_activity_ms: meta.modified,
+        title: Some(clean_pi_title(meta.session_name, &meta.first_message)),
+    }));
+    sessions.extend(omp_sessions.into_iter().map(|meta| CacheSessionListEntry {
+        harness: Harness::Omp,
         session_id: meta.session_id,
         last_activity_ms: meta.modified,
         title: Some(clean_pi_title(meta.session_name, &meta.first_message)),
@@ -2460,7 +2491,9 @@ pub fn get_session_cache_events(
 ) -> Vec<DbCacheEvent> {
     match harness {
         Harness::Opencode => get_opencode_session_cache_events(session_id, limit, since_timestamp),
-        Harness::Pi => get_pi_session_cache_events(session_id, limit, since_timestamp),
+        Harness::Pi | Harness::Omp => {
+            get_pi_session_cache_events(harness, session_id, limit, since_timestamp)
+        }
         Harness::ClaudeCode => {
             get_claude_code_session_cache_events(session_id, limit, since_timestamp)
         }
@@ -2503,7 +2536,9 @@ pub fn get_session_cache_events_by_turn_count(
     let max_events = (target_turns * 50).max(200); // floor to existing limit
     let raw = match harness {
         Harness::Opencode => get_opencode_session_cache_events(session_id, Some(max_events), None),
-        Harness::Pi => get_pi_session_cache_events(session_id, Some(max_events), None),
+        Harness::Pi | Harness::Omp => {
+            get_pi_session_cache_events(harness, session_id, Some(max_events), None)
+        }
         Harness::ClaudeCode => {
             get_claude_code_session_cache_events(session_id, Some(max_events), None)
         }
@@ -2598,11 +2633,12 @@ fn get_opencode_session_cache_events_from_conn(
 }
 
 fn get_pi_session_cache_events(
+    harness: Harness,
     session_id: &str,
     limit: Option<usize>,
     since_timestamp: Option<i64>,
 ) -> Vec<DbCacheEvent> {
-    let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
+    let Some(path) = find_pi_session_path_for_harness(harness, session_id) else {
         return Vec::new();
     };
     let Some(detail) = pi_sessions::read_pi_session_detail(&path) else {
@@ -2615,7 +2651,7 @@ fn get_pi_session_cache_events(
         .filter_map(|message| {
             let usage = message.usage?;
             (usage.total > 0).then_some(RawDbCacheEvent {
-                harness: Harness::Pi,
+                harness,
                 message_id: message.entry_id,
                 session_id: session_id.to_string(),
                 timestamp: message.timestamp_ms,
@@ -2901,13 +2937,18 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
         }
     }
 
-    for meta in pi_sessions::scan_pi_compatible_session_dir() {
-        if meta.cwd.is_empty() {
-            continue;
-        }
-        let identity = lookup_session_identity(identities, Harness::Pi, &meta.session_id);
-        if !identity.is_empty() {
-            dirs.push((identity, meta.cwd));
+    for (harness, sessions) in [
+        (Harness::Pi, pi_sessions::scan_pi_session_dir()),
+        (Harness::Omp, pi_sessions::scan_omp_session_dir()),
+    ] {
+        for meta in sessions {
+            if meta.cwd.is_empty() {
+                continue;
+            }
+            let identity = lookup_session_identity(identities, harness, &meta.session_id);
+            if !identity.is_empty() {
+                dirs.push((identity, meta.cwd));
+            }
         }
     }
 
@@ -3016,19 +3057,26 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
         }
     }
 
-    let mut pi_counts: HashMap<String, (String, u32)> = HashMap::new();
-    for meta in pi_sessions::scan_pi_compatible_session_dir() {
-        if let Some(allowed_paths) = project_paths_filter {
-            if !allowed_paths.contains(&meta.cwd) {
+    let mut pi_counts: HashMap<(Harness, String), (String, u32)> = HashMap::new();
+    for (harness, sessions) in [
+        (Harness::Pi, pi_sessions::scan_pi_session_dir()),
+        (Harness::Omp, pi_sessions::scan_omp_session_dir()),
+    ] {
+        for meta in sessions {
+            if let Some(allowed_paths) = project_paths_filter {
+                if !allowed_paths.contains(&meta.cwd) {
+                    continue;
+                }
+            }
+            let identity = lookup_session_identity(&session_identities, harness, &meta.session_id);
+            if identity.is_empty() {
                 continue;
             }
+            let entry = pi_counts
+                .entry((harness, identity))
+                .or_insert((meta.cwd, 0));
+            entry.1 = entry.1.saturating_add(1);
         }
-        let identity = lookup_session_identity(&session_identities, Harness::Pi, &meta.session_id);
-        if identity.is_empty() {
-            continue;
-        }
-        let entry = pi_counts.entry(identity).or_insert((meta.cwd, 0));
-        entry.1 = entry.1.saturating_add(1);
     }
     if let Some(allowed_paths) = project_paths_filter {
         for project_path in allowed_paths {
@@ -3042,10 +3090,10 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
         }
     }
 
-    for (identity, (cwd, count)) in pi_counts {
+    for ((harness, identity), (cwd, count)) in pi_counts {
         let entry = groups.entry(identity).or_default();
         entry.pi_path = Some(cwd);
-        entry.harnesses.insert(Harness::Pi);
+        entry.harnesses.insert(harness);
         entry.session_count = entry.session_count.saturating_add(count);
     }
 
@@ -3077,7 +3125,7 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
 }
 
 /// Build the Projects card grid. One pass over the session truth
-/// (`list_all_sessions`, both harnesses) grouped by project identity, enriched
+/// (`list_all_sessions`, all harnesses) grouped by project identity, enriched
 /// per group with its active-memory count and workspace name. Primary sessions
 /// only count toward `session_count`/`last_activity_ms` (subagents are an
 /// implementation detail, not a project the user navigates), but a project that
@@ -4746,20 +4794,24 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     .unwrap_or_default()
 }
 
-pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
-    if filter.harness.is_some_and(|h| h != Harness::Pi) {
+fn list_pi_compatible_sessions(
+    filter: &SessionFilter,
+    harness: Harness,
+    sessions: Vec<pi_sessions::PiSessionMeta>,
+) -> Vec<SessionRow> {
+    if filter.harness.is_some_and(|wanted| wanted != harness) {
         return Vec::new();
     }
-    let subagent_map = load_subagent_map_for_harness(Harness::Pi);
+    let subagent_map = load_subagent_map_for_harness(harness);
     let session_identities = load_session_identity_map();
-    pi_sessions::scan_pi_compatible_session_dir()
+    sessions
         .into_iter()
         .map(|meta| {
             let project_identity =
-                lookup_session_identity(&session_identities, Harness::Pi, &meta.session_id);
+                lookup_session_identity(&session_identities, harness, &meta.session_id);
             let is_subagent = subagent_map.get(&meta.session_id).copied().unwrap_or(false);
             SessionRow {
-                harness: Harness::Pi,
+                harness,
                 session_id: meta.session_id,
                 title: clean_pi_title(meta.session_name, &meta.first_message),
                 project_identity,
@@ -4772,10 +4824,19 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         .collect()
 }
 
+pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
+    list_pi_compatible_sessions(filter, Harness::Pi, pi_sessions::scan_pi_session_dir())
+}
+
+pub fn list_omp_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
+    list_pi_compatible_sessions(filter, Harness::Omp, pi_sessions::scan_omp_session_dir())
+}
+
 pub fn list_all_sessions(filter: SessionFilter) -> Vec<SessionRow> {
     let mut rows = Vec::new();
     rows.extend(list_opencode_sessions(&filter));
     rows.extend(list_pi_sessions(&filter));
+    rows.extend(list_omp_sessions(&filter));
     rows.sort_by_key(|row| std::cmp::Reverse(row.last_activity_ms));
     rows
 }
@@ -4876,7 +4937,7 @@ pub fn get_session_detail(
 ) -> Result<Option<SessionDetail>, rusqlite::Error> {
     match harness {
         Harness::Opencode => get_opencode_session_detail(conn, session_id),
-        Harness::Pi => Ok(get_pi_session_detail(conn, session_id)),
+        Harness::Pi | Harness::Omp => Ok(get_pi_session_detail(conn, harness, session_id)),
         Harness::ClaudeCode | Harness::Codex => Ok(None),
     }
 }
@@ -4898,8 +4959,8 @@ pub fn get_session_messages(
             let conn = open_readonly(&opencode_db_path)?;
             load_opencode_messages(&conn, session_id)
         }
-        Harness::Pi => {
-            let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
+        Harness::Pi | Harness::Omp => {
+            let Some(path) = find_pi_session_path_for_harness(harness, session_id) else {
                 return Ok(Vec::new());
             };
             let Some(detail) = pi_sessions::read_pi_session_detail(&path) else {
@@ -5130,8 +5191,27 @@ fn normalize_preview(text: &str) -> String {
         .collect()
 }
 
-pub fn get_pi_session_detail(conn: Option<&Connection>, session_id: &str) -> Option<SessionDetail> {
-    let path = pi_sessions::find_pi_session_path(session_id)?;
+fn find_pi_session_path_for_harness(
+    harness: Harness,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let sessions = match harness {
+        Harness::Pi => pi_sessions::scan_pi_session_dir(),
+        Harness::Omp => pi_sessions::scan_omp_session_dir(),
+        _ => return None,
+    };
+    sessions
+        .into_iter()
+        .find(|meta| meta.session_id == session_id)
+        .map(|meta| meta.jsonl_path)
+}
+
+pub fn get_pi_session_detail(
+    conn: Option<&Connection>,
+    harness: Harness,
+    session_id: &str,
+) -> Option<SessionDetail> {
+    let path = find_pi_session_path_for_harness(harness, session_id)?;
     let detail = pi_sessions::read_pi_session_detail(&path)?;
     let title = clean_pi_title(detail.meta.session_name.clone(), &detail.meta.first_message);
 
@@ -5162,9 +5242,9 @@ pub fn get_pi_session_detail(conn: Option<&Connection>, session_id: &str) -> Opt
         .and_then(|c| get_context_token_breakdown(c, session_id).ok())
         .flatten();
     let session_identities = load_session_identity_map();
-    let project_identity = lookup_session_identity(&session_identities, Harness::Pi, session_id);
+    let project_identity = lookup_session_identity(&session_identities, harness, session_id);
     Some(SessionDetail {
-        harness: Harness::Pi,
+        harness,
         session_id: detail.meta.session_id.clone(),
         title,
         project_identity,
@@ -6740,6 +6820,7 @@ mod session_identity_map_tests {
             let conn = create_context_db(data_home, true);
             insert_session_project(&conn, "oc-1", "opencode", "git:oc-root");
             insert_session_project(&conn, "pi-1", "pi", "dir:pi-root");
+            insert_session_project(&conn, "omp-1", "omp", "dir:omp-root");
             insert_session_project(&conn, "weird-1", "future", "git:future-root");
             drop(conn);
 
@@ -6752,7 +6833,11 @@ mod session_identity_map_tests {
                 map.get(&(Harness::Pi, "pi-1".to_string())),
                 Some(&"dir:pi-root".to_string())
             );
-            assert_eq!(map.len(), 2, "unknown harness rows must be skipped");
+            assert_eq!(
+                map.get(&(Harness::Omp, "omp-1".to_string())),
+                Some(&"dir:omp-root".to_string())
+            );
+            assert_eq!(map.len(), 3, "unknown harness rows must be skipped");
         });
     }
 

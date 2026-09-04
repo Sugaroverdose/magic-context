@@ -1,3 +1,4 @@
+import type { HarnessId } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 
 export type SubagentKind =
@@ -13,7 +14,7 @@ export type SubagentInvocationStatus = "completed" | "failed" | "aborted";
 
 export interface SubagentInvocationInput {
     sessionId: string;
-    harness: "opencode" | "pi";
+    harness: HarnessId;
     subagent: SubagentKind;
     task?: string | null;
     providerId?: string | null;
@@ -32,7 +33,7 @@ export interface SubagentInvocationInput {
 export interface SubagentInvocationRow {
     id: number;
     sessionId: string;
-    harness: "opencode" | "pi";
+    harness: HarnessId;
     subagent: SubagentKind;
     task: string | null;
     providerId: string | null;
@@ -59,7 +60,7 @@ export interface SubagentTotals {
 interface SubagentInvocationDbRow {
     id: number;
     session_id: string;
-    harness: "opencode" | "pi";
+    harness: HarnessId;
     subagent: SubagentKind;
     task: string | null;
     provider_id: string | null;

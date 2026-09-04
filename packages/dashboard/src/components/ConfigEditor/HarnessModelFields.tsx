@@ -1,20 +1,28 @@
 import { For, Show } from "solid-js";
+import { ompModelIdToCanonical, piModelIdToCanonical } from "../../lib/model-ids";
 import ModelSelect from "./ModelSelect";
 
-export type Harness = "opencode" | "pi";
+export type Harness = "opencode" | "pi" | "omp";
 
 export function modelCatalogForHarness(
-  catalogs: { opencode: string[]; pi: string[] },
+  catalogs: Record<Harness, string[]>,
   harness: Harness,
 ): string[] {
-  return catalogs[harness];
+  const canonicalize =
+    harness === "pi" ? piModelIdToCanonical : harness === "omp" ? ompModelIdToCanonical : undefined;
+  return [...new Set(canonicalize ? catalogs[harness].map(canonicalize) : catalogs[harness])];
 }
 
 export type OpenCodeModelEntry = string | { model: string; variant?: string };
 export type PiModelEntry = string | { model: string; thinking_level?: string };
 export type ModelEntry = OpenCodeModelEntry | PiModelEntry;
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const OMP_THINKING_LEVELS = [...PI_THINKING_LEVELS, "inherit", "auto"] as const;
+
+export function thinkingLevelsForHarness(harness: Harness): readonly string[] {
+  return harness === "omp" ? OMP_THINKING_LEVELS : PI_THINKING_LEVELS;
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -87,7 +95,9 @@ function QualifierControl(props: {
             onChange={(event) => props.onChange(event.currentTarget.value || undefined)}
           >
             <option value="">Use harness default</option>
-            <For each={THINKING_LEVELS}>{(level) => <option value={level}>{level}</option>}</For>
+            <For each={thinkingLevelsForHarness(props.harness)}>
+              {(level) => <option value={level}>{level}</option>}
+            </For>
           </select>
         }
       >

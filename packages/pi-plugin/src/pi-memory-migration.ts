@@ -206,7 +206,7 @@ export async function runPiMemoryMigration(
 		return {
 			ran: false,
 			summary:
-				"Memory migration skipped: the model returned no usable re-categorized memories (an empty or malformed result). Your memories are unchanged. Point `historian.model` at a capable model and re-run /ctx-session-upgrade.",
+				"Memory migration skipped: the model returned no usable re-categorized memories (an empty or malformed result). Your memories are unchanged. Configure a capable historian model for the active harness and re-run /ctx-session-upgrade.",
 		};
 	}
 
