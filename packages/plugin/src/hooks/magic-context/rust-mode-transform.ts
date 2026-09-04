@@ -52,6 +52,7 @@ import {
     type ToolAvailabilityVerdict,
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
+import { isEditTool } from "./edit-marker";
 import {
     EmergencyFailClosedError,
     ENGINE_RECONNECTING_USER_MESSAGE,
@@ -1319,6 +1320,7 @@ function toolInputKeyOrders(input: unknown[]): Record<string, string[]> {
             const toolInput = kindRecord.input;
             if (
                 kindRecord.type === "tool_call" &&
+                isEditTool(typeof kindRecord.name === "string" ? kindRecord.name : undefined) &&
                 toolInput !== null &&
                 typeof toolInput === "object" &&
                 !Array.isArray(toolInput)
