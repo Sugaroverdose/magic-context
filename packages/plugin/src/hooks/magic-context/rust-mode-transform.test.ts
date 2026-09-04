@@ -683,6 +683,13 @@ describe("Rust mode authority adapter", () => {
             const logged = logSpy.mock.calls
                 .filter(([loggedSession]) => loggedSession === sessionId)
                 .map(([, message]) => message);
+            const coverageLines = logged.filter((message) =>
+                message.startsWith("rust input coverage:"),
+            );
+            expect(coverageLines).toEqual([
+                "rust input coverage: oc_input=1 marker_at=none covered=0",
+                "rust input coverage: oc_input=1 marker_at=none covered=0",
+            ]);
             const passLines = logged.filter((message) => message.startsWith("rust pass:"));
             expect(passLines).toHaveLength(2);
             expect(passLines[0]).toContain("decision=HARD");
@@ -762,6 +769,20 @@ describe("Rust mode authority adapter", () => {
 
     it("keeps the rust pass line grep-compatible", () => {
         expect(
+            __rustModeTransformTest.formatRustInputCoverageLog({
+                ocInput: 10_004,
+                markerAt: "msg_boundary",
+                covered: 9_590,
+            }),
+        ).toBe("rust input coverage: oc_input=10004 marker_at=msg_boundary covered=9590");
+        expect(
+            __rustModeTransformTest.formatRustInputCoverageLog({
+                ocInput: 21_748,
+                markerAt: null,
+                covered: 7_400,
+            }),
+        ).toBe("rust input coverage: oc_input=21748 marker_at=none covered=7400");
+        expect(
             __rustModeTransformTest.formatRustPassLog({
                 decision: "HARD",
                 reason: "first_render",
@@ -775,6 +796,29 @@ describe("Rust mode authority adapter", () => {
         ).toBe(
             "rust pass: decision=HARD reason=first_render served_from=transform in=4 out=3 applied=true row_version=0 elapsed=12.3 ms module=8.8 ms stages=prefix_guard:0.0 ordinal_resolve:0.0 state_sync:0.0 clone:0.0 wire_build:0.0 wire_messages:0 transport:0.0 transport_pages:0 transport_bytes:0 apply:0.0 lkg_snapshot:0.0 mirror_pull:0.0 compartment_mirror:0.0 other:12.3",
         );
+    });
+
+    it("accepts materialized boundaries only from a committed non-defer response", () => {
+        expect(
+            __rustModeTransformTest.materializedCompactionBoundary({
+                decision: "HARD",
+                scheduler_decision: "execute",
+                committed: true,
+                row_version: 12,
+                coverage_ordinal: 9_590,
+                boundary_id: "msg_boundary#3",
+            }),
+        ).toEqual({ rowVersion: 12, ordinal: 9_590, endMessageId: "msg_boundary" });
+        expect(
+            __rustModeTransformTest.materializedCompactionBoundary({
+                decision: "SOFT+",
+                scheduler_decision: "defer",
+                committed: true,
+                row_version: 12,
+                coverage_ordinal: 9_590,
+                boundary_id: "msg_boundary#3",
+            }),
+        ).toBeUndefined();
     });
 
     it("consumes the persisted provider-overflow limit on the next Rust-mode pass", async () => {
@@ -1824,7 +1868,7 @@ describe("Rust mode authority adapter", () => {
         await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
         const pageIds = new Set(transformBodies.map((body) => body.transform_page_id));
-        expect(pageIds.size).toBe(2);
+        expect(pageIds.size).toBe(1);
         expect(transformBodies.length).toBeGreaterThan(2);
         expect(
             transformBodies.every((body) =>
@@ -1883,9 +1927,9 @@ describe("Rust mode authority adapter", () => {
             const seriesStarts = transformBodies.filter((page) => page.transform_page_index === 0);
             const pageIds = new Set(seriesStarts.map((page) => page.transform_page_id));
             expect(seriesStarts).toHaveLength(2);
-            expect(pageIds.size).toBe(2);
+            expect(pageIds.size).toBe(1);
             expect(failedPageId).toBe(seriesStarts[0]?.transform_page_id);
-            expect(seriesStarts[1]?.transform_page_id).not.toBe(seriesStarts[0]?.transform_page_id);
+            expect(seriesStarts[1]?.transform_page_id).toBe(seriesStarts[0]?.transform_page_id);
             expect(output.messages).toEqual(native);
             const logged = logSpy.mock.calls
                 .filter(([loggedSession]) => loggedSession === sessionId)
@@ -1941,7 +1985,7 @@ describe("Rust mode authority adapter", () => {
                 ({ body }) => body.transform_page_index === 0,
             );
             expect(seriesStarts).toHaveLength(2);
-            expect(new Set(seriesStarts.map(({ body }) => body.transform_page_id)).size).toBe(2);
+            expect(new Set(seriesStarts.map(({ body }) => body.transform_page_id)).size).toBe(1);
             expect(
                 transformCalls.find(({ body }) => body.transform_page_index === 1)
                     ?.generationSensitive,
@@ -1969,12 +2013,13 @@ describe("Rust mode authority adapter", () => {
         const transformCalls: Array<{
             body: Record<string, unknown>;
             attemptClass: string | undefined;
+            timeoutMs: number | undefined;
         }> = [];
         const moduleClient: RustModeModuleClient = {
-            call: async ({ method, body, attemptClass }) => {
+            call: async ({ method, body, attemptClass, timeoutMs }) => {
                 if (method !== "transform") return { ok: true };
                 const page = body as Record<string, unknown>;
-                transformCalls.push({ body: page, attemptClass });
+                transformCalls.push({ body: page, attemptClass, timeoutMs });
                 if (page.transform_page_complete === true) {
                     throw Object.assign(new Error("cold execute deadline"), { code: "ETIMEDOUT" });
                 }
@@ -1992,6 +2037,7 @@ describe("Rust mode authority adapter", () => {
             );
             expect(seriesStarts).toHaveLength(1);
             expect(transformCalls.at(-1)?.attemptClass).toBe("transform_series_execute");
+            expect(transformCalls.at(-1)?.timeoutMs).toBe(30_002);
             expect(
                 transformCalls
                     .slice(0, -1)
@@ -2042,7 +2088,7 @@ describe("Rust mode authority adapter", () => {
 
             const seriesStarts = transformBodies.filter((page) => page.transform_page_index === 0);
             expect(seriesStarts).toHaveLength(2);
-            expect(new Set(seriesStarts.map((page) => page.transform_page_id)).size).toBe(2);
+            expect(new Set(seriesStarts.map((page) => page.transform_page_id)).size).toBe(1);
             expect(output.messages).toEqual(messages);
             const logged = logSpy.mock.calls
                 .filter(([loggedSession]) => loggedSession === sessionId)

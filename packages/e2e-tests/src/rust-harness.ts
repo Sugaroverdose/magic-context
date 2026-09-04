@@ -583,6 +583,7 @@ export class RustTestHarness {
             timeoutMs?: number;
             providerID?: string;
             modelID?: string;
+            messageID?: string;
         } = {},
     ): Promise<unknown> {
         const timeoutMs = options.timeoutMs ?? 180_000;
@@ -595,6 +596,7 @@ export class RustTestHarness {
                 },
                 parts: [{ type: "text", text }],
                 ...(options.agent ? { agent: options.agent } : {}),
+                ...(options.messageID ? { messageID: options.messageID } : {}),
             },
         });
         const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));

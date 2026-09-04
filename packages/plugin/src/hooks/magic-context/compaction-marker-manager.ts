@@ -23,7 +23,10 @@ import {
     removeCompactionMarker,
     removeForeignCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
-import { getCompartmentsByEndMessageId } from "../../features/magic-context/compartment-storage";
+import {
+    getCompartments,
+    getCompartmentsByEndMessageId,
+} from "../../features/magic-context/compartment-storage";
 import {
     getPersistedCompactionMarkerState,
     type PendingCompactionMarker,
@@ -122,7 +125,22 @@ function validatePendingTarget(
     }
 
     // 2. SECONDARY: compartment row keyed by endMessageId.
-    const compartments = getCompartmentsByEndMessageId(db, sessionId, pending.endMessageId);
+    const exactCompartments = getCompartmentsByEndMessageId(db, sessionId, pending.endMessageId);
+    // Rust stores compartment anchors as flat block ids (`<mid>#<index>`), while
+    // OpenCode marker rows and the shared pending blob address the owning message.
+    // Accept that vocabulary only when the suffix is a canonical numeric block index.
+    const compartments =
+        exactCompartments.length > 0
+            ? exactCompartments
+            : getCompartments(db, sessionId).filter((compartment) => {
+                  const separator = compartment.endMessageId.lastIndexOf("#");
+                  if (separator < 1) return false;
+                  const blockIndex = compartment.endMessageId.slice(separator + 1);
+                  return (
+                      compartment.endMessageId.slice(0, separator) === pending.endMessageId &&
+                      /^\d+$/.test(blockIndex)
+                  );
+              });
     if (compartments.length === 0) {
         return "compartment-removed";
     }
@@ -227,17 +245,32 @@ function existingMarkerAlreadyCoversTarget(
  * absent, and injection uses deterministic IDs with exact-row upserts, so a
  * committed marker whose context-state write failed is reused rather than duplicated.
  */
+export interface TrustedMaterializedCompactionBoundary {
+    rowVersion: number;
+    ordinal: number;
+    endMessageId: string;
+}
+
 export function applyDeferredCompactionMarker(
     db: Database,
     sessionId: string,
     pending: PendingCompactionMarker,
     directory?: string,
+    trustedBoundary?: TrustedMaterializedCompactionBoundary,
 ): MarkerUpdateOutcome {
     try {
-        // Stale-target check FIRST — cheap and avoids any state mutation when
-        // the target is already gone. The check may throw on DB failure;
-        // outer catch turns that into retryable-failure.
-        const validation = validatePendingTarget(db, sessionId, pending);
+        // Rust may fence the target with the exact durable boundary returned by the
+        // materializing response. Other callers validate against local compartment rows.
+        // Validation failures happen before any marker state mutation.
+        const responseFencesTarget =
+            trustedBoundary !== undefined &&
+            Number.isSafeInteger(trustedBoundary.rowVersion) &&
+            trustedBoundary.rowVersion > 0 &&
+            trustedBoundary.ordinal === pending.ordinal &&
+            trustedBoundary.endMessageId === pending.endMessageId;
+        const validation = responseFencesTarget
+            ? "ok"
+            : validatePendingTarget(db, sessionId, pending);
         if (validation !== "ok") {
             sessionLog(
                 sessionId,

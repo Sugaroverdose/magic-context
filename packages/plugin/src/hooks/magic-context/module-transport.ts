@@ -40,12 +40,25 @@ const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
 export const TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS = 5_000;
-/**
- * A completed giant page series makes the module assemble, project, and encode the whole cold
- * snapshot. ASTRO-scale cold passes have exceeded five seconds while still making progress, so
- * leave enough headroom for that one execute attempt without weakening steady-state deadlines.
- */
 export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 30_000;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 120_000;
+
+/**
+ * Cold execution includes full projection and native encoding after the final page lands.
+ * ENGRAM's 7.4k-message seed completes module-side in about 6s, while ASTRO's 9.6k-message,
+ * tool-heavy seed exceeded 31s under load. Preserve the 30s floor and add two milliseconds
+ * per message, capped at two minutes: 44.8s for ENGRAM and 49.2s for ASTRO.
+ */
+export function transformColdStartExecuteTimeoutMs(seedMessageCount: number): number {
+    const messages = Number.isSafeInteger(seedMessageCount) ? Math.max(0, seedMessageCount) : 0;
+    return Math.min(
+        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS,
+        TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS +
+            messages * TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS,
+    );
+}
+
 /** Consumer deadline for the module's exported historian::MAX_WRAPUP_REQUEST_BUDGET. */
 export const MAX_WRAPUP_REQUEST_BUDGET_MS = 3_800_000;
 const SERIAL_LANE_MAX_WAITERS = 16;

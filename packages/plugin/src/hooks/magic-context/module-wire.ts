@@ -297,7 +297,8 @@ export function buildPagedModuleTransformPayloads(
 ): ModuleTransformWirePage[] {
     // The unpaged path must stringify once to know it fits. Return that length so
     // the transport telemetry does not serialize the same body a second time.
-    const unpagedBytes = Buffer.byteLength(JSON.stringify(body));
+    const serializedBody = JSON.stringify(body);
+    const unpagedBytes = Buffer.byteLength(serializedBody);
     if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) return [{ page: body, bytes: unpagedBytes }];
 
     const arrayFields = [
@@ -317,7 +318,10 @@ export function buildPagedModuleTransformPayloads(
     }
     const scalarFields = { ...body };
     for (const field of [...arrayFields, ...mapFields]) delete scalarFields[field];
-    const transformPageId = crypto.randomUUID();
+    // A completed series can outlive the requester's route. Content-addressing the
+    // attempt lets the next identical cold pass replay page admission and adopt the
+    // retained result at the final page instead of rebuilding and executing it.
+    const transformPageId = crypto.createHash("sha256").update(serializedBody).digest("hex");
     const arrayItems = arrayFields.flatMap((field) =>
         (body[field] as unknown[]).map((value, itemIndex) => ({ field, value, itemIndex })),
     );
