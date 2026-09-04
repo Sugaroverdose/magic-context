@@ -294,18 +294,26 @@ describe("message-index-async", () => {
         const messages = Array.from({ length: 201 }, (_, index) =>
             message(`m-${index + 1}`, index + 1, `message ${index + 1}`),
         );
-        let timerRan = false;
+        // The product yields between pages with setImmediate, and a zero-delay timer
+        // armed during page 1 is not guaranteed to run before page 2 (immediates run
+        // ahead of timers whose 1ms has not elapsed). Record the page each callback
+        // observed at fire time and assert the timer ran before the LAST page: that is
+        // the yield property, and it does not depend on immediate-vs-timer ordering.
+        // An assertion inside the reader would abort reconciliation and surface as
+        // an unrelated timeout, so the check happens after the run.
+        let timerPage: number | null = null;
         let pageCount = 0;
         const reader = pagedReader(messages, () => {
             pageCount += 1;
-            if (pageCount === 1) setTimeout(() => (timerRan = true), 0);
-            if (pageCount === 2) expect(timerRan).toBe(true);
+            if (pageCount === 1) setTimeout(() => (timerPage = pageCount), 0);
         });
 
         scheduleReconciliation(db, "ses-pages", reader);
         await waitUntil(() => isSessionReconciled("ses-pages"));
 
         expect(pageCount).toBe(3);
+        expect(timerPage).not.toBeNull();
+        expect(timerPage as number).toBeLessThan(3);
         expect(countRows(db, "ses-pages")).toBe(201);
         expect(isSessionReconciled("ses-pages")).toBe(true);
     });
@@ -331,13 +339,15 @@ describe("message-index-async", () => {
         }) as typeof db.prepare;
 
         scheduleIncrementalIndex(db, "ses-marker-failure", "m-2", () => history[1] ?? null);
-        await wait(140);
+        // The failed marker write must clear the reconciled latch; poll for that
+        // transition instead of assuming the async write lands inside a fixed sleep.
+        await waitUntil(() => !isSessionReconciled("ses-marker-failure"));
         expect(isSessionReconciled("ses-marker-failure")).toBe(false);
         expect(countMessageRows(db, "ses-marker-failure", "m-2")).toBe(0);
 
         (db as unknown as { prepare: typeof db.prepare }).prepare = originalPrepare;
         scheduleReconciliation(db, "ses-marker-failure", () => history);
-        await wait(20);
+        await waitUntil(() => countMessageRows(db, "ses-marker-failure", "m-2") === 1);
         expect(countMessageRows(db, "ses-marker-failure", "m-2")).toBe(1);
     });
 
