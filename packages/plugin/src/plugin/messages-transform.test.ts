@@ -11,10 +11,10 @@ import {
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
 } from "../features/magic-context/storage-meta-persisted";
-import { Database } from "../shared/sqlite";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
+import { Database } from "../shared/sqlite";
 import { createMessagesTransformHandler } from "./messages-transform";
 
 afterEach(() => {

@@ -704,7 +704,7 @@ export function tagMessages(
                         continue;
                     }
                     const existingTag = getTagById(db, sessionId, existingTagId);
-                    if (!existingTag || existingTag.type !== "message") {
+                    if (existingTag?.type !== "message") {
                         tagger.unbindTag(sessionId, contentId);
                         textOrdinal += 1;
                         continue;

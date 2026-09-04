@@ -301,11 +301,7 @@ export function createMessagesTransformHandler(args: {
                 restoreCompactionOffInput();
                 return output.messages;
             }
-            if (
-                !args.compactionOff &&
-                sessionId &&
-                isProviderOverflowFailClosedProven(sessionId)
-            ) {
+            if (!args.compactionOff && sessionId && isProviderOverflowFailClosedProven(sessionId)) {
                 throw new EmergencyFailClosedError(
                     "Emergency recovery transform failed; refusing an unbounded raw fallback",
                     { cause: error },
