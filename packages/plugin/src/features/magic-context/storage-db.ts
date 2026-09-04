@@ -26,7 +26,7 @@ import {
     parseRpcPortFile,
     readProcessProbeEvidence,
 } from "../../shared/rpc-utils";
-import { Database } from "../../shared/sqlite";
+import { Database, detectSqliteRuntime } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
 import { ensureContextStoreUuid } from "./context-authority";
@@ -99,6 +99,13 @@ export function __resetSchemaFenceStateForTests(): void {
 
 export const LATEST_SUPPORTED_VERSION = 83;
 
+/**
+ * Every runtime backend receives the same finite wait before the first schema
+ * read. Five seconds preserves the established contention tolerance while
+ * remaining well inside the server-wide 15 second boot budget.
+ */
+export const BOOT_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
 const PERMISSIONS_ENFORCEABLE = process.platform !== "win32";
@@ -168,8 +175,23 @@ export interface DatabaseBootTimings {
 export interface OpenDatabaseOptions {
     dbPath?: string;
     latestSupportedVersion?: number;
+    /** Test/diagnostic override; production uses BOOT_SQLITE_BUSY_TIMEOUT_MS. */
+    busyTimeoutMs?: number;
     /** Boot-only timing sink; omitted by ordinary storage callers. */
     onBootTimings?: (timings: DatabaseBootTimings) => void;
+}
+
+function resolveBootBusyTimeoutMs(value: number | undefined): number {
+    if (value === undefined) return BOOT_SQLITE_BUSY_TIMEOUT_MS;
+    if (!Number.isFinite(value)) return BOOT_SQLITE_BUSY_TIMEOUT_MS;
+    return Math.max(0, Math.min(BOOT_SQLITE_BUSY_TIMEOUT_MS, Math.floor(value)));
+}
+
+function installBootBusyTimeout(db: Database, dbPath: string, timeoutMs: number): void {
+    db.exec(`PRAGMA busy_timeout=${timeoutMs}`);
+    log(
+        `[magic-context] SQLite boot busy timeout: backend=${detectSqliteRuntime()} timeout=${timeoutMs}ms path=${dbPath}`,
+    );
 }
 
 // Exported for the test-isolation guard test. Returns a PATH only — opens no DB —
@@ -866,12 +888,14 @@ function finishDatabaseOpen(
     return db;
 }
 
-export function initializeDatabase(db: Database): void {
-    // Install the busy timeout BEFORE any file-level PRAGMAs like WAL. Two
-    // processes can cold-open the same DB at once (real OpenCode/Pi startup, or
-    // the subprocess lease tests); without the timeout this connection can throw
-    // SQLITE_BUSY immediately while the sibling is switching journal mode.
-    db.exec("PRAGMA busy_timeout=5000");
+export function initializeDatabase(
+    db: Database,
+    busyTimeoutMs = BOOT_SQLITE_BUSY_TIMEOUT_MS,
+): void {
+    // Keep the same finite timeout through schema creation and migrations. The
+    // open paths install it before their first read; direct initializer callers
+    // receive it here before any file-level PRAGMA such as WAL.
+    db.exec(`PRAGMA busy_timeout=${resolveBootBusyTimeoutMs(busyTimeoutMs)}`);
     // SQLite per-connection PRAGMAs. foreign_keys MUST run before any reads
     // or writes: it defaults to OFF, which silently breaks every ON DELETE
     // CASCADE / SET NULL declared in the schema below and in migrations.
@@ -2230,6 +2254,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
     const explicitDbPath = options?.dbPath !== undefined;
     const { dbDir, dbPath } = resolveDatabasePath(options?.dbPath);
     const latestSupportedVersion = getRuntimeLatestSupportedVersion(options);
+    const busyTimeoutMs = resolveBootBusyTimeoutMs(options?.busyTimeoutMs);
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
     const existing = databases.get(dbPath);
@@ -2255,6 +2280,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         ensureSecureStorageDir(dbDir);
 
         const db = new Database(dbPath);
+        installBootBusyTimeout(db, dbPath, busyTimeoutMs);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
             return null;
@@ -2263,7 +2289,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
             closeQuietly(db);
             return null;
         }
-        initializeDatabase(db);
+        initializeDatabase(db, busyTimeoutMs);
         runMigrations(db);
         ensureContextStoreUuid(db);
         return finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
@@ -2291,6 +2317,7 @@ export async function openDatabaseAsync(
     const explicitDbPath = options?.dbPath !== undefined;
     const { dbDir, dbPath } = resolveDatabasePath(options?.dbPath);
     const latestSupportedVersion = getRuntimeLatestSupportedVersion(options);
+    const busyTimeoutMs = resolveBootBusyTimeoutMs(options?.busyTimeoutMs);
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
     const existing = databases.get(dbPath);
@@ -2325,6 +2352,7 @@ export async function openDatabaseAsync(
             ensureSecureStorageDir(dbDir);
 
             db = new Database(dbPath);
+            installBootBusyTimeout(db, dbPath, busyTimeoutMs);
             openMs = performance.now() - openStartedAt;
             guardStartedAt = performance.now();
             if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
@@ -2339,7 +2367,7 @@ export async function openDatabaseAsync(
             }
             guardMs = performance.now() - guardStartedAt;
             migrateStartedAt = performance.now();
-            initializeDatabase(db);
+            initializeDatabase(db, busyTimeoutMs);
             await runMigrationsWithRetry(db);
             ensureContextStoreUuid(db);
             const opened = finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);

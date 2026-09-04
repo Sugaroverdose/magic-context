@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { runBootPhaseWithDeadline } from "./boot-deadline";
+import {
+    createBootBudget,
+    runBootPhaseWithDeadline,
+    runBootPhaseWithinBudget,
+} from "./boot-deadline";
 
 describe("boot phase deadline", () => {
     test("plugin hook initialization resolves when the boot dependency never settles", async () => {
@@ -34,6 +38,43 @@ describe("boot phase deadline", () => {
         expect(result.status).toBe("timed_out");
         if (result.status !== "timed_out") return;
         await expect(result.pending).resolves.toBe("real hooks");
+    });
+
+    test("one boot budget bounds consecutive phases by the original deadline", async () => {
+        const startedAt = performance.now();
+        const messages: string[] = [];
+        const budget = createBootBudget(45);
+
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        const result = await runBootPhaseWithinBudget(
+            budget,
+            "hooks",
+            () => new Promise<never>(() => {}),
+            (message) => messages.push(message),
+        );
+
+        expect(result.status).toBe("timed_out");
+        expect(performance.now() - startedAt).toBeLessThan(60);
+        expect(messages[0]).toContain("whole-server 45ms budget");
+        expect(messages[0]).toContain("phase 'hooks'");
+    });
+
+    test("an exhausted whole-server budget returns before a synchronous late-recovery prefix", async () => {
+        const budget = createBootBudget(0);
+        let invoked = false;
+        const result = await runBootPhaseWithinBudget(
+            budget,
+            "hooks",
+            async () => {
+                invoked = true;
+                return "late hooks";
+            },
+            () => {},
+        );
+
+        expect(result.status).toBe("timed_out");
+        expect(invoked).toBe(false);
+        if (result.status === "timed_out") await expect(result.pending).resolves.toBe("late hooks");
     });
 
     test("returns a completed phase value and timing", async () => {

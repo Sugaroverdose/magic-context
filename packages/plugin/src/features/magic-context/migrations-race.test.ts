@@ -130,6 +130,31 @@ describe("migration race tolerance", () => {
         closeQuietly(db);
     });
 
+    test("current schema does not take a write lock behind a sibling BEGIN IMMEDIATE", () => {
+        const dir = mkdtempSync(join(tmpdir(), "mc-migration-current-lock-"));
+        const path = join(dir, "context.db");
+        const setup = new Database(path);
+        const holder = new Database(path);
+        const opener = new Database(path);
+        try {
+            initializeDatabase(setup);
+            runMigrations(setup);
+            setup.close();
+
+            holder.exec("PRAGMA busy_timeout=100; BEGIN IMMEDIATE");
+            opener.exec("PRAGMA busy_timeout=50");
+            const startedAt = performance.now();
+            expect(() => runMigrations(opener)).not.toThrow();
+            expect(performance.now() - startedAt).toBeLessThan(500);
+        } finally {
+            holder.exec("ROLLBACK");
+            closeQuietly(holder);
+            closeQuietly(opener);
+            closeQuietly(setup);
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
     test("does not reselect an already-recorded sibling migration row", () => {
         const db = new Database(":memory:");
         initializeDatabase(db);

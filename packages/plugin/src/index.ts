@@ -42,7 +42,11 @@ import { createLiveSessionState } from "./hooks/magic-context/live-session-state
 import { SubcModuleTransport } from "./hooks/magic-context/module-transport";
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
-import { runBootPhaseWithDeadline } from "./plugin/boot-deadline";
+import {
+    createBootBudget,
+    remainingBootBudgetMs,
+    runBootPhaseWithinBudget,
+} from "./plugin/boot-deadline";
 import { beginBootQuietPeriod, scheduleAfterBootQuiet } from "./plugin/boot-quiet";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
@@ -62,7 +66,7 @@ import {
 import { getMagicContextStorageDir } from "./shared/data-path";
 import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setKeepSubagents } from "./shared/keep-subagents";
-import { log } from "./shared/logger";
+import { flushLogger, log } from "./shared/logger";
 import {
     resolveHistorianAgentOverrides,
     resolveHistorianModel,
@@ -75,13 +79,26 @@ import { closeQuietly } from "./shared/sqlite-helpers";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { reloadWindowOverlay } from "./shared/window-geometry";
 
-const BOOT_HOOKS_DEADLINE_MS = 15_000;
+const BOOT_SERVER_DEADLINE_MS = 15_000;
+const RESOLVED_CONFIG_TIMEOUT_MS = 2_000;
 
 const server: Plugin = async (ctx) => {
     const bootStartedAt = performance.now();
+    const bootBudget = createBootBudget(BOOT_SERVER_DEADLINE_MS, bootStartedAt);
     const storageBootTimings = { openMs: 0, guardMs: 0, migrateMs: 0 };
+    let configMs = 0;
+    let conflictMs = 0;
     let rpcMs = 0;
     let hooksDeadlineReason: string | null = null;
+    let deadlinePhase: string | null = null;
+
+    // Flush the first breadcrumb synchronously. The regular logger batches for
+    // 500ms; a synchronous filesystem or SQLite stall before that timer fires
+    // otherwise recreates the reporter's "no Magic Context lines" symptom.
+    log(`[magic-context] boot: entering pid=${process.pid} dir=${ctx.directory}`);
+    flushLogger();
+
+    const configStartedAt = performance.now();
     beginBootQuietPeriod();
     // Move config from the legacy per-harness locations to the shared CortexKit
     // location BEFORE loading (hard cutover: the loader reads only CortexKit).
@@ -177,6 +194,8 @@ const server: Plugin = async (ctx) => {
         }, 3000);
     }
 
+    configMs = performance.now() - configStartedAt;
+
     // Detect conflicts that prevent magic-context from operating correctly.
     // The resolved MC compaction mode is threaded in explicitly — the detector
     // never re-derives it from the config path. In compaction-off mode,
@@ -191,8 +210,16 @@ const server: Plugin = async (ctx) => {
     // we cannot see). If the resolved fetch fails or times out, we fall back to
     // the file-based check unchanged and log one line naming the fallback.
     let conflictResult: ConflictResult | null = null;
+    const conflictStartedAt = performance.now();
     if (pluginConfig.enabled) {
-        const resolvedCompaction = await resolveCompactionForBoot(ctx.client);
+        const resolvedConfigTimeoutMs = Math.min(
+            RESOLVED_CONFIG_TIMEOUT_MS,
+            remainingBootBudgetMs(bootBudget),
+        );
+        const resolvedCompaction =
+            resolvedConfigTimeoutMs > 0
+                ? await resolveCompactionForBoot(ctx.client, resolvedConfigTimeoutMs)
+                : null;
         if (resolvedCompaction === null) {
             log(
                 "[magic-context] resolved-config fetch failed; using file-based compaction detection (the running server's resolved config may differ — `opencode debug config` is authoritative)",
@@ -209,6 +236,7 @@ const server: Plugin = async (ctx) => {
             log("[magic-context] no conflicts detected, plugin enabled");
         }
     }
+    conflictMs = performance.now() - conflictStartedAt;
 
     const liveSessionState = createLiveSessionState();
     const rustModeModuleTransport =
@@ -222,7 +250,8 @@ const server: Plugin = async (ctx) => {
         ? (rustModeModuleTransport ?? new SubcModuleTransport(pluginConfig.subc?.connection_file))
         : undefined;
 
-    const hooksPhase = await runBootPhaseWithDeadline(
+    const hooksPhase = await runBootPhaseWithinBudget(
+        bootBudget,
         "hooks",
         () =>
             createSessionHooksAsync({
@@ -233,7 +262,6 @@ const server: Plugin = async (ctx) => {
                 promptSurfaceRuntime,
                 onStorageBootTimings: (timings) => Object.assign(storageBootTimings, timings),
             }),
-        BOOT_HOOKS_DEADLINE_MS,
         log,
     );
     const hooks =
@@ -241,8 +269,10 @@ const server: Plugin = async (ctx) => {
             ? hooksPhase.value
             : { magicContext: null, rustToolBackends: undefined };
     if (hooksPhase.status === "timed_out") {
-        hooksDeadlineReason = `boot hooks phase exceeded ${BOOT_HOOKS_DEADLINE_MS}ms`;
+        deadlinePhase = "hooks";
+        hooksDeadlineReason = `boot hooks phase exhausted the whole-server ${BOOT_SERVER_DEADLINE_MS}ms budget`;
     }
+    const postStartedAt = performance.now();
 
     // Mutable holder so a healed storage reopen can install real hooks without
     // rebuilding the outer messages-transform wrapper.
@@ -469,15 +499,17 @@ const server: Plugin = async (ctx) => {
             // Best-effort background maintenance must not hold plugin startup. The
             // registration is observed so a late failure is visible, while the host
             // receives the core transform hooks without waiting for it.
-            void startDreamScheduleTimer(timerRegistration)
-                .then((stop) => {
-                    stopDreamTimerRegistration = stop;
-                })
-                .catch((err) => {
-                    log(
-                        `[magic-context] dream timer registration failed (continuing without it): ${err}`,
-                    );
-                });
+            setTimeout(() => {
+                void startDreamScheduleTimer(timerRegistration)
+                    .then((stop) => {
+                        stopDreamTimerRegistration = stop;
+                    })
+                    .catch((err) => {
+                        log(
+                            `[magic-context] dream timer registration failed (continuing without it): ${err}`,
+                        );
+                    });
+            }, 0);
         }
 
         // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus).
@@ -490,11 +522,24 @@ const server: Plugin = async (ctx) => {
             liveSessionState,
             rustModeModuleClient,
         });
-        const rpcStartedAt = performance.now();
-        rpcServer.start().catch((err) => {
-            log(`[magic-context] RPC server failed to start: ${err}`);
-        });
-        rpcMs = performance.now() - rpcStartedAt;
+        const rpcScheduledAt = performance.now();
+        // MagicContextRpcServer.start() is async but its Bun.serve + discovery-file
+        // prefix is synchronous. Invoke it in the next task so those filesystem
+        // calls are not part of the host's deadline-bound plugin construction.
+        setTimeout(() => {
+            const rpcStartedAt = performance.now();
+            rpcServer
+                ?.start()
+                .then(() => {
+                    log(
+                        `[magic-context] boot deferred phase: rpc=${Math.round(performance.now() - rpcStartedAt)}ms`,
+                    );
+                })
+                .catch((err) => {
+                    log(`[magic-context] RPC server failed to start: ${err}`);
+                });
+        }, 0);
+        rpcMs = performance.now() - rpcScheduledAt;
 
         // Warm the model-context-limit cache from OpenCode's SDK once at startup.
         // The API response matches OpenCode's internal resolution (live models.dev
@@ -516,7 +561,9 @@ const server: Plugin = async (ctx) => {
         // smaller/wrong limit and silently break an in-progress session. The
         // event handler may still retry this refresh once when it detects an
         // obviously bad cache value, but normal operation is one-shot.
-        void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
+        setTimeout(() => {
+            void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
+        }, 0);
     }
 
     // Schema-fence warning for Desktop mode. If openDatabase() fail-closed
@@ -553,19 +600,24 @@ const server: Plugin = async (ctx) => {
     // Conflict warning / cleanup for Desktop mode.
     // TUI handles this via a startup dialog; this covers Desktop where we can't show dialogs.
     if (conflictResult?.hasConflict) {
-        // Fire-and-forget: send warning to the last active session for this project
-        void sendConflictWarning(
-            ctx.client as unknown as Record<string, unknown>,
-            ctx.directory,
-            conflictResult,
-        );
+        // Defer host-client work until plugin construction has returned. Calling
+        // an async SDK helper here would still execute its synchronous prefix now.
+        setTimeout(() => {
+            void sendConflictWarning(
+                ctx.client as unknown as Record<string, unknown>,
+                ctx.directory,
+                conflictResult,
+            );
+        }, 0);
     } else if (pluginConfig.enabled) {
         // No conflicts — clean up any leftover warning messages from previous disabled runs
-        void cleanupConflictWarnings(
-            ctx.client as unknown as Record<string, unknown>,
-            ctx.directory,
-            serverUrlStr,
-        );
+        setTimeout(() => {
+            void cleanupConflictWarnings(
+                ctx.client as unknown as Record<string, unknown>,
+                ctx.directory,
+                serverUrlStr,
+            );
+        }, 0);
     }
 
     // The TUI sidebar entry in tui.json(c) is added ONLY by the setup wizard and
@@ -630,9 +682,10 @@ const server: Plugin = async (ctx) => {
     const totalBootMs = performance.now() - bootStartedAt;
     const measuredStorageMs =
         storageBootTimings.openMs + storageBootTimings.guardMs + storageBootTimings.migrateMs;
-    const hooksMs = Math.max(0, totalBootMs - measuredStorageMs - rpcMs);
+    const hooksMs = Math.max(0, hooksPhase.elapsedMs - measuredStorageMs);
+    const postMs = Math.max(0, performance.now() - postStartedAt - rpcMs);
     log(
-        `[magic-context] boot phases: guard=${Math.round(storageBootTimings.guardMs)}ms open=${Math.round(storageBootTimings.openMs)}ms migrate=${Math.round(storageBootTimings.migrateMs)}ms rpc=${Math.round(rpcMs)}ms hooks=${Math.round(hooksMs)}ms total=${Math.round(totalBootMs)}ms`,
+        `[magic-context] boot phases: config=${Math.round(configMs)}ms conflict=${Math.round(conflictMs)}ms guard=${Math.round(storageBootTimings.guardMs)}ms open=${Math.round(storageBootTimings.openMs)}ms migrate=${Math.round(storageBootTimings.migrateMs)}ms hooks=${Math.round(hooksMs)}ms rpc=${Math.round(rpcMs)}ms post=${Math.round(postMs)}ms total=${Math.round(totalBootMs)}ms budget=${BOOT_SERVER_DEADLINE_MS}ms deadline_phase=${deadlinePhase ?? "none"}`,
     );
 
     return {

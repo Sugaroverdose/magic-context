@@ -209,7 +209,7 @@ export function detectConflicts(
  */
 export interface OpencodeConfigClientLike {
     config: {
-        get: () => Promise<{ data?: unknown }>;
+        get: (options?: { signal?: AbortSignal }) => Promise<{ data?: unknown }>;
     };
 }
 
@@ -250,13 +250,29 @@ export async function resolveCompactionForBoot(
     client: OpencodeConfigClientLike,
     timeoutMs = 2_000,
 ): Promise<ResolvedCompaction | null> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-        const result = await Promise.race([
-            client.config.get(),
-            new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error("config.get() timed out")), timeoutMs),
-            ),
-        ]);
+        // Install the deadline before invoking the generated SDK method. During
+        // OpenCode bootstrap, /config can recursively wait for the same project
+        // instance that is currently loading this plugin. Deferring invocation
+        // ensures the deadline exists before any synchronous SDK/fetch prefix runs.
+        const timeout = new Promise<null>((resolve) => {
+            timer = setTimeout(
+                () => {
+                    controller.abort(new Error("config.get() timed out"));
+                    resolve(null);
+                },
+                Math.max(0, timeoutMs),
+            );
+            (timer as { unref?: () => void }).unref?.();
+        });
+        const request = Promise.resolve().then(() =>
+            client.config.get({ signal: controller.signal }),
+        );
+        const result = await Promise.race([request, timeout]);
+        if (result === null) return null;
+
         // The SDK's generated `Config` type has no `compaction` key, so read it
         // defensively from the runtime response.
         const compaction = (result?.data as ResolvedCompactionBlock | undefined)?.compaction;
@@ -272,6 +288,8 @@ export async function resolveCompactionForBoot(
         return { auto: compaction.auto, prune: compaction.prune };
     } catch {
         return null;
+    } finally {
+        if (timer) clearTimeout(timer);
     }
 }
 

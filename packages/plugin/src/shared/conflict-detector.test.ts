@@ -653,5 +653,29 @@ describe("detectConflicts", () => {
             const result = await resolveCompactionForBoot(client, 20);
             expect(result).toBeNull();
         });
+
+        it("aborts the host request when its boot timeout expires", async () => {
+            let requestSignal: AbortSignal | undefined;
+            const client = {
+                config: {
+                    get: (options?: { signal?: AbortSignal }) => {
+                        requestSignal = options?.signal;
+                        return new Promise<{ data?: unknown }>((_resolve, reject) => {
+                            options?.signal?.addEventListener(
+                                "abort",
+                                () => reject(options.signal?.reason ?? new Error("aborted")),
+                                { once: true },
+                            );
+                        });
+                    },
+                },
+            };
+
+            const result = await resolveCompactionForBoot(client, 20);
+
+            expect(result).toBeNull();
+            expect(requestSignal).toBeDefined();
+            expect(requestSignal?.aborted).toBe(true);
+        });
     });
 });
