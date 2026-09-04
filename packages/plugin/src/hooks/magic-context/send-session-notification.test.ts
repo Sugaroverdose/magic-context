@@ -80,6 +80,25 @@ describe("sendIgnoredMessage", () => {
         expect(__ignoredNotificationTest.pendingTexts("ses-active")).toEqual(["background status"]);
     });
 
+    it("runs delivery callbacks only when a queued notice is actually sent", async () => {
+        const session = titledClientWithLastTurn();
+        let active = true;
+        const onDelivered = mock(() => {});
+        __ignoredNotificationTest.setMidTurnDetector(() => active);
+
+        const result = await sendIgnoredMessage({ session }, "ses-callback", "callback status", {
+            onDelivered,
+        });
+
+        expect(result).toBe("queued");
+        expect(onDelivered).not.toHaveBeenCalled();
+
+        active = false;
+        await flushIgnoredMessages("ses-callback");
+
+        expect(onDelivered).toHaveBeenCalledTimes(1);
+    });
+
     it("flushes queued notices in order after the session becomes idle", async () => {
         const session = titledClientWithLastTurn();
         let active = true;

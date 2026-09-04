@@ -10,10 +10,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { sendIgnoredMessage } from "../hooks/magic-context/send-session-notification";
 import type { ConflictResult } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
-import { waitForSafeNotificationTarget } from "../shared/safe-notification-target";
 
 const CONFLICT_WARNING_MARKER = "⚠️ Magic Context is disabled due to conflicting configuration:";
 const SCHEMA_FENCE_MARKER = "⚠️ Magic Context is disabled — database is newer than this version";
@@ -102,6 +102,16 @@ function readDesktopState(directory: string): DesktopState {
 
 // Cache per directory so each project gets its own lookup
 const cachedDesktopStateByDir = new Map<string, DesktopState>();
+
+/** Test seam for targeting a synthetic Desktop session without touching user state files. */
+export const __conflictWarningTest = {
+    setDesktopState(directory: string, state: DesktopState): void {
+        cachedDesktopStateByDir.set(directory, state);
+    },
+    reset(): void {
+        cachedDesktopStateByDir.clear();
+    },
+};
 
 function getDesktopState(directory: string): DesktopState {
     let cached = cachedDesktopStateByDir.get(directory);
@@ -205,12 +215,6 @@ export async function sendConflictWarning(
         return;
     }
 
-    // Never post into a session that hasn't been titled yet — an extra
-    // (non-synthetic) user message in a fresh session permanently suppresses
-    // OpenCode's title generation (issue #129). Conflict detection re-fires on
-    // every startup, so skipping here just retries on the next launch.
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
-
     const warningText = formatConflictShort(conflictResult);
 
     log(
@@ -218,34 +222,7 @@ export async function sendConflictWarning(
     );
 
     try {
-        const c = client as {
-            session?: {
-                prompt?: (input: unknown) => unknown;
-                promptAsync?: (input: unknown) => unknown;
-            };
-        };
-
-        const promptInput = {
-            path: { id: sessionId },
-            body: {
-                noReply: true,
-                parts: [
-                    {
-                        type: "text",
-                        text: warningText,
-                        ignored: true,
-                    },
-                ],
-            },
-        };
-
-        if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(promptInput));
-        } else if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(promptInput);
-        } else {
-            log("[magic-context] conflict-warning: session prompt API unavailable");
-        }
+        await sendIgnoredMessage(client, sessionId, warningText, {});
     } catch (error: unknown) {
         log(
             `[magic-context] conflict-warning: failed to send: ${error instanceof Error ? error.message : String(error)}`,
@@ -319,68 +296,51 @@ export async function cleanupConflictWarnings(
     }
 
     // Send a brief "enabled" confirmation so the user sees the conflict is resolved.
-    // Same title-safety guard as all ignored-message posts (issue #129); the
-    // warning cleanup above already ran — only the confirmation is skippable.
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
+    // The guarded sender handles title safety and defers this post if a run is active.
     const enabledText = `${ENABLED_MARKER}. Enjoy! ✨`;
+    const scheduleEnabledCleanup = (): void => {
+        // Auto-remove the "enabled" message after 1 second so it doesn't persist across restarts.
+        // We identify it by the ENABLED_MARKER + ignored flag to avoid deleting real user messages.
+        setTimeout(async () => {
+            try {
+                const freshMessages = await getSessionMessages(client, sessionId);
+                // Scan from end for our specific enabled marker
+                for (let i = freshMessages.length - 1; i >= 0; i--) {
+                    const msg = freshMessages[i];
+                    const msgId = msg.info?.id;
+                    const msgRole = msg.info?.role;
+                    if (!msgId || msgRole !== "user") break;
+
+                    const parts = msg.parts ?? [];
+                    const isEnabled =
+                        parts.length > 0 &&
+                        parts.every(
+                            (p) =>
+                                p.ignored === true &&
+                                p.type === "text" &&
+                                typeof p.text === "string" &&
+                                p.text.startsWith(ENABLED_MARKER),
+                        );
+
+                    if (isEnabled) {
+                        await deleteMessage(serverUrl, sessionId, msgId);
+                    } else {
+                        break;
+                    }
+                }
+            } catch {
+                // Ignore cleanup errors because removing this temporary message is nonessential.
+            }
+        }, 1000);
+    };
+
     try {
-        const c = client as {
-            session?: {
-                prompt?: (input: unknown) => unknown;
-                promptAsync?: (input: unknown) => unknown;
-            };
-        };
-
-        const promptInput = {
-            path: { id: sessionId },
-            body: {
-                noReply: true,
-                parts: [{ type: "text", text: enabledText, ignored: true }],
-            },
-        };
-
-        if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(promptInput));
-        } else if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(promptInput);
-        }
+        await sendIgnoredMessage(client, sessionId, enabledText, {
+            onDelivered: scheduleEnabledCleanup,
+        });
     } catch {
         // Best-effort — don't log noise if this fails
     }
-
-    // Auto-remove the "enabled" message after 1 second so it doesn't persist across restarts.
-    // We identify it by the ENABLED_MARKER + ignored flag to avoid deleting real user messages.
-    setTimeout(async () => {
-        try {
-            const freshMessages = await getSessionMessages(client, sessionId);
-            // Scan from end for our specific enabled marker
-            for (let i = freshMessages.length - 1; i >= 0; i--) {
-                const msg = freshMessages[i];
-                const msgId = msg.info?.id;
-                const msgRole = msg.info?.role;
-                if (!msgId || msgRole !== "user") break;
-
-                const parts = msg.parts ?? [];
-                const isEnabled =
-                    parts.length > 0 &&
-                    parts.every(
-                        (p) =>
-                            p.ignored === true &&
-                            p.type === "text" &&
-                            typeof p.text === "string" &&
-                            p.text.startsWith(ENABLED_MARKER),
-                    );
-
-                if (isEnabled) {
-                    await deleteMessage(serverUrl, sessionId, msgId);
-                } else {
-                    break;
-                }
-            }
-        } catch {
-            // Best-effort cleanup
-        }
-    }, 1000);
 }
 
 /** Remove any leftover "enabled" messages that survived from a previous cleanup run */
@@ -432,10 +392,6 @@ export async function sendSchemaFenceWarning(
     const { sessionId } = getDesktopState(directory);
     if (!sessionId) return;
 
-    // Title-safety guard (issue #129): the fence re-fires on every startup
-    // while the version mismatch persists, so a skip retries next launch.
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
-
     const text = [
         `${SCHEMA_FENCE_MARKER}`,
         "",
@@ -453,21 +409,7 @@ export async function sendSchemaFenceWarning(
     ].join("\n");
 
     try {
-        const c = client as {
-            session?: {
-                prompt?: (input: unknown) => unknown;
-                promptAsync?: (input: unknown) => unknown;
-            };
-        };
-        const promptInput = {
-            path: { id: sessionId },
-            body: { noReply: true, parts: [{ type: "text", text, ignored: true }] },
-        };
-        if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(promptInput));
-        } else if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(promptInput);
-        }
+        await sendIgnoredMessage(client, sessionId, text, {});
     } catch {
         return;
     }
@@ -503,9 +445,8 @@ export async function sendStartupAnnouncement(
     // via the get-announcement / mark-announced RPC. This server-side path is the
     // Desktop/Web fallback ONLY. Without this gate both fire for a TUI session —
     // the ignored message lands in the scrollback AND stamps last_announced_version,
-    // which then suppresses (or races) the dialog. Every other notification routes
-    // through sendIgnoredMessage (which checks isTuiConnected); this one bypassed
-    // that helper, so gate it explicitly here.
+    // which then suppresses (or races) the dialog. The guarded sender checks the
+    // target session; this explicit gate also covers any TUI polling another session.
     //
     // Check the target session first (precise), then fall back to "any TUI
     // connected": the announcement is a global once-per-version event with a
@@ -514,10 +455,6 @@ export async function sendStartupAnnouncement(
     // which a per-session-only check would miss (the reported bug).
     const { isTuiConnected } = await import("../shared/rpc-notifications");
     if (isTuiConnected(sessionId) || isTuiConnected()) return;
-
-    // Title-safety guard (issue #129): markSeen only runs after successful
-    // delivery below, so skipping here re-attempts on the next startup.
-    if ((await waitForSafeNotificationTarget(client, sessionId)) === "skip") return;
 
     // NOTE: OpenCode Desktop renders user messages through HighlightedText
     // (packages/ui/src/components/message-part.tsx ~L1184), which is plain
@@ -537,38 +474,14 @@ export async function sendStartupAnnouncement(
     log(`[magic-context] sending startup announcement for v${version} to session ${sessionId}`);
 
     try {
-        const c = client as {
-            session?: {
-                prompt?: (input: unknown) => unknown;
-                promptAsync?: (input: unknown) => unknown;
-            };
-        };
-
-        const promptInput = {
-            path: { id: sessionId },
-            body: {
-                noReply: true,
-                parts: [{ type: "text", text, ignored: true }],
-            },
-        };
-
-        if (typeof c.session?.prompt === "function") {
-            await Promise.resolve(c.session.prompt(promptInput));
-        } else if (typeof c.session?.promptAsync === "function") {
-            await c.session.promptAsync(promptInput);
-        } else {
-            log("[magic-context] announcement: session prompt API unavailable");
-            return;
-        }
+        await sendIgnoredMessage(client, sessionId, text, {
+            // The callback runs only after a persisted or TUI delivery. If the
+            // sender queues this notice during a run, it runs when the queue flushes.
+            onDelivered: () => markSeen(version),
+        });
     } catch (error: unknown) {
         log(
             `[magic-context] announcement: failed to send: ${error instanceof Error ? error.message : String(error)}`,
         );
-        return;
     }
-
-    // Persist the dismissal AFTER successful delivery so we never silently
-    // suppress an announcement that the user never saw due to a transient
-    // delivery error.
-    markSeen(version);
 }

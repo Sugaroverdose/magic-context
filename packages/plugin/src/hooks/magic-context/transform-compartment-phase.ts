@@ -397,7 +397,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             // while historian compacts. Without this, users have no idea what's happening.
             //
             // CRITICAL: This notification creates a user message via session.prompt
-            // with noReply:true. The message is PERSISTED to OpenCode's session DB,
+            // as an ignored no-reply post. OpenCode PERSISTS it to the session DB,
             // which gives it a higher ID than the latest assistant. OpenCode's
             // runLoop break condition checks `lastUser.id < lastAssistant.id`, and
             // a fresh notification-user-message every transform pass makes that

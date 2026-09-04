@@ -9,6 +9,8 @@ export interface NotificationParams {
     modelId?: string;
     /** TUI toast lifetime in milliseconds (default: 5000). */
     toastDurationMs?: number;
+    /** Runs after this notification is delivered, including after a queued flush. */
+    onDelivered?: () => void;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "queued" | "skipped" | "failed";
@@ -113,6 +115,14 @@ interface NotificationClient {
         prompt?: (opts: unknown) => unknown | Promise<unknown>;
         promptAsync?: (opts: unknown) => Promise<unknown>;
     };
+}
+
+function notifyDelivered(sessionId: string, params: NotificationParams): void {
+    try {
+        params.onDelivered?.();
+    } catch (error: unknown) {
+        sessionLog(sessionId, "notification delivery callback failed:", getErrorMessage(error));
+    }
 }
 
 function hasNotificationSessionClient(client: unknown): client is NotificationClient {
@@ -281,6 +291,7 @@ async function sendIgnoredMessageNow(
         ) {
             return "queued";
         }
+        notifyDelivered(sessionId, params);
         return "sent";
     } catch (error: unknown) {
         const msg = getErrorMessage(error);
@@ -387,7 +398,10 @@ export async function sendIgnoredMessage(
     forcePersist = false,
 ): Promise<NotificationDeliveryDisposition> {
     // TUI notifications are already out-of-band and do not create a user row.
-    if (await trySendTuiToast(sessionId, text, params, forcePersist)) return "sent";
+    if (await trySendTuiToast(sessionId, text, params, forcePersist)) {
+        notifyDelivered(sessionId, params);
+        return "sent";
+    }
 
     // OpenCode's MessageV2.latest is role-based and treats an ignored-only user
     // row as the latest user turn. Do not create that invisible chronology entry
