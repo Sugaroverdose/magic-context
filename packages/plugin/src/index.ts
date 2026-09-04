@@ -60,6 +60,8 @@ import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
+import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
+import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
 import {
     type ConflictResult,
     detectConflicts,
@@ -140,59 +142,63 @@ const server: Plugin = async (ctx) => {
     // instance, and OpenCode Desktop runs many in one process (Node warns past 10).
     registerExitAbort(autoUpdateAbort);
 
-    // Surface config validation warnings to user and log
+    // Surface config validation warnings to user and log. Parse failures are
+    // claimed process-wide because OpenCode may initialize one server per project.
     if (pluginConfig.configWarnings?.length) {
         for (const w of pluginConfig.configWarnings) {
             log(`[magic-context] config warning: ${w}`);
         }
-        // Send warning to user via startup notification (after a short delay so session is ready)
-        const warningText = [
-            "## ⚠️ Magic Context Config Warning",
-            "",
-            "Some configuration values are invalid and were replaced with defaults:",
-            "",
-            ...pluginConfig.configWarnings.map((w) => `- ${w}`),
-            "",
-            "Check your `magic-context.jsonc` to fix these values.",
-        ].join("\n");
+        const allParseFailures = loadedPluginConfig.configParseFailures;
+        const parseFailuresToShow = claimConfigParseFailuresOnce("opencode", allParseFailures);
+        const warningText = buildOpenCodeConfigWarningBanner(
+            pluginConfig.configWarnings,
+            parseFailuresToShow,
+            allParseFailures,
+        );
+        const hasBannerEntries =
+            parseFailuresToShow.length > 0 ||
+            pluginConfig.configWarnings.some(
+                (warning) => !allParseFailures.some((failure) => warning.includes(failure.warning)),
+            );
 
-        setTimeout(async () => {
-            try {
-                const { sendIgnoredMessage } = await import(
-                    "./hooks/magic-context/send-session-notification"
-                );
-                // sendIgnoredMessage already handles TUI (toast) vs Desktop (ignored message)
-                // via isTuiConnected(). We need a session ID — use the first active session.
-                // SDK types don't expose `session.list()`'s actual response shape (the
-                // client surface has been through multiple revisions; some versions
-                // return `{ data: [...] }`, others return the array directly), so we
-                // probe both shapes defensively at runtime.
-                type SessionListFn = () => Promise<
-                    { data?: Array<{ id?: string }> } | Array<{ id?: string }>
-                >;
-                const clientWithSessions = ctx.client as unknown as {
-                    session?: { list?: SessionListFn };
-                };
-                const sessions = await Promise.resolve(clientWithSessions.session?.list?.()).catch(
-                    () => null,
-                );
-                const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
-                const sessionId = sessionList?.[0]?.id;
-                if (sessionId) {
-                    // Pin the session's last real turn (agent + model + variant)
-                    // onto the warning. Passing nothing makes OpenCode record the
-                    // DEFAULT agent/model on this ignored message — which both
-                    // mis-attributes the notice (shows the default agent, not the
-                    // session's) AND switches the model on the user's next turn,
-                    // busting the prefix cache. resolvePromptContext reads from
-                    // real session messages and returns null on a fresh/empty
-                    // session, so this degrades safely there.
-                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
+        if (hasBannerEntries)
+            setTimeout(async () => {
+                try {
+                    const { sendIgnoredMessage } = await import(
+                        "./hooks/magic-context/send-session-notification"
+                    );
+                    // sendIgnoredMessage already handles TUI (toast) vs Desktop (ignored message)
+                    // via isTuiConnected(). We need a session ID — use the first active session.
+                    // SDK types don't expose `session.list()`'s actual response shape (the
+                    // client surface has been through multiple revisions; some versions
+                    // return `{ data: [...] }`, others return the array directly), so we
+                    // probe both shapes defensively at runtime.
+                    type SessionListFn = () => Promise<
+                        { data?: Array<{ id?: string }> } | Array<{ id?: string }>
+                    >;
+                    const clientWithSessions = ctx.client as unknown as {
+                        session?: { list?: SessionListFn };
+                    };
+                    const sessions = await Promise.resolve(
+                        clientWithSessions.session?.list?.(),
+                    ).catch(() => null);
+                    const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
+                    const sessionId = sessionList?.[0]?.id;
+                    if (sessionId) {
+                        // Pin the session's last real turn (agent + model + variant)
+                        // onto the warning. Passing nothing makes OpenCode record the
+                        // DEFAULT agent/model on this ignored message — which both
+                        // mis-attributes the notice (shows the default agent, not the
+                        // session's) AND switches the model on the user's next turn,
+                        // busting the prefix cache. resolvePromptContext reads from
+                        // real session messages and returns null on a fresh/empty
+                        // session, so this degrades safely there.
+                        await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
+                    }
+                } catch {
+                    // Intentional: config warning delivery must not crash startup
                 }
-            } catch {
-                // Intentional: config warning delivery must not crash startup
-            }
-        }, 3000);
+            }, 3000);
     }
 
     configMs = performance.now() - configStartedAt;

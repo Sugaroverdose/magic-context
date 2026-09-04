@@ -7,6 +7,7 @@ import type {
     DreamTaskBacklogMap,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
+import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
 
 export interface TailHygieneStatus {
@@ -181,6 +182,11 @@ export interface StatusDetail extends SidebarSnapshot {
      *  (only meaningful when lastResponseTime > 0); N = live countdown. */
     cacheRemainingMs: number;
     cacheExpired: boolean;
+    /** Reports whether the displayed TTL came from config, persisted session metadata,
+     *  or the default; cache scheduling still uses the TTL stored in session metadata. */
+    cacheTtlSource?: "config" | "session" | "default";
+    cacheTtlModelKey?: string;
+    configParseFailures?: ConfigParseFailure[];
     /** True when cacheTtl is "never" — the idle-TTL heuristic is disabled on
      *  this lane. Redundant with cacheTtlMs === -1; kept as the readable form. */
     cacheNeverExpires?: boolean;

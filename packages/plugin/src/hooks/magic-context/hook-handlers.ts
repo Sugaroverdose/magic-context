@@ -1,3 +1,4 @@
+import type { MagicContextConfig } from "../../config/schema/magic-context";
 import {
     clearSessionTracking,
     scheduleIncrementalIndex,
@@ -21,6 +22,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
+import { seedSessionCacheTtlIfUnsynced } from "../../shared/cache-ttl-seed";
 import { sessionLog } from "../../shared/logger";
 import { clearAutoSearchForSession } from "./auto-search-runner";
 import type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
@@ -193,6 +195,7 @@ export function createChatMessageHook(args: {
     upgradeReminder?: (sessionId: string) => Promise<void>;
     /** The native slash-command handler, reused when Desktop removes the slash. */
     commandHandler?: MagicContextCommandHandler;
+    cacheTtlConfig?: MagicContextConfig["cache_ttl"];
 }) {
     return async (
         input: {
@@ -245,6 +248,14 @@ export function createChatMessageHook(args: {
                 providerID: input.model.providerID,
                 modelID: input.model.modelID,
             });
+            if (args.cacheTtlConfig) {
+                seedSessionCacheTtlIfUnsynced({
+                    db: args.db,
+                    sessionId,
+                    configured: args.cacheTtlConfig,
+                    modelKey: `${input.model.providerID}/${input.model.modelID}`,
+                });
+            }
         }
 
         // The tool-heavy "sticky turn reminder" was replaced by the in-turn

@@ -501,6 +501,39 @@ describe("createEventHook mid-session model switch clears overflow state", () =>
     });
 });
 
+describe("createChatMessageHook cache TTL seeding", () => {
+    test("seeds config TTL on the first model-bearing user message without marking it synced", async () => {
+        const db = createTestDb();
+        const sessionId = "ses-cache-ttl-seed";
+        const hook = createChatMessageHook({
+            db,
+            liveModelBySession: new Map(),
+            variantBySession: new Map(),
+            agentBySession: new Map(),
+            historyRefreshSessions: new Set(),
+            systemPromptRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            cacheTtlConfig: {
+                default: "5m",
+                "anthropic/claude-opus-5": "1h",
+            },
+        });
+        try {
+            await hook({
+                sessionID: sessionId,
+                model: { providerID: "anthropic", modelID: "claude-opus-5" },
+            });
+
+            const meta = getOrCreateSessionMeta(db, sessionId);
+            expect(meta.cacheTtl).toBe("1h");
+            expect(meta.lastObservedModelKey).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("Desktop stripped-command interception", () => {
     function createCommandHook(commandHandler: {
         "command.execute.before": (

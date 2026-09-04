@@ -18,6 +18,7 @@ const STATUS_FIXTURE: StatusDetail = {
     sessionNoteCount: 1,
     readySmartNoteCount: 2,
     cacheTtl: "5m",
+    cacheTtlSource: "session",
     lastTransformError: null,
     lastDreamerRunAt: null,
     projectIdentity: "/repo",
@@ -73,7 +74,7 @@ describe("formatStatusDetailMarkdown", () => {
 - **Mode:** Magic Context compaction
 - **Active profile:** work
 - **Usage:** 75.0% (96,000 / 128,000 usable tokens)
-- **Cache lane:** live (42s remaining); TTL 5m
+- **Cache TTL: 5m (session)**; live (42s remaining); TTL 5m
 - **Historian:** running; boundary present; coverage 12
 - **Memory:** 8 active; 3 injected
 - **Tags:** 4 active, 1 dropped; 2 pending drops

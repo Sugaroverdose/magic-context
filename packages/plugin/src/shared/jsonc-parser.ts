@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
+import { type ParseError, parse as parseJsoncDocument, printParseErrorCode } from "jsonc-parser";
+
 export function stripJsonComments(content: string): string {
     let result = "";
     let inString = false;
@@ -153,6 +155,89 @@ export function sanitizeParsedJson<T>(
         });
     }
     return sanitized as T;
+}
+
+export interface JsoncParseIssue {
+    line: number;
+    column: number;
+    offset: number;
+    length: number;
+    message: string;
+}
+
+export interface RecoveringJsoncParseResult<T> {
+    value: T;
+    issues: JsoncParseIssue[];
+}
+
+function lineAndColumnAt(content: string, offset: number): { line: number; column: number } {
+    const before = content.slice(0, Math.max(0, offset));
+    const lines = before.split(/\r?\n/);
+    return { line: lines.length, column: (lines.at(-1)?.length ?? 0) + 1 };
+}
+
+function parseIssue(content: string, error: ParseError): JsoncParseIssue {
+    const location = lineAndColumnAt(content, error.offset);
+    const code = printParseErrorCode(error.error);
+    const message = code.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+    return {
+        ...location,
+        offset: error.offset,
+        length: error.length,
+        message,
+    };
+}
+
+/**
+ * Parse JSONC with the same recovery grammar used by the runtime config loaders.
+ * Syntax diagnostics are never discarded: callers must surface every non-empty
+ * `issues` result even when the parser recovered a usable object.
+ */
+function normalizeJsoncParserObjects(
+    value: unknown,
+    options: ParsedJsonSanitizerOptions,
+    path: string[] = [],
+): unknown {
+    if (Array.isArray(value)) {
+        return value.map((entry, index) =>
+            normalizeJsoncParserObjects(entry, options, [...path, String(index)]),
+        );
+    }
+    if (value === null || typeof value !== "object") return value;
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+        // jsonc-parser assigns an own "__proto__" property through normal JS
+        // assignment, which changes only this parsed object's prototype. Treat
+        // that prototype as the rejected key and copy only its own safe fields.
+        options.onRejectedKey?.([...path, "__proto__"]);
+    }
+    const normalized: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        Object.defineProperty(normalized, key, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: normalizeJsoncParserObjects(entry, options, [...path, key]),
+        });
+    }
+    return normalized;
+}
+
+export function parseJsoncRecovering<T = unknown>(
+    content: string,
+    options: ParsedJsonSanitizerOptions = {},
+): RecoveringJsoncParseResult<T> {
+    const errors: ParseError[] = [];
+    const parsed = parseJsoncDocument(content, errors, {
+        allowTrailingComma: true,
+        disallowComments: false,
+        allowEmptyContent: false,
+    }) as T;
+    return {
+        value: sanitizeParsedJson(normalizeJsoncParserObjects(parsed, options) as T, options),
+        issues: errors.map((error) => parseIssue(content, error)),
+    };
 }
 
 export function parseJsonc<T = unknown>(

@@ -8,6 +8,7 @@ import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     type DreamerConfig,
     type HistorianConfig,
+    type MagicContextConfig,
     type SidekickConfig,
 } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
@@ -65,6 +66,7 @@ import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embed
 import { buildStatusDetail } from "../../plugin/rpc-handlers";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../plugin/types";
+import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -144,7 +146,9 @@ export interface MagicContextDeps {
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
-        cache_ttl: string | Record<string, string>;
+        cache_ttl: MagicContextConfig["cache_ttl"];
+        cacheTtlConfigured?: boolean;
+        configParseFailures?: ConfigParseFailure[];
         prompt_surface?: PromptSurfaceConfig;
 
         historian?: HistorianConfig;
@@ -1349,6 +1353,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         rustModeModuleClient,
         projectRoot: deps.directory,
         commitClusterTrigger: deps.config.commit_cluster_trigger,
+        cacheTtlConfig: deps.config.cache_ttl,
+        cacheTtlConfigured: deps.config.cacheTtlConfigured === true,
+        configParseFailures: deps.config.configParseFailures ?? [],
         getLiveModelKey: (sessionId) => {
             // Use DB fallback so /ctx-status shows the correct model-specific
             // threshold even before the first transform pass has populated
@@ -1556,6 +1563,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             pendingMaterializationSessions,
             lastHeuristicsTurnId,
             commandHandler,
+            cacheTtlConfig: deps.config.cache_ttl,
             // E5 — only offer the upgrade reminder when historian can run (so
             // /ctx-session-upgrade is actually actionable). Self-gates per session.
             upgradeReminder: historianRunnable

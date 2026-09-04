@@ -80,6 +80,25 @@ afterEach(() => {
 });
 
 describe("loadPiConfig", () => {
+	it("recovers a leading invalid symbol and returns a located file-parse warning", () => {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeUserConfig(home, '\\{\n  "cache_ttl": "1h"\n}');
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.cache_ttl).toBe("1h");
+		expect(result.configParseFailures).toHaveLength(1);
+		expect(result.configParseFailures[0]).toMatchObject({
+			warningClass: "file-parse",
+			line: 1,
+			column: 1,
+			recovered: true,
+			message: "invalid symbol",
+		});
+	});
+
 	it("does not invalidate a same-path overlay during routine config reads", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");
@@ -265,7 +284,7 @@ describe("loadPiConfig", () => {
 		expect(result.loadedFromPaths).toEqual([projectPath, userPath]);
 	});
 
-	it("warns and falls back to defaults for invalid JSONC", () => {
+	it("warns and applies values recovered from invalid JSONC", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");
 		withHome(home);
@@ -273,10 +292,15 @@ describe("loadPiConfig", () => {
 
 		const result = loadPiConfig({ cwd });
 
-		expect(result.config).toEqual(MagicContextConfigSchema.parse({}));
+		expect(result.config.enabled).toBe(false);
 		expect(result.loadedFromPaths).toEqual([projectPath]);
-		expect(result.warnings.join("\n")).toContain("failed to load config");
-		expect(result.warnings.join("\n")).toContain("using defaults");
+		expect(result.configParseFailures[0]).toMatchObject({
+			warningClass: "file-parse",
+			recovered: true,
+		});
+		expect(result.warnings.join("\n")).toContain(
+			"recovered values were applied",
+		);
 	});
 
 	it("warns and falls back to defaults for invalid Zod fields", () => {

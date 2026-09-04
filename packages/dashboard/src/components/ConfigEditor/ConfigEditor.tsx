@@ -266,6 +266,7 @@ function ConfigForm(props: {
   content: string;
   exists: boolean;
   readError?: string | null;
+  path: string;
   onSave: (content: string) => void | Promise<void>;
   saveStatus: string | null;
   modelCatalogs: ModelCatalogs;
@@ -401,6 +402,9 @@ function ConfigForm(props: {
     const next = parsedState();
     if (!next.error) {
       setFormData(next.value);
+    } else {
+      setShowRaw(true);
+      setRawEdit(null);
     }
   });
 
@@ -669,6 +673,19 @@ function ConfigForm(props: {
           </button>
         </div>
       </div>
+
+      <Show when={parsedState().error}>
+        {(error) => {
+          const line = error().match(/Line\s+(\d+)/i)?.[1] ?? "1";
+          const column = error().match(/column\s+(\d+)/i)?.[1] ?? "1";
+          return (
+            <div class="empty-state" style={{ color: "var(--red)", "margin-bottom": "12px" }}>
+              Config: PARSE FAILED ({props.path}:{line}:{column}) — structured defaults are not
+              shown; fix the file in Raw JSONC. {error()}
+            </div>
+          );
+        }}
+      </Show>
 
       <Show
         when={!showRaw()}
@@ -2333,6 +2350,7 @@ function ProjectConfigDetail(props: {
               content={config()?.content ?? ""}
               exists={config()?.exists ?? true}
               readError={config()?.error}
+              path={config()?.path ?? configPath()}
               onSave={handleSave}
               saveStatus={saveStatus()}
               modelCatalogs={props.modelCatalogs}
@@ -2481,6 +2499,7 @@ export default function ConfigEditor(props: {
                     content={userConfig()?.content ?? ""}
                     exists={userConfig()?.exists ?? true}
                     readError={userConfig()?.error}
+                    path={userConfig()?.path ?? "magic-context.jsonc"}
                     onSave={handleUserSave}
                     saveStatus={saveStatus()}
                     modelCatalogs={props.modelCatalogs}

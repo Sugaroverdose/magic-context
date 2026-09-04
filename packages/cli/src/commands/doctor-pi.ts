@@ -23,10 +23,11 @@ import {
 } from "@magic-context/core/shared/data-path";
 import {
     isPrototypePollutionKey,
+    parseJsoncRecovering,
     sanitizeParsedJson,
 } from "@magic-context/core/shared/jsonc-parser";
 import { loadPiConfig } from "@magic-context/pi-core/config";
-import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { parse as parseCommentJson, stringify as stringifyJsonc } from "comment-json";
 
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
@@ -127,6 +128,7 @@ interface DoctorDeps {
 export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
     issue?: boolean;
+    report?: string;
     help?: boolean;
     cwd?: string;
     prompts?: PromptIO;
@@ -164,6 +166,9 @@ function printDoctorHelp(): void {
     console.log("    magic-context-pi doctor          Run health checks");
     console.log("    magic-context-pi doctor --force  Repair safe issues, then re-check");
     console.log("    magic-context-pi doctor --issue  Create a sanitized bug report");
+    console.log(
+        "    magic-context-pi doctor --issue --report <path>  Write a report without prompting",
+    );
     console.log(
         "    magic-context-pi doctor --check-v22-backfill  Show v22 memory backfill status",
     );
@@ -246,7 +251,7 @@ function readJsonc(path: string): {
 } {
     try {
         return {
-            value: parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>,
+            value: parseCommentJson(readFileSync(path, "utf-8")) as Record<string, unknown>,
         };
     } catch (error) {
         return {
@@ -267,7 +272,23 @@ function readMagicContextJsonc(
         const raw = loadRawConfigFile({ configPath: path, tier });
         if (!raw)
             return { value: {}, error: "config file disappeared while doctor was reading it" };
-        return { value: parseJsonc(raw.text) as Record<string, unknown> };
+        const substituted = substituteConfigVariables({
+            text: raw.text,
+            configPath: path,
+            isProjectConfig: tier === "project",
+        });
+        const parsed = parseJsoncRecovering<Record<string, unknown>>(substituted.text);
+        const value =
+            parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)
+                ? parsed.value
+                : {};
+        const issue = parsed.issues[0];
+        return issue
+            ? {
+                  value,
+                  error: `${path}:${issue.line}:${issue.column}: ${issue.message} (runtime recovery does not make the file valid)`,
+              }
+            : { value };
     } catch (error) {
         return {
             value: {},
@@ -334,9 +355,12 @@ function readConfigForEmbedding(
             isProjectConfig,
         });
         const rejectedKeyPaths: string[] = [];
-        const parsed = sanitizeParsedJson(parseJsonc(substituted.text) as Record<string, unknown>, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
-        });
+        const parsed = sanitizeParsedJson(
+            parseCommentJson(substituted.text) as Record<string, unknown>,
+            {
+                onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+            },
+        );
         if (rejectedKeyPaths.length > 0) {
             throw new Error("unsafe prototype-pollution key in config");
         }
@@ -1026,7 +1050,28 @@ async function runIssueFlow(options: {
     cwd: string;
     prompts: PromptIO;
     deps: DoctorDeps;
+    reportPath?: string;
 }): Promise<number> {
+    if (options.reportPath) {
+        try {
+            const report = await options.deps.collectDiagnostics(options.cwd);
+            const outputPath = isAbsolute(options.reportPath)
+                ? options.reportPath
+                : join(options.cwd, options.reportPath);
+            const bundled = await bundleIssueReport(
+                report,
+                "Generated non-interactively by `doctor --issue --report`.",
+                "Magic Context diagnostic report",
+                { cwd: options.cwd, now: options.deps.now(), outputPath },
+            );
+            options.prompts.log.info(`Report written to ${bundled.path}`);
+            return 0;
+        } catch (error) {
+            console.error(error instanceof Error ? error.message : String(error));
+            return 1;
+        }
+    }
+
     options.prompts.intro("Magic Context for Pi Issue Report");
     const title = await options.prompts.text("Issue title", {
         placeholder: "Short summary of the Pi problem",
@@ -1123,7 +1168,7 @@ export async function runDoctor(options: RunDoctorOptions = {}): Promise<number>
     const configMigrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
 
     if (options.issue) {
-        return runIssueFlow({ cwd, prompts, deps });
+        return runIssueFlow({ cwd, prompts, deps, reportPath: options.report });
     }
 
     let v22Db: ReturnType<typeof openExistingContextDatabase> = null;
@@ -1201,9 +1246,11 @@ function valueAfter(args: string[], flag: string): string | null {
 
 export function parseDoctorArgs(args: string[]): RunDoctorOptions {
     const rekeyV22DirIdentity = valueAfter(args, "--rekey-v22-dir-identity");
+    const report = valueAfter(args, "--report");
     return {
         force: args.includes("--force"),
-        issue: args.includes("--issue"),
+        issue: args.includes("--issue") || report !== null,
+        ...(report !== null ? { report } : {}),
         help: args.includes("--help") || args.includes("-h"),
         checkV22Backfill: args.includes("--check-v22-backfill"),
         retryV22Backfill: args.includes("--retry-v22-backfill"),

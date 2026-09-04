@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { parseCacheTtl } from "@magic-context/core/features/magic-context/scheduler";
@@ -29,6 +30,14 @@ import { formatBytes } from "@magic-context/core/hooks/magic-context/format-byte
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/upgrade-reminder";
+import {
+	formatCacheTtlDisplay,
+	resolveCacheTtlDisplay,
+} from "@magic-context/core/shared/cache-ttl-display";
+import {
+	type ConfigParseFailure,
+	formatConfigParseStatusLine,
+} from "@magic-context/core/shared/config-diagnostics";
 import {
 	formatThresholdClampNote,
 	formatThresholdPercent,
@@ -80,6 +89,9 @@ export interface StatusDialogDeps {
 		default?: number;
 		[modelKey: string]: number | undefined;
 	};
+	cacheTtlConfig?: MagicContextConfig["cache_ttl"];
+	cacheTtlConfigured?: boolean;
+	configParseFailures?: ConfigParseFailure[];
 }
 
 interface StatusDialogDetail {
@@ -99,6 +111,9 @@ interface StatusDialogDetail {
 	historianLastFailureAt: number | null;
 	historianLastError: string | null;
 	cacheTtl: string;
+	cacheTtlSource: "config" | "session" | "default";
+	cacheTtlModelKey?: string;
+	configParseFailures: ConfigParseFailure[];
 	lastResponseTime: number;
 	cacheRemainingMs: number;
 	cacheExpired: boolean;
@@ -276,6 +291,10 @@ function renderInner(
 		)}`,
 	);
 	lines.push("");
+	for (const failure of s.configParseFailures) {
+		lines.push(theme.fg("error", formatConfigParseStatusLine(failure)));
+	}
+	if (s.configParseFailures.length > 0) lines.push("");
 
 	// Context summary
 	lines.push(
@@ -348,7 +367,7 @@ function renderInner(
 	}
 	lines.push(`Pending drops: ${s.pendingOpsCount}`);
 	lines.push(
-		`Cache TTL: ${s.cacheTtl} · last response ${
+		`${formatCacheTtlDisplay({ value: s.cacheTtl, source: s.cacheTtlSource, modelKey: s.cacheTtlModelKey })} · last response ${
 			s.lastResponseTime > 0
 				? `${Math.round((Date.now() - s.lastResponseTime) / 1000)}s ago`
 				: "never"
@@ -567,7 +586,14 @@ export function buildPiStatusDetail(
 			sessionId,
 		},
 	);
-	const cacheTtl = meta.cacheTtl || "5m";
+	const cacheTtlDisplay = resolveCacheTtlDisplay({
+		configured: deps.cacheTtlConfig ?? "5m",
+		configuredExplicitly: deps.cacheTtlConfigured === true,
+		modelKey,
+		sessionValue: meta.cacheTtl,
+		sessionModelKey: meta.lastObservedModelKey,
+	});
+	const cacheTtl = cacheTtlDisplay.value;
 	let cacheTtlMs: number;
 	try {
 		cacheTtlMs = parseCacheTtl(cacheTtl);
@@ -633,6 +659,9 @@ export function buildPiStatusDetail(
 				: null,
 		historianLastError: metaRow?.historian_last_error ?? null,
 		cacheTtl,
+		cacheTtlSource: cacheTtlDisplay.source,
+		cacheTtlModelKey: cacheTtlDisplay.modelKey,
+		configParseFailures: deps.configParseFailures ?? [],
 		lastResponseTime: meta.lastResponseTime,
 		cacheRemainingMs,
 		cacheExpired,

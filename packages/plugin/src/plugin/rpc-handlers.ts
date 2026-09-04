@@ -60,6 +60,8 @@ import {
     markAnnouncementSeen,
     shouldShowAnnouncement,
 } from "../shared/announcement";
+import { resolveCacheTtlDisplay } from "../shared/cache-ttl-display";
+import type { ConfigParseFailure } from "../shared/config-diagnostics";
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
@@ -674,6 +676,8 @@ export function buildStatusDetail(
         cacheTtlMs: 0,
         cacheRemainingMs: 0,
         cacheExpired: false,
+        cacheTtlSource: "default",
+        configParseFailures: [],
         cacheNeverExpires: false,
         executeThreshold: 65,
         executeThresholdMode: "percentage",
@@ -713,6 +717,8 @@ export function buildStatusDetail(
                 ageMs: row ? Math.max(0, Date.now() - row.renderedAt) : null,
             };
         }
+        let persistedCacheTtl = "5m";
+        let persistedModelKey: string | null = null;
         const meta = db
             .prepare<[string], Record<string, unknown>>(
                 "SELECT * FROM session_meta WHERE session_id = ?",
@@ -726,6 +732,15 @@ export function buildStatusDetail(
                 ? String(meta.last_transform_error)
                 : null;
             detail.isSubagent = Boolean(meta.is_subagent);
+            persistedCacheTtl =
+                typeof meta.cache_ttl === "string" && meta.cache_ttl.length > 0
+                    ? meta.cache_ttl
+                    : "5m";
+            persistedModelKey =
+                typeof meta.last_observed_model_key === "string" &&
+                meta.last_observed_model_key.length > 0
+                    ? meta.last_observed_model_key
+                    : null;
         }
 
         // Tags
@@ -811,8 +826,19 @@ export function buildStatusDetail(
                 detail.executeThresholdTokens = thresholdDetail.absoluteTokens;
             }
 
-            const ct = resolveConfigValue<string>(config, "cache_ttl", modelKey, "5m");
-            detail.cacheTtl = ct;
+            const ttlDisplay = resolveCacheTtlDisplay({
+                configured: (config.cache_ttl ?? "5m") as MagicContextConfig["cache_ttl"],
+                configuredExplicitly: config.cacheTtlConfigured === true,
+                modelKey,
+                sessionValue: persistedCacheTtl,
+                sessionModelKey: persistedModelKey,
+            });
+            detail.cacheTtl = ttlDisplay.value;
+            detail.cacheTtlSource = ttlDisplay.source;
+            detail.cacheTtlModelKey = ttlDisplay.modelKey;
+            detail.configParseFailures = Array.isArray(config.configParseFailures)
+                ? (config.configParseFailures as ConfigParseFailure[])
+                : [];
 
             if (typeof config.protected_tags === "number") {
                 detail.protectedTagCount = config.protected_tags;

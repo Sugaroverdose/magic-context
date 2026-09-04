@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
     type PiDiagnosticReport,
@@ -54,7 +54,12 @@ export async function bundleIssueReport(
     report: PiDiagnosticReport,
     description: string,
     title: string,
-    options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
+    options: {
+        cwd?: string;
+        now?: Date;
+        sessionFilter?: string | null;
+        outputPath?: string;
+    } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
     const allLogLines = report.logFile.exists
@@ -108,13 +113,16 @@ export async function bundleIssueReport(
 
     const cwd = options.cwd ?? process.cwd();
     const timestamp = formatTimestamp(options.now ?? new Date());
-    const path = join(cwd, `magic-context-pi-issue-${timestamp}.md`);
+    const path = options.outputPath ?? join(cwd, `magic-context-pi-issue-${timestamp}.md`);
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, `${bodyMarkdown}\n`);
 
     // Keep the complete sanitized report as a local attachment when the issue
     // body had to be reduced to fit GitHub's limit.
     const fullPath = truncated
-        ? join(cwd, `magic-context-pi-issue-${timestamp}-full.md`)
+        ? options.outputPath
+            ? `${options.outputPath}.full.md`
+            : join(cwd, `magic-context-pi-issue-${timestamp}-full.md`)
         : undefined;
     if (fullPath) writeFileSync(fullPath, `${rawBodyMarkdown}\n`);
 

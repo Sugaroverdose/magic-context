@@ -1,3 +1,5 @@
+import { formatCacheTtlDisplay } from "./cache-ttl-display";
+import { formatConfigParseStatusLine } from "./config-diagnostics";
 import type { StatusDetail } from "./rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "./rust-mode-status";
 
@@ -33,12 +35,14 @@ export function formatStatusDetailMarkdown(detail: StatusDetail): string {
             : "Magic Context compaction";
 
     const lines = [
+        ...(detail.configParseFailures ?? []).map(formatConfigParseStatusLine),
+        ...((detail.configParseFailures?.length ?? 0) > 0 ? [""] : []),
         "## Magic Context Status",
         "",
         `- **Mode:** ${mode}`,
         `- **Active profile:** ${detail.activeProfile ?? "none"}`,
         `- **Usage:** ${detail.usagePercentage.toFixed(1)}% (${formatCount(detail.inputTokens)} / ${usableLimit})`,
-        `- **Cache lane:** ${formatCacheLane(detail)}`,
+        `- **${formatCacheTtlDisplay({ value: detail.cacheTtl, source: detail.cacheTtlSource ?? "session", modelKey: detail.cacheTtlModelKey })}**; ${formatCacheLane(detail)}`,
         `- **Historian:** ${[historianState, ...historianDetails].join("; ")}`,
         ...(detail.hostBackendsModuleSide ? [`- ${RUST_MODE_HOST_PATHS_LINE}`] : []),
         `- **Memory:** ${formatCount(detail.memoryCount)} active; ${formatCount(detail.memoryBlockCount)} injected`,

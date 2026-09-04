@@ -238,6 +238,34 @@ describe("Pi doctor", () => {
         });
     });
 
+    it("parses --report as a non-interactive issue flow", () => {
+        expect(parseDoctorArgs(["--report", "diagnostics.md"])).toMatchObject({
+            issue: true,
+            report: "diagnostics.md",
+        });
+    });
+
+    it("fails the runtime JSONC parse check for a recoverable leading backslash", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const configHome = process.env.XDG_CONFIG_HOME ?? join(root, ".config");
+        writeFileSync(
+            join(configHome, "cortexkit", "magic-context.jsonc"),
+            '\\{\n  "cache_ttl": "1h"\n}',
+        );
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("FAIL user magic-context.jsonc is invalid JSONC");
+        expect(output).toContain(":1:1: invalid symbol");
+        expect(output).not.toContain("PASS user magic-context.jsonc is valid JSONC");
+    });
+
     it("passes Phase 1 with a healthy mocked environment", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");
@@ -628,6 +656,27 @@ describe("Pi doctor", () => {
         expect(report).not.toContain(root);
         expect(report).not.toContain("abc123");
         expect(report).not.toContain("sk-12345678901234567890");
+
+        const nonInteractivePrompts = new MockPrompts();
+        const explicitReportPath = join(cwd, "explicit-report.md");
+        const nonInteractiveCode = await runDoctor({
+            ...options,
+            issue: true,
+            report: explicitReportPath,
+            prompts: nonInteractivePrompts,
+            deps: {
+                ...options.deps,
+                collectDiagnostics: async () => diagnosticReport,
+            },
+        });
+        expect(nonInteractiveCode).toBe(0);
+        expect(existsSync(explicitReportPath)).toBe(true);
+        expect(nonInteractivePrompts.messages.some((message) => message.startsWith("intro:"))).toBe(
+            false,
+        );
+        expect(
+            nonInteractivePrompts.messages.some((message) => message.startsWith("spinner-start:")),
+        ).toBe(false);
     });
 
     it("clears stale caches under PI_CODING_AGENT_DIR's parent without touching HOME/.pi/cache", async () => {

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
 import { resolveHistorianModel } from "../shared/model-resolution";
 import { createTestTempDir } from "../shared/test-temp-dir";
 import {
@@ -189,6 +190,49 @@ describe("loadPluginConfig — preload user-config isolation", () => {
             model: "fixture-model",
         });
         expect(process.env.XDG_CONFIG_HOME).toBe(preloadConfigHome);
+    });
+});
+
+describe("loadPluginConfig — parse failure diagnostics", () => {
+    it("recovers the reporter's stray leading character and keeps a loud location warning", () => {
+        const result = loadWithUserConfig('\\{\n  "cache_ttl": "1h"\n}');
+
+        expect(result.cache_ttl).toBe("1h");
+        expect(result.configParseFailures).toHaveLength(1);
+        expect(result.configParseFailures?.[0]).toMatchObject({
+            warningClass: "file-parse",
+            line: 1,
+            column: 1,
+            recovered: true,
+            message: "invalid symbol",
+        });
+        expect(result.configWarnings?.[0]).toContain(":1:1: invalid symbol");
+    });
+
+    it("keeps file parse and invalid-leaf warning classes distinct", () => {
+        const parseResult = loadWithUserConfig('\\{\n  "cache_ttl": "1h"\n}');
+        const leafResult = loadWithUserConfig('{"protected_tags":"bogus"}');
+
+        expect(parseResult.configWarningDetails?.[0]?.warningClass).toBe("file-parse");
+        expect(
+            leafResult.configWarningDetails?.some(
+                (detail) => detail.warningClass === "invalid-leaf",
+            ),
+        ).toBe(true);
+    });
+
+    it("puts a recovered parse failure first in the OpenCode warning banner", () => {
+        const result = loadWithUserConfig('\\{\n  "cache_ttl": "1h"\n}');
+        const failures = result.configParseFailures ?? [];
+        const banner = buildOpenCodeConfigWarningBanner(
+            result.configWarnings ?? [],
+            failures,
+            failures,
+        );
+
+        expect(banner).toStartWith("## ⚠️ Magic Context Config Warning");
+        expect(banner.indexOf("PARSE FAILED")).toBeLessThan(banner.indexOf("Fix the reported"));
+        expect(banner).toContain(":1:1");
     });
 });
 

@@ -10,6 +10,8 @@ import {
 import packageJson from "../../package.json"
 import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade, type EmbedDetail, type StatusDetail } from "./data/context-db"
 import { startNotificationSocket, stopNotificationSocket, type SocketNotification } from "./data/notification-socket"
+import { formatCacheTtlDisplay } from "../shared/cache-ttl-display"
+import { formatConfigParseStatusLine } from "../shared/config-diagnostics"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { formatTailHygiene } from "../shared/tail-hygiene-status"
 import { RUST_MODE_HOST_PATHS_LINE } from "../shared/rust-mode-status"
@@ -228,6 +230,10 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 <text fg={t().textMuted}>v{packageJson.version}</text>
             </box>
 
+            {s().configParseFailures.map((failure) => (
+                <text fg={t().error}>{formatConfigParseStatusLine(failure)}</text>
+            ))}
+
             <box flexDirection="row" justifyContent="space-between" width="100%">
                 {compactionOff() ? (
                     <text fg={t().accent}>
@@ -378,7 +384,15 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                             <box marginTop={1}>
                                 <text fg={t().text}><b>Cache TTL</b></text>
                             </box>
-                            <R t={t()} l="Configured" v={s().cacheTtl} />
+                            <R
+                                t={t()}
+                                l="Configured"
+                                v={formatCacheTtlDisplay({
+                                    value: s().cacheTtl,
+                                    source: s().cacheTtlSource,
+                                    modelKey: s().cacheTtlModelKey,
+                                }).replace(/^Cache TTL: /, "")}
+                            />
                             <R t={t()} l="Last response" v={s().lastResponseTime > 0 ? `${Math.round(elapsed() / 1000)}s ago` : "never"} />
                             <R t={t()} l="Remaining" v={s().cacheExpired ? "expired" : s().cacheNeverExpires ? "never (MC never assumes expiry — external cache-keep)" : `${Math.round(s().cacheRemainingMs / 1000)}s`} fg={s().cacheExpired ? t().warning : t().textMuted} />
                             <R t={t()} l="Auto-execute" v={s().cacheExpired ? "yes (expired)" : s().cacheNeverExpires ? `at ≥${formatThresholdPercent(s().executeThreshold)}%` : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`} fg={t().textMuted} />

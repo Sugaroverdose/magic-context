@@ -32,6 +32,7 @@ import { doctor as runPiDoctor } from "./doctor-pi";
 export interface RunDoctorOptions extends V22BackfillCommandArgs {
     force?: boolean;
     issue?: boolean;
+    report?: string;
     clear?: boolean;
     argv?: string[];
 }
@@ -138,6 +139,7 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
             const piArgs: string[] = [];
             if (options.force) piArgs.push("--force");
             if (options.issue) piArgs.push("--issue");
+            if (options.report) piArgs.push("--report", options.report);
             return runPiDoctor(piArgs);
         }
         case "omp":
