@@ -36,7 +36,8 @@ export function handlePiProviderFailure(args: {
 	compactionOff?: boolean;
 	thinkingBindingRecoveryEnabled?: boolean;
 }): PiProviderFailureResult {
-	if (!args.message || typeof args.message !== "object") return { kind: "none" };
+	if (!args.message || typeof args.message !== "object")
+		return { kind: "none" };
 	const message = args.message as {
 		role?: unknown;
 		errorMessage?: unknown;
@@ -51,7 +52,8 @@ export function handlePiProviderFailure(args: {
 		return { kind: "none" };
 	}
 
-	const provider = typeof message.provider === "string" ? message.provider : undefined;
+	const provider =
+		typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
 	const binding = detectThinkingBindingMismatch(message.errorMessage);
 	if (binding.isBindingMismatch) {
@@ -158,9 +160,14 @@ export function applyPiThinkingBindingRecovery(args: {
 }): PiThinkingBindingApplication | null {
 	if (args.provider?.toLowerCase() !== "anthropic") return null;
 	const frozenEntryIds = new Set<string>();
-	for (const frozenId of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
+	for (const frozenId of getMergedReasoningStrippedIds(
+		args.db,
+		args.sessionId,
+	)) {
 		if (!frozenId.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
-		const entryId = frozenId.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
+		const entryId = frozenId.slice(
+			THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length,
+		);
 		if (entryId.length > 0) frozenEntryIds.add(entryId);
 	}
 
@@ -179,7 +186,8 @@ export function applyPiThinkingBindingRecovery(args: {
 			}
 		} else {
 			messageIndex = args.entryIds.findIndex(
-				(entryId, index) => entryId === flagTarget && hasThinkingPart(args.messages[index]),
+				(entryId, index) =>
+					entryId === flagTarget && hasThinkingPart(args.messages[index]),
 			);
 		}
 		const entryId = messageIndex >= 0 ? args.entryIds[messageIndex] : undefined;
@@ -197,7 +205,8 @@ export function applyPiThinkingBindingRecovery(args: {
 
 	for (let index = 0; index < args.messages.length; index += 1) {
 		const entryId = args.entryIds[index];
-		if (entryId && frozenEntryIds.has(entryId)) stripThinkingParts(args.messages[index]);
+		if (entryId && frozenEntryIds.has(entryId))
+			stripThinkingParts(args.messages[index]);
 	}
 	return applied;
 }

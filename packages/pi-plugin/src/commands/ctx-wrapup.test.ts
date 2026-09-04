@@ -22,10 +22,10 @@ import {
 	recordOverflowDetected,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
-import * as logger from "@magic-context/core/shared/logger";
 import {
 	consumeDeferredHistoryRefresh,
 	consumeDeferredMaterialization,
@@ -329,7 +329,8 @@ describe("Pi /ctx-wrapup", () => {
 				sessionId,
 				2,
 			);
-			while (runPiHistorianForWrapup.mock.calls.length === 0) await Promise.resolve();
+			while (runPiHistorianForWrapup.mock.calls.length === 0)
+				await Promise.resolve();
 			expect(holderId).not.toBe("");
 
 			blocker.exec("BEGIN IMMEDIATE");

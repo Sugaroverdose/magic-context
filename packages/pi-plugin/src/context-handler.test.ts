@@ -98,17 +98,19 @@ describe("Pi pressure guards", () => {
 	});
 	describe("two-pass tool reclaim source invariants", () => {
 		it("only advances reclaim on a priced application opportunity", () => {
+			// Whitespace-normalized so the formatter's line-wrapping of long boolean
+			// chains cannot break a check that is about the predicate, not layout.
 			const src = readFileSync(
 				join(import.meta.dir, "context-handler.ts"),
 				"utf8",
-			);
+			).replace(/\s+/g, " ");
 			expect(src).toContain("let pendingOpsDidMutate = false");
 			expect(src).toContain("let heuristicOrReasoningDidMutate = false");
 			expect(src).toContain(
-				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
+				"const alreadyMutatingThisPass = pendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass",
 			);
 			expect(src).toContain(
-				"const toolReclaimApplicationOpportunity =\n\t\ttoolReclaimExecutePass && alreadyMutatingThisPass",
+				"const toolReclaimApplicationOpportunity = toolReclaimExecutePass && alreadyMutatingThisPass",
 			);
 			expect(src).toContain(
 				"if (toolReclaimApplicationOpportunity && !emergencyDropEligible)",
@@ -4920,7 +4922,9 @@ describe("maybeFireHistorian raw provider cleanup", () => {
 		expect(catchIndex).toBeGreaterThan(0);
 		expect(finallyIndex).toBeGreaterThan(catchIndex);
 		expect(body).toContain("pi historian finalizer failed");
-		expect(body).not.toContain("releaseCompartmentLease(db, sessionId, holderId)");
+		expect(body).not.toContain(
+			"releaseCompartmentLease(db, sessionId, holderId)",
+		);
 	});
 
 	it("unregisters the raw-message provider in finally when no historian is spawned", () => {

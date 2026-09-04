@@ -407,15 +407,16 @@ export function applyPiHeuristicCleanup(
 	}
 
 	// ── Pass 1b: stale ctx_reduce calls (Pi persisted-drop replay) ──────
-	const staleReduce = routine && config.staleReduceStripEnabled
-		? collectStaleReduceCallIds(
-				piMessages,
-				buildMessageIdToMaxTagFromTargets(targets),
-				buildCtxReduceTagNumbers(tags),
-				toolAgeCutoff,
-				resolveStableId,
-			)
-		: { composite: new Set<string>(), bareCallIds: new Set<string>() };
+	const staleReduce =
+		routine && config.staleReduceStripEnabled
+			? collectStaleReduceCallIds(
+					piMessages,
+					buildMessageIdToMaxTagFromTargets(targets),
+					buildCtxReduceTagNumbers(tags),
+					toolAgeCutoff,
+					resolveStableId,
+				)
+			: { composite: new Set<string>(), bareCallIds: new Set<string>() };
 	if (
 		routine &&
 		config.staleReduceStripEnabled &&

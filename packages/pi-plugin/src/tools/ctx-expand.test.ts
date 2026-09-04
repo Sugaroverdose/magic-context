@@ -31,7 +31,9 @@ describe("Pi ctx_expand ordinal validation", () => {
 	it("rejects fractional message and range ordinals", async () => {
 		const byMessage = await execute({ message: 1.5 });
 		expect(byMessage.isError).toBe(true);
-		expect(textOf(byMessage)).toBe("Error: message must be a positive integer.");
+		expect(textOf(byMessage)).toBe(
+			"Error: message must be a positive integer.",
+		);
 
 		const byRange = await execute({ start: 1.5, end: 2 });
 		expect(byRange.isError).toBe(true);

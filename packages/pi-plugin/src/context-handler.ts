@@ -44,7 +44,6 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
-import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	clearSessionTracking,
@@ -136,6 +135,7 @@ import {
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { evaluateChannel2 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
+import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import {
 	DEFAULT_CONTEXT_LIMIT,
 	resolveExecuteThreshold,
@@ -236,8 +236,8 @@ import {
 	formatPiPressureForLog,
 	resolvePiPressureSnapshot,
 } from "./pi-pressure";
-import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
+import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import {
 	convertEntriesToRawMessages,
 	findLastModelKeyFromBranch,
@@ -838,11 +838,16 @@ export function recordPiLiveModel(
 	modelKey: string,
 	assistantTimestamp?: number,
 ): boolean {
-	if (typeof assistantTimestamp === "number" && Number.isFinite(assistantTimestamp)) {
-		const latestTimestamp = latestAssistantModelTimestampBySession.get(sessionId);
+	if (
+		typeof assistantTimestamp === "number" &&
+		Number.isFinite(assistantTimestamp)
+	) {
+		const latestTimestamp =
+			latestAssistantModelTimestampBySession.get(sessionId);
 		// Pi may replay terminal events after a newer assistant has already finished.
 		// Only the newest timestamp may move the model pin used by later context passes.
-		if (latestTimestamp !== undefined && assistantTimestamp < latestTimestamp) return false;
+		if (latestTimestamp !== undefined && assistantTimestamp < latestTimestamp)
+			return false;
 		latestAssistantModelTimestampBySession.set(sessionId, assistantTimestamp);
 	}
 	liveModelBySession.set(sessionId, modelKey);
@@ -5348,7 +5353,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				activeTags,
 				stableIdResolver,
 			);
-			if (!routineCleanupApplied && heuristicsResult.emergencyDroppedTools > 0) {
+			if (
+				!routineCleanupApplied &&
+				heuristicsResult.emergencyDroppedTools > 0
+			) {
 				const ridingCleanup = applyPiHeuristicCleanup(
 					args.sessionId,
 					args.db,
@@ -5364,17 +5372,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					stableIdResolver,
 				);
 				heuristicsResult = {
-					droppedTools: heuristicsResult.droppedTools + ridingCleanup.droppedTools,
+					droppedTools:
+						heuristicsResult.droppedTools + ridingCleanup.droppedTools,
 					deduplicatedTools:
-						heuristicsResult.deduplicatedTools + ridingCleanup.deduplicatedTools,
+						heuristicsResult.deduplicatedTools +
+						ridingCleanup.deduplicatedTools,
 					droppedInjections:
-						heuristicsResult.droppedInjections + ridingCleanup.droppedInjections,
+						heuristicsResult.droppedInjections +
+						ridingCleanup.droppedInjections,
 					droppedStaleReduceCalls:
 						heuristicsResult.droppedStaleReduceCalls +
 						ridingCleanup.droppedStaleReduceCalls,
 					emergencyDroppedTools: heuristicsResult.emergencyDroppedTools,
 					compressedTextTags:
-						heuristicsResult.compressedTextTags + ridingCleanup.compressedTextTags,
+						heuristicsResult.compressedTextTags +
+						ridingCleanup.compressedTextTags,
 					mutatedTextTags:
 						heuristicsResult.mutatedTextTags + ridingCleanup.mutatedTextTags,
 				};
@@ -5518,7 +5530,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const toolReclaimExecutePass = args.schedulerDecision === "execute";
 	const alreadyMutatingThisPass =
-		pendingOpsDidMutate || heuristicOrReasoningDidMutate || foldExecutedThisPass;
+		pendingOpsDidMutate ||
+		heuristicOrReasoningDidMutate ||
+		foldExecutedThisPass;
 	const toolReclaimApplicationOpportunity =
 		toolReclaimExecutePass && alreadyMutatingThisPass;
 	let autoReclaimTargetCount = 0;
