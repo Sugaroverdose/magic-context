@@ -83,6 +83,11 @@ describe("Pi context handler LKG replay", () => {
 		const dbPath = join(dir, "context.db");
 		const db = createTestDb(dbPath);
 		const sessionId = "pi-lkg-busy";
+		const logLines: string[] = [];
+		const restoreLog =
+			contextHandlerInternals.setLkgRecoveryLogObserverForTests((message) =>
+				logLines.push(message),
+			);
 		sessions.add(sessionId);
 		try {
 			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
@@ -109,11 +114,15 @@ describe("Pi context handler LKG replay", () => {
 				expect(JSON.stringify(replay?.messages)).toBe(
 					JSON.stringify([...(first?.messages ?? []), ...rawTail]),
 				);
+				expect(logLines).toContain(
+					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG replay served 2 messages instead of raw 2",
+				);
 			} finally {
 				locker.exec("ROLLBACK");
 				closeQuietly(locker);
 			}
 		} finally {
+			restoreLog();
 			closeQuietly(db);
 		}
 	});
@@ -215,12 +224,15 @@ describe("Pi context handler LKG replay", () => {
 			const replay = await runPass(
 				handler,
 				sessionId,
-				[userMessage("first locked pass", 1)],
-				["entry-u1"],
+				[
+					userMessage("first locked pass", 1),
+					assistantMessage("unserved locked tail", 2),
+				],
+				["entry-u1", "entry-a1"],
 			);
 			expect(replay).toBeUndefined();
 			expect(logLines).toContain(
-				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); serving raw 1-message input",
+				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); serving raw 2-message input",
 			);
 		} finally {
 			if (locker.inTransaction) locker.exec("ROLLBACK");

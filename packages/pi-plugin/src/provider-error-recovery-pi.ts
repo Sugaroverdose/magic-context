@@ -15,8 +15,18 @@ import {
 	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { log } from "@magic-context/core/shared/logger";
 
 import { clearPiLkgSessionState } from "./pi-lkg";
+
+function reportBindingRecovery(
+	sessionId: string,
+	report: ((message: string) => void) | undefined,
+	message: string,
+): void {
+	if (report) report(message);
+	else log(`[magic-context][${sessionId}] ${message}`);
+}
 
 export type PiProviderFailureResult =
 	| { kind: "none" }
@@ -35,8 +45,10 @@ export function handlePiProviderFailure(args: {
 	message: unknown;
 	compactionOff?: boolean;
 	thinkingBindingRecoveryEnabled?: boolean;
+	report?: (message: string) => void;
 }): PiProviderFailureResult {
-	if (!args.message || typeof args.message !== "object") return { kind: "none" };
+	if (!args.message || typeof args.message !== "object")
+		return { kind: "none" };
 	const message = args.message as {
 		role?: unknown;
 		errorMessage?: unknown;
@@ -51,7 +63,8 @@ export function handlePiProviderFailure(args: {
 		return { kind: "none" };
 	}
 
-	const provider = typeof message.provider === "string" ? message.provider : undefined;
+	const provider =
+		typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
 	const binding = detectThinkingBindingMismatch(message.errorMessage);
 	if (binding.isBindingMismatch) {
@@ -66,6 +79,11 @@ export function handlePiProviderFailure(args: {
 			armThinkingBindingRecovery(args.db, args.sessionId);
 			clearPiLkgSessionState(args.sessionId);
 			dropSlot(args.sessionId, "thinking-binding-recovery-arm");
+			reportBindingRecovery(
+				args.sessionId,
+				args.report,
+				`Fable thinking-binding recovery armed from message_end target=${NEWEST_REASONING_BEARING_ASSISTANT}`,
+			);
 		}
 		return { kind: "thinking_binding", armed: enabled };
 	}
@@ -155,12 +173,18 @@ export function applyPiThinkingBindingRecovery(args: {
 	entryIds: readonly (string | undefined)[];
 	provider?: string;
 	model?: string;
+	report?: (message: string) => void;
 }): PiThinkingBindingApplication | null {
 	if (args.provider?.toLowerCase() !== "anthropic") return null;
 	const frozenEntryIds = new Set<string>();
-	for (const frozenId of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
+	for (const frozenId of getMergedReasoningStrippedIds(
+		args.db,
+		args.sessionId,
+	)) {
 		if (!frozenId.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
-		const entryId = frozenId.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
+		const entryId = frozenId.slice(
+			THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length,
+		);
 		if (entryId.length > 0) frozenEntryIds.add(entryId);
 	}
 
@@ -179,7 +203,8 @@ export function applyPiThinkingBindingRecovery(args: {
 			}
 		} else {
 			messageIndex = args.entryIds.findIndex(
-				(entryId, index) => entryId === flagTarget && hasThinkingPart(args.messages[index]),
+				(entryId, index) =>
+					entryId === flagTarget && hasThinkingPart(args.messages[index]),
 			);
 		}
 		const entryId = messageIndex >= 0 ? args.entryIds[messageIndex] : undefined;
@@ -191,13 +216,19 @@ export function applyPiThinkingBindingRecovery(args: {
 			) {
 				frozenEntryIds.add(entryId);
 				applied = { flagTarget, entryId };
+				reportBindingRecovery(
+					args.sessionId,
+					args.report,
+					`Fable thinking-binding recovery consumed on context pass target=${flagTarget} entry=${entryId}`,
+				);
 			}
 		}
 	}
 
 	for (let index = 0; index < args.messages.length; index += 1) {
 		const entryId = args.entryIds[index];
-		if (entryId && frozenEntryIds.has(entryId)) stripThinkingParts(args.messages[index]);
+		if (entryId && frozenEntryIds.has(entryId))
+			stripThinkingParts(args.messages[index]);
 	}
 	return applied;
 }

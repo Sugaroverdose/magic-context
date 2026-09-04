@@ -32,8 +32,10 @@ export function registerPiFailClosedSurface(
 		reason: FailClosedReason;
 		tryReopen: () => Promise<ContextDatabase | null>;
 		onRecovered: (db: ContextDatabase) => void | Promise<void>;
+		report?: (message: string) => void;
 	},
 ): PiFailClosedSurface {
+	const report = args.report ?? log;
 	const controller = createFailClosedController();
 	controller.arm(args.reason);
 	let recovered = false;
@@ -54,12 +56,12 @@ export function registerPiFailClosedSurface(
 				await args.onRecovered(db);
 				recovered = true;
 				controller.clear();
-				log(
+				report(
 					`${PREFIX} storage recovered; full Magic Context runtime installed and fail-closed cleared`,
 				);
 				return true;
 			} catch (error) {
-				log(
+				report(
 					`${PREFIX} storage re-probe failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 				return false;
@@ -104,7 +106,7 @@ export function registerPiFailClosedSurface(
 		// enforce() returned without throw only when recovered mid-pass.
 	});
 
-	log(
+	report(
 		`${PREFIX} fail-closed blocking surface registered (${args.reason.kind}); primary turns will error until storage recovers or the build is upgraded`,
 	);
 	return {

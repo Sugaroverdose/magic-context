@@ -44,6 +44,8 @@ import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting"
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
 import {
     createBootBudget,
+    emitBootEnteringBreadcrumb,
+    formatBootPhaseDiagnostics,
     remainingBootBudgetMs,
     runBootPhaseWithinBudget,
 } from "./plugin/boot-deadline";
@@ -95,8 +97,7 @@ const server: Plugin = async (ctx) => {
     // Flush the first breadcrumb synchronously. The regular logger batches for
     // 500ms; a synchronous filesystem or SQLite stall before that timer fires
     // otherwise recreates the reporter's "no Magic Context lines" symptom.
-    log(`[magic-context] boot: entering pid=${process.pid} dir=${ctx.directory}`);
-    flushLogger();
+    emitBootEnteringBreadcrumb(process.pid, ctx.directory, log, flushLogger);
 
     const configStartedAt = performance.now();
     beginBootQuietPeriod();
@@ -685,7 +686,19 @@ const server: Plugin = async (ctx) => {
     const hooksMs = Math.max(0, hooksPhase.elapsedMs - measuredStorageMs);
     const postMs = Math.max(0, performance.now() - postStartedAt - rpcMs);
     log(
-        `[magic-context] boot phases: config=${Math.round(configMs)}ms conflict=${Math.round(conflictMs)}ms guard=${Math.round(storageBootTimings.guardMs)}ms open=${Math.round(storageBootTimings.openMs)}ms migrate=${Math.round(storageBootTimings.migrateMs)}ms hooks=${Math.round(hooksMs)}ms rpc=${Math.round(rpcMs)}ms post=${Math.round(postMs)}ms total=${Math.round(totalBootMs)}ms budget=${BOOT_SERVER_DEADLINE_MS}ms deadline_phase=${deadlinePhase ?? "none"}`,
+        formatBootPhaseDiagnostics({
+            configMs,
+            conflictMs,
+            guardMs: storageBootTimings.guardMs,
+            openMs: storageBootTimings.openMs,
+            migrateMs: storageBootTimings.migrateMs,
+            hooksMs,
+            rpcMs,
+            postMs,
+            totalMs: totalBootMs,
+            budgetMs: BOOT_SERVER_DEADLINE_MS,
+            deadlinePhase,
+        }),
     );
 
     return {

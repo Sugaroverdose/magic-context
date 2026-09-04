@@ -155,6 +155,58 @@ describe("encodeOpenCodeMessagesToCk", () => {
 });
 
 describe("resolveOrdinalsForModule provisional tails", () => {
+    it("records the exact compaction-summary normalization removed from module input", async () => {
+        const sessionId = "module-wire-summary-normalization";
+        const unregister = setRawMessageProvider(sessionId, {
+            readMessages: () => [],
+            readMessageOrdinalPage: () => [],
+            getStoredMessageCount: () => 0,
+        });
+        const summary = {
+            info: {
+                id: "summary-1",
+                role: "assistant",
+                sessionID: sessionId,
+                summary: true,
+                finish: "stop",
+            },
+            parts: [{ type: "text", text: "redacted summary fixture" }],
+        } as MessageLike;
+        const tail = {
+            info: { id: "tail-1", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "continue" }],
+        } as MessageLike;
+
+        try {
+            const resolved = await resolveOrdinalsForModule({
+                sessionId,
+                messages: [summary, tail],
+                generation: 1,
+                memoGeneration: 1,
+                memo: new Map(),
+                memoStoredCount: 0,
+                memoCanonicalCount: 0,
+            });
+
+            expect(resolved.ok).toBe(true);
+            if (!resolved.ok) throw new Error(resolved.reason);
+            expect(resolved.annotatedInput).toEqual([
+                expect.objectContaining({ absolute_ordinal: 1, info: tail.info }),
+            ]);
+            expect(resolved.normalizations).toEqual([
+                {
+                    kind: "summary_message",
+                    message_id: "summary-1",
+                    part_index: -1,
+                    field: "input",
+                    removed: JSON.stringify(summary),
+                },
+            ]);
+        } finally {
+            unregister();
+        }
+    });
+
     async function resolveTail(count: number) {
         const sessionId = `module-wire-provisional-${count}`;
         const persistedTail: Array<{

@@ -17,6 +17,38 @@ export interface BootBudget {
     readonly totalMs: number;
 }
 
+export interface BootPhaseDiagnostics {
+    configMs: number;
+    conflictMs: number;
+    guardMs: number;
+    openMs: number;
+    migrateMs: number;
+    hooksMs: number;
+    rpcMs: number;
+    postMs: number;
+    totalMs: number;
+    budgetMs: number;
+    deadlinePhase: string | null;
+}
+
+export function formatBootEnteringBreadcrumb(pid: number, directory: string): string {
+    return `[magic-context] boot: entering pid=${pid} dir=${directory}`;
+}
+
+export function emitBootEnteringBreadcrumb(
+    pid: number,
+    directory: string,
+    report: (message: string) => void,
+    flush: () => void,
+): void {
+    report(formatBootEnteringBreadcrumb(pid, directory));
+    flush();
+}
+
+export function formatBootPhaseDiagnostics(timings: BootPhaseDiagnostics): string {
+    return `[magic-context] boot phases: config=${Math.round(timings.configMs)}ms conflict=${Math.round(timings.conflictMs)}ms guard=${Math.round(timings.guardMs)}ms open=${Math.round(timings.openMs)}ms migrate=${Math.round(timings.migrateMs)}ms hooks=${Math.round(timings.hooksMs)}ms rpc=${Math.round(timings.rpcMs)}ms post=${Math.round(timings.postMs)}ms total=${Math.round(timings.totalMs)}ms budget=${timings.budgetMs}ms deadline_phase=${timings.deadlinePhase ?? "none"}`;
+}
+
 export function createBootBudget(totalMs: number, startedAt = performance.now()): BootBudget {
     const boundedTotalMs = Math.max(0, totalMs);
     return {

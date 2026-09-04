@@ -49,6 +49,7 @@ describe("Pi provider failure recovery", () => {
 	it("arms message_end binding recovery and re-serves stripped bytes after restart", () => {
 		const database = db();
 		const sessionId = "pi-fable-binding-recovery";
+		const diagnostics: string[] = [];
 		const event = handlePiProviderFailure({
 			db: database,
 			sessionId,
@@ -59,6 +60,7 @@ describe("Pi provider failure recovery", () => {
 				errorMessage:
 					"400 invalid_request_error: thinking block is bound to a different conversation",
 			},
+			report: (message) => diagnostics.push(message),
 		});
 		expect(event).toEqual({ kind: "thinking_binding", armed: true });
 		expect(getThinkingBindingRecoveryTarget(database, sessionId)).toBe(
@@ -73,12 +75,18 @@ describe("Pi provider failure recovery", () => {
 			entryIds: ["entry-u1", "entry-a1", "entry-u2"],
 			provider: "anthropic",
 			model: "claude-fable-5-1",
+			report: (message) => diagnostics.push(message),
 		});
 		expect(applied).toEqual({
 			flagTarget: "newest_reasoning_bearing_assistant",
 			entryId: "entry-a1",
 		});
 		expect(JSON.stringify(first)).not.toContain("bound bytes");
+		expect(diagnostics).toEqual([
+			"Fable thinking-binding recovery armed from message_end target=newest_reasoning_bearing_assistant",
+			"Fable thinking-binding recovery consumed on context pass target=newest_reasoning_bearing_assistant entry=entry-a1",
+		]);
+		expect(diagnostics[0]).not.toBe(diagnostics[1]);
 		expect(getMergedReasoningStrippedIds(database, sessionId)).toContain(
 			"binding_mismatch:entry-a1",
 		);

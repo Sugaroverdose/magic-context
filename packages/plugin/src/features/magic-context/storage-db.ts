@@ -179,6 +179,8 @@ export interface OpenDatabaseOptions {
     busyTimeoutMs?: number;
     /** Boot-only timing sink; omitted by ordinary storage callers. */
     onBootTimings?: (timings: DatabaseBootTimings) => void;
+    /** Receives the exact busy-timeout diagnostic emitted during a fresh database open. */
+    onBootBusyTimeout?: (message: string) => void;
 }
 
 function resolveBootBusyTimeoutMs(value: number | undefined): number {
@@ -187,9 +189,14 @@ function resolveBootBusyTimeoutMs(value: number | undefined): number {
     return Math.max(0, Math.min(BOOT_SQLITE_BUSY_TIMEOUT_MS, Math.floor(value)));
 }
 
-function installBootBusyTimeout(db: Database, dbPath: string, timeoutMs: number): void {
+function installBootBusyTimeout(
+    db: Database,
+    dbPath: string,
+    timeoutMs: number,
+    report: (message: string) => void = log,
+): void {
     db.exec(`PRAGMA busy_timeout=${timeoutMs}`);
-    log(
+    report(
         `[magic-context] SQLite boot busy timeout: backend=${detectSqliteRuntime()} timeout=${timeoutMs}ms path=${dbPath}`,
     );
 }
@@ -2280,7 +2287,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         ensureSecureStorageDir(dbDir);
 
         const db = new Database(dbPath);
-        installBootBusyTimeout(db, dbPath, busyTimeoutMs);
+        installBootBusyTimeout(db, dbPath, busyTimeoutMs, options?.onBootBusyTimeout);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
             return null;
@@ -2352,7 +2359,7 @@ export async function openDatabaseAsync(
             ensureSecureStorageDir(dbDir);
 
             db = new Database(dbPath);
-            installBootBusyTimeout(db, dbPath, busyTimeoutMs);
+            installBootBusyTimeout(db, dbPath, busyTimeoutMs, options?.onBootBusyTimeout);
             openMs = performance.now() - openStartedAt;
             guardStartedAt = performance.now();
             if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
