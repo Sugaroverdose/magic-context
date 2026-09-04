@@ -283,6 +283,121 @@ describe("createDreamTaskExecutor — curate", () => {
     });
 });
 
+describe("createDreamTaskExecutor — structured failure telemetry", () => {
+    test("distinguishes provider errors, executor timeouts, and empty completions", async () => {
+        db = freshDb();
+
+        const drive = async (
+            suffix: string,
+            mode: "provider_error" | "provider_timeout" | "empty_completion",
+        ) => {
+            const project = `/repo/failure-${suffix}`;
+            insertMemory(db as Database, {
+                projectPath: project,
+                category: "PROJECT_RULES",
+                content: `Failure telemetry fixture ${suffix}.`,
+            });
+            const childId = `failure-child-${suffix}`;
+            const client = {
+                session: {
+                    list: mock(async () => ({ data: [] })),
+                    create: mock(async () => ({ data: { id: childId } })),
+                    prompt: mock(async (args: { signal?: AbortSignal }) => {
+                        if (mode === "provider_error") {
+                            throw new Error(`HTTP 429 provider rate limit ${"x".repeat(600)}`);
+                        }
+                        if (mode === "provider_timeout") {
+                            await new Promise<never>((_resolve, reject) => {
+                                args.signal?.addEventListener("abort", () =>
+                                    reject(new Error("provider request aborted")),
+                                );
+                            });
+                        }
+                        return {};
+                    }),
+                    messages: mock(async () => ({ data: [] })),
+                    abort: mock(async () => ({})),
+                    delete: mock(async () => ({})),
+                },
+            };
+            const executor = createDreamTaskExecutor({
+                client: client as never,
+                sessionDirectory: project,
+                openOpenCodeDb: () => null,
+            });
+            const result = await executor(
+                {
+                    task: "curate",
+                    schedule: "0 4 * * 0",
+                    model: "provider/primary",
+                    timeoutMinutes: mode === "provider_timeout" ? 0.001 : 20,
+                },
+                {
+                    db: db as Database,
+                    projectIdentity: project,
+                    holderId: `holder-${suffix}`,
+                    leaseKey: leaseKeyFor("curate", project),
+                },
+            );
+            const row = getDreamRuns(db as Database, project)[0];
+            const task = JSON.parse(row?.tasks_json ?? "[]")[0] as {
+                error?: string;
+                failure?: {
+                    failure_class: string;
+                    model_attempted: string | null;
+                    models_tried: string[];
+                    provider_error: string | null;
+                    timeout_ms: number | null;
+                    child_session_id: string | null;
+                };
+            };
+            return { result, task, childId };
+        };
+
+        const provider = await drive("provider", "provider_error");
+        const timeout = await drive("timeout", "provider_timeout");
+        const empty = await drive("empty", "empty_completion");
+
+        expect([
+            provider.task.failure?.failure_class,
+            timeout.task.failure?.failure_class,
+            empty.task.failure?.failure_class,
+        ]).toEqual(["provider_error", "provider_timeout", "empty_completion"]);
+        expect(
+            new Set([
+                provider.task.failure?.failure_class,
+                timeout.task.failure?.failure_class,
+                empty.task.failure?.failure_class,
+            ]).size,
+        ).toBe(3);
+        expect(provider.task.failure).toMatchObject({
+            model_attempted: "provider/primary",
+            models_tried: ["provider/primary"],
+            timeout_ms: null,
+            child_session_id: provider.childId,
+        });
+        expect(
+            provider.task.failure?.provider_error?.startsWith("HTTP 429 provider rate limit"),
+        ).toBe(true);
+        expect(provider.task.failure?.provider_error?.length).toBe(500);
+        expect(timeout.task.failure).toMatchObject({
+            failure_class: "provider_timeout",
+            child_session_id: timeout.childId,
+        });
+        expect(timeout.task.failure?.timeout_ms).toBeGreaterThan(0);
+        expect(timeout.task.failure?.timeout_ms).toBeLessThanOrEqual(60);
+        expect(empty.task.failure).toMatchObject({
+            failure_class: "empty_completion",
+            provider_error: null,
+            child_session_id: empty.childId,
+        });
+        expect(provider.result.failureDetail).toContain("provider_error");
+        expect(timeout.result.failureDetail).toContain("provider_timeout");
+        expect(empty.result.failureDetail).toContain("empty_completion");
+        expect(empty.task.error).toContain("Dreamer returned no assistant output.");
+    });
+});
+
 describe("createDreamTaskExecutor — verify-broad disposition", () => {
     test("records cycle progress as a completed run result instead of an error status", async () => {
         db = freshDb();

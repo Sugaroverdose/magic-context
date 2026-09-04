@@ -50,6 +50,9 @@ export interface TaskExecOutcome {
      *  MAX_TASK_RETRIES; a permanent failure advances to the next cron slot. */
     transient?: boolean;
     error?: string;
+    /** Structured user-facing diagnostic while `error` remains the legacy value
+     *  persisted in task schedule state. */
+    failureDetail?: string;
     schedulePatch?: {
         /** retrospective content watermark (max message ts scanned this run). */
         retrospectiveWatermarkMs?: number | null;
@@ -384,7 +387,7 @@ async function runDomainGroup(
                 cb?.onRan?.(due.config.task);
             } else if (outcome.transient) {
                 recordTransientFailure(db, projectIdentity, due, finishedAt, outcome.error ?? null);
-                cb?.onFailed?.(due.config.task, outcome.error);
+                cb?.onFailed?.(due.config.task, outcome.failureDetail ?? outcome.error);
             } else {
                 advanceAfterRun(
                     db,
@@ -394,7 +397,7 @@ async function runDomainGroup(
                     "failed",
                     outcome.error ?? null,
                 );
-                cb?.onFailed?.(due.config.task, outcome.error);
+                cb?.onFailed?.(due.config.task, outcome.failureDetail ?? outcome.error);
             }
         }
     } finally {

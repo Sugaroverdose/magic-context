@@ -350,6 +350,24 @@ export interface DreamerProject {
   tasks: DreamerProjectTask[];
 }
 
+export type DreamRunFailureClass =
+  | "provider_timeout"
+  | "provider_error"
+  | "empty_completion"
+  | "no_models"
+  | "child_aborted"
+  | "parse_failed"
+  | "unknown";
+
+export interface DreamRunFailureDetail {
+  failure_class: DreamRunFailureClass;
+  model_attempted: string | null;
+  models_tried: string[];
+  provider_error: string | null;
+  timeout_ms: number | null;
+  child_session_id: string | null;
+}
+
 export interface DreamRunTask {
   name: string;
   durationMs: number;
@@ -357,6 +375,7 @@ export interface DreamRunTask {
   /** Failure detail only. Missing means no failure was recorded; an empty
    * string is treated as absent by the dashboard. */
   error?: string;
+  failure?: DreamRunFailureDetail;
   /** Successful progress/detail. Missing means no progress was reported; an
    * empty string is treated as absent by the dashboard. */
   progress?: string;

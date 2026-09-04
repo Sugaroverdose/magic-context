@@ -330,12 +330,20 @@ async function verifyOneBatch(
         const desc = describeError(error);
         const providerFailure =
             error instanceof DreamerProviderOutputFailureError ? error : undefined;
+        const promptFailure = shared.getPromptFailureDetail(error);
         log(
             `[dreamer] verify batch ${providerFailure ? "provider failure" : "failed"}: ${desc.brief}`,
             desc.stackHead ? { stackHead: desc.stackHead } : undefined,
         );
         recordInvocation(args, startedAt, { status: "failed", error });
-        if (error instanceof DreamerModuleFailureError || signal.aborted) throw error;
+        if (
+            error instanceof DreamerModuleFailureError ||
+            signal.aborted ||
+            (promptFailure !== null &&
+                promptFailure.failureClass !== "parse_failed" &&
+                !providerFailure)
+        )
+            throw error;
         return {
             verified: 0,
             updated: 0,

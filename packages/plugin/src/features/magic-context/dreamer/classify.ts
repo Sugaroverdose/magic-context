@@ -429,7 +429,13 @@ async function classifyOneChunk(
         // A MODULE-authority failure is not safe to downgrade to the guarded
         // TypeScript child path. Surface it so the scheduler records a
         // transient failure and retries the same task instead.
-        if (moduleRoute || signal.aborted || failure instanceof DreamerProviderOutputFailureError)
+        if (
+            moduleRoute ||
+            signal.aborted ||
+            failure instanceof DreamerProviderOutputFailureError ||
+            (shared.getPromptFailureDetail(failure)?.failureClass !== "parse_failed" &&
+                shared.getPromptFailureDetail(failure) !== null)
+        )
             throw failure;
         return { classified: 0, changed: 0 };
     } finally {

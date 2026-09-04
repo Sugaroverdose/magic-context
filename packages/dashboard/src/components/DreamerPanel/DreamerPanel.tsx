@@ -383,6 +383,16 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
     [...(runs() ?? [])].sort((a, b) => b.finished_at - a.finished_at),
   );
 
+  const latestTaskFailure = (projectPath: string, taskName: string): string | null => {
+    for (const run of flatRuns()) {
+      if (run.project_path !== projectPath || run.tasks_failed <= 0) continue;
+      const task = run.tasks_json.find((candidate) => candidate.name === taskName);
+      if (!task) continue;
+      return getDreamRunTaskDetail(task, run.tasks_failed).text ?? null;
+    }
+    return null;
+  };
+
   const toggleProject = (projectPath: string) => {
     setExpandedProjects((previous) => {
       const next = new Set(previous);
@@ -521,7 +531,11 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                           enabled={enabled}
                           iconTint={!enabled ? "gray" : taskLight(task) === "red" ? "red" : "green"}
                           light={taskLight(task)}
-                          lastError={isResumableBroadFailure(task) ? null : task.last_error}
+                          lastError={
+                            isResumableBroadFailure(task)
+                              ? null
+                              : (latestTaskFailure(project.identity, task.task) ?? task.last_error)
+                          }
                           resumable={isResumableBroadFailure(task)}
                           canToggle={project.worktree != null}
                           busy={togglingTasks().has(`${project.identity}::${task.task}`)}
@@ -609,10 +623,17 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                             <Show when={isResumableBroadFailure(task)}>
                               <span class="dreamer-task-next">· resumable</span>
                             </Show>
-                            <Show when={task.last_error && !isResumableBroadFailure(task)}>
-                              <span class="dreamer-task-err" title={task.last_error ?? ""}>
-                                {task.last_error}
-                              </span>
+                            <Show
+                              when={
+                                !isResumableBroadFailure(task) &&
+                                (latestTaskFailure(project.identity, task.task) ?? task.last_error)
+                              }
+                            >
+                              {(detail) => (
+                                <span class="dreamer-task-err" title={detail()}>
+                                  {detail()}
+                                </span>
+                              )}
                             </Show>
                           </div>
                         )}
