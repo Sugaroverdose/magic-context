@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { MODULE_PAGE_MAX_BYTES } from "../../plugin/src/hooks/magic-context/module-wire";
 import { RustTestHarness, type RustPassLine } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
@@ -120,21 +121,25 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         }
         expect(smallDeltas.every((pass) => pass.wireMessages <= 4)).toBe(true);
         expect(smallDeltas.every((pass) => pass.transportPages === 1)).toBe(true);
-        expect(smallDeltas.every((pass) => pass.transportBytes < 512 * 1024)).toBe(true);
+        // Steady-state deltas are a few KB; "small" is bounded against the ballast, not the cap.
+        expect(smallDeltas.every((pass) => pass.transportBytes < 160_000)).toBe(true);
 
         // SOFT+ may reuse the caller-owned tail in one small module request or retransmit the
-        // same bytes across bounded pages. The module assertions cover both paths; the provider
+        // same bytes across bounded pages. The page cap is derived from subc's frame limit, so
+        // a ~1.3 MB tail is legitimately a single page; the invariant is that a page never
+        // exceeds the cap and that a multi-page series only happens above it. The provider
         // wire-size increase separately proves that the large tail was not lost.
         expect(largeTailDelta.applied).toBe(true);
         expect(largeTailDelta.transportPages).toBeGreaterThanOrEqual(1);
         expect(largeTailDelta.transportPages).toBeLessThanOrEqual(6);
         expect(largeTailDelta.wireMessages).toBeLessThanOrEqual(4);
+        expect(largeTailDelta.transportBytes).toBeGreaterThan(160_000);
         if (largeTailDelta.transportPages === 1) {
-            expect(largeTailDelta.transportBytes).toBeLessThan(512 * 1024);
+            expect(largeTailDelta.transportBytes).toBeLessThanOrEqual(MODULE_PAGE_MAX_BYTES);
         } else {
-            expect(largeTailDelta.transportBytes).toBeGreaterThan(512 * 1024);
+            expect(largeTailDelta.transportBytes).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
         }
-        expect(providerBytesAfterLargeTail).toBeGreaterThan(providerBytesBeforeLargeTail + 512 * 1024);
+        expect(providerBytesAfterLargeTail).toBeGreaterThan(providerBytesBeforeLargeTail + 160_000);
         expect(h.lastMainWireSerialized()).toContain("large tail delta");
     }, 600_000);
 });

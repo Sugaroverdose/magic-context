@@ -134,7 +134,11 @@ function astroShape(sessionId: string): Record<string, unknown> {
     };
 }
 
-describe.skipIf(!PERF_GATE || !rustPrereqs.ok)("rust performance: ASTRO-shape cold seed", () => {
+// The structural assertions (status, page count, serialized-message ceiling) are
+// load-independent and run in every lane; only the wall-clock budgets are gated
+// behind MC_PERF_GATE, so an ungated run still records timings instead of
+// skipping the file (the hermetic runner treats an all-skip file as a crash).
+describe.skipIf(!rustPrereqs.ok)("rust performance: ASTRO-shape cold seed", () => {
     let h: RustTestHarness;
 
     beforeAll(async () => {
@@ -199,7 +203,7 @@ describe.skipIf(!PERF_GATE || !rustPrereqs.ok)("rust performance: ASTRO-shape co
                 ? MESSAGE_COUNT + 2
                 : COLD_SERIALIZED_MESSAGE_LIMIT;
             expect(Number(timings.build_serialized_messages)).toBeLessThanOrEqual(serializedMessageLimit);
-            if (!PERF_FULL_OUTPUT) {
+            if (PERF_GATE && !PERF_FULL_OUTPUT) {
                 expect(Number(timings.build_output)).toBeLessThan(COLD_BUILD_OUTPUT_LIMIT_MS);
                 expect(Number(timings.handler_total)).toBeLessThan(COLD_HANDLER_LIMIT_MS);
             }
