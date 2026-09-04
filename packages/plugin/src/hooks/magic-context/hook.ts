@@ -52,6 +52,7 @@ import {
     openDatabase,
 } from "../../features/magic-context/storage";
 import {
+    type DatabaseBootTimings,
     getMigrationOnOpenRefusal,
     getSchemaFenceRejection,
     openDatabaseAsync,
@@ -195,6 +196,8 @@ export interface MagicContextDeps {
     rustModeModuleClient?: RustModeModuleClient;
     /** Test and async-boot seam for supplying a database already opened by the caller. */
     openDatabaseForHook?: () => Database | null;
+    /** Plugin-factory diagnostics for the boot-time storage phases. */
+    onStorageBootTimings?: (timings: DatabaseBootTimings) => void;
 }
 
 function notifyMagicContextDisabled(client: PluginContext["client"], reason: string): void {
@@ -1639,7 +1642,7 @@ export async function createMagicContextHookAsync(
     let database: Database | null;
     try {
         clearHookInitFailure();
-        database = await openDatabaseAsync();
+        database = await openDatabaseAsync({ onBootTimings: deps.onStorageBootTimings });
     } catch (error) {
         const reason = getErrorMessage(error);
         log("[magic-context] hook failed to open storage; disabling feature:", error);

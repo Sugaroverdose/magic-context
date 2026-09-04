@@ -43,6 +43,7 @@ import {
     isDatabasePersisted,
     LATEST_SUPPORTED_VERSION,
     openDatabase,
+    openDatabaseAsync,
     resolveDatabasePath,
 } from "./storage-db";
 import { clearSession } from "./storage-meta-session";
@@ -231,6 +232,25 @@ describe("explicit shared storage resolution", () => {
         const db = openDatabase();
         expect(db).not.toBeNull();
         expect(getDatabasePath(db!)).toBe(resolved.dbPath);
+        closeDatabase();
+    });
+
+    it("reports bounded boot phase timings for an async open", async () => {
+        const dataHome = useTempDataHome("storage-db-boot-timing-");
+        let timings: { openMs: number; guardMs: number; migrateMs: number } | undefined;
+
+        const db = await openDatabaseAsync({
+            onBootTimings: (observed) => {
+                timings = observed;
+            },
+        });
+
+        expect(db).not.toBeNull();
+        expect(getDatabasePath(db!)).toBe(resolveDbPath(dataHome));
+        expect(timings).toBeDefined();
+        expect(timings!.openMs).toBeGreaterThanOrEqual(0);
+        expect(timings!.guardMs).toBeGreaterThanOrEqual(0);
+        expect(timings!.migrateMs).toBeGreaterThanOrEqual(0);
         closeDatabase();
     });
 

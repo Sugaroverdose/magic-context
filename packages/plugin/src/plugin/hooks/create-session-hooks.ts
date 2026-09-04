@@ -3,6 +3,7 @@ import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-
 import { createCompactionHandler } from "../../features/magic-context/compaction";
 import { DEFAULT_PROTECTED_TAGS } from "../../features/magic-context/defaults";
 import { createScheduler } from "../../features/magic-context/scheduler";
+import type { DatabaseBootTimings } from "../../features/magic-context/storage-db";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createMagicContextHook, createMagicContextHookAsync } from "../../hooks/magic-context";
 import type { LiveSessionState } from "../../hooks/magic-context/live-session-state";
@@ -77,6 +78,7 @@ export async function createSessionHooksAsync(args: {
     liveSessionState: LiveSessionState;
     rustModeModuleClient?: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
+    onStorageBootTimings?: (timings: DatabaseBootTimings) => void;
 }) {
     const { ctx, pluginConfig, liveSessionState } = args;
 
@@ -100,6 +102,7 @@ export async function createSessionHooksAsync(args: {
         liveSessionState,
         rustModeModuleClient: args.rustModeModuleClient,
         promptSurfaceRuntime: args.promptSurfaceRuntime,
+        onStorageBootTimings: args.onStorageBootTimings,
         config: buildMagicContextHookConfig(pluginConfig),
     });
 
