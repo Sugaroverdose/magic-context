@@ -554,6 +554,30 @@
             ]
         },
         {
+            "path": "tests/rust-compaction-marker-byte-identity.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "rust-mode compaction marker advance leaves the served wire bytes identical with and without the marker; the marker only shrinks the input array",
+            "contract_refs": [
+                "RUST-E2E"
+            ]
+        },
+        {
+            "path": "tests/rust-cold-seed-perf.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "cold-seed handler budget on an ASTRO-shaped 10k-message seed; wall-clock, so it asserts only under MC_PERF_GATE=1 and records timings otherwise",
+            "contract_refs": [
+                "RUST-E2E"
+            ]
+        },
+        {
             "path": "tests/rust-paired-session-replay.test.ts",
             "tier": "rust-only",
             "invocation": {

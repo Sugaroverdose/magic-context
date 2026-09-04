@@ -40,15 +40,18 @@ const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
 export const TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS = 5_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 10_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 1;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 60_000;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 15_000;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 90_000;
 
 /**
  * Cold execution includes full projection and native encoding after the final page lands.
- * The hermetic 9.6k-message/8k-tool cold gate completes module-side in 8.0s after the
- * cold-path fixes. A 10s floor plus one millisecond per message leaves more than 2x margin:
- * 17.4s for ENGRAM's 7.4k messages and 19.6s for ASTRO's 9.6k messages.
+ * The hermetic 9.6k-message/8k-tool cold gate completes module-side in 8.0s at load 9 and
+ * 10.2s at load 18 after the cold-path fixes, and this box routinely runs at load 40+ during
+ * release gates. A 15s floor plus two milliseconds per message keeps ~3x margin over the
+ * measured cold time (30s for ENGRAM's 7.4k messages, 34s for ASTRO's 9.6k); a miss is no
+ * longer fatal because a completed series the requester abandoned is adopted by the next
+ * identical pass, but each miss still costs the user one refused turn.
  */
 export function transformColdStartExecuteTimeoutMs(seedMessageCount: number): number {
     const messages = Number.isSafeInteger(seedMessageCount) ? Math.max(0, seedMessageCount) : 0;
