@@ -779,24 +779,32 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
-	it("keeps the steer nudge row byte-identical when the intent is served again", () => {
+	it("keeps Pi and OMP steer nudge rows byte-identical across repeated intents", () => {
 		const db = createTestDb();
-		const sessionId = "ses-ch2-pi-byte-freeze";
-		const payloads: string[] = [];
-		const api = {
-			sendMessage: (message: unknown, options: unknown) => {
-				payloads.push(JSON.stringify({ message, options }));
-			},
-		};
+		const payloadsByHarness = new Map<string, string[]>();
 
-		setChannel2NudgeState(db, sessionId, "pending");
-		armStrongBaseline(sessionId);
-		expect(maybeDeliverChannel2Pi(api as never, db, sessionId)).toBe(true);
-		setChannel2NudgeState(db, sessionId, "pending");
-		expect(maybeDeliverChannel2Pi(api as never, db, sessionId)).toBe(true);
+		for (const harness of ["pi", "omp"] as const) {
+			const sessionId = `ses-ch2-${harness}-byte-freeze`;
+			const payloads: string[] = [];
+			payloadsByHarness.set(harness, payloads);
+			const api = {
+				sendMessage: (message: unknown, options: unknown) => {
+					payloads.push(JSON.stringify({ message, options }));
+				},
+			};
 
-		expect(payloads).toHaveLength(2);
-		expect(payloads[1]).toBe(payloads[0]);
+			setChannel2NudgeState(db, sessionId, "pending");
+			armStrongBaseline(sessionId);
+			expect(maybeDeliverChannel2Pi(api as never, db, sessionId)).toBe(true);
+			setChannel2NudgeState(db, sessionId, "pending");
+			expect(maybeDeliverChannel2Pi(api as never, db, sessionId)).toBe(true);
+
+			expect(payloads).toHaveLength(2);
+			expect(payloads[1]).toBe(payloads[0]);
+		}
+		expect(payloadsByHarness.get("omp")?.[0]).toBe(
+			payloadsByHarness.get("pi")?.[0],
+		);
 	});
 
 	it("does NOT deliver and leaves pending when no baseline measurement exists", () => {

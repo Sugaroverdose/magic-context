@@ -65,6 +65,45 @@ describe("dashboard JSONC patching", () => {
     expect(dreamer.opencode).toBeUndefined();
   });
 
+  it("preserves an OMP block while the OpenCode dashboard edits its own harness", () => {
+    const source = JSON.stringify({
+      historian: {
+        opencode: { model: "anthropic/opencode-historian" },
+        omp: { model: "anthropic/omp-historian", thinking_level: "auto" },
+      },
+      dreamer: {
+        opencode: { model: "anthropic/opencode-dreamer" },
+        omp: {
+          model: "anthropic/omp-dreamer",
+          thinking_level: "inherit",
+          tasks: { verify: { model: "anthropic/omp-verify" } },
+        },
+        tasks: { verify: { schedule: "0 3 * * *" } },
+      },
+    });
+
+    const next = patchDreamerTasksJsonc(source, { verify: { schedule: "0 4 * * *" } }, "opencode", {
+      verify: { model: "anthropic/opencode-verify", variant: "high" },
+    });
+    const parsed = asRecord(parse(next));
+    const historian = asRecord(parsed.historian);
+    const dreamer = asRecord(parsed.dreamer);
+
+    expect(historian.omp).toEqual({
+      model: "anthropic/omp-historian",
+      thinking_level: "auto",
+    });
+    expect(dreamer.omp).toEqual({
+      model: "anthropic/omp-dreamer",
+      thinking_level: "inherit",
+      tasks: { verify: { model: "anthropic/omp-verify" } },
+    });
+    expect(asRecord(asRecord(dreamer.opencode).tasks).verify).toEqual({
+      model: "anthropic/opencode-verify",
+      variant: "high",
+    });
+  });
+
   it("#given malformed JSONC #when parsing or patching #then the save path is refused", () => {
     const malformed = `{ "dreamer": { "tasks": `;
     expect(() => parseJsonc(malformed)).toThrow(/Config JSONC parse failed/);
