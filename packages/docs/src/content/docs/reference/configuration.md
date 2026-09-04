@@ -78,7 +78,7 @@ Named user-owned model-selection overlays. A project may select a profile name b
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `profile` | string | — | Select a named user-owned model profile. A valid project name overrides this user default; an empty string, null, or other non-string project value is ignored with a warning so the user selection still applies. Unknown names warn and use the base configuration. |
-| `profiles` | map<string, object> | — | User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles. |
+| `profiles` | map<string, object> | — | User-level named model profiles. A profile may contain only historian/dreamer model, fallback_models, OpenCode variant, and Pi/OMP thinking_level fields plus sidekick model-selection fields; task execution policy (including timeout_minutes) is excluded. Project configs may select a name but cannot define profiles. |
 
 ## Historian
 
@@ -86,7 +86,7 @@ The background agent that condenses old conversation into compact history.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `historian` | object | — | Historian metadata plus independent strict OpenCode and Pi execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode or historian.pi. |
+| `historian` | object | — | Historian metadata plus independent strict OpenCode, Pi, and OMP execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode, historian.pi, or historian.omp. |
 | `historian.temperature` | number (0–2) | — | Sampling temperature (0-2) |
 | `historian.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
 | `historian.prompt` | string | — | Additional system prompt text |
@@ -111,6 +111,10 @@ The background agent that condenses old conversation into compact history.
 | `historian.pi.model` | string \\| object | — | Primary Pi model entry. |
 | `historian.pi.fallback_models` | string \\| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
 | `historian.pi.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `historian.omp` | object | — | Strict OMP model-resolution block. It accepts no OpenCode vocabulary. |
+| `historian.omp.model` | string \\| object | — | Primary OMP model entry. |
+| `historian.omp.fallback_models` | string \\| object[] | — | Ordered fallback OMP entries. |
+| `historian.omp.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` \\| `"inherit"` \\| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
 | `historian.two_pass` | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
 | `historian.disallowed_tools` | `"*"` \\| `"read"` \\| `"aft_outline"` \\| `"aft_zoom"` \\| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
 | `historian_timeout_ms` | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
@@ -156,7 +160,7 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `dreamer` | object | — | Dreamer metadata and scheduling plus independent strict OpenCode and Pi execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block. |
+| `dreamer` | object | — | Dreamer metadata and scheduling plus independent strict OpenCode, Pi, and OMP execution blocks. schedule and promotion_threshold stay at dreamer.tasks; model, fallback_models, variant, thinking_level, and timeout_minutes belong only in the matching harness block. |
 | `dreamer.temperature` | number (0–2) | — | Sampling temperature (0-2) |
 | `dreamer.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
 | `dreamer.prompt` | string | — | Additional system prompt text |
@@ -183,7 +187,12 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.pi.fallback_models` | string \\| object[] | — | Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array. |
 | `dreamer.pi.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` | — | Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
 | `dreamer.pi.tasks` | map<string, object> | — | Pi task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
-| `dreamer.tasks` | object | — | Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks or dreamer.pi.tasks. |
+| `dreamer.omp` | object | — | Strict OMP dreamer model-resolution block. It accepts no OpenCode vocabulary. |
+| `dreamer.omp.model` | string \\| object | — | Primary OMP model entry. |
+| `dreamer.omp.fallback_models` | string \\| object[] | — | Ordered fallback OMP entries. |
+| `dreamer.omp.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` \\| `"inherit"` \\| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `dreamer.omp.tasks` | map<string, object> | — | OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
+| `dreamer.tasks` | object | — | Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks, dreamer.pi.tasks, or dreamer.omp.tasks. |
 | `dreamer.tasks.map-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
 | `dreamer.tasks.verify-broad.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |

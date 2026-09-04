@@ -126,6 +126,7 @@ import type {
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
 
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 import {
 	convertEntriesToRawMessages,
 	SYNTH_USER_ID_PREFIX,
@@ -389,7 +390,7 @@ export interface PiHistorianDeps {
 	 *  OpenCode's `historian.two_pass` config. Editor validation falls back
 	 *  to the first-pass result on failure. Default: false. */
 	twoPass?: boolean;
-	/** Pi only: explicit thinking level passed as --thinking <level> to
+	/** Pi and OMP: explicit thinking level passed as --thinking <level> to
 	 *  historian subagent invocations. When unset, Pi's own resolution runs
 	 *  (works for most providers; may fail for e.g. github-copilot/gpt-5.4). */
 	thinkingLevel?: string;
@@ -1378,7 +1379,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					const stored = insertPrimerCandidates(db, [
 						{
 							projectPath,
-							harness: "pi",
+							harness: resolvePiHarnessKind(),
 							sessionId,
 							question: candidate.question,
 							sourceCompartmentStart: startC?.startMessage,
@@ -1511,7 +1512,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					: null;
 			recordHistorianRun(db, {
 				sessionId,
-				harness: "pi",
+				harness: resolvePiHarnessKind(),
 				subagentInvocationId: invocationId,
 				runKind: telemetry.runKind ?? "incremental",
 				status: telemetry.status ?? "failed",

@@ -1,4 +1,4 @@
-export type ModelHarness = "opencode" | "pi";
+export type ModelHarness = "opencode" | "pi" | "omp";
 
 export interface ResolvedModelEntry {
     /** Canonical provider/model reference used for identity and model selection. */
@@ -25,6 +25,14 @@ function readString(value: unknown): string | undefined {
 
 function hasOwn(record: ConfigRecord, key: string): boolean {
     return Object.hasOwn(record, key);
+}
+
+function resolveHarnessBlock(
+    container: ConfigRecord | undefined,
+    harness: ModelHarness,
+): ConfigRecord | undefined {
+    const selected = harness === "omp" ? (container?.omp ?? container?.pi) : container?.[harness];
+    return asRecord(selected);
 }
 
 /**
@@ -98,15 +106,15 @@ export interface ResolvedHistorianModel {
 }
 
 /**
- * Resolve historian model attempts from exactly one harness block. Flat keys
- * and the other harness are deliberately never consulted after cutover.
+ * Resolve historian model attempts from the selected harness block. OMP uses
+ * its own block when present and falls back to Pi when it is absent.
  */
 export function resolveHistorianModel(
     config: unknown,
     harness: ModelHarness,
 ): ResolvedHistorianModel {
     const historian = asRecord(asRecord(config)?.historian);
-    const block = asRecord(historian?.[harness]);
+    const block = resolveHarnessBlock(historian, harness);
     if (!block) return { fallbacks: [] };
 
     return {
@@ -139,7 +147,7 @@ export function resolveDreamerTaskModel(args: {
     muralModel?: unknown;
 }): ResolvedDreamerTaskModel {
     const dreamer = asRecord(asRecord(args.config)?.dreamer);
-    const harnessBlock = asRecord(dreamer?.[args.harness]);
+    const harnessBlock = resolveHarnessBlock(dreamer, args.harness);
     const taskBlock = asRecord(asRecord(harnessBlock?.tasks)?.[args.task]);
     const schedulingTask = asRecord(asRecord(dreamer?.tasks)?.[args.task]);
     if (!harnessBlock) {
@@ -211,6 +219,7 @@ export function resolveOpenCodeAgentOverrides(agent: unknown): Record<string, un
         thinking_level: _thinking,
         opencode,
         pi,
+        omp,
         tasks,
         ...rest
     } = source;

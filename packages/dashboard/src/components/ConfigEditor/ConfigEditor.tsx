@@ -1003,6 +1003,13 @@ function ConfigForm(props: {
                               >
                                 Pi
                               </button>
+                              <button
+                                type="button"
+                                class={`tab-pill ${historianHarness() === "omp" ? "active" : ""}`}
+                                onClick={() => setHistorianHarness("omp")}
+                              >
+                                OMP
+                              </button>
                             </div>
                             <Show when={historianHarness() === "opencode"}>
                               {manualModelHint()}
@@ -1410,6 +1417,13 @@ function ConfigForm(props: {
                   >
                     Pi
                   </button>
+                  <button
+                    type="button"
+                    class={`tab-pill ${dreamerHarness() === "omp" ? "active" : ""}`}
+                    onClick={() => setDreamerHarness("omp")}
+                  >
+                    OMP
+                  </button>
                 </div>
                 <Show when={dreamerHarness() === "opencode"}>{manualModelHint()}</Show>
                 <HarnessModelFields
@@ -1428,7 +1442,7 @@ function ConfigForm(props: {
                 <span class="config-field-key">dreamer.tasks / dreamer.{"<harness>"}.tasks</span>
               </div>
               <span class="config-field-desc">
-                Schedules apply once for both harnesses. The selected tab configures only that
+                Schedules apply once for every harness. The selected tab configures only that
                 harness's task model entries and qualifiers.
               </span>
               <DreamerTasksField
@@ -2439,7 +2453,7 @@ export default function ConfigEditor(props: {
                 </tbody>
               </table>
               <p style={{ "font-size": "11px", color: "var(--text-muted)", margin: "4px 0 0" }}>
-                Shared CortexKit user config (OpenCode and Pi)
+                Shared CortexKit user config (OpenCode, Pi, and OMP)
               </p>
             </div>
             <Show

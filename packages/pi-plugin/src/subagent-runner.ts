@@ -39,6 +39,7 @@ import type {
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 const PI_CODING_AGENT_PACKAGE_NAMES = new Set([
@@ -477,46 +478,8 @@ const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
 export const MAGIC_CONTEXT_PI_SUBAGENT_ENV = "MAGIC_CONTEXT_PI_SUBAGENT";
 
-function packageRootIsOmp(packageRoot: string): boolean {
-	try {
-		const manifest = JSON.parse(
-			readFileSync(join(packageRoot, "package.json"), "utf-8"),
-		) as { name?: unknown };
-		return manifest.name === "@oh-my-pi/pi-coding-agent";
-	} catch {
-		return false;
-	}
-}
-
-function expandHomePath(value: string): string {
-	if (value === "~") return homedir();
-	if (value.startsWith("~/") || value.startsWith("~\\")) {
-		return resolvePath(homedir(), value.slice(2));
-	}
-	return resolvePath(value);
-}
-
-/**
- * Positive OMP host identification. PI_CODING_AGENT_DIR alone is deliberately
- * insufficient because upstream Pi supports the same variable.
- */
 function isOmpHostProcess(): boolean {
-	const execName = basename(process.execPath).toLowerCase();
-	if (/^omp(?:\.exe)?$/.test(execName)) return true;
-
-	const packageOverride = process.env.PI_PACKAGE_DIR?.trim();
-	if (packageOverride && packageRootIsOmp(expandHomePath(packageOverride))) {
-		return true;
-	}
-
-	let current = process.argv[1] ? dirname(resolvePath(process.argv[1])) : "";
-	while (current) {
-		if (packageRootIsOmp(current)) return true;
-		const parent = dirname(current);
-		if (parent === current) break;
-		current = parent;
-	}
-	return false;
+	return resolvePiHarnessKind() === "omp";
 }
 
 function normalizedOmpProfile(): string | undefined {
@@ -863,7 +826,7 @@ type ExtensionRetryResult = {
  *   the core contract.
  */
 export class PiSubagentRunner implements SubagentRunner {
-	readonly harness = "pi";
+	readonly harness = resolvePiHarnessKind();
 
 	/**
 	 * How to invoke a Pi subagent (command + fixed leading args + shell flag).
@@ -1090,7 +1053,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			recordChildInvocation({
 				db: openDatabase(),
 				parentSessionId: options.accountingSessionId,
-				harness: "pi",
+				harness: this.harness,
 				subagent:
 					options.accountingSubagent ?? inferAccountingSubagent(options.agent),
 				task: options.accountingTask ?? null,

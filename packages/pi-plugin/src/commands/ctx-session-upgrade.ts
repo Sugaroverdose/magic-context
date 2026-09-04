@@ -96,7 +96,7 @@ export function registerCtxSessionUpgradeCommand(
 			if (!currentDeps.historianModel) {
 				sendStatus({
 					title: "/ctx-session-upgrade",
-					text: "## Session Upgrade\n\nUnavailable because `historian.model` is not configured.",
+					text: "## Session Upgrade\n\nUnavailable because the active harness's historian model is not configured.",
 					level: "error",
 				});
 				return;
@@ -139,10 +139,8 @@ export function registerCtxSessionUpgradeCommand(
 				? `${ctx.model.provider}/${ctx.model.id}`
 				: undefined;
 
-			// Migration runs only when memory is enabled — parity with OpenCode,
-			// whose orchestrator gates on `runMigration = memory.enabled !== false
-			// && historian.model` (recomp-orchestrator drives migration off that
-			// flag, NOT unconditionally). With memory disabled there is no memory
+			// This command reaches migration only after confirming an active historian
+			// model, and migration runs only when memory is enabled. With memory disabled there is no memory
 			// pool to re-organize, so re-categorizing would be a no-op at best and
 			// could touch a pool the user opted out of at worst.
 			const migrationEnabled = currentDeps.memoryEnabled;

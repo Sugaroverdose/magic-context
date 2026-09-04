@@ -1,7 +1,13 @@
 import { createSignal, Index, Show } from "solid-js";
 
 import { describeCron, isValidCronShape } from "../../lib/cron";
-import { type Harness, type ModelEntry, modelEntryWithModel, modelId } from "./HarnessModelFields";
+import {
+  type Harness,
+  type ModelEntry,
+  modelEntryWithModel,
+  modelId,
+  thinkingLevelsForHarness,
+} from "./HarnessModelFields";
 import ModelSelect from "./ModelSelect";
 
 export interface DreamTaskConfig {
@@ -111,7 +117,6 @@ const PRESETS: { label: string; cron: string }[] = [
   { label: "Hourly", cron: "0 * * * *" },
   { label: "Disabled", cron: "" },
 ];
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const CUSTOM = "__custom__";
 
 function isPresetCron(cron: string): boolean {
@@ -278,7 +283,7 @@ export default function DreamerTasksField(props: DreamerTasksFieldProps) {
                       }
                     >
                       <option value="">Use harness default</option>
-                      <Index each={THINKING_LEVELS}>
+                      <Index each={thinkingLevelsForHarness(props.harness)}>
                         {(level) => <option value={level()}>{level()}</option>}
                       </Index>
                     </select>

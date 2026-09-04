@@ -179,7 +179,7 @@ function loadStoredValue(key: string): string {
 
 function loadHarnessFilter(): HarnessFilter {
   const stored = loadStoredValue(HARNESS_FILTER_KEY);
-  return stored === "opencode" || stored === "pi" ? stored : "all";
+  return stored === "opencode" || stored === "pi" || stored === "omp" ? stored : "all";
 }
 
 interface SessionViewerProps {
@@ -744,6 +744,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
               { value: "all", label: "Harness: All" },
               { value: "opencode", label: "OpenCode" },
               { value: "pi", label: "Pi" },
+              { value: "omp", label: "OMP" },
             ]}
           />
           <label
@@ -1765,7 +1766,9 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                       <td>Execute hits</td>
                       <td>{metaData().times_execute_threshold_reached}</td>
                     </tr>
-                    <Show when={sessionDetail()?.harness !== "pi"}>
+                    <Show
+                      when={sessionDetail()?.harness !== "pi" && sessionDetail()?.harness !== "omp"}
+                    >
                       <tr>
                         <td>Subagent</td>
                         <td>{metaData().is_subagent ? "Yes" : "No"}</td>

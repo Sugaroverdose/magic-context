@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub enum Harness {
     Opencode,
     Pi,
+    Omp,
 }
 
 impl Harness {
@@ -17,6 +18,7 @@ impl Harness {
         match self {
             Harness::Opencode => "opencode",
             Harness::Pi => "pi",
+            Harness::Omp => "omp",
         }
     }
 }
@@ -24,9 +26,10 @@ impl Harness {
 /// Resolve the plugin log file for a specific harness.
 ///
 /// The plugin writes separate logs per harness so a single machine running
-/// both can produce two independent issue reports:
+/// each can produce an independent issue report:
 ///   - OpenCode → `${tmpdir}/opencode/magic-context/magic-context.log`
 ///   - Pi       → `${tmpdir}/pi/magic-context/magic-context.log`
+///   - OMP      → `${tmpdir}/omp/magic-context/magic-context.log`
 ///
 /// Mirrors the resolution done in TypeScript at
 /// `packages/plugin/src/shared/data-path.ts:getMagicContextLogPath`. Kept
@@ -59,8 +62,8 @@ fn resolve_log_path_from_temp_dir(temp_dir: &std::path::Path, harness: Harness) 
 /// not run inside a specific harness, so reading both preserves Pi-only and
 /// OpenCode-only activity instead of silently selecting one of them.
 pub fn resolve_log_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(2);
-    for harness in [Harness::Opencode, Harness::Pi] {
+    let mut paths = Vec::with_capacity(3);
+    for harness in [Harness::Opencode, Harness::Pi, Harness::Omp] {
         let path = resolve_log_path_for(harness);
         if !paths.contains(&path) {
             paths.push(path);
@@ -527,6 +530,10 @@ mod tests {
             resolve_log_path_from_temp_dir(tmpdir, Harness::Pi),
             tmpdir.join("pi/magic-context/magic-context.log")
         );
+        assert_eq!(
+            resolve_log_path_from_temp_dir(tmpdir, Harness::Omp),
+            tmpdir.join("omp/magic-context/magic-context.log")
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -542,10 +549,14 @@ mod tests {
             resolve_log_path_from_temp_dir(tmpdir, Harness::Pi),
             tmpdir.join("pi/magic-context/magic-context.log")
         );
+        assert_eq!(
+            resolve_log_path_from_temp_dir(tmpdir, Harness::Omp),
+            tmpdir.join("omp/magic-context/magic-context.log")
+        );
     }
 
     #[test]
-    fn resolve_log_paths_reads_both_harnesses_when_no_override_is_set() {
+    fn resolve_log_paths_reads_all_harnesses_when_no_override_is_set() {
         let _guard = env_lock();
         std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
 
@@ -554,6 +565,7 @@ mod tests {
             vec![
                 resolve_log_path_for(Harness::Opencode),
                 resolve_log_path_for(Harness::Pi),
+                resolve_log_path_for(Harness::Omp),
             ]
         );
     }

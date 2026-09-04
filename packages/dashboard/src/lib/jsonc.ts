@@ -74,7 +74,7 @@ export function formatJsonc(value: unknown): string {
 export function patchDreamerTasksJsonc(
   text: string,
   tasks: Record<string, unknown>,
-  harness?: "opencode" | "pi",
+  harness?: "opencode" | "pi" | "omp",
   modelTasks?: Record<string, unknown>,
 ): string {
   const root = parseRoot(text);

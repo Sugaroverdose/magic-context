@@ -15,6 +15,7 @@ import {
 } from "@magic-context/core/features/magic-context/dreamer/task-scheduler";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
+import type { ModelHarness } from "@magic-context/core/shared/model-resolution";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
 import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
@@ -28,8 +29,10 @@ export interface PiDreamerOptions {
 	registrationOwner: object;
 	/** Resolved runnable DreamerConfig from loadPiConfig(). When disable=true, the caller does not register. */
 	config: DreamerConfig;
+	/** Active Pi-compatible host used to select per-harness model configuration. */
+	harness: Extract<ModelHarness, "pi" | "omp">;
 	/**
-	 * Council finding #7: dreamer needs the real embedding config so it can
+	 * Dreamer needs the real embedding config so it can
 	 * (a) maintain near-duplicate/stale memories using deterministic file gates and
 	 * (b) re-embed memory content when it gets rewritten by `improve`.
 	 * Hardcoded `{provider:"off"}` previously meant dreamer skipped both
@@ -37,7 +40,7 @@ export interface PiDreamerOptions {
 	 */
 	embeddingConfig: EmbeddingConfig;
 	/**
-	 * Council finding #7: dreamer needs the real memory.enabled gate so the
+	 * Dreamer needs the real memory.enabled gate so the
 	 * memory-promotion pipeline (consolidation + improve + archive) can
 	 * actually write to the project memory store. Hardcoded `false`
 	 * previously made dreamer's memory tasks a no-op.
@@ -202,7 +205,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	void startDreamScheduleTimerFn({
 		directory: opts.projectDir,
 		projectIdentity: opts.projectIdentity,
-		harness: "pi",
+		harness: opts.harness,
 		client,
 		dreamerConfig: opts.config,
 		language: opts.language,
@@ -266,7 +269,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			projectIdentity: manualOpts.projectIdentity,
 			tasks: buildDreamTaskRuntimeConfigs(
 				manualOpts.config,
-				"pi",
+				manualOpts.harness,
 				manualOpts.language,
 				manualOpts.mural?.model,
 			),

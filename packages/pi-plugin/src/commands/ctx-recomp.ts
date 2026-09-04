@@ -113,7 +113,7 @@ export function registerCtxRecompCommand(
 			if (!currentDeps.historianModel) {
 				sendStatus({
 					title: "/ctx-recomp",
-					text: "## Magic Recomp\n\n/ctx-recomp is unavailable because `historian.model` is not configured.",
+					text: "## Magic Recomp\n\n/ctx-recomp is unavailable because the active harness's historian model is not configured.",
 					level: "error",
 				});
 				return;

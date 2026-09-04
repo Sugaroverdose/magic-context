@@ -939,6 +939,7 @@ pub async fn get_opencode_install_state() -> String {
 pub struct ModelCatalogs {
     pub opencode: Vec<String>,
     pub pi: Vec<String>,
+    pub omp: Vec<String>,
 }
 
 fn catalog_model_id(value: &str) -> Option<String> {
@@ -1005,8 +1006,12 @@ async fn discover_opencode_models() -> Vec<String> {
 
 #[tauri::command]
 pub async fn get_model_catalogs() -> ModelCatalogs {
-    let (opencode, pi) = tokio::join!(discover_opencode_models(), discover_pi_models());
-    ModelCatalogs { opencode, pi }
+    let (opencode, pi, omp) = tokio::join!(
+        discover_opencode_models(),
+        discover_pi_models(),
+        get_available_omp_models()
+    );
+    ModelCatalogs { opencode, pi, omp }
 }
 
 fn strip_ansi_pi_output(text: &str) -> String {
@@ -1147,17 +1152,6 @@ async fn get_available_omp_models() -> Vec<String> {
     Vec::new()
 }
 
-fn merge_pi_and_omp_models(mut pi_models: Vec<String>, omp_models: Vec<String>) -> Vec<String> {
-    pi_models.extend(omp_models);
-    pi_models.sort();
-    pi_models.dedup();
-    pi_models
-}
-
-async fn include_omp_models(pi_models: Vec<String>) -> Vec<String> {
-    merge_pi_and_omp_models(pi_models, get_available_omp_models().await)
-}
-
 async fn discover_pi_models() -> Vec<String> {
     // GUI apps on macOS don't inherit shell PATH; try common locations.
     //
@@ -1213,7 +1207,7 @@ async fn discover_pi_models() -> Vec<String> {
         if let Some(text) = run_bounded_binary(bin, &["--list-models"]).await {
             let models = parse_pi_models_output(&text);
             if !models.is_empty() {
-                return include_omp_models(models).await;
+                return models;
             }
         }
     }
@@ -1223,23 +1217,22 @@ async fn discover_pi_models() -> Vec<String> {
             if let Some(text) = run_bounded_binary(&bin, &["--list-models"]).await {
                 let models = parse_pi_models_output(&text);
                 if !models.is_empty() {
-                    return include_omp_models(models).await;
+                    return models;
                 }
             }
         }
     }
 
-    // Resolve Pi through the user's login shell before falling back to OMP.
-    // Otherwise an OMP install can mask a real Pi install managed by an
-    // uncommon version manager whose shims are only present in login-shell PATH.
+    // Resolve Pi through the user's login shell before reporting an empty Pi
+    // catalog. OMP discovery remains a separate harness-scoped catalog.
     if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
         let models = parse_pi_models_output(&text);
         if !models.is_empty() {
-            return include_omp_models(models).await;
+            return models;
         }
     }
 
-    get_available_omp_models().await
+    Vec::new()
 }
 
 // ── Embedding test ──────────────────────────────────────────
@@ -1441,10 +1434,10 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_pi_and_omp_models, opencode_desktop_detected_for_env, parse_omp_models_output,
-        parse_opencode_models_output, parse_pi_models_output, pick_first_line,
-        prepare_embedding_probe_options, run_bounded_binary, windows_opencode_candidates,
-        DesktopPlatform, ModelCatalogs, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
+        opencode_desktop_detected_for_env, parse_omp_models_output, parse_opencode_models_output,
+        parse_pi_models_output, pick_first_line, prepare_embedding_probe_options,
+        run_bounded_binary, windows_opencode_candidates, DesktopPlatform, ModelCatalogs,
+        OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::path::{Path, PathBuf};
@@ -1656,6 +1649,7 @@ mod tests {
                 "anthropic/claude-sonnet".to_string(),
                 "shared/model".to_string(),
             ],
+            omp: vec!["opencode-zen/gpt-5".to_string(), "shared/model".to_string()],
         })
         .expect("catalogs serialize");
 
@@ -1664,6 +1658,7 @@ mod tests {
             serde_json::json!({
                 "opencode": ["openai/gpt-5", "shared/model"],
                 "pi": ["anthropic/claude-sonnet", "shared/model"],
+                "omp": ["opencode-zen/gpt-5", "shared/model"],
             })
         );
     }
@@ -1740,17 +1735,6 @@ mod tests {
                 "modal/@modal/qwen/model-v1",
                 "openai/fallback/model",
             ]
-        );
-    }
-
-    #[test]
-    fn pi_and_omp_model_catalogs_are_merged_and_deduplicated() {
-        assert_eq!(
-            merge_pi_and_omp_models(
-                vec!["anthropic/shared".into(), "pi/only".into()],
-                vec!["omp/only".into(), "anthropic/shared".into()],
-            ),
-            vec!["anthropic/shared", "omp/only", "pi/only"]
         );
     }
 

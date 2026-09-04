@@ -1051,6 +1051,7 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
             project={project()}
             opencodeModels={modelCatalogs()?.opencode ?? []}
             piModels={modelCatalogs()?.pi ?? []}
+            ompModels={modelCatalogs()?.omp ?? []}
             onClose={() => setConfigProject(null)}
             onSaved={() => refetchDreamerProjects()}
           />

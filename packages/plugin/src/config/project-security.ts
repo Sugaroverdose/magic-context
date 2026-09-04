@@ -1,6 +1,7 @@
 import {
     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     PER_HARNESS_MIGRATION_INVENTORY,
+    PER_HARNESS_MODEL_KEYS,
 } from "./schema/magic-context";
 
 /**
@@ -12,13 +13,13 @@ import {
  * trusted user config, mutating the relevant object in place and returning
  * human-readable warnings.
  *
- * Shared by both harnesses (OpenCode `config/index.ts` and Pi
- * `config/index.ts`) so the trust boundary is identical cross-harness.
+ * Shared by OpenCode and the Pi-compatible Pi/OMP extension so the trust
+ * boundary is identical across every supported harness.
  */
 
 /** Hidden agents that run with elevated/autonomous capability. */
 const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
-const HARNESS_KEYS = ["opencode", "pi"] as const;
+const HARNESS_KEYS = PER_HARNESS_MODEL_KEYS;
 /** Every historian model-resolution field, including per-harness qualifiers.
  *  Variant and thinking_level merge onto the user's historian model at resolve
  *  time, so leaving them would let a cloned repo force extra spend. */

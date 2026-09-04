@@ -7,6 +7,7 @@ interface HarnessBadgeProps {
 const HARNESS_LABELS: Record<Harness, { short: string; title: string; color: string }> = {
   opencode: { short: "OC", title: "OpenCode", color: "amber" },
   pi: { short: "Pi", title: "Pi", color: "purple" },
+  omp: { short: "OMP", title: "Oh My Pi", color: "purple" },
   claude_code: { short: "CC", title: "Claude Code", color: "blue" },
   codex: { short: "Codex", title: "Codex", color: "green" },
 };

@@ -77,6 +77,7 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
+import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
@@ -193,7 +194,7 @@ export function createPiTranscript(
 
 	return {
 		messages: transcriptMessages,
-		harness: "pi",
+		harness: resolvePiHarnessKind(),
 		commit(): void {
 			if (committed) return;
 			committed = true;

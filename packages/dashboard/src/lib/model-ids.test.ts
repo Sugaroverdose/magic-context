@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { canonicalModelIdToPi, piModelIdToCanonical } from "./model-ids";
+import {
+  canonicalModelIdToOmp,
+  canonicalModelIdToPi,
+  ompModelIdToCanonical,
+  piModelIdToCanonical,
+} from "./model-ids";
 
 describe("shared-config model IDs", () => {
   it("canonicalizes Pi provider prefixes", () => {
@@ -10,6 +15,12 @@ describe("shared-config model IDs", () => {
   it("maps canonical provider prefixes back to Pi", () => {
     expect(canonicalModelIdToPi("openai/gpt-5")).toBe("openai-codex/gpt-5");
     expect(canonicalModelIdToPi("google/gemini-2.5-pro")).toBe("google-antigravity/gemini-2.5-pro");
+  });
+
+  it("maps OMP's opencode-zen alias without changing nested model ids", () => {
+    expect(ompModelIdToCanonical("opencode-zen/org/model")).toBe("opencode/org/model");
+    expect(canonicalModelIdToOmp("opencode/org/model")).toBe("opencode-zen/org/model");
+    expect(ompModelIdToCanonical("openai-codex/gpt-5")).toBe("openai/gpt-5");
   });
 
   it("passes through unknown or malformed provider prefixes", () => {

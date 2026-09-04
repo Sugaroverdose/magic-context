@@ -17,7 +17,7 @@ Project config always merges on top of user config. The unified setup wizard (`n
 
 ### Per-harness model migration
 
-Historian and dreamer model execution now live in independent `opencode` and `pi` blocks. On the first user-config read that finds the former flat model fields, Magic Context writes one exact-byte recovery copy at `<config>.pre-per-harness.bak` before rewriting the config. **Magic Context retains `<config>.pre-per-harness.bak` indefinitely and never garbage-collects it. You may delete it manually after you no longer need the recovery copy.**
+Historian and dreamer model execution live in independent `opencode`, `pi`, and `omp` blocks. On the first user-config read that finds the former flat model fields, Magic Context writes one exact-byte recovery copy at `<config>.pre-per-harness.bak` before rewriting the config. **Magic Context retains `<config>.pre-per-harness.bak` indefinitely and never garbage-collects it. You may delete it manually after you no longer need the recovery copy.**
 
 Only model-resolution fields move. The migration inventory is explicit:
 
@@ -27,7 +27,7 @@ Only model-resolution fields move. The migration inventory is explicit:
 | `dreamer` | `temperature`, `top_p`, `prompt`, `tools`, `disable`, `description`, `mode`, `color`, `maxSteps`, `permission`, `maxTokens`, `inject_docs` | `model`, `fallback_models`, `variant`, `thinking_level` |
 | `dreamer.tasks.<task>` | `schedule`, `promotion_threshold` | `model`, `fallback_models`, `variant`, `thinking_level`, `timeout_minutes` |
 
-There is no catch-all migration rule: fields not listed in this table are not moved by the per-harness migration.
+There is no catch-all migration rule: fields not listed in this table are not moved by the per-harness migration. Existing users need no additional OMP migration: when an `omp` block is absent, OMP resolves the matching `pi` block.
 
 ### Per-repository model profiles
 
@@ -41,14 +41,16 @@ Use user-owned `profiles` when your work repositories and personal repositories 
     "personal": {
       "historian": {
         "opencode": { "model": "anthropic/claude-sonnet-4-6" },
-        "pi": { "model": "github-copilot/claude-sonnet-4-6" }
+        "pi": { "model": "github-copilot/claude-sonnet-4-6" },
+        "omp": { "model": "opencode/claude-sonnet-4-6", "thinking_level": "auto" }
       },
       "sidekick": { "model": "anthropic/claude-haiku-4-5" }
     },
     "work": {
       "historian": {
         "opencode": { "model": "openai/gpt-5.2-codex" },
-        "pi": { "model": "github-copilot/gpt-5.2-codex" }
+        "pi": { "model": "github-copilot/gpt-5.2-codex" },
+        "omp": { "model": "opencode/gpt-5.2-codex", "thinking_level": "high" }
       },
       "dreamer": {
         "opencode": { "model": "openai/gpt-5.2-codex" }
@@ -66,16 +68,16 @@ A work repository then needs only a selection key:
 { "profile": "work" }
 ```
 
-Resolution is `user base → selected user profile → project config`; a project selection wins over the user default. Profile overlays deep-merge, so a profile can override one harness model while base fallback chains and other settings stay intact. Profiles are defined only in user config: a project may select a known name, but project-supplied `profiles` content is ignored with a warning. An unknown selected name also warns and uses the base configuration with no profile rather than disabling Magic Context. Profiles admit only hidden-agent model selection (`historian.opencode` / `historian.pi`, `dreamer.opencode` / `dreamer.pi`, and sidekick model fields); embeddings, prompts, storage, compaction, memory gates, thresholds, and other durable behavior stay outside them.
+Resolution is `user base → selected user profile → project config`; a project selection wins over the user default. Profile overlays deep-merge, so a profile can override one harness model while base fallback chains and other settings stay intact. Profiles are defined only in user config: a project may select a known name, but project-supplied `profiles` content is ignored with a warning. An unknown selected name also warns and uses the base configuration with no profile rather than disabling Magic Context. Profiles admit only hidden-agent model selection (`historian.opencode` / `historian.pi` / `historian.omp`, `dreamer.opencode` / `dreamer.pi` / `dreamer.omp`, and sidekick model fields); embeddings, prompts, storage, compaction, memory gates, thresholds, and other durable behavior stay outside them.
 
 ### Cross-harness scoping
 
 Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magic-context/context.db`. Tables are scoped by:
 
-- `harness` column (`'opencode'` or `'pi'`) for **session-scoped** data — OMP intentionally uses the Pi-compatible `'pi'` discriminator
+- `harness` column (`'opencode'`, `'pi'`, or `'omp'`) for **session-scoped** data — OMP has its own first-class discriminator
 - `project_path` (resolved git root) for **project-scoped** data — memories, embeddings, dreamer runs, key-file pins, smart notes
 
-Project memories therefore flow across OpenCode, Pi, and OMP, while per-session state remains scoped to the OpenCode or Pi-compatible runtime.
+Project memories therefore flow across OpenCode, Pi, and OMP, while per-session state remains scoped to the OpenCode, Pi, or OMP runtime.
 
 For semantic search to work cross-harness, every host resolves embedding config per project identity on each retrieval path. Keep the effective `embedding` block consistent across OpenCode, Pi, and OMP for the same project.
 
@@ -123,7 +125,7 @@ Both setup wizards add this automatically.
 
 Model keys use the same progressive, case-sensitive lookup walk as `cache_ttl`: exact `provider/model` keys, less-specific model variants, then the literal `provider/*` wildcard and `default`. The first slash separates the provider; additional slashes remain part of the model ID. Missing provider/model components fall back to `default`.
 
-> **OpenCode/Pi v1 limitation:** per-model routing in `models` applies to the guidance block only. Tool descriptions are registered once per process by the v1 plugin API, so they always follow `prompt_surface.default`. Per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes (tracked in [#260](https://github.com/cortexkit/magic-context/issues/260)).
+> **OpenCode/Pi/OMP v1 limitation:** per-model routing in `models` applies to the guidance block only. Tool descriptions are registered once per process by the v1 plugin API, so they always follow `prompt_surface.default`. Per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes (tracked in [#260](https://github.com/cortexkit/magic-context/issues/260)).
 
 `guidance_override_path` and `tool_descriptions` are user-level only. A project may select `default` and `models`, but repository-supplied guidance files and tool-description text are stripped with a warning.
 
@@ -241,7 +243,7 @@ When Magic Context is enabled but cannot open its shared database — most often
 npx @cortexkit/magic-context@latest doctor
 ```
 
-rather than unregistering hooks and letting OpenCode/Pi native compaction run with no user-visible signal. Transient `SQLITE_BUSY` / `SQLITE_LOCKED` still pass through. Internal OpenCode agents (`title` / `summary` / `compaction`), Magic Context hidden children, and Pi subagent processes are not blocked. A healed storage open is re-probed periodically so service can resume without restart.
+rather than unregistering hooks and letting OpenCode/Pi/OMP native compaction run with no user-visible signal. Transient `SQLITE_BUSY` / `SQLITE_LOCKED` still pass through. Internal OpenCode agents (`title` / `summary` / `compaction`), Magic Context hidden children, and Pi subagent processes are not blocked. A healed storage open is re-probed periodically so service can resume without restart.
 
 Set `fail_closed_blocking: false` in **user config only** to restore silent degrade (not recommended). Project configs cannot set this field.
 
@@ -409,7 +411,7 @@ An absolute-tokens alternative to `execute_threshold_percentage`. Useful when yo
 
 Each hidden agent (historian, dreamer, sidekick) uses the `model` you configure for it. There is **no built-in fallback chain** — Magic Context never silently tries models you haven't configured (a hardcoded chain inevitably names providers you don't have, producing confusing `Model not found` errors).
 
-If the configured primary fails (auth, transient, or returns unusable output), the fallback order is:
+For OMP, harness selection is whole-block precedence: `historian.omp ?? historian.pi` and `dreamer.omp ?? dreamer.pi` (including task overrides). An explicit OMP block is authoritative even if it omits a model; only an absent block falls back to Pi. Within the selected block, if the configured primary fails (auth, transient, or returns unusable output), the fallback order is:
 
 1. Your explicit `fallback_models` for that agent, in order.
 2. **Historian only:** your active session model, as a last resort (a model you're already using). The dreamer and sidekick use only their configured `fallback_models`.
@@ -439,7 +441,7 @@ Example — restricting historian to read-only tools and denying bash:
 ```jsonc
 {
   "historian": {
-    "model": "github-copilot/gpt-5.4",
+    "opencode": { "model": "github-copilot/gpt-5.4" },
     "tools": { "bash": false, "write": false, "edit": false },
     "permission": { "bash": "deny", "webfetch": "deny" }
   }
@@ -460,19 +462,19 @@ Set this in the user configuration when Magic Context should provide knowledge w
 }
 ```
 
-The setting is resolved at process boot. Restart OpenCode or Pi after changing it. A project-tier `compaction.enabled` is stripped, so a cloned repository cannot disable the user's context management.
+The setting is resolved at process boot. Restart OpenCode, Pi, or OMP after changing it. A project-tier `compaction.enabled` is stripped, so a cloned repository cannot disable the user's context management.
 
 ### What stays on
 
 - Memory, docs, user-profile, and key-file injection stays additive through m[0]/m[1]. The messages transform remains registered so knowledge still reaches the model.
 - Raw-message FTS indexing, `ctx_search`, `ctx_expand`, `ctx_memory`, `ctx_note`, `/ctx-embed`, notes, and dreamer maintenance remain available. Historian-dependent dreamer tasks simply find no candidates.
-- Native OpenCode or Pi compaction is allowed to run. Magic Context does not enable native compaction. If native compaction is also disabled, boot and doctor report `no active compaction`; the sidebar uses `Context: <pct>% · native compaction` or `Context: <pct>% · no active compaction` and never renders MC's execute-threshold fill.
+- Native OpenCode, Pi, or OMP compaction is allowed to run. Magic Context does not enable native compaction. If native compaction is also disabled, boot and doctor report `no active compaction`; the sidebar uses `Context: <pct>% · native compaction` or `Context: <pct>% · no active compaction` and never renders MC's execute-threshold fill.
 
 ### What stops
 
 Magic Context does not tag new messages or write tags, create or inject compartments, write its compaction markers, fold, prune, drop, strip, splice, apply pending drops, run heuristic or emergency reclaim, add synthetic context-management todos, add temporal markers, nudge, or block on a failed transform. `ctx_reduce` is unavailable; `ctx_expand` remains available. `/ctx-wrapup`, `/ctx-recomp`, `/ctx-flush`, and `/ctx-session-upgrade` refuse with `Unavailable: magic-context is in compaction-off mode (compaction.enabled=false).` and make no context-management changes; `/ctx-embed` remains functional. `fail_closed_blocking` is inert in this mode: a transform failure passes the input messages through without blocking or cancelling the request.
 
-Magic Context's `compaction.enabled` in `magic-context.jsonc` is not OpenCode's `compaction.auto` or `compaction.prune` in `opencode.jsonc`. These are different files and different owners. The coexistence guarantee covers OpenCode and Pi native compaction; DCP and OMO context-transforming hooks keep their existing conflict policy.
+Magic Context's `compaction.enabled` in `magic-context.jsonc` is not OpenCode's `compaction.auto` or `compaction.prune` in `opencode.jsonc`. These are different files and different owners. The coexistence guarantee covers OpenCode, Pi, and OMP native compaction; DCP and OMO context-transforming hooks keep their existing conflict policy.
 
 ### Transitions and long sessions
 
@@ -497,12 +499,18 @@ Historian retains agent metadata at `historian`, while each harness receives its
     "pi": {
       "model": { "model": "github-copilot/gpt-5.4", "thinking_level": "high" },
       "fallback_models": ["anthropic/claude-sonnet-4-6"]
+    },
+    "omp": {
+      "model": { "model": "opencode/gpt-5.4", "thinking_level": "auto" },
+      "fallback_models": [
+        { "model": "anthropic/claude-sonnet-4-6", "thinking_level": "inherit" }
+      ]
     }
   }
 }
 ```
 
-An OpenCode entry is either a model string or `{ "model": "provider/model", "variant": "..." }`. A Pi entry is either a model string or `{ "model": "provider/model", "thinking_level": "..." }`. The two entry objects and their harness blocks are strict: Pi never accepts `variant`, and OpenCode never accepts `thinking_level`.
+An OpenCode entry is either a model string or `{ "model": "provider/model", "variant": "..." }`. Pi and OMP entries use `{ "model": "provider/model", "thinking_level": "..." }`. Their entry objects and harness blocks are strict: Pi/OMP never accept `variant`, and OpenCode never accepts `thinking_level`. OMP accepts Pi's levels plus `inherit` and `auto`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `inherit`, or `auto`. OMP also accepts its native `provider/model:level` selectors; host/provider capability gates still govern `max` and `auto`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -512,6 +520,9 @@ An OpenCode entry is either a model string or `{ "model": "provider/model", "var
 | `historian.pi.model` | Pi entry | Primary Pi model. |
 | `historian.pi.fallback_models` | Pi entry[] | Ordered Pi fallback entries. New-shape fallbacks must be arrays. |
 | `historian.pi.thinking_level` | Pi thinking level | Default Pi reasoning level. |
+| `historian.omp.model` | OMP entry | Primary OMP model; absent `historian.omp` falls back to `historian.pi`. |
+| `historian.omp.fallback_models` | OMP entry[] | Ordered OMP fallback entries with per-entry thinking levels. |
+| `historian.omp.thinking_level` | OMP thinking level | Default OMP reasoning level, including `inherit` and `auto`. |
 | `historian.temperature`, `top_p`, `prompt`, `tools`, `disable`, `description`, `mode`, `color`, `maxSteps`, `permission`, `maxTokens`, `two_pass`, `disallowed_tools` | metadata | Retained at `historian`; these fields never move into a harness block. |
 
 ---
@@ -541,6 +552,13 @@ Dreamer scheduling and agent metadata remain at `dreamer`, while task execution 
       "tasks": {
         "verify": { "timeout_minutes": 30, "thinking_level": "medium" }
       }
+    },
+    "omp": {
+      "model": { "model": "opencode/gpt-5.4", "thinking_level": "auto" },
+      "fallback_models": ["openai/gpt-5.4"],
+      "tasks": {
+        "verify": { "timeout_minutes": 30, "thinking_level": "inherit" }
+      }
     }
   }
 }
@@ -550,8 +568,10 @@ Dreamer scheduling and agent metadata remain at `dreamer`, while task execution 
 |----------|----------------|-------------|
 | `dreamer.opencode` | `model`, `fallback_models`, `variant`, `tasks` | Strict OpenCode execution block. `fallback_models` is an array of OpenCode entries. |
 | `dreamer.pi` | `model`, `fallback_models`, `thinking_level`, `tasks` | Strict Pi execution block. `fallback_models` is an array of Pi entries. |
+| `dreamer.omp` | `model`, `fallback_models`, `thinking_level`, `tasks` | Strict OMP execution block; absent block falls back to `dreamer.pi`. |
 | `dreamer.opencode.tasks.<task>` | `model`, `fallback_models`, `variant`, `timeout_minutes` | Strict OpenCode task execution override. |
 | `dreamer.pi.tasks.<task>` | `model`, `fallback_models`, `thinking_level`, `timeout_minutes` | Strict Pi task execution override. |
+| `dreamer.omp.tasks.<task>` | `model`, `fallback_models`, `thinking_level`, `timeout_minutes` | Strict OMP task execution override. |
 | `dreamer.tasks.<task>` | `schedule`, `promotion_threshold` | Harness-independent task metadata. `schedule: ""` disables the task; there is no separate `enabled` key. |
 | `dreamer.temperature`, `top_p`, `prompt`, `tools`, `disable`, `description`, `mode`, `color`, `maxSteps`, `permission`, `maxTokens`, `inject_docs` | metadata | Retained at `dreamer`; these fields never move into a harness block. |
 

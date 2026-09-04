@@ -19,14 +19,15 @@ const UPDATE_POLL_INTERVAL = 10 * 60 * 1000; // 10 minutes
 function loadCachedModelCatalogs(): ModelCatalogs {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(MODEL_CATALOGS_CACHE_KEY) ?? "{}");
-    if (!parsed || typeof parsed !== "object") return { opencode: [], pi: [] };
+    if (!parsed || typeof parsed !== "object") return { opencode: [], pi: [], omp: [] };
     const catalogs = parsed as Partial<ModelCatalogs>;
     return {
       opencode: Array.isArray(catalogs.opencode) ? catalogs.opencode : [],
       pi: Array.isArray(catalogs.pi) ? catalogs.pi : [],
+      omp: Array.isArray(catalogs.omp) ? catalogs.omp : [],
     };
   } catch {
-    return { opencode: [], pi: [] };
+    return { opencode: [], pi: [], omp: [] };
   }
 }
 

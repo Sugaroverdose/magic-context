@@ -307,6 +307,19 @@ describe("MagicContextConfigSchema", () => {
                                 },
                                 thinking_level: "high",
                             },
+                            omp: {
+                                model: {
+                                    model: "opencode/work-historian",
+                                    thinking_level: "auto",
+                                },
+                                fallback_models: [
+                                    {
+                                        model: "opencode/work-historian-fallback",
+                                        thinking_level: "inherit",
+                                    },
+                                ],
+                                thinking_level: "max",
+                            },
                         },
                         dreamer: {
                             opencode: {
@@ -329,6 +342,16 @@ describe("MagicContextConfigSchema", () => {
                                 ],
                                 thinking_level: "high",
                             },
+                            omp: {
+                                model: "opencode/work-dreamer",
+                                fallback_models: [
+                                    {
+                                        model: "opencode/work-dreamer-fallback",
+                                        thinking_level: "auto",
+                                    },
+                                ],
+                                thinking_level: "inherit",
+                            },
                         },
                         sidekick: {
                             model: "anthropic/work-sidekick",
@@ -349,6 +372,10 @@ describe("MagicContextConfigSchema", () => {
             expect(result.profiles?.work?.dreamer?.pi?.fallback_models).toEqual([
                 { model: "openai/work-dreamer-fallback", thinking_level: "minimal" },
             ]);
+            expect(result.profiles?.work?.historian?.omp?.fallback_models).toEqual([
+                { model: "opencode/work-historian-fallback", thinking_level: "inherit" },
+            ]);
+            expect(result.profiles?.work?.dreamer?.omp?.thinking_level).toBe("inherit");
             expect(result.profiles?.work?.sidekick?.model).toBe("anthropic/work-sidekick");
         });
 
@@ -484,6 +511,14 @@ describe("MagicContextConfigSchema", () => {
                         fallback_models: ["openai/gpt-5.4"],
                         thinking_level: "medium",
                     },
+                    omp: {
+                        model: {
+                            model: "opencode/gpt-5.4",
+                            thinking_level: "auto",
+                        },
+                        fallback_models: [{ model: "openai/gpt-5.4", thinking_level: "inherit" }],
+                        thinking_level: "max",
+                    },
                 },
                 dreamer: {
                     disable: false,
@@ -518,6 +553,29 @@ describe("MagicContextConfigSchema", () => {
                             },
                         },
                     },
+                    omp: {
+                        model: "opencode/gpt-5.4",
+                        fallback_models: [
+                            { model: "opencode/gpt-5.4-mini", thinking_level: "auto" },
+                        ],
+                        thinking_level: "inherit",
+                        tasks: {
+                            verify: {
+                                model: {
+                                    model: "opencode/gpt-5.4",
+                                    thinking_level: "max",
+                                },
+                                fallback_models: [
+                                    {
+                                        model: "opencode/gpt-5.4-mini",
+                                        thinking_level: "off",
+                                    },
+                                ],
+                                thinking_level: "auto",
+                                timeout_minutes: 30,
+                            },
+                        },
+                    },
                 },
             });
 
@@ -527,12 +585,18 @@ describe("MagicContextConfigSchema", () => {
                 promotion_threshold: 4,
             });
             expect(result.dreamer?.opencode?.tasks?.verify?.timeout_minutes).toBe(30);
+            expect(result.historian?.omp?.model).toEqual({
+                model: "opencode/gpt-5.4",
+                thinking_level: "auto",
+            });
+            expect(result.dreamer?.omp?.tasks?.verify?.thinking_level).toBe("auto");
         });
 
         it("rejects cross-harness vocabulary, non-array fallbacks, and execution fields at metadata depth", () => {
             const invalidConfigs = [
                 { historian: { opencode: { thinking_level: "high" } } },
                 { historian: { pi: { variant: "high" } } },
+                { historian: { omp: { variant: "high" } } },
                 {
                     dreamer: {
                         opencode: { tasks: { verify: { thinking_level: "high" } } },

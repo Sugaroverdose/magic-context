@@ -154,7 +154,7 @@ export function registerCtxWrapupCommand(
 			if (!currentDeps.historianModel) {
 				sendStatus({
 					title: "/ctx-wrapup",
-					text: "## Magic Wrapup\n\n/ctx-wrapup is unavailable because `historian.model` is not configured.",
+					text: "## Magic Wrapup\n\n/ctx-wrapup is unavailable because the active harness's historian model is not configured.",
 					level: "error",
 				});
 				return;

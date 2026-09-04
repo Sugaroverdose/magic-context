@@ -64,6 +64,7 @@ function dreamerOptions(args: {
 	projectDir?: string;
 	registrationOwner?: object;
 	config?: DreamerConfig;
+	harness?: "pi" | "omp";
 	language?: string;
 	onAdjunctsRefreshNeeded?: (projectIdentity: string) => void;
 }) {
@@ -75,6 +76,7 @@ function dreamerOptions(args: {
 		projectIdentity: args.projectIdentity,
 		registrationOwner: args.registrationOwner ?? {},
 		config: args.config ?? enabledConfig(),
+		harness: args.harness ?? "pi",
 		embeddingConfig: { provider: "off" as const },
 		memoryEnabled: true,
 		language: args.language,
@@ -262,6 +264,30 @@ describe("Pi dreamer wiring", () => {
 
 		expect(registration?.memoryEnabled).toBe(true);
 		expect(registration?.embeddingConfig?.provider).toBe("local");
+	});
+
+	test("threads OMP identity into scheduled dreamer model resolution", async () => {
+		db = createDb();
+		let harness: string | undefined;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			harness = registration.harness;
+			return mock(() => {});
+		});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:omp-model-resolution",
+				harness: "omp",
+				config: DreamerConfigSchema.parse({
+					pi: { model: "pi/fallback" },
+					omp: { model: "omp/selected" },
+				}),
+			}),
+		);
+		await flushMicrotasks();
+
+		expect(harness).toBe("omp");
 	});
 
 	test("threads language into scheduled dreamer registration", async () => {

@@ -553,6 +553,7 @@ export default function CacheDiagnostics() {
               { value: "all", label: "Harness: All" },
               { value: "opencode", label: "OpenCode" },
               { value: "pi", label: "Pi" },
+              { value: "omp", label: "OMP" },
               { value: "claude_code", label: "Claude Code" },
               { value: "codex", label: "Codex" },
             ]}

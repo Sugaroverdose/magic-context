@@ -156,9 +156,10 @@ import { loadDefaultPiSessionApi } from "./dreamer/pi-session-api";
 import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { resolvePiUsableContextLimit } from "./pi-context-limit";
+import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
-import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
+import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -183,7 +184,8 @@ import {
 	setTodoSnapshot,
 } from "./tools/todo-view-pi";
 
-const PREFIX = "[magic-context][pi]";
+const PI_HARNESS_KIND = resolvePiHarnessKind();
+const PREFIX = `[magic-context][${PI_HARNESS_KIND}]`;
 
 // ---------------------------------------------------------------------------
 // In-process child guard (issue #247)
@@ -640,7 +642,7 @@ const PLUGIN_VERSION: string = (() => {
 
 /** Lock the harness at module load. Safe to import this file in tests; the
  * lock is idempotent and will throw only on a conflicting reset. */
-setHarness("pi");
+setHarness(PI_HARNESS_KIND);
 
 // ---------------------------------------------------------------------------
 // Config-driven resolvers
@@ -676,13 +678,14 @@ export function resolveSidekickFromConfig(
 
 export function resolveHistorianFromConfig(
 	config: MagicContextConfig,
+	harness: PiHarnessKind = PI_HARNESS_KIND,
 ): PiHistorianOptions | undefined {
 	// Defensive: schema declares `historian` required with default {}, but the
 	// runtime config can come from a malformed JSONC merge that drops the
 	// field. Fall back to undefined-safe access so plugin load never crashes.
 	const historian = config.historian as HistorianConfig | undefined;
 	if (historian?.disable === true) return undefined;
-	const resolved = resolveHistorianModel(config, "pi");
+	const resolved = resolveHistorianModel(config, harness);
 	const model = resolved.primary?.model;
 	if (!model) return undefined;
 
@@ -712,7 +715,7 @@ export function resolveHistorianFromConfig(
 		// historian round-trip's latency and token cost. Enable for
 		// long sessions where chunk dedupe matters more than speed.
 		twoPass: historian?.two_pass === true,
-		// Pi only: explicit thinking level for historian subagent invocations.
+		// Pi and OMP: explicit thinking level for historian subagent invocations.
 		// When set, passed as --thinking <level> to Pi subprocess.
 		// Required for providers like GitHub Copilot that apply bad defaults.
 		thinkingLevel: resolved.primary?.qualifier,
@@ -978,7 +981,7 @@ async function startPiMagicContextRuntime(
 			cwd: projectDir,
 		});
 	const promptSurfaceRuntime = createPromptSurfaceRuntime({
-		harness: "pi",
+		harness: PI_HARNESS_KIND,
 		directory: projectDir,
 		warn: (message) => warn(`config: ${message}`),
 	});
@@ -989,7 +992,7 @@ async function startPiMagicContextRuntime(
 		"";
 	if (projectIdentity) seenDreamerProjectIdentities.add(projectIdentity);
 	info(
-		`loaded v${PLUGIN_VERSION} | harness=pi | db=${dbPath} | ` +
+		`loaded v${PLUGIN_VERSION} | harness=${PI_HARNESS_KIND} | db=${dbPath} | ` +
 			`project=${projectIdentity} | dir=${projectDir}`,
 	);
 	// Pi tools are registered once per process, so this mode is intentionally
@@ -1216,6 +1219,7 @@ async function startPiMagicContextRuntime(
 			projectIdentity: current.projectIdentity,
 			registrationOwner: dreamerRegistrationOwner,
 			config: current.dreamerConfig,
+			harness: PI_HARNESS_KIND,
 			// Council finding #7: thread real embedding + memory config so
 			// dreamer can do semantic dedup AND can write memory updates.
 			// Previously hardcoded to off/false, making most dreamer tasks
@@ -1319,7 +1323,7 @@ async function startPiMagicContextRuntime(
 	info(
 		bootProjectDeps.historianConfig
 			? `registered historian trigger (model=${bootProjectDeps.historianConfig.model}, executeThreshold=${formatExecuteThresholdForLog(bootProjectDeps.historianConfig.executeThresholdPercentage)})`
-			: "registered historian trigger: DISABLED (set historian.model in magic-context.jsonc)",
+			: "registered historian trigger: DISABLED (configure the active harness's historian model in magic-context.jsonc)",
 	);
 	info(
 		bootProjectDeps.autoSearchConfig.enabled

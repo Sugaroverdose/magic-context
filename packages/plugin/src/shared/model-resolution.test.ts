@@ -130,6 +130,67 @@ describe("model-resolution", () => {
         });
     });
 
+    test("uses OMP blocks first, falls back to Pi blocks, then preserves existing defaults", () => {
+        const configured = {
+            historian: {
+                pi: {
+                    model: { model: "pi/historian", thinking_level: "high" },
+                    fallback_models: ["pi/historian-fallback"],
+                },
+                omp: {
+                    model: { model: "omp/historian", thinking_level: "auto" },
+                    fallback_models: [{ model: "omp/historian-fallback", thinking_level: "max" }],
+                },
+            },
+            dreamer: {
+                tasks: { verify: { schedule: "0 3 * * *" } },
+                pi: {
+                    model: "pi/dreamer",
+                    tasks: { verify: { model: "pi/verify" } },
+                },
+                omp: {
+                    model: "omp/dreamer",
+                    tasks: {
+                        verify: {
+                            model: { model: "omp/verify", thinking_level: "inherit" },
+                        },
+                    },
+                },
+            },
+        };
+
+        expect(resolveHistorianModel(configured, "omp")).toEqual({
+            primary: { model: "omp/historian", qualifier: "auto" },
+            fallbacks: [{ model: "omp/historian-fallback", qualifier: "max" }],
+        });
+        expect(
+            resolveDreamerTaskModel({ config: configured, harness: "omp", task: "verify" }),
+        ).toMatchObject({ primary: { model: "omp/verify", qualifier: "inherit" } });
+
+        const piFallback = {
+            historian: configured.historian,
+            dreamer: { ...configured.dreamer, omp: undefined },
+        };
+        delete (piFallback.historian as { omp?: unknown }).omp;
+        expect(resolveHistorianModel(piFallback, "omp")?.primary).toEqual({
+            model: "pi/historian",
+            qualifier: "high",
+        });
+        expect(
+            resolveDreamerTaskModel({ config: piFallback, harness: "omp", task: "verify" }),
+        ).toMatchObject({ primary: { model: "pi/verify" } });
+
+        expect(resolveHistorianModel({}, "omp")).toEqual({ fallbacks: [] });
+        const existingDefaults = resolveDreamerTaskModel({
+            config: { dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } } },
+            harness: "omp",
+            task: "verify",
+        });
+        expect(existingDefaults.primary).toBeUndefined();
+        expect(existingDefaults.fallbacks).toEqual([]);
+        expect(existingDefaults.schedule).toBe("0 3 * * *");
+    });
+
     test("resolves ordinary task model and scheduling without crossing harnesses", () => {
         const config = {
             dreamer: {
