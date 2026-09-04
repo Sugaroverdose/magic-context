@@ -32,7 +32,12 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
-import { getTailHygieneTags } from "../../features/magic-context/storage-tags";
+import { getTrailingBlankDecisions } from "../../features/magic-context/storage-meta-persisted";
+import {
+    getTailHygieneTags,
+    insertTag,
+    markWhitespaceAssistantTagInert,
+} from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
@@ -732,6 +737,125 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             expect(getTagsBySession(db, sessionId)).toHaveLength(tagsAfterFold.length);
         });
     }
+
+    it("keeps a tagged whitespace shell byte-identical after a marker-advance drain", async () => {
+        useTempDataHome("ctx-busting-marker-whitespace-shell-");
+        const sessionId = "ses-marker-whitespace-shell";
+        const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const deferredMaterializationSessions = new Set<string>();
+        let decision: "execute" | "defer" = "execute";
+        const sourceMessages = (includeBlank: boolean, includeTool: boolean): TestMessage[] => [
+            {
+                info: { id: "marker-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "marker boundary" }],
+            },
+            {
+                info: { id: "retained-head-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "retained head" }],
+            },
+            {
+                info: { id: "blank-owner", role: "assistant", sessionID: sessionId },
+                parts: [
+                    ...(includeBlank ? ([{ type: "text", text: " " }] as TestPart[]) : []),
+                    ...(includeTool
+                        ? ([
+                              {
+                                  type: "tool",
+                                  callID: "drained-tool",
+                                  state: { output: "old tool output", tool: "read" },
+                              },
+                          ] as TestPart[])
+                        : []),
+                ],
+            },
+            {
+                info: { id: "target-assistant", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "The static flag didn't take" }],
+            },
+            {
+                info: { id: "tail-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+        ];
+        insertTag(db, sessionId, "blank-owner:p0", "message", 1, 16778, 0, null, 0, null, null, {
+            tokenCount: 0,
+            inputTokenCount: null,
+            reasoningTokenCount: null,
+        });
+        markWhitespaceAssistantTagInert(db, sessionId, 16778, "blank-owner:p0");
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => decision) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            liveModelBySession: new Map([
+                [sessionId, { providerID: "anthropic", modelID: "anthropic-test-model" }],
+            ]),
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            deferredHistoryRefreshSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+        });
+
+        await transform({}, { messages: sourceMessages(true, true) });
+        expect(getTrailingBlankDecisions(db, sessionId).get("blank-owner")).toBe("strip");
+        const toolTag = getTagsBySession(db, sessionId).find(
+            (tag) => tag.type === "tool" && tag.messageId === "drained-tool",
+        );
+        expect(toolTag).toBeDefined();
+        queuePendingOp(db, sessionId, toolTag!.tagNumber, "drop");
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "marker-user",
+                    endMessageId: "marker-user",
+                    title: "advanced marker",
+                    content: "folded marker prefix",
+                },
+            ],
+            [],
+        );
+        deferredHistoryRefreshSessions.add(sessionId);
+        deferredMaterializationSessions.add(sessionId);
+
+        const foldMessages = sourceMessages(true, false);
+        await transform({}, { messages: foldMessages });
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        const foldAssistant = (
+            JSON.parse(serializeProviderWire(foldMessages, "anthropic")) as Array<{
+                role: string;
+                content: TestPart[];
+            }>
+        ).find((message) => JSON.stringify(message).includes("The static flag didn't take"));
+
+        decision = "defer";
+        const replayMessages = sourceMessages(false, false).slice(1);
+        await transform({}, { messages: replayMessages });
+        const replayAssistant = (
+            JSON.parse(serializeProviderWire(replayMessages, "anthropic")) as Array<{
+                role: string;
+                content: TestPart[];
+            }>
+        ).find((message) => JSON.stringify(message).includes("The static flag didn't take"));
+
+        expect(replayAssistant).toEqual(foldAssistant);
+    });
 
     it("Fable 5.1 variant change keeps the next pass deferred and pending ops untouched", async () => {
         useTempDataHome("ctx-fable-variant-defer-");

@@ -1,5 +1,6 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { isSentinel, makeSentinel, makeWholeMessageSentinel } from "./sentinel";
+import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 const DROPPED_PLACEHOLDER_PATTERN = /^\[dropped §\d+§\]$/;
@@ -605,7 +606,7 @@ function isSentinelInvisibleTextPart(part: unknown): boolean {
         isRecord(part) &&
         part.type === "text" &&
         typeof part.text === "string" &&
-        part.text.trim() === ""
+        stripWellFormedLeadingTagPrefix(part.text).trim() === ""
     );
 }
 
