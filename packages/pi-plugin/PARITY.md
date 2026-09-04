@@ -238,27 +238,49 @@ the harness I/O differs:
 
 - **Channel 2 (hidden ceiling nudge).** OpenCode MUST use a live-server
   `createOpencodeClient(serverUrl)` + `/session` probe to dodge the plugin
-  runner-split bug (anomalyco/opencode#28202); Pi just calls the native
-  `pi.sendMessage({ customType, content, display:false, details }, { deliverAs })`.
-  **Pi has no #28202 workaround, no live-server client, and no probe** — it is
-  single-process, so the message coalesces natively and lands at the tail after
-  the current turn. **Hidden-render divergence (same intent, different mechanism):**
-  OpenCode marks its promptAsync part `synthetic: true` (skips OC core's
-  queued-message wrapper + the #129 flip-bust, drops from the user-message render,
-  still model-visible); Pi has no such wrapper, so it achieves the same
-  "model-visible but not a literal user turn" via a `sendMessage` custom message
-  with `display:false` (Pi converts `role:"custom"`→user message for the model
-  via convertToLlm, renders only when `display:true`). Neither presents the nudge
-  as a user turn. The shared `channel2_nudge_state` lease
-  (pending→claimed→delivered, TTL-scoped stale-claim heal, revert only on send
-  failure) is used identically for the one-ceiling-per-lifetime cap; only the
-  delivery call differs. Delivery timing follows each host's safe queue surface:
-  OpenCode emits from `message.updated` (finish=tool-calls OR stop), and its
-  synthetic queued message drains at the next run-loop step. Pi calls the same
-  token-bound delivery helper from `tool_result`, with clean-stop `agent_end` as
-  the fallback, but always uses `deliverAs: "nextTurn"`. That queue joins the next
-  real user turn instead of steering the active turn or starting an autonomous
-  follow-up that could race an external prompt.
+  runner-split bug (anomalyco/opencode#28202); Pi calls native
+  `pi.sendMessage({ customType, content, display:false, details },
+  { deliverAs:"steer", triggerTurn:true })`. **Pi has no #28202 workaround,
+  live-server client, or probe** — it is single-process. **Hidden-render
+  divergence (same intent, different mechanism):** OpenCode marks its promptAsync
+  part `synthetic: true` (skips OC core's queued-message wrapper + the #129
+  flip-bust, drops from the user-message render, still model-visible); Pi has no
+  such wrapper, so `display:false` keeps the custom row out of the TUI while
+  `convertToLlm` presents it to the model. Neither presents the nudge as a literal
+  user turn.
+
+  `steer` is the shared Pi/oh-my-pi (OMP) boundary contract. During a busy Pi 0.83.0 run it
+  queues the custom row; the [parallel executor finishes every scheduled
+  tool](https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/agent/src/agent-loop.ts#L489-L554),
+  then the [loop injects steering before the next model
+  call](https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/agent/src/agent-loop.ts#L181-L193).
+  OMP 18.1.7 likewise awaits the current batch before its next model boundary
+  ([interrupt classification](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/agent/src/agent-loop.ts#L2478-L2517),
+  [result pairing and skip rules](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/agent/src/agent-loop.ts#L2560-L2579),
+  [await and injection boundary](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/agent/src/agent-loop.ts#L2781-L2889)).
+  Ordinary tools are never skipped. OMP may cancel only tools that explicitly opt
+  into interruption (currently pure waits such as `hub wait`/`vibe`), and emits
+  synthetic skipped results so every tool call remains paired. When idle,
+  `triggerTurn:true` starts a model turn with the nudge on both [Pi](https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/src/core/agent-session.ts#L1450-L1462)
+  and [OMP](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/coding-agent/src/session/agent-session.ts#L7126-L7142),
+  matching OpenCode's idle `promptAsync` behavior.
+
+  Do not restore `nextTurn`: Pi stores it until the next explicit user prompt, so
+  a marathon turn never sees Channel 2. OMP's [public hook
+  type](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/coding-agent/src/extensibility/hooks/types.ts#L512-L532)
+  exposes only `steer | followUp`, even though the [session runtime has hidden
+  `nextTurn`/`aside` branches](https://github.com/can1357/oh-my-pi/blob/c4da0d08e8275659f3e09cf381c7df7018a19025/packages/coding-agent/src/session/agent-session.ts#L7019-L7073).
+  Hook forwarding performs no runtime validation: an unknown busy-run value falls
+  through to steer, while an idle one appends without starting a turn. That
+  coercion and the hidden modes are not a supported integration surface.
+
+  The shared `channel2_nudge_state` lease keeps its three-state
+  pending→claimed→delivered path, token-bound confirm/revert, ten-minute stale
+  claim reap, and one-ceiling-per-tail-cycle cap. Coverage-advancing HARD folds
+  and measured U collapse still re-arm the cycle; delivery mode does not alter
+  compliance grace. OpenCode emits at `message.updated` (finish=tool-calls OR
+  stop). Pi calls the token-bound helper from `tool_result`, with clean-stop
+  `agent_end` as fallback.
 
 - **Removed in this redesign (both harnesses):** the rolling/iteration nudge
   (`nudger`/`injectPiNudge`/`nudge-injector.ts`) and the tool-heavy sticky reminder

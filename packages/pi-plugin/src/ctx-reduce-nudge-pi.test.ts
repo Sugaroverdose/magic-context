@@ -639,12 +639,117 @@ describe("maybeDeliverChannel2Pi", () => {
 		});
 	}
 
-	it("regression: queues the model-visible ceiling nudge for the next real turn", () => {
+	type TimelineMessage = {
+		customType: string;
+		content: string;
+		display: boolean;
+	};
+
+	type TimelineOptions = {
+		deliverAs?: "steer" | "followUp" | "nextTurn";
+		triggerTurn?: boolean;
+	};
+
+	function createPiDeliveryTimeline(streaming: boolean) {
+		const transcript: string[] = [];
+		const steerQueue: TimelineMessage[] = [];
+		const followUpQueue: TimelineMessage[] = [];
+		const nextTurnQueue: TimelineMessage[] = [];
+		let deliveredOptions: TimelineOptions | undefined;
+		const appendNudge = () => transcript.push("channel2-nudge");
+
+		return {
+			transcript,
+			steerQueue,
+			followUpQueue,
+			nextTurnQueue,
+			get deliveredOptions() {
+				return deliveredOptions;
+			},
+			api: {
+				sendMessage(message: TimelineMessage, options?: TimelineOptions) {
+					deliveredOptions = options;
+					if (options?.deliverAs === "nextTurn") {
+						nextTurnQueue.push(message);
+						return;
+					}
+					if (streaming) {
+						(options?.deliverAs === "followUp"
+							? followUpQueue
+							: steerQueue
+						).push(message);
+						return;
+					}
+					appendNudge();
+					if (options?.triggerTurn) transcript.push("model-call:idle");
+				},
+			},
+			startNextModelCall() {
+				for (const _message of steerQueue.splice(0)) appendNudge();
+				transcript.push("model-call:2");
+			},
+		};
+	}
+
+	it("steers a busy turn after every current-step tool result and before the next model call", () => {
+		const db = createTestDb();
+		const sessionId = "ses-ch2-pi-busy-steer";
+		const host = createPiDeliveryTimeline(true);
+		const pendingToolCalls = new Set(["read", "bash"]);
+		host.transcript.push("model-call:1", "tool-call:read", "tool-call:bash");
+		const finishTool = (toolName: string) => {
+			pendingToolCalls.delete(toolName);
+			host.transcript.push(`tool-result:${toolName}`);
+		};
+
+		setChannel2NudgeState(db, sessionId, "pending");
+		armStrongBaseline(sessionId);
+		finishTool("read");
+		expect([...pendingToolCalls]).toEqual(["bash"]);
+		expect(maybeDeliverChannel2Pi(host.api as never, db, sessionId)).toBe(true);
+		finishTool("bash");
+		host.startNextModelCall();
+
+		expect([...pendingToolCalls]).toEqual([]);
+		expect(
+			host.transcript.filter((entry) => entry.startsWith("tool-result:")),
+		).toEqual(["tool-result:read", "tool-result:bash"]);
+		const lastToolResultPosition = host.transcript.indexOf("tool-result:bash");
+		const nudgePosition = host.transcript.indexOf("channel2-nudge");
+		const nextModelCallPosition = host.transcript.indexOf("model-call:2");
+		expect(nudgePosition).toBe(5);
+		expect(lastToolResultPosition).toBeLessThan(nudgePosition);
+		expect(nudgePosition).toBeLessThan(nextModelCallPosition);
+		expect(host.nextTurnQueue).toHaveLength(0);
+		expect(host.deliveredOptions).toEqual({
+			deliverAs: "steer",
+			triggerTurn: true,
+		});
+	});
+
+	it("starts an idle turn with the nudge, matching OpenCode promptAsync", () => {
+		const db = createTestDb();
+		const sessionId = "ses-ch2-pi-idle-steer";
+		const host = createPiDeliveryTimeline(false);
+		setChannel2NudgeState(db, sessionId, "pending");
+		armStrongBaseline(sessionId);
+
+		expect(maybeDeliverChannel2Pi(host.api as never, db, sessionId)).toBe(true);
+		expect(host.transcript).toEqual(["channel2-nudge", "model-call:idle"]);
+		expect(host.nextTurnQueue).toHaveLength(0);
+		expect(host.deliveredOptions).toEqual({
+			deliverAs: "steer",
+			triggerTurn: true,
+		});
+	});
+
+	it("delivers the model-visible ceiling nudge as a hidden steer", () => {
 		const db = createTestDb();
 		setChannel2NudgeState(db, SESSION, "pending");
 		armStrongBaseline(SESSION);
 		let capturedContent = "";
 		let capturedDeliverAs = "";
+		let capturedTriggerTurn: boolean | undefined;
 		let capturedDisplay: boolean | undefined;
 		let capturedCustomType = "";
 		const delivered = maybeDeliverChannel2Pi(
@@ -654,13 +759,15 @@ describe("maybeDeliverChannel2Pi", () => {
 					capturedDisplay = message.display;
 					capturedCustomType = message.customType;
 					capturedDeliverAs = options?.deliverAs ?? "";
+					capturedTriggerTurn = options?.triggerTurn;
 				},
 			},
 			db,
 			SESSION,
 		);
 		expect(delivered).toBe(true);
-		expect(capturedDeliverAs).toBe("nextTurn");
+		expect(capturedDeliverAs).toBe("steer");
+		expect(capturedTriggerTurn).toBe(true);
 		// Hidden from the Pi TUI as synthetic context but still model-visible.
 		expect(capturedDisplay).toBe(false);
 		expect(capturedCustomType).toBe("magic-context:ceiling-nudge");
@@ -672,7 +779,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
-	it("keeps the next-turn nudge row byte-identical when the intent is served again", () => {
+	it("keeps the steer nudge row byte-identical when the intent is served again", () => {
 		const db = createTestDb();
 		const sessionId = "ses-ch2-pi-byte-freeze";
 		const payloads: string[] = [];
