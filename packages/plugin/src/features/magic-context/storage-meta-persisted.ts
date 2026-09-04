@@ -13,6 +13,7 @@ import type { ContextUsage } from "./types";
 const emergencyRecoveryArmedSessions = new Set<string>();
 const emergencyRecoveryArmedAtBySession = new Map<string, number>();
 const providerOverflowReconfirmedSessions = new Set<string>();
+const providerOverflowKnownLimitSessions = new Set<string>();
 
 export function isEmergencyRecoveryArmed(sessionId: string): boolean {
     return emergencyRecoveryArmedSessions.has(sessionId);
@@ -20,6 +21,13 @@ export function isEmergencyRecoveryArmed(sessionId: string): boolean {
 
 export function isProviderOverflowReconfirmed(sessionId: string): boolean {
     return providerOverflowReconfirmedSessions.has(sessionId);
+}
+
+export function isProviderOverflowFailClosedProven(sessionId: string): boolean {
+    return (
+        providerOverflowKnownLimitSessions.has(sessionId) ||
+        providerOverflowReconfirmedSessions.has(sessionId)
+    );
 }
 
 export function getEmergencyRecoveryArmedAt(sessionId: string): number | null {
@@ -30,6 +38,7 @@ export function resetEmergencyRecoveryRegistryForTest(): void {
     emergencyRecoveryArmedSessions.clear();
     emergencyRecoveryArmedAtBySession.clear();
     providerOverflowReconfirmedSessions.clear();
+    providerOverflowKnownLimitSessions.clear();
 }
 
 interface PersistedUsageRow {
@@ -2004,6 +2013,9 @@ export function recordOverflowDetected(
     // Arm before the durable write so an unreadable or failed write remains fail-closed.
     emergencyRecoveryArmedSessions.add(sessionId);
     emergencyRecoveryArmedAtBySession.set(sessionId, Date.now());
+    if (origin === "provider_overflow" && typeof reportedLimit === "number" && reportedLimit > 0) {
+        providerOverflowKnownLimitSessions.add(sessionId);
+    }
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         const prior = db
@@ -2079,6 +2091,7 @@ export function clearEmergencyRecovery(db: Database, sessionId: string): void {
     emergencyRecoveryArmedSessions.delete(sessionId);
     emergencyRecoveryArmedAtBySession.delete(sessionId);
     providerOverflowReconfirmedSessions.delete(sessionId);
+    providerOverflowKnownLimitSessions.delete(sessionId);
 }
 
 /**

@@ -32,6 +32,7 @@ import {
     getOverflowState,
     getPersistedTodoPermissionDenied,
     isEmergencyRecoveryArmed,
+    isProviderOverflowFailClosedProven,
     isProviderOverflowReconfirmed,
     loadProtectedTailMeta,
     setPersistedTodoPermissionDenied,
@@ -1793,8 +1794,10 @@ export function createRustModeTransform(
             ? transformGeometry.usable_hard > 0
             : resolvedContextLimit !== undefined && resolvedContextLimit > 0;
         emergencyFailClosed =
-            hardWallUsagePercentage(passUsageSnapshot, transformGeometry) >=
-                RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall;
+            isProviderOverflowFailClosedProven(sessionId) ||
+            (hardWallUsagePercentage(passUsageSnapshot, transformGeometry) >=
+                RUST_EMERGENCY_WALL_PCT &&
+                hasTrustedEmergencyWall);
         if (overflowState) {
             const detectedLimitMatchesModel =
                 overflowState.detectedContextLimitModelKey === null ||

@@ -61,10 +61,7 @@ import {
 	openDatabaseAsync,
 	setSqlitePragmaConfig,
 } from "@magic-context/core/features/magic-context/storage-db";
-import {
-	getOverflowState,
-	recordOverflowDetected,
-} from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { getOverflowState } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { runDeferredV22Backfill } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
 import { setCtxReduceRegisteredGlobally } from "@magic-context/core/hooks/magic-context/ctx-reduce-availability";
 import {
@@ -160,6 +157,7 @@ import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { resolvePiUsableContextLimit } from "./pi-context-limit";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
+import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
@@ -2254,67 +2252,34 @@ async function startPiMagicContextRuntime(
 			warn("message_end: persist session_meta usage failed:", err);
 		}
 
-		// Overflow recovery: if Pi's assistant message ended with a
-		// provider context-overflow error (`message.errorMessage` matches
-		// a known overflow pattern), record the recovery flag in
-		// session_meta so the next transform pass treats this session as
-		// "needs emergency recovery" — historian fires immediately, drop-
-		// all-tools applies, and pressure math uses the real
-		// detected_context_limit if the error reported one.
-		//
-		// Pi populates `errorMessage` on the assistant message when the
-		// underlying API call fails (we saw exactly this pattern in the
-		// Codex `context_length_exceeded` failure that motivated this
-		// work). The provider-agnostic `detectOverflow` helper from
-		// shared core matches Anthropic, OpenAI, Codex/OpenAI, xAI,
-		// Cerebras, GitHub Copilot, OpenRouter, Ollama, vLLM, Mistral,
-		// MiniMax, Kimi, Gemini, and a generic fallback.
+		// Pi has no `session.error` event. Provider failures arrive on the assistant
+		// `message_end` payload, so classify both overflow and Fable thinking-binding
+		// failures here and persist the decision for the next context pass.
 		try {
-			if (compactionOff) return;
 			const sm = ctx.sessionManager as
 				| { getSessionId?: () => string | undefined }
 				| undefined;
 			const sessionId = sm?.getSessionId?.();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
-			const msgRaw = event.message as unknown;
-			if (!msgRaw || typeof msgRaw !== "object") return;
-			const msg = msgRaw as {
-				role?: string;
-				errorMessage?: string;
-				provider?: string;
-				model?: string;
-			};
-			if (msg.role !== "assistant") return;
-			if (
-				typeof msg.errorMessage !== "string" ||
-				msg.errorMessage.length === 0
-			) {
-				return;
-			}
-			const detection = detectOverflow(msg.errorMessage);
-			if (!detection.isOverflow) return;
-			const modelKey =
-				typeof msg.provider === "string" &&
-				typeof msg.model === "string" &&
-				msg.provider.length > 0 &&
-				msg.model.length > 0
-					? `${msg.provider}/${msg.model}`
-					: undefined;
-			recordOverflowDetected(
+			const recovery = handlePiProviderFailure({
 				db,
 				sessionId,
-				detection.reportedLimit,
-				modelKey,
-				"provider_overflow",
-				detection.reportedLimitProvenance,
-			);
-			log(
-				`[magic-context][${sessionId}] overflow detected: reportedLimit=${
-					detection.reportedLimit ?? "?"
-				} provenance=${detection.reportedLimitProvenance ?? "?"} pattern=${detection.matchedPattern ?? "?"}`,
-			);
+				message: event.message,
+				compactionOff,
+			});
+			if (recovery.kind === "overflow") {
+				log(
+					`[magic-context][${sessionId}] overflow detected: reportedLimit=${
+						recovery.reportedLimit ?? "?"
+					} provenance=${recovery.reportedLimitProvenance ?? "?"} pattern=${recovery.matchedPattern ?? "?"}`,
+				);
+			} else if (recovery.kind === "thinking_binding" && recovery.armed) {
+				log(
+					`[magic-context][${sessionId}] Fable thinking-binding recovery armed from message_end`,
+				);
+			}
 		} catch (err) {
-			warn("message_end: overflow detection failed:", err);
+			warn("message_end: provider failure classification failed:", err);
 		}
 	});
 
