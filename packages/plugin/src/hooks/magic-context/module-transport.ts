@@ -40,15 +40,15 @@ const CONNECT_BACKOFF_WAIT_JITTER_MS = 100;
 const HANDSHAKE_TIMEOUT_MS = 2_000;
 const MODULE_SEND_TIMEOUT_MS = 15_000;
 export const TRANSFORM_PAGE_UPLOAD_TIMEOUT_MS = 5_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 30_000;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 2;
-export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 120_000;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MS = 10_000;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_PER_MESSAGE_MS = 1;
+export const TRANSFORM_COLD_START_EXECUTE_TIMEOUT_MAX_MS = 60_000;
 
 /**
  * Cold execution includes full projection and native encoding after the final page lands.
- * ENGRAM's 7.4k-message seed completes module-side in about 6s, while ASTRO's 9.6k-message,
- * tool-heavy seed exceeded 31s under load. Preserve the 30s floor and add two milliseconds
- * per message, capped at two minutes: 44.8s for ENGRAM and 49.2s for ASTRO.
+ * The hermetic 9.6k-message/8k-tool cold gate completes module-side in 8.0s after the
+ * cold-path fixes. A 10s floor plus one millisecond per message leaves more than 2x margin:
+ * 17.4s for ENGRAM's 7.4k messages and 19.6s for ASTRO's 9.6k messages.
  */
 export function transformColdStartExecuteTimeoutMs(seedMessageCount: number): number {
     const messages = Number.isSafeInteger(seedMessageCount) ? Math.max(0, seedMessageCount) : 0;

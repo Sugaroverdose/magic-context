@@ -11,7 +11,10 @@ import {
 import type { MessageLike } from "./transform-operations";
 
 /** The maximum request page size accepted by the module facade. */
-export const MODULE_PAGE_MAX_BYTES = 512 * 1024;
+export const SUBC_MAX_FRAME_BODY_BYTES = 64 * 1024 * 1024;
+export const MODULE_PAGE_ENVELOPE_HEADROOM_BYTES = 16 * 1024 * 1024;
+export const MODULE_PAGE_MAX_BYTES =
+    SUBC_MAX_FRAME_BODY_BYTES - MODULE_PAGE_ENVELOPE_HEADROOM_BYTES;
 /** Large individual values are split so one message cannot exceed a page. */
 export const MODULE_ITEM_CONTINUATION_CHUNK_BYTES = 64 * 1024;
 // The module-side reassembler recognizes this continuation envelope for
@@ -294,12 +297,13 @@ export interface ModuleTransformWirePage {
 
 export function buildPagedModuleTransformPayloads(
     body: Record<string, unknown>,
+    pageMaxBytes = MODULE_PAGE_MAX_BYTES,
 ): ModuleTransformWirePage[] {
     // The unpaged path must stringify once to know it fits. Return that length so
     // the transport telemetry does not serialize the same body a second time.
     const serializedBody = JSON.stringify(body);
     const unpagedBytes = Buffer.byteLength(serializedBody);
-    if (unpagedBytes <= MODULE_PAGE_MAX_BYTES) return [{ page: body, bytes: unpagedBytes }];
+    if (unpagedBytes <= pageMaxBytes) return [{ page: body, bytes: unpagedBytes }];
 
     const arrayFields = [
         "input",
@@ -462,7 +466,7 @@ export function buildPagedModuleTransformPayloads(
                 complete: false,
                 arrayBytes: currentArrayBytes,
                 mapBytes: currentMapBytes,
-            }) <= MODULE_PAGE_MAX_BYTES;
+            }) <= pageMaxBytes;
         const appendArrayUnit = (field: string, value: unknown): boolean => {
             const valueBytes = serializedItemBytes(value);
             const previousBytes = currentArrayBytes[field] ?? 2;
@@ -550,7 +554,7 @@ export function buildPagedModuleTransformPayloads(
             arrays: currentArrays,
             maps: currentMaps,
         });
-        if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) {
+        if (finalPage.bytes > pageMaxBytes) {
             if (!hasUnits(currentArrays, currentMaps)) throw scalarTailError();
             flushCurrent();
             finalPage = makePage({
@@ -560,7 +564,7 @@ export function buildPagedModuleTransformPayloads(
                 arrays: currentArrays,
                 maps: currentMaps,
             });
-            if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) throw scalarTailError();
+            if (finalPage.bytes > pageMaxBytes) throw scalarTailError();
         }
         pages.push(finalPage);
         if (pages.length === assumedTotal) return pages;

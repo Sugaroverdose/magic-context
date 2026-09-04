@@ -1064,35 +1064,38 @@ function encodedSeedItemBytes(item: SeedItem): number {
     return Buffer.byteLength(encoded === undefined ? "null" : encoded);
 }
 
-export function buildPagedModuleStateSyncPayloads(args: {
-    moduleGeneration: number;
-    expectedShadowSeq: number;
-    seedId: string;
-    seedBoundaryId: string | null;
-    compartments: unknown[];
-    memories: unknown[];
-    memoryMutations: unknown[];
-    dropSeeds?: ModuleDropSeed[];
-    dropSeedSkipped?: number;
-    pendingDropSeeds?: ModulePendingDropSeed[];
-    pendingDropSkipped?: number;
-    noteNudgeAnchors?: ModuleNoteNudgeAnchorSeed[];
-    autoSearchHintSeeds?: ModuleAutoSearchHintSeed[];
-    autoSearchHintSkipped?: number;
-    todoSyntheticAnchor?: ModuleTodoSyntheticAnchorSeed | null;
-    emergencyLatches?: ModuleEmergencyLatchSeed;
-    pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
-    deferredExecuteState?: ModuleDeferredExecuteSeed | null;
-    channel2NudgeState?: string;
-    stripSeeds?: ModuleStripSeed[];
-    stripSeedSkipped?: number;
-    reasoningClearedThroughTag?: number;
-    userProfile: string[];
-    workspace: ModuleWorkspacePayload | null;
-    lastTodoState: string;
-    watermarks: ModuleWatermarks;
-    omitAuthorityMemorySections?: boolean;
-}): ModuleStateSyncPayload[] {
+export function buildPagedModuleStateSyncPayloads(
+    args: {
+        moduleGeneration: number;
+        expectedShadowSeq: number;
+        seedId: string;
+        seedBoundaryId: string | null;
+        compartments: unknown[];
+        memories: unknown[];
+        memoryMutations: unknown[];
+        dropSeeds?: ModuleDropSeed[];
+        dropSeedSkipped?: number;
+        pendingDropSeeds?: ModulePendingDropSeed[];
+        pendingDropSkipped?: number;
+        noteNudgeAnchors?: ModuleNoteNudgeAnchorSeed[];
+        autoSearchHintSeeds?: ModuleAutoSearchHintSeed[];
+        autoSearchHintSkipped?: number;
+        todoSyntheticAnchor?: ModuleTodoSyntheticAnchorSeed | null;
+        emergencyLatches?: ModuleEmergencyLatchSeed;
+        pendingCompactionMarker?: ModulePendingCompactionMarkerSeed | null;
+        deferredExecuteState?: ModuleDeferredExecuteSeed | null;
+        channel2NudgeState?: string;
+        stripSeeds?: ModuleStripSeed[];
+        stripSeedSkipped?: number;
+        reasoningClearedThroughTag?: number;
+        userProfile: string[];
+        workspace: ModuleWorkspacePayload | null;
+        lastTodoState: string;
+        watermarks: ModuleWatermarks;
+        omitAuthorityMemorySections?: boolean;
+    },
+    maxPageBytes = MODULE_PAGE_MAX_BYTES,
+): ModuleStateSyncPayload[] {
     const items: SeedItem[] = [
         ...args.compartments.map((value) => ({ kind: "compartment", value }) as const),
         ...(args.omitAuthorityMemorySections
@@ -1276,14 +1279,14 @@ export function buildPagedModuleStateSyncPayloads(args: {
         const itemBytes = encodedSeedItemBytes(item);
         const itemContribution = itemBytes + 1; // value bytes plus a conservative comma.
         const candidateBytes = envelopeMarginBytes + currentEncodedBytes + itemContribution;
-        if (currentItemCount > 0 && candidateBytes > MODULE_PAGE_MAX_BYTES) {
+        if (currentItemCount > 0 && candidateBytes > maxPageBytes) {
             pageBatches.push(current);
             current = emptyBatch();
             currentEncodedBytes = 0;
             currentItemCount = 0;
         }
-        if (envelopeMarginBytes + itemContribution > MODULE_PAGE_MAX_BYTES) {
-            throw new Error("module seed item exceeds the 512 KiB batch limit");
+        if (envelopeMarginBytes + itemContribution > maxPageBytes) {
+            throw new Error("module seed item exceeds the configured batch limit");
         }
         appendItem(current, item);
         currentEncodedBytes += itemContribution;
@@ -1308,11 +1311,8 @@ export function buildPagedModuleStateSyncPayloads(args: {
         // An estimate may choose a different split point than an exact wire-size
         // check. This is safe because the module reassembler concatenates pages in
         // order, preserving every item.
-        if (
-            moduleWireBodyBytes({ method: "state_sync", params: payload.params }) >
-            MODULE_PAGE_MAX_BYTES
-        ) {
-            throw new Error("module seed batch exceeds the 512 KiB batch limit");
+        if (moduleWireBodyBytes({ method: "state_sync", params: payload.params }) > maxPageBytes) {
+            throw new Error("module seed batch exceeds the configured batch limit");
         }
         return payload;
     });

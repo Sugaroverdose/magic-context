@@ -693,8 +693,10 @@ const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
 const STATE_SYNC_SEED_COLLECTOR_TTL: Duration = Duration::from_secs(10 * 60);
 // These bounds apply to every live transform page so no session can bypass the
 // handler-wide staging budget.
-const TRANSFORM_PAGE_MAX_BYTES: usize = 512 * 1024;
-const TRANSFORM_PAGE_MAX_STAGED_BYTES: usize = 128 * 1024 * 1024;
+const SUBC_FRAME_BODY_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
+const TRANSFORM_PAGE_MAX_BYTES: usize =
+    subc_protocol::MAX_FRAME_BODY_LEN as usize - SUBC_FRAME_BODY_HEADROOM_BYTES;
+const TRANSFORM_PAGE_MAX_STAGED_BYTES: usize = 256 * 1024 * 1024;
 const TRANSFORM_PAGE_MAX_PENDING: usize = 64;
 const TRANSFORM_PAGE_MAX_ID_BYTES: usize = 128;
 const ITEM_CONTINUATION_KEY: &str = "__shadow_item_continuation";
@@ -2447,6 +2449,49 @@ impl BoundaryTokenCache {
             lru: VecDeque::new(),
             retained_bytes: 0,
             max_retained_bytes,
+        }
+    }
+
+    fn prime_from_persisted_tags(&mut self, session_id: &str, tags: &[mc_store::McTagRow]) {
+        if self.sessions.contains_key(session_id) || tags.is_empty() {
+            return;
+        }
+        let entries = tags
+            .iter()
+            .filter_map(|tag| {
+                usize::try_from(tag.token_count).ok().map(|token_count| {
+                    (
+                        tag.block_id.clone(),
+                        BoundaryTokenCacheEntry {
+                            byte_size: tag.source_bytes.len(),
+                            content_hash: Sha256::digest(&tag.source_bytes).into(),
+                            token_count,
+                        },
+                    )
+                })
+            })
+            .collect::<HashMap<_, _>>();
+        let retained_bytes = boundary_token_maps_retained_bytes(entries.iter(), 0);
+        if entries.is_empty() || retained_bytes > self.max_retained_bytes {
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
+        self.sessions.insert(
+            session_id.to_string(),
+            BoundaryTokenCacheSession {
+                retained_bytes,
+                entries: Arc::new(entries),
+                formatted_tokens: Arc::default(),
+            },
+        );
+        self.lru.push_back(session_id.to_string());
+        while self.retained_bytes > self.max_retained_bytes {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(session) = self.sessions.remove(&oldest) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
+            }
         }
     }
 
@@ -4913,6 +4958,12 @@ impl McHandler {
             return PreparedHistorianAction::Complete(diagnostics);
         }
         let boundary_build_started_at = Instant::now();
+        if let Ok(tags) = store.load_tags_for_session(&parsed.session_id) {
+            self.boundary_tokens
+                .lock()
+                .expect("boundary token cache mutex")
+                .prime_from_persisted_tags(&parsed.session_id, &tags);
+        }
         let CachedBoundaryMessages {
             messages: boundary_messages,
             token_cache_hits,
@@ -8096,6 +8147,7 @@ impl McHandler {
         ticket: &TransformDispatchTicket<'_>,
     ) -> HandlerOutcome {
         let handler_started_at = Instant::now();
+        let request_decode_started_at = Instant::now();
         let mut delta_expand_ms = 0.0;
         const REQUEST_OBSERVED_KEY: &str = "request_observed_at_ms";
         let request_observed_to_handler = request
@@ -8113,6 +8165,8 @@ impl McHandler {
                 };
             }
         };
+        let request_decode_ms = request_decode_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let handler_prepare_started_at = Instant::now();
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
             return unknown_serializer_profile_error();
@@ -8435,6 +8489,8 @@ impl McHandler {
                 message,
             }
         };
+        let handler_prepare_ms = handler_prepare_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let transform_execute_started_at = Instant::now();
         let mut result = match run_transform() {
             Ok(result) => {
                 self.runtime_store_errors
@@ -8445,6 +8501,8 @@ impl McHandler {
             }
             Err(e) => return reject_transform(e),
         };
+        let transform_execute_ms = transform_execute_started_at.elapsed().as_secs_f64() * 1_000.0;
+        let handler_followup_started_at = Instant::now();
         let mut emergency_pre_floor =
             if result.scheduler_pass == scheduler::PassDecision::Emergency95 {
                 store
@@ -8607,6 +8665,7 @@ impl McHandler {
                 };
             }
         }
+        let handler_followup_ms = handler_followup_started_at.elapsed().as_secs_f64() * 1_000.0;
         let post_attach_started_at = Instant::now();
         let revert_epoch = result.revert_epoch;
         let reasoning_watermark = result.reasoning_watermark;
@@ -8695,6 +8754,10 @@ impl McHandler {
         let snapshot_store_ms = snapshot_store_started_at.elapsed().as_secs_f64() * 1_000.0;
         if let Some(timings) = response.timings.as_mut() {
             timings.handler_total = handler_started_at.elapsed().as_secs_f64() * 1_000.0;
+            timings.request_decode = request_decode_ms;
+            timings.handler_prepare = handler_prepare_ms;
+            timings.transform_execute = transform_execute_ms;
+            timings.handler_followup = handler_followup_ms;
             timings.request_observed_to_handler = request_observed_to_handler;
             timings.delta_expand = delta_expand_ms;
             timings.side_channel_drain = side_channel_drain_ms;
@@ -9590,7 +9653,10 @@ impl McHandler {
                 "non-final transform pages may carry only message arrays and pageable maps",
             );
         }
-        if transform_page_content_digest(&request) != page_digest {
+        let page_digest_started_at = Instant::now();
+        let digest_matches = transform_page_content_digest(&request) == page_digest;
+        let page_digest_ms = page_digest_started_at.elapsed().as_secs_f64() * 1_000.0;
+        if !digest_matches {
             self.discard_transform_pages(&binding.session);
             return transform_page_error(
                 lane,
@@ -9598,6 +9664,7 @@ impl McHandler {
                 "transform page content digest did not match the supplied digest",
             );
         }
+        let page_size_started_at = Instant::now();
         let page_bytes = match serde_json::to_vec(&request) {
             Ok(bytes) => bytes.len(),
             Err(error) => {
@@ -9605,6 +9672,7 @@ impl McHandler {
                 return invalid_params_error(error.to_string());
             }
         };
+        let page_size_encode_ms = page_size_started_at.elapsed().as_secs_f64() * 1_000.0;
         if page_bytes > TRANSFORM_PAGE_MAX_BYTES {
             self.discard_transform_pages(&binding.session);
             return transform_page_error(
@@ -9646,6 +9714,7 @@ impl McHandler {
             }
         }
         let queued_at_ms = now_ms().max(0) as u64;
+        let page_stage_started_at = Instant::now();
         let staged = {
             let mut transforms = self.transform_pages.lock().expect("transform page mutex");
             transforms.stage(
@@ -9661,7 +9730,18 @@ impl McHandler {
                 queued_at_ms,
             )
         };
+        let page_stage_ms = page_stage_started_at.elapsed().as_secs_f64() * 1_000.0;
         self.refresh_oldest_queued_at_ms();
+        eprintln!(
+            "mc-transform-page-timing session={} page={}/{} bytes={} digest={:.1} size_encode={:.1} stage={:.1}",
+            binding.session,
+            page_index + 1,
+            page_total,
+            page_bytes,
+            page_digest_ms,
+            page_size_encode_ms,
+            page_stage_ms,
+        );
         let action = match staged {
             Ok(action) => {
                 ticket.accept();
@@ -9704,6 +9784,7 @@ impl McHandler {
                 final_digest,
                 inbound_bytes,
             } => {
+                let page_assembly_started_at = Instant::now();
                 let assembled = match assemble_transform_pages(pages) {
                     Ok(assembled) => assembled,
                     Err(error) => {
@@ -9719,6 +9800,11 @@ impl McHandler {
                         return transform_page_error(lane, suffix, message);
                     }
                 };
+                let page_assembly_ms = page_assembly_started_at.elapsed().as_secs_f64() * 1_000.0;
+                eprintln!(
+                    "mc-transform-page-assembly session={} pages={} inbound_bytes={} assembly={:.1}",
+                    binding.session, page_total, inbound_bytes, page_assembly_ms,
+                );
                 let outcome = self
                     .handle_transform_unpaged_value(
                         channel,
@@ -12190,6 +12276,7 @@ fn native_value_retained_bytes(value: &Value) -> usize {
 fn native_reasoning_should_clear(
     served: &transform::ServedMessage,
     request: &TransformRequest,
+    ingress_ordinals: &HashMap<&str, u64>,
     reasoning_watermark: u64,
     tag_numbers: &BTreeMap<String, u64>,
     newest_assistant_mid: Option<&str>,
@@ -12197,10 +12284,10 @@ fn native_reasoning_should_clear(
     let Some(mid) = served.meta.harness_id.as_deref() else {
         return (0, false);
     };
-    let Some(ingress) = request.messages.iter().find(|message| message.mid == mid) else {
+    let Some(ordinal) = ingress_ordinals.get(mid).copied() else {
         return (0, false);
     };
-    let tag_number = tag_numbers.get(mid).copied().unwrap_or(ingress.ordinal);
+    let tag_number = tag_numbers.get(mid).copied().unwrap_or(ordinal);
     let should_clear = served.role == "assistant"
         && !served.meta.synthetic
         && reasoning_watermark > 0
@@ -12373,6 +12460,11 @@ fn attach_native_messages_incremental(
         .collect::<Vec<_>>();
     let newest_assistant_mid =
         transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
+    let ingress_ordinals = request
+        .messages
+        .iter()
+        .map(|message| (message.mid.as_str(), message.ordinal))
+        .collect::<HashMap<_, _>>();
 
     let mut sidecar_hashes = cached
         .as_mut()
@@ -12422,6 +12514,7 @@ fn attach_native_messages_incremental(
         let (tag_number, reasoning_should_clear) = native_reasoning_should_clear(
             served,
             request,
+            &ingress_ordinals,
             reasoning_watermark,
             tag_numbers,
             newest_assistant_mid,
@@ -13439,12 +13532,9 @@ fn store_unavailable_error() -> HandlerOutcome {
     }
 }
 
-const MAX_FACADE_FRAME_BYTES: usize = 1024 * 1024;
-/// Transform-class requests carry a session's full message array. The transport
-/// frame ceiling is 64 MiB; half that leaves headroom for envelope overhead while
-/// still admitting the largest observed live sessions (multi-MiB CK arrays with
-/// retained ingress bytes).
-const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_FACADE_FRAME_BYTES: usize =
+    subc_protocol::MAX_FRAME_BODY_LEN as usize - SUBC_FRAME_BODY_HEADROOM_BYTES;
+const MAX_TRANSFORM_FRAME_BYTES: usize = MAX_FACADE_FRAME_BYTES;
 
 /// Minimal probe deserialized from an oversized body ONLY to pick the right byte
 /// cap. serde ignores every other field, so this stays cheap relative to a full
@@ -13483,10 +13573,12 @@ fn enforce_request_byte_cap(body: &[u8]) -> Result<(), HandlerOutcome> {
             return Ok(());
         }
         return Err(invalid_params_error(
-            "request body exceeds the 32 MiB transform limit",
+            "request body exceeds the 48 MiB transform limit",
         ));
     }
-    Err(invalid_params_error("request body exceeds the 1 MiB limit"))
+    Err(invalid_params_error(
+        "request body exceeds the 48 MiB limit",
+    ))
 }
 const MAX_AGENT_DROPS_COMMAND_ID_BYTES: usize = 128;
 const MAX_MEMORY_CONTENT_BYTES: usize = 64 * 1024;
@@ -15758,6 +15850,31 @@ mod tests {
     }
 
     #[test]
+    fn boundary_token_cache_primes_cold_entries_from_durable_tag_tokens() {
+        let bytes = b"durable tagged block".to_vec();
+        let mut cache = BoundaryTokenCache::new(1024 * 1024);
+        cache.prime_from_persisted_tags(
+            "session",
+            &[mc_store::McTagRow {
+                tag_number: 1,
+                block_id: "m1#0".to_string(),
+                kind: "text".to_string(),
+                token_count: 37,
+                created_at_ms: 1,
+                source_bytes: bytes.clone(),
+            }],
+        );
+        let mut snapshot = cache.snapshot("session");
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(
+            snapshot.token_count("m1#0", "durable tagged block", &digest),
+            37
+        );
+        assert_eq!(snapshot.hits, 1);
+        assert_eq!(snapshot.misses, 0);
+    }
+
+    #[test]
     fn boundary_token_cache_hash_fences_same_length_edits_and_evicts_lru() {
         let mut cache = BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES);
         let mut cold = cache.snapshot("ses-a");
@@ -16807,7 +16924,7 @@ mod tests {
     }
 
     #[test]
-    fn request_byte_cap_widens_for_transform_class_only() {
+    fn request_byte_cap_uses_the_subc_frame_budget_for_every_request_class() {
         let pad = |method: &str, key: &str, bytes: usize| {
             format!(
                 "{{\"{key}\":\"{method}\",\"pad\":\"{}\"}}",
@@ -16815,19 +16932,32 @@ mod tests {
             )
             .into_bytes()
         };
-        // Under the facade cap everything passes without parsing.
         assert!(enforce_request_byte_cap(b"{}").is_ok());
-        // Oversized transform-class bodies pass up to the transform cap.
         let two_mib = 2 * 1024 * 1024;
         assert!(enforce_request_byte_cap(&pad("transform", "kind", two_mib)).is_ok());
         assert!(enforce_request_byte_cap(&pad("state_sync", "method", two_mib)).is_ok());
-        // Oversized facade bodies still reject at 1 MiB.
-        assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", two_mib)).is_err());
-        // Unparseable oversized bodies reject conservatively.
-        assert!(enforce_request_byte_cap(&vec![b'x'; two_mib]).is_err());
-        // The transform cap itself is still a hard ceiling.
+        assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", two_mib)).is_ok());
+        assert!(enforce_request_byte_cap(&vec![b'x'; two_mib]).is_ok());
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
+        );
+    }
+
+    #[test]
+    fn application_frame_limits_are_derived_from_subc_protocol() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../testdata/subc-frame-limits.json")).unwrap();
+        assert_eq!(
+            fixture["max_frame_body_bytes"].as_u64().unwrap() as usize,
+            subc_protocol::MAX_FRAME_BODY_LEN as usize
+        );
+        assert_eq!(
+            fixture["application_body_bytes"].as_u64().unwrap() as usize,
+            TRANSFORM_PAGE_MAX_BYTES
+        );
+        assert_eq!(
+            fixture["transform_staging_bytes"].as_u64().unwrap() as usize,
+            TRANSFORM_PAGE_MAX_STAGED_BYTES
         );
     }
 
@@ -30836,9 +30966,6 @@ mod tests {
                     .collect(),
             )
         };
-        let large_map = key_order_map(0, 12_000);
-        assert!(serde_json::to_vec(&large_map).unwrap().len() > TRANSFORM_PAGE_MAX_BYTES);
-
         let mut large_response = None;
         for index in 0..3 {
             let complete = index == 2;
@@ -32011,12 +32138,6 @@ mod tests {
             "native_replace_from": 0,
         });
         final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
-        assert!(
-            serde_json::to_vec(&first).unwrap().len()
-                + serde_json::to_vec(&final_page).unwrap().len()
-                > TRANSFORM_PAGE_MAX_BYTES
-        );
-
         let first_ack = handler.dispatch_value(7, first).await;
         let HandlerOutcome::Response(first_ack) = first_ack else {
             panic!("first delta page should stage: {first_ack:?}");
