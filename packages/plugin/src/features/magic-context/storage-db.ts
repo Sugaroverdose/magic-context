@@ -159,9 +159,17 @@ function restrictDatabaseFilePermissions(dbPath: string): void {
     }
 }
 
+export interface DatabaseBootTimings {
+    openMs: number;
+    guardMs: number;
+    migrateMs: number;
+}
+
 export interface OpenDatabaseOptions {
     dbPath?: string;
     latestSupportedVersion?: number;
+    /** Boot-only timing sink; omitted by ordinary storage callers. */
+    onBootTimings?: (timings: DatabaseBootTimings) => void;
 }
 
 // Exported for the test-isolation guard test. Returns a PATH only — opens no DB —
@@ -2287,10 +2295,18 @@ export async function openDatabaseAsync(
     lastMigrationOnOpenRefusal = null;
     const existing = databases.get(dbPath);
     if (existing) {
-        if (!enforceSchemaFence(existing, dbPath, latestSupportedVersion)) return null;
-        if (!persistenceByDatabase.has(existing)) persistenceByDatabase.set(existing, true);
-        healWedgedChannel2Claims(existing);
-        return existing;
+        const startedAt = performance.now();
+        const accepted = enforceSchemaFence(existing, dbPath, latestSupportedVersion);
+        if (accepted) {
+            if (!persistenceByDatabase.has(existing)) persistenceByDatabase.set(existing, true);
+            healWedgedChannel2Claims(existing);
+        }
+        options?.onBootTimings?.({
+            openMs: performance.now() - startedAt,
+            guardMs: 0,
+            migrateMs: 0,
+        });
+        return accepted ? existing : null;
     }
 
     const pending = pendingAsyncOpens.get(dbPath);
@@ -2298,23 +2314,37 @@ export async function openDatabaseAsync(
 
     const opening = (async (): Promise<Database | null> => {
         let db: Database | undefined;
+        const openStartedAt = performance.now();
+        let openMs = 0;
+        let guardMs = 0;
+        let migrateMs = 0;
+        let guardStartedAt: number | null = null;
+        let migrateStartedAt: number | null = null;
         try {
             if (!explicitDbPath) migrateLegacyStorageIfNeeded(dbPath, dbDir);
             ensureSecureStorageDir(dbDir);
 
             db = new Database(dbPath);
+            openMs = performance.now() - openStartedAt;
+            guardStartedAt = performance.now();
             if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
+                guardMs = performance.now() - guardStartedAt;
                 closeQuietly(db);
                 return null;
             }
             if (!enforceMigrationOnOpenGuard(db, dbPath, dbDir, latestSupportedVersion)) {
+                guardMs = performance.now() - guardStartedAt;
                 closeQuietly(db);
                 return null;
             }
+            guardMs = performance.now() - guardStartedAt;
+            migrateStartedAt = performance.now();
             initializeDatabase(db);
             await runMigrationsWithRetry(db);
             ensureContextStoreUuid(db);
-            return finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
+            const opened = finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
+            migrateMs = performance.now() - migrateStartedAt;
+            return opened;
         } catch (error) {
             if (db) closeQuietly(db);
             const detail = getErrorMessage(error);
@@ -2322,6 +2352,15 @@ export async function openDatabaseAsync(
             throw new Error(
                 `[magic-context] storage unavailable: ${detail}. Magic Context is disabled for this run; check log for details.`,
             );
+        } finally {
+            if (openMs === 0) openMs = performance.now() - openStartedAt;
+            if (guardStartedAt !== null && guardMs === 0) {
+                guardMs = performance.now() - guardStartedAt;
+            }
+            if (migrateStartedAt !== null && migrateMs === 0) {
+                migrateMs = performance.now() - migrateStartedAt;
+            }
+            options?.onBootTimings?.({ openMs, guardMs, migrateMs });
         }
     })();
     pendingAsyncOpens.set(dbPath, opening);

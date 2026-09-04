@@ -254,21 +254,17 @@ describe("dream-timer null-DB guards (static)", () => {
 });
 
 describe("dream-timer startup is fail-open at the index.ts call site (static)", () => {
-    // The awaited startDreamScheduleTimer(...) in index.ts runs BEFORE the hooks
-    // are returned from server(). If it throws, the transform/compaction pipeline
-    // never registers and every session's context balloons. The call must be
-    // wrapped so any throw is logged and swallowed.
+    // Startup must not await optional timer registration. Its promise still needs
+    // a rejection handler so a late timer failure remains visible and contained.
     const indexSource = readFileSync(join(import.meta.dir, "../index.ts"), "utf8");
 
-    test("await startDreamScheduleTimer is wrapped in try/catch", () => {
-        const callIdx = indexSource.indexOf("await startDreamScheduleTimer(");
+    test("starts registration fire-and-forget and observes late rejection", () => {
+        const callIdx = indexSource.indexOf("void startDreamScheduleTimer(");
         expect(callIdx).toBeGreaterThan(0);
-        // The 200 chars before the call must contain a `try {`, and the call must
-        // be followed (within a small window) by a `catch`.
-        const before = indexSource.slice(Math.max(0, callIdx - 200), callIdx);
-        const after = indexSource.slice(callIdx, callIdx + 300);
-        expect(before).toContain("try {");
-        expect(after).toContain("catch");
+        expect(indexSource).not.toContain("await startDreamScheduleTimer(");
+        const after = indexSource.slice(callIdx, callIdx + 500);
+        expect(after).toContain(".catch((err)");
+        expect(after).toContain("continuing without it");
     });
 });
 
