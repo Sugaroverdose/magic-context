@@ -336,15 +336,24 @@ fn store_open_error_is_live_lease(error: &McStoreError) -> bool {
     )
 }
 
-/// The transform heartbeat is deliberately process-wide: the SDK health callback runs on
-/// the channel-0 control path and must be able to observe the data-plane lane without
-/// borrowing a handler lock or touching the store.
+/// The process-wide transform heartbeat observes the data-plane lane from the SDK's channel-0
+/// control path without touching the store. Route-lifecycle accounting uses one short registry
+/// lock so a closed request route can release its accepted dispatch even when no response
+/// consumer remains.
+#[derive(Default)]
+struct DispatchRegistry {
+    next_id: u64,
+    active: HashMap<u64, u16>,
+    closed_channels: HashSet<u16>,
+}
+
 struct DispatchHealth {
     last_dispatch_started_at_ms: AtomicU64,
     last_dispatch_completed_at_ms: AtomicU64,
     in_flight_count: AtomicU64,
     oldest_queued_at_ms: AtomicU64,
     consecutive_error_count: AtomicU64,
+    registry: OnceLock<Mutex<DispatchRegistry>>,
 }
 
 impl DispatchHealth {
@@ -355,7 +364,79 @@ impl DispatchHealth {
             in_flight_count: AtomicU64::new(0),
             oldest_queued_at_ms: AtomicU64::new(0),
             consecutive_error_count: AtomicU64::new(0),
+            registry: OnceLock::new(),
         }
+    }
+
+    fn registry(&self) -> &Mutex<DispatchRegistry> {
+        self.registry
+            .get_or_init(|| Mutex::new(DispatchRegistry::default()))
+    }
+
+    fn route_open(&self, channel: u16) {
+        self.registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closed_channels
+            .remove(&channel);
+    }
+
+    fn route_gone(&self, channel: u16) {
+        let released = {
+            let mut registry = self
+                .registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.closed_channels.insert(channel);
+            let before = registry.active.len();
+            registry
+                .active
+                .retain(|_, active_channel| *active_channel != channel);
+            before.saturating_sub(registry.active.len()) as u64
+        };
+        if released > 0 {
+            let _ =
+                self.in_flight_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        Some(count.saturating_sub(released))
+                    });
+        }
+    }
+
+    fn accept(&self, channel: u16) -> Option<u64> {
+        let mut registry = self
+            .registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registry.closed_channels.contains(&channel) {
+            return None;
+        }
+        registry.next_id = registry.next_id.wrapping_add(1).max(1);
+        let id = registry.next_id;
+        registry.active.insert(id, channel);
+        self.in_flight_count.fetch_add(1, Ordering::Relaxed);
+        Some(id)
+    }
+
+    fn release(&self, id: u64) -> bool {
+        if id == 0 {
+            return false;
+        }
+        let removed = self
+            .registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .remove(&id)
+            .is_some();
+        if removed {
+            let _ =
+                self.in_flight_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        Some(count.saturating_sub(1))
+                    });
+        }
+        removed
     }
 
     fn report(&self, now_ms: u64) -> HealthReport {
@@ -438,14 +519,18 @@ static DISPATCH_HEALTH: DispatchHealth = DispatchHealth::new();
 
 struct TransformDispatchTicket<'a> {
     health: &'a DispatchHealth,
+    channel: u16,
+    dispatch_id: AtomicU64,
     accepted: AtomicBool,
     finished: AtomicBool,
 }
 
 impl<'a> TransformDispatchTicket<'a> {
-    fn new(health: &'a DispatchHealth) -> Self {
+    fn new(health: &'a DispatchHealth, channel: u16) -> Self {
         Self {
             health,
+            channel,
+            dispatch_id: AtomicU64::new(0),
             accepted: AtomicBool::new(false),
             finished: AtomicBool::new(false),
         }
@@ -455,7 +540,10 @@ impl<'a> TransformDispatchTicket<'a> {
         if self.accepted.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.health.in_flight_count.fetch_add(1, Ordering::Relaxed);
+        let Some(id) = self.health.accept(self.channel) else {
+            return;
+        };
+        self.dispatch_id.store(id, Ordering::Release);
         self.health
             .last_dispatch_started_at_ms
             .store(now_ms().max(0) as u64, Ordering::Relaxed);
@@ -463,6 +551,10 @@ impl<'a> TransformDispatchTicket<'a> {
 
     fn finish(&self, errored: bool) {
         if !self.accepted.load(Ordering::Acquire) || self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let id = self.dispatch_id.load(Ordering::Acquire);
+        if !self.health.release(id) {
             return;
         }
         // This is the completion point, after the handler has produced its outcome. A panic
@@ -479,7 +571,6 @@ impl<'a> TransformDispatchTicket<'a> {
                 .consecutive_error_count
                 .store(0, Ordering::Relaxed);
         }
-        self.health.in_flight_count.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -489,9 +580,10 @@ impl Drop for TransformDispatchTicket<'_> {
             && !self.finished.load(Ordering::Acquire)
             && self.accepted.swap(false, Ordering::AcqRel)
         {
-            // A panic unwinds through this guard. Decrement the count, but do not stamp a
-            // completion: a panicking dispatch did not prove that the lane advanced.
-            self.health.in_flight_count.fetch_sub(1, Ordering::Relaxed);
+            // A panic unwinds through this guard. Release the accepted ticket, but do not stamp
+            // a completion: a panicking dispatch did not prove that the lane advanced.
+            self.health
+                .release(self.dispatch_id.load(Ordering::Acquire));
         }
     }
 }
@@ -3799,6 +3891,7 @@ impl McHandler {
     /// reused channel — the daemon won't reuse a channel without a `route.gone` first, so
     /// this only overwrites a stale entry that somehow survived (defensive).
     fn bind_route(&self, channel: u16, binding: SessionBinding) {
+        DISPATCH_HEALTH.route_open(channel);
         self.transform_route_channels
             .lock()
             .expect("transform route channels mutex")
@@ -4147,6 +4240,7 @@ impl McHandler {
 
     /// Remove a route and evict process-local session state after its final binding closes.
     fn unbind_route(&self, channel: u16) {
+        DISPATCH_HEALTH.route_gone(channel);
         self.transform_route_channels
             .lock()
             .expect("transform route channels mutex")
@@ -7970,7 +8064,7 @@ impl McHandler {
         request: Value,
         inbound_bytes: Option<usize>,
     ) -> HandlerOutcome {
-        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH);
+        let ticket = TransformDispatchTicket::new(&DISPATCH_HEALTH, channel);
         let outcome = if has_transform_page_fields(&request) {
             self.handle_transform_page_value(channel, request, TransformLane::Authority, &ticket)
                 .await
@@ -9522,10 +9616,26 @@ impl McHandler {
         {
             let transforms = self.transform_pages.lock().expect("transform page mutex");
             if let Some(completed) = transforms.completed(&binding.session, &transform_id) {
-                if completed.generation == generation
-                    && page_complete
-                    && completed.final_digest == page_digest
-                {
+                if completed.generation != generation {
+                    return transform_page_error(
+                        lane,
+                        "digest_mismatch",
+                        "completed transform generation changed",
+                    );
+                }
+                if !page_complete {
+                    // Content-addressed attempt ids let a caller whose route disappeared
+                    // replay page admission cheaply. The final-page digest below remains
+                    // the response adoption fence; random ids from older adapters never
+                    // collide with a retained completion.
+                    return respond(json!({
+                        "ok": true,
+                        "staged": true,
+                        "next_expected_index": page_index + 1,
+                        "completed_replay": true,
+                    }));
+                }
+                if completed.final_digest == page_digest {
                     return HandlerOutcome::Response(completed.result.clone());
                 }
                 return transform_page_error(
@@ -17921,7 +18031,7 @@ mod tests {
     #[test]
     fn transform_health_normal_advance_is_ok_and_errors_still_advance() {
         let health = DispatchHealth::new();
-        let ticket = TransformDispatchTicket::new(&health);
+        let ticket = TransformDispatchTicket::new(&health, 7);
         ticket.accept();
         assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
         ticket.finish(false);
@@ -17934,7 +18044,7 @@ mod tests {
             json!(0)
         );
 
-        let error_ticket = TransformDispatchTicket::new(&health);
+        let error_ticket = TransformDispatchTicket::new(&health, 7);
         error_ticket.accept();
         error_ticket.finish(true);
         let error_report = health.report(now_ms().max(0) as u64);
@@ -17961,7 +18071,7 @@ mod tests {
         {
             // A refused item never calls accept, so dropping its ticket cannot make the
             // refusal loop look like completed transform work.
-            let _refused = TransformDispatchTicket::new(&health);
+            let _refused = TransformDispatchTicket::new(&health, 7);
         }
 
         let report = health.report(200_001);
@@ -17976,7 +18086,7 @@ mod tests {
     fn transform_dispatch_panic_drop_guard_decrements_without_completion_stamp() {
         let health = DispatchHealth::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let ticket = TransformDispatchTicket::new(&health);
+            let ticket = TransformDispatchTicket::new(&health, 7);
             ticket.accept();
             panic!("simulated transform dispatch panic");
         }));
@@ -17986,6 +18096,44 @@ mod tests {
             health.last_dispatch_completed_at_ms.load(Ordering::Relaxed),
             0
         );
+    }
+
+    #[test]
+    fn route_close_releases_only_its_in_flight_dispatch_and_cannot_double_decrement() {
+        let health = DispatchHealth::new();
+        health.route_open(7);
+        health.route_open(8);
+        let closed_route_ticket = TransformDispatchTicket::new(&health, 7);
+        let live_route_ticket = TransformDispatchTicket::new(&health, 8);
+        closed_route_ticket.accept();
+        live_route_ticket.accept();
+        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 2);
+
+        health.route_gone(7);
+        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
+        closed_route_ticket.finish(false);
+        assert_eq!(
+            health.in_flight_count.load(Ordering::Relaxed),
+            1,
+            "a late completion from the abandoned requester must not decrement another route"
+        );
+
+        let post_close_ticket = TransformDispatchTicket::new(&health, 7);
+        post_close_ticket.accept();
+        assert_eq!(
+            health.in_flight_count.load(Ordering::Relaxed),
+            1,
+            "a torn handler cannot register after route.gone"
+        );
+        live_route_ticket.finish(false);
+        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
+
+        health.route_open(7);
+        let rebound_ticket = TransformDispatchTicket::new(&health, 7);
+        rebound_ticket.accept();
+        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 1);
+        rebound_ticket.finish(false);
+        assert_eq!(health.in_flight_count.load(Ordering::Relaxed), 0);
     }
 
     // (the same gate as the corruption path itself); a default build has neither the arm
@@ -30799,6 +30947,55 @@ mod tests {
             serde_json::to_vec(&paged_output["ck_messages"]).unwrap(),
             serde_json::to_vec(&unpaged_output["ck_messages"]).unwrap()
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_content_addressed_page_series_replays_without_reexecution() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(state, default_test_config());
+        let first = paged_transform_page(
+            "transform",
+            "ses",
+            "content-addressed-attempt",
+            0,
+            0,
+            2,
+            false,
+            Vec::new(),
+        );
+        let final_page = paged_transform_page(
+            "transform",
+            "ses",
+            "content-addressed-attempt",
+            0,
+            1,
+            2,
+            true,
+            vec![serde_json::to_value(ck("adopted", 0, "completed result")).unwrap()],
+        );
+
+        assert!(matches!(
+            handler.dispatch_value(7, first.clone()).await,
+            HandlerOutcome::Response(_)
+        ));
+        let completed = match handler.dispatch_value(7, final_page.clone()).await {
+            HandlerOutcome::Response(bytes) => bytes,
+            other => panic!("completed series should execute: {other:?}"),
+        };
+        let row_version = store.load("ses").unwrap().row_version;
+
+        let replay_ack = match handler.dispatch_value(7, first).await {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("completed series prefix should replay admission: {other:?}"),
+        };
+        assert_eq!(replay_ack["completed_replay"], true);
+        let adopted = match handler.dispatch_value(7, final_page).await {
+            HandlerOutcome::Response(bytes) => bytes,
+            other => panic!("completed series final page should adopt result: {other:?}"),
+        };
+
+        assert_eq!(adopted, completed);
+        assert_eq!(store.load("ses").unwrap().row_version, row_version);
     }
 
     #[tokio::test(flavor = "current_thread")]
