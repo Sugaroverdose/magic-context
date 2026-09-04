@@ -607,6 +607,7 @@ dependencies = [
  "mc-store",
  "mc-tokenizer",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -1001,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.17.4"
+version = "0.17.7"
 dependencies = [
  "base64",
  "cortexkit-paths",

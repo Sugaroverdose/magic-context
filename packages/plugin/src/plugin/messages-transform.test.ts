@@ -1,14 +1,25 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
     createFailClosedController,
     FAIL_CLOSED_DOCTOR_COMMAND,
     isFailClosedBlockingError,
 } from "../features/magic-context/fail-closed-block";
+import { initializeDatabase } from "../features/magic-context/storage-db";
+import {
+    recordOverflowDetected,
+    resetEmergencyRecoveryRegistryForTest,
+} from "../features/magic-context/storage-meta-persisted";
+import { Database } from "../shared/sqlite";
+import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
 import { createMessagesTransformHandler } from "./messages-transform";
+
+afterEach(() => {
+    resetEmergencyRecoveryRegistryForTest();
+});
 
 // Minimal fake message shape — just needs info + parts.
 function makeOutput(overrides?: { agent?: string; sessionID?: string }): any {
@@ -50,6 +61,29 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
         // Messages are left untouched when transform fails.
         expect(output.messages).toHaveLength(1);
         expect(output.messages[0].info.id).toBe("m1");
+    });
+
+    it("fails closed instead of serving raw when emergency recovery meets SQLITE_BUSY", async () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        recordOverflowDetected(db, "ses_test", 100_000, "anthropic/fable-5-1");
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {
+                    const err = new Error("database is locked") as Error & { code: string };
+                    err.code = "SQLITE_BUSY";
+                    throw err;
+                },
+            },
+        });
+
+        try {
+            await expect(handler({}, makeOutput())).rejects.toBeInstanceOf(
+                EmergencyFailClosedError,
+            );
+        } finally {
+            db.close();
+        }
     });
 
     it("swallows unexpected non-SQLITE errors too", async () => {

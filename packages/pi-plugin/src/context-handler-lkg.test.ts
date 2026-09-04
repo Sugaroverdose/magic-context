@@ -3,6 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
+import {
+	recordOverflowDetected,
+	resetEmergencyRecoveryRegistryForTest,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -67,6 +72,7 @@ describe("Pi context handler LKG replay", () => {
 		for (const sessionId of sessions) clearContextHandlerSession(sessionId);
 		sessions.clear();
 		resetLkgSlotsForTest();
+		resetEmergencyRecoveryRegistryForTest();
 		for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 		tempDirs.length = 0;
 	});
@@ -108,6 +114,37 @@ describe("Pi context handler LKG replay", () => {
 				closeQuietly(locker);
 			}
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("fails closed instead of serving LKG or raw when emergency recovery meets SQLITE_BUSY", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-lkg-emergency-busy-"));
+		tempDirs.push(dir);
+		const dbPath = join(dir, "context.db");
+		const db = createTestDb(dbPath);
+		const sessionId = "pi-lkg-emergency-busy";
+		sessions.add(sessionId);
+		const locker = new Database(dbPath);
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			recordOverflowDetected(db, sessionId, 100_000, "anthropic/fable-5-1");
+			const handler = handlerFor(db);
+			db.exec("PRAGMA busy_timeout=0");
+			locker.exec("PRAGMA busy_timeout=0");
+			locker.exec("BEGIN IMMEDIATE");
+
+			await expect(
+				runPass(
+					handler,
+					sessionId,
+					[userMessage("overflow retry", 1)],
+					["entry-u1"],
+				),
+			).rejects.toBeInstanceOf(EmergencyFailClosedError);
+		} finally {
+			if (locker.inTransaction) locker.exec("ROLLBACK");
+			closeQuietly(locker);
 			closeQuietly(db);
 		}
 	});

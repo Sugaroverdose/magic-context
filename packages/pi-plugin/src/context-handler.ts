@@ -44,6 +44,7 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-lease";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
+import { EmergencyFailClosedError } from "@magic-context/core/hooks/magic-context/emergency-fail-closed";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	clearSessionTracking,
@@ -93,10 +94,12 @@ import {
 	clearEmergencyRecovery,
 	clearHistorianFailureState,
 	clearPersistedReasoningWatermark,
+	clearThinkingBindingRecoveryIf,
 	getAutoSearchHintDecisions,
 	getEmergencyInputSample,
 	getNoteNudgeAnchors,
 	getOverflowState,
+	isProviderOverflowFailClosedProven,
 	type PendingPiCompactionMarker,
 	peekDeferredExecutePending,
 	pruneAutoSearchHintDecisions,
@@ -233,6 +236,7 @@ import {
 	formatPiPressureForLog,
 	resolvePiPressureSnapshot,
 } from "./pi-pressure";
+import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
 	convertEntriesToRawMessages,
@@ -2209,6 +2213,14 @@ export function registerPiContextHandler(
 				modelKey: lkgModelKey,
 				providerKey: lkgProviderKey,
 			});
+			const thinkingBindingRecoveryApplied = applyPiThinkingBindingRecovery({
+				db: options.db,
+				sessionId,
+				messages: event.messages as unknown[],
+				entryIds: lkgEntryIds ?? [],
+				provider: lkgProviderKey ?? undefined,
+				model: ctx.model?.id,
+			});
 			if (
 				strictEntryIds &&
 				branchEntries &&
@@ -3397,6 +3409,20 @@ export function registerPiContextHandler(
 				});
 			}
 			capturePiServedArray(sessionId, outputMessages);
+			if (thinkingBindingRecoveryApplied) {
+				try {
+					clearThinkingBindingRecoveryIf(
+						options.db,
+						sessionId,
+						thinkingBindingRecoveryApplied.flagTarget,
+					);
+				} catch (error) {
+					sessionLog(
+						sessionId,
+						`thinking binding recovery cleanup deferred: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};
@@ -3405,6 +3431,16 @@ export function registerPiContextHandler(
 			// swallow into native-compaction fallthrough.
 			if (isFailClosedBlockingError(err) && !baseOptions.compactionOff)
 				throw err;
+			if (
+				!lkgCompactionOff &&
+				sessionIdForError &&
+				isProviderOverflowFailClosedProven(sessionIdForError)
+			) {
+				throw new EmergencyFailClosedError(
+					"Emergency recovery transform failed; refusing an unbounded raw fallback",
+					{ cause: err },
+				);
+			}
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			const transientStorageFailure = isTransientPiStorageError(err);

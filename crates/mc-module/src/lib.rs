@@ -2992,6 +2992,13 @@ impl ProjectionCache {
     }
 }
 
+#[derive(Clone)]
+struct RuntimeStoreError {
+    code: String,
+    message: String,
+    at_ms: i64,
+}
+
 /// The module handler. Holds the single store handle (opened once in `on_hello_ack`)
 /// and the per-route session bindings (route channel → {project, session}).
 pub struct McHandler {
@@ -3066,6 +3073,7 @@ pub struct McHandler {
     /// Back-compat facade callers may omit the host tool-call id. Warn once per resolved session
     /// while the transport shim is upgraded, without rejecting the mutation.
     missing_facade_command_id_sessions: Mutex<HashSet<String>>,
+    runtime_store_errors: Mutex<HashMap<String, RuntimeStoreError>>,
 }
 
 #[async_trait]
@@ -3525,6 +3533,7 @@ impl McHandler {
             state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
+            runtime_store_errors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3781,6 +3790,7 @@ impl McHandler {
             state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
+            runtime_store_errors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -4164,6 +4174,10 @@ impl McHandler {
             self.scheduler_observations
                 .lock()
                 .expect("scheduler observations mutex")
+                .remove(&session);
+            self.runtime_store_errors
+                .lock()
+                .expect("runtime store errors mutex")
                 .remove(&session);
             self.state_sync_seeds
                 .lock()
@@ -6093,6 +6107,21 @@ impl McHandler {
         }
     }
 
+    fn runtime_store_error_value(&self, session_id: &str) -> Value {
+        self.runtime_store_errors
+            .lock()
+            .expect("runtime store errors mutex")
+            .get(session_id)
+            .map(|error| {
+                json!({
+                    "code": error.code,
+                    "message": error.message,
+                    "at_ms": error.at_ms,
+                })
+            })
+            .unwrap_or(Value::Null)
+    }
+
     fn handle_session_delete_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let (session_id, binding) =
             match self.management_binding(channel, request, "session.delete") {
@@ -6105,6 +6134,10 @@ impl McHandler {
         };
         match store.delete_session(&session_id, &binding.project_root.to_string_lossy()) {
             Ok(deleted_rows) => {
+                self.runtime_store_errors
+                    .lock()
+                    .expect("runtime store errors mutex")
+                    .remove(&session_id);
                 self.reattaching_sessions
                     .lock()
                     .expect("reattaching sessions mutex")
@@ -6324,6 +6357,7 @@ impl McHandler {
             // Keep the current-pass attribution separate from the explicitly historical
             // `last_divergence` field so stable status reads cannot imply a fresh bust.
             "pass_trace": pass_trace,
+            "runtime_store_error": self.runtime_store_error_value(&session_id),
             "tail_identity_re_adopt_count": loaded.meta.tail_identity_re_adopt_count,
             "fake_compaction": {
                 "compaction_seen": descent_counters.compaction_seen,
@@ -7917,6 +7951,7 @@ impl McHandler {
             "publication_floor_ordinal": loaded.meta.publication_floor_ordinal,
             "tail_identity_re_adopt_count": loaded.meta.tail_identity_re_adopt_count,
             "pass_trace": pass_trace,
+            "runtime_store_error": self.runtime_store_error_value(session_id),
             "epochs": {
                 "memory_render_epoch": MEMORY_RENDER_FORMAT_EPOCH,
                 "compartment_render_epoch": COMPARTMENT_RENDER_FORMAT_EPOCH,
@@ -8286,6 +8321,19 @@ impl McHandler {
                 "transform_failed"
             };
             let message = e.to_string();
+            if matches!(&e, crate::transform::TransformError::Store(_)) {
+                self.runtime_store_errors
+                    .lock()
+                    .expect("runtime store errors mutex")
+                    .insert(
+                        parsed.session_id.clone(),
+                        RuntimeStoreError {
+                            code: code.to_string(),
+                            message: message.clone(),
+                            at_ms: now_ms(),
+                        },
+                    );
+            }
             let _ = store.trace_pass_rejected(&parsed.session_id, &message, now_ms());
             HandlerOutcome::Error {
                 code: code.to_string(),
@@ -8293,7 +8341,13 @@ impl McHandler {
             }
         };
         let mut result = match run_transform() {
-            Ok(result) => result,
+            Ok(result) => {
+                self.runtime_store_errors
+                    .lock()
+                    .expect("runtime store errors mutex")
+                    .remove(&parsed.session_id);
+                result
+            }
             Err(e) => return reject_transform(e),
         };
         let mut emergency_pre_floor =
@@ -21821,6 +21875,40 @@ mod tests {
         let health =
             call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
         assert_eq!(health["pass_trace"], status["pass_trace"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sqlite_busy_transform_is_typed_and_visible_in_status_and_health() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, dir, _project) = handler_with_store(producer, default_test_config());
+        let baseline = call_transform_request(&handler, request(vec![ck("m1", 1, "one")])).await;
+        assert_eq!(baseline["status"], "ok", "{baseline}");
+
+        let descriptor = dev_descriptor_at(dir.path().join("data").to_str().unwrap());
+        let StorageBackend::Sqlite { path } = descriptor.backend else {
+            panic!("test descriptor must use SQLite")
+        };
+        let locker = rusqlite::Connection::open(path).unwrap();
+        locker.busy_timeout(Duration::ZERO).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (code, message) = error_frame(
+            call_transform_outcome(
+                &handler,
+                request(vec![ck("m1", 1, "one"), ck("m2", 2, "two")]),
+            )
+            .await,
+        );
+        assert_eq!(code, "transform_failed");
+        assert!(message.contains("database is locked"), "{message}");
+        locker.execute_batch("ROLLBACK").unwrap();
+
+        let status =
+            call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
+        assert_eq!(status["runtime_store_error"]["code"], "transform_failed");
+        assert_eq!(status["runtime_store_error"]["message"], message);
+        let health =
+            call_dispatch_request(&handler, json!({ "kind": "health", "session_id": "ses" })).await;
+        assert_eq!(health["runtime_store_error"], status["runtime_store_error"]);
     }
 
     #[tokio::test(flavor = "current_thread")]

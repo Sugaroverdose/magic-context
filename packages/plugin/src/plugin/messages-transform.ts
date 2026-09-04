@@ -8,6 +8,7 @@ import { getOrCreateSessionMeta, openDatabase } from "../features/magic-context/
 import {
     getOverflowState,
     isEmergencyRecoveryArmed,
+    isProviderOverflowFailClosedProven,
 } from "../features/magic-context/storage-meta-persisted";
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
@@ -299,6 +300,16 @@ export function createMessagesTransformHandler(args: {
                 );
                 restoreCompactionOffInput();
                 return output.messages;
+            }
+            if (
+                !args.compactionOff &&
+                sessionId &&
+                isProviderOverflowFailClosedProven(sessionId)
+            ) {
+                throw new EmergencyFailClosedError(
+                    "Emergency recovery transform failed; refusing an unbounded raw fallback",
+                    { cause: error },
+                );
             }
             if (args.compactionOff) {
                 // Skip the LKG replay entirely: the contract for this mode is
