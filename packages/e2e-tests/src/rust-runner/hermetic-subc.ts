@@ -751,6 +751,46 @@ export class HermeticSubcStack {
         }
     }
 
+    async moduleSeriesRequest(
+        sessionId: string,
+        projectRoot: string,
+        requests: readonly Record<string, unknown>[],
+        timeoutMs = 120_000,
+    ): Promise<Record<string, unknown>[]> {
+        const identity: BindIdentity = {
+            project_root: resolve(projectRoot),
+            harness: "opencode",
+            session: sessionId,
+        };
+        const client = await SubcClient.connect({
+            connectionFile: this.connectionFile,
+            identity,
+            targetKind: "tool_provider",
+        });
+        let route: Awaited<ReturnType<SubcClient["routeOpen"]>> | null = null;
+        try {
+            route = await routeOpenWithoutAmbientConsumerIdentity(
+                client,
+                { kind: "tool_provider", module_id: MODULE_ID },
+                identity,
+            );
+            const responses: Record<string, unknown>[] = [];
+            for (const request of requests) {
+                const response = await client.request(route, request, { timeoutMs });
+                responses.push(
+                    (response && typeof response === "object" ? response : {}) as Record<
+                        string,
+                        unknown
+                    >,
+                );
+            }
+            return responses;
+        } finally {
+            if (route) await client.closeRoute(route).catch(() => undefined);
+            client.close();
+        }
+    }
+
     async moduleStatus(
         sessionId: string,
         projectRoot: string,

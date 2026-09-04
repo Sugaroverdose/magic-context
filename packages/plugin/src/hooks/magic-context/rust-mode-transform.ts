@@ -311,6 +311,8 @@ export interface RustModeTransformOptions {
     projectRoot?: string;
     notifyParked?: (sessionId: string, message: string) => void;
     moduleTimeoutMs?: number;
+    /** Test-only page-size override for exercising multi-page control flow with small fixtures. */
+    modulePageMaxBytes?: number;
     memorySyncRequestedSessions?: Set<string>;
     /**
      * Invoked with each project that reaches rust-mode authority preparation, so the
@@ -2540,7 +2542,10 @@ export function createRustModeTransform(
                 payload: Record<string, unknown>,
                 detail = "",
             ): Promise<TransformSeriesResult> => {
-                const pages = buildPagedModuleTransformPayloads(payload);
+                const pages = buildPagedModuleTransformPayloads(
+                    payload,
+                    options.modulePageMaxBytes,
+                );
                 const seedMessageCount = Array.isArray(payload.input)
                     ? payload.input.length
                     : Array.isArray(payload.messages)

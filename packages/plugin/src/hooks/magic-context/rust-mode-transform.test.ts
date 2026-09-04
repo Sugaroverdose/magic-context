@@ -76,6 +76,7 @@ const createRustModeTransform = (
     createRustModeTransformImpl(deps, {
         ...options,
         allowAuthorityProtocolBypassForTests: true,
+        modulePageMaxBytes: 512 * 1024,
         scheduleLkgCapture: options.scheduleLkgCapture ?? ((capture) => capture()),
     });
 
@@ -2037,7 +2038,7 @@ describe("Rust mode authority adapter", () => {
             );
             expect(seriesStarts).toHaveLength(1);
             expect(transformCalls.at(-1)?.attemptClass).toBe("transform_series_execute");
-            expect(transformCalls.at(-1)?.timeoutMs).toBe(30_002);
+            expect(transformCalls.at(-1)?.timeoutMs).toBe(10_001);
             expect(
                 transformCalls
                     .slice(0, -1)

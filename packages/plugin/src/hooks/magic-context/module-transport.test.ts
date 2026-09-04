@@ -439,10 +439,10 @@ describe("SubcModuleTransport", () => {
     });
 
     it("scales cold execution for ENGRAM and ASTRO while retaining a bounded ceiling", () => {
-        expect(transformColdStartExecuteTimeoutMs(0)).toBe(30_000);
-        expect(transformColdStartExecuteTimeoutMs(7_400)).toBe(44_800);
-        expect(transformColdStartExecuteTimeoutMs(9_600)).toBe(49_200);
-        expect(transformColdStartExecuteTimeoutMs(100_000)).toBe(120_000);
+        expect(transformColdStartExecuteTimeoutMs(0)).toBe(10_000);
+        expect(transformColdStartExecuteTimeoutMs(7_400)).toBe(17_400);
+        expect(transformColdStartExecuteTimeoutMs(9_600)).toBe(19_600);
+        expect(transformColdStartExecuteTimeoutMs(100_000)).toBe(60_000);
     });
 
     it("uses a cold-start deadline only for a completed transform page series", async () => {
@@ -495,8 +495,8 @@ describe("SubcModuleTransport", () => {
         expect(observedTimeouts).toHaveLength(2);
         expect(observedTimeouts[0]).toBeGreaterThan(4_500);
         expect(observedTimeouts[0]).toBeLessThanOrEqual(5_000);
-        expect(observedTimeouts[1]).toBeGreaterThan(29_000);
-        expect(observedTimeouts[1]).toBeLessThanOrEqual(30_000);
+        expect(observedTimeouts[1]).toBeGreaterThan(9_500);
+        expect(observedTimeouts[1]).toBeLessThanOrEqual(10_000);
     });
 
     it("fails a completed-series deadline without reconnecting or retrying", async () => {

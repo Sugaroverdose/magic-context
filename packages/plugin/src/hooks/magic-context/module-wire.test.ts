@@ -9,6 +9,7 @@ import {
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     MODULE_PAGE_MAX_BYTES,
+    SUBC_MAX_FRAME_BODY_BYTES,
     resolveOrdinalsForModule,
 } from "./module-wire";
 import { setRawMessageProvider } from "./read-session-chunk";
@@ -362,7 +363,19 @@ describe("resolveOrdinalsForModule provisional tails", () => {
     });
 });
 
+const TEST_PAGE_MAX_BYTES = 512 * 1024;
+
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
+    it("pins the application page budget to the shared SUBC frame fixture", async () => {
+        const fixture = (await Bun.file(
+            new URL(
+                "../../../../../crates/mc-module/testdata/subc-frame-limits.json",
+                import.meta.url,
+            ),
+        ).json()) as { max_frame_body_bytes: number; application_body_bytes: number };
+        expect(SUBC_MAX_FRAME_BODY_BYTES).toBe(fixture.max_frame_body_bytes);
+        expect(MODULE_PAGE_MAX_BYTES).toBe(fixture.application_body_bytes);
+    });
     it("returns the first stringify length on the unpaged path", () => {
         const body = {
             method: "transform",
@@ -385,8 +398,8 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
                 ck: { text: "x".repeat(8_000) },
             })),
         };
-        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(MODULE_PAGE_MAX_BYTES);
-        const pages = buildPagedModuleTransformPayloads(body);
+        expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(TEST_PAGE_MAX_BYTES);
+        const pages = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
         for (const { page, bytes } of pages) {
             expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
@@ -404,12 +417,15 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             })),
         };
 
-        const first = buildPagedModuleTransformPayloads(body);
-        const retry = buildPagedModuleTransformPayloads(structuredClone(body));
-        const changed = buildPagedModuleTransformPayloads({
-            ...body,
-            input: [...body.input, { mid: "changed", ordinal: 81, ck: { text: "changed" } }],
-        });
+        const first = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES);
+        const retry = buildPagedModuleTransformPayloads(structuredClone(body), TEST_PAGE_MAX_BYTES);
+        const changed = buildPagedModuleTransformPayloads(
+            {
+                ...body,
+                input: [...body.input, { mid: "changed", ordinal: 81, ck: { text: "changed" } }],
+            },
+            TEST_PAGE_MAX_BYTES,
+        );
         const id = first[0]?.page.transform_page_id;
 
         expect(first.length).toBeGreaterThan(1);
@@ -437,11 +453,11 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         };
 
         expect(Buffer.byteLength(JSON.stringify(toolInputKeyOrders))).toBeGreaterThan(
-            MODULE_PAGE_MAX_BYTES,
+            TEST_PAGE_MAX_BYTES,
         );
-        const pages = buildPagedModuleTransformPayloads(body);
+        const pages = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES);
         expect(pages.length).toBeGreaterThan(1);
-        expect(pages.every(({ bytes }) => bytes <= MODULE_PAGE_MAX_BYTES)).toBe(true);
+        expect(pages.every(({ bytes }) => bytes <= TEST_PAGE_MAX_BYTES)).toBe(true);
 
         const reassembled = Object.assign(
             {},
@@ -489,7 +505,7 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
             sixth: "f".repeat(80_000),
         };
 
-        expect(() => buildPagedModuleTransformPayloads(body)).toThrow(
+        expect(() => buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES)).toThrow(
             "largest scalar fields: largest=180002 bytes, second=160002 bytes, third=140002 bytes, fourth=120002 bytes, fifth=100002 bytes",
         );
     });

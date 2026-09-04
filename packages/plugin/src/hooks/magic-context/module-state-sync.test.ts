@@ -1014,19 +1014,22 @@ describe("module incremental and paged assembly", () => {
         }) as typeof JSON.stringify;
         let pages: ReturnType<typeof buildPagedModuleStateSyncPayloads> = [];
         try {
-            pages = buildPagedModuleStateSyncPayloads({
-                moduleGeneration: 1,
-                expectedShadowSeq: 0,
-                seedId: "seed",
-                seedBoundaryId: null,
-                compartments: items,
-                memories: [],
-                memoryMutations: [],
-                userProfile: [],
-                workspace: null,
-                lastTodoState: "",
-                watermarks,
-            });
+            pages = buildPagedModuleStateSyncPayloads(
+                {
+                    moduleGeneration: 1,
+                    expectedShadowSeq: 0,
+                    seedId: "seed",
+                    seedBoundaryId: null,
+                    compartments: items,
+                    memories: [],
+                    memoryMutations: [],
+                    userProfile: [],
+                    workspace: null,
+                    lastTodoState: "",
+                    watermarks,
+                },
+                512 * 1024,
+            );
         } finally {
             JSON.stringify = originalStringify;
         }

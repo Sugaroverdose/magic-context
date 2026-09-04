@@ -110,6 +110,21 @@ struct CkWireMessageData {
     pub meta: HarnessMeta,
 }
 
+#[derive(Serialize)]
+struct CkWireMessageRef<'a> {
+    role: &'a str,
+    content: &'a [CkWireBlock],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'a MessageOrigin>,
+    #[serde(skip_serializing_if = "provider_extras_ref_is_empty")]
+    provider_extras: &'a ProviderExtras,
+    meta: &'a HarnessMeta,
+}
+
+fn provider_extras_ref_is_empty(value: &&ProviderExtras) -> bool {
+    value.is_empty()
+}
+
 impl<'de> Deserialize<'de> for CkWireMessage {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -137,12 +152,12 @@ impl Serialize for CkWireMessage {
         if let Some(original) = &self.original {
             return original.serialize(serializer);
         }
-        CkWireMessageData {
-            role: self.role.clone(),
-            content: self.content.clone(),
-            origin: self.origin.clone(),
-            provider_extras: self.provider_extras.clone(),
-            meta: self.meta.clone(),
+        CkWireMessageRef {
+            role: &self.role,
+            content: &self.content,
+            origin: self.origin.as_ref(),
+            provider_extras: &self.provider_extras,
+            meta: &self.meta,
         }
         .serialize(serializer)
     }
@@ -207,6 +222,13 @@ struct CkWireBlockData {
     pub provider_extras: ProviderExtras,
 }
 
+#[derive(Serialize)]
+struct CkWireBlockRef<'a> {
+    kind: &'a CkKind,
+    #[serde(skip_serializing_if = "provider_extras_ref_is_empty")]
+    provider_extras: &'a ProviderExtras,
+}
+
 impl<'de> Deserialize<'de> for CkWireBlock {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -231,9 +253,9 @@ impl Serialize for CkWireBlock {
         if let Some(original) = &self.original {
             return original.serialize(serializer);
         }
-        CkWireBlockData {
-            kind: self.kind.clone(),
-            provider_extras: self.provider_extras.clone(),
+        CkWireBlockRef {
+            kind: &self.kind,
+            provider_extras: &self.provider_extras,
         }
         .serialize(serializer)
     }
