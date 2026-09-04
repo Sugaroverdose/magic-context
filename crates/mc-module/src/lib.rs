@@ -18733,7 +18733,24 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cold_soft_plus_full_sync_primes_the_next_tail_delta() {
         let producer = Arc::new(ProducerState::default());
-        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        store
+            .replace_compartments(
+                "ses",
+                &[StoredCompartment {
+                    sequence: 1,
+                    start_message: 1,
+                    end_message: 1,
+                    start_message_id: "m1#0".to_string(),
+                    end_message_id: "m1#0".to_string(),
+                    title: "covered history".to_string(),
+                    content: "summary of m1".to_string(),
+                    p1: Some("summary of m1".to_string()),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
         let first_native = json!({
             "info": {
                 "id": "m1",
@@ -18743,11 +18760,15 @@ mod tests {
             },
             "parts": [{ "type": "text", "text": "hello", "customPart": 7 }]
         });
+        let tail_native = json!({
+            "info": { "id": "m2", "sessionID": "ses", "role": "user" },
+            "parts": [{ "type": "text", "text": "tail" }]
+        });
         let full_request = |fingerprint: &str| {
-            let mut body = request(vec![ck("m1", 1, "hello")]);
+            let mut body = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "tail")]);
             body["serializer_profile"] = json!("opencode-aisdk");
             body["serve_native"] = json!(true);
-            body["native_messages"] = json!([first_native.clone()]);
+            body["native_messages"] = json!([first_native.clone(), tail_native.clone()]);
             body["full_array_fingerprint"] = json!(fingerprint);
             body
         };
@@ -18766,6 +18787,12 @@ mod tests {
         assert!(cold["native_messages"]
             .as_array()
             .is_some_and(|messages| messages.first() != Some(&first_native)));
+        assert_eq!(cold["timings"]["build_serialized_messages"], 3);
+        assert!(!cold["ck_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["meta"]["harness_id"] == "m1"));
         assert!(handler
             .transform_snapshots
             .lock()
@@ -18774,31 +18801,35 @@ mod tests {
             .is_none());
 
         let second_native = json!({
-            "info": { "id": "m2", "sessionID": "ses", "role": "user" },
+            "info": { "id": "m3", "sessionID": "ses", "role": "user" },
             "parts": [{ "type": "text", "text": "next" }]
         });
-        let mut delta = request(vec![ck("m2", 2, "next")]);
+        let mut delta = request(vec![ck("m3", 3, "next")]);
         delta["serializer_profile"] = json!("opencode-aisdk");
         delta["serve_native"] = json!(true);
         delta["native_messages"] = json!([second_native]);
         delta["full_array_fingerprint"] = json!("cold-fp-2");
         delta["tail_delta"] = json!({
             "after": "cold-fp-1",
-            "replace_from": 1,
-            "native_replace_from": 1,
+            "replace_from": 2,
+            "native_replace_from": 2,
         });
         let delta_bytes = serde_json::to_vec(&delta).unwrap().len();
-        let mut full_followup = request(vec![ck("m1", 1, "hello"), ck("m2", 2, "next")]);
+        let mut full_followup = request(vec![
+            ck("m1", 1, "hello"),
+            ck("m2", 2, "tail"),
+            ck("m3", 3, "next"),
+        ]);
         full_followup["serializer_profile"] = json!("opencode-aisdk");
         full_followup["serve_native"] = json!(true);
-        full_followup["native_messages"] = json!([first_native, second_native]);
+        full_followup["native_messages"] = json!([first_native, tail_native, second_native]);
         full_followup["full_array_fingerprint"] = json!("cold-fp-2");
         assert!(delta_bytes < serde_json::to_vec(&full_followup).unwrap().len());
 
         let attached = call_transform_request(&handler, delta).await;
         assert_eq!(attached["status"], "ok", "{attached}");
         assert_eq!(attached["action"], "SOFT+", "{attached}");
-        assert_eq!(attached["timings"]["projection_reused_messages"], 1);
+        assert_eq!(attached["timings"]["projection_reused_messages"], 2);
         assert!(
             attached["timings"]["native_cache_reused_messages"]
                 .as_u64()

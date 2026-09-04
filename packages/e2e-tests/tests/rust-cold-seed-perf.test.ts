@@ -7,10 +7,39 @@ import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 const PERF_GATE = process.env.MC_PERF_GATE === "1";
+const PERF_FULL_OUTPUT = process.env.MC_PERF_FULL_OUTPUT === "1";
 const MESSAGE_COUNT = 9_600;
 const TOOL_MESSAGE_COUNT = 8_000;
-const RECORDED_HANDLER_MS = 8_000;
-const LOAD_CLASS_HANDLER_LIMIT_MS = RECORDED_HANDLER_MS * 3;
+const COVERED_MESSAGE_COUNT = 9_200;
+const COMPARTMENT_COUNT = 148;
+const COLD_BUILD_OUTPUT_LIMIT_MS = 1_000;
+const COLD_HANDLER_LIMIT_MS = 2_500;
+const COLD_SERIALIZED_MESSAGE_LIMIT = MESSAGE_COUNT - COVERED_MESSAGE_COUNT + 2;
+
+function astroCompartments(): Record<string, unknown>[] {
+    return Array.from({ length: COMPARTMENT_COUNT }, (_, index) => {
+        const sequence = index + 1;
+        const start = Math.floor((index * COVERED_MESSAGE_COUNT) / COMPARTMENT_COUNT) + 1;
+        const end = Math.floor((sequence * COVERED_MESSAGE_COUNT) / COMPARTMENT_COUNT);
+        const startMid = `msg_perf_${(start - 1).toString().padStart(5, "0")}`;
+        const endMid = `msg_perf_${(end - 1).toString().padStart(5, "0")}`;
+        const endBlockIndex = end <= TOOL_MESSAGE_COUNT ? 1 : 0;
+        return {
+            sequence,
+            start_message: start,
+            end_message: end,
+            start_message_id: `${startMid}#0`,
+            end_message_id: `${endMid}#${endBlockIndex}`,
+            title: `ASTRO history ${sequence}`,
+            content: `Summary of messages ${start}-${end}`,
+            p1: `Summary of messages ${start}-${end}`,
+            importance: 50,
+            episode_type: "feature",
+            legacy: 0,
+            created_at: sequence,
+        };
+    });
+}
 
 function astroShape(sessionId: string): Record<string, unknown> {
     const messages: Record<string, unknown>[] = [];
@@ -120,6 +149,16 @@ describe.skipIf(!PERF_GATE || !rustPrereqs.ok)("rust performance: ASTRO-shape co
         "keeps a 9.6k-message, 8k-tool cold full transform below the load-class budget",
         async () => {
             const sessionId = "ses_astro_shape_perf";
+            if (!PERF_FULL_OUTPUT) {
+                const seed = await h.subc.moduleRequest(sessionId, h.env.workdir, {
+                    method: "state_sync",
+                    shadow_generation: 0,
+                    expected_shadow_seq: 0,
+                    compartments: astroCompartments(),
+                });
+                expect(seed.ok).toBe(true);
+            }
+
             const payload = astroShape(sessionId);
             const configuredPageBytes = Number(process.env.MC_PERF_PAGE_BYTES);
             const pageBytes = Number.isSafeInteger(configuredPageBytes) && configuredPageBytes > 0
@@ -151,12 +190,19 @@ describe.skipIf(!PERF_GATE || !rustPrereqs.ok)("rust performance: ASTRO-shape co
                     `request_decode=${Number(timings.request_decode ?? 0).toFixed(1)} handler_prepare=${Number(timings.handler_prepare ?? 0).toFixed(1)} ` +
                     `transform_execute=${Number(timings.transform_execute ?? 0).toFixed(1)} handler_followup=${Number(timings.handler_followup ?? 0).toFixed(1)} ` +
                     `state_evolution=${Number(timings.state_evolution ?? 0).toFixed(1)} build_output=${Number(timings.build_output ?? 0).toFixed(1)} ` +
-                    `build_serialize_misses=${Number(timings.build_serialize_misses ?? 0).toFixed(1)} build_tail_loop=${Number(timings.build_tail_loop ?? 0).toFixed(1)} ` +
+                    `build_serialize_misses=${Number(timings.build_serialize_misses ?? 0).toFixed(1)} build_serialized_messages=${Number(timings.build_serialized_messages ?? 0)} build_tail_loop=${Number(timings.build_tail_loop ?? 0).toFixed(1)} ` +
                     `native_attach=${Number(timings.native_attach ?? 0).toFixed(1)} post_attach=${Number(timings.post_attach ?? 0).toFixed(1)}`,
             );
             expect(result.status).toBe("ok");
             expect(pages.length).toBeGreaterThan(1);
-            expect(Number(timings.handler_total)).toBeLessThan(LOAD_CLASS_HANDLER_LIMIT_MS);
+            const serializedMessageLimit = PERF_FULL_OUTPUT
+                ? MESSAGE_COUNT + 2
+                : COLD_SERIALIZED_MESSAGE_LIMIT;
+            expect(Number(timings.build_serialized_messages)).toBeLessThanOrEqual(serializedMessageLimit);
+            if (!PERF_FULL_OUTPUT) {
+                expect(Number(timings.build_output)).toBeLessThan(COLD_BUILD_OUTPUT_LIMIT_MS);
+                expect(Number(timings.handler_total)).toBeLessThan(COLD_HANDLER_LIMIT_MS);
+            }
         },
         600_000,
     );
