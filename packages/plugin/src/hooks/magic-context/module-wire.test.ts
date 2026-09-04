@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+    __moduleWireTest,
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     MODULE_PAGE_MAX_BYTES,
@@ -390,5 +391,80 @@ describe("buildPagedModuleTransformPayloads byte reuse", () => {
         for (const { page, bytes } of pages) {
             expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
         }
+    });
+
+    it("pages a 30,000-entry tool-input key-order map and bounds the scalar tail", () => {
+        const toolInputKeyOrders = Object.fromEntries(
+            Array.from({ length: 30_000 }, (_, index) => [
+                `msg_${index.toString(16).padStart(24, "0")}#0`,
+                ["filePath", "oldString", "newString"],
+            ]),
+        );
+        const body = {
+            method: "transform",
+            kind: "transform",
+            v: 2,
+            session_id: "ses-key-order-map",
+            input: [],
+            tool_input_key_orders: toolInputKeyOrders,
+            usage: { current_total_input_tokens: 1, context_limit_tokens: 200_000 },
+        };
+
+        expect(Buffer.byteLength(JSON.stringify(toolInputKeyOrders))).toBeGreaterThan(
+            MODULE_PAGE_MAX_BYTES,
+        );
+        const pages = buildPagedModuleTransformPayloads(body);
+        expect(pages.length).toBeGreaterThan(1);
+        expect(pages.every(({ bytes }) => bytes <= MODULE_PAGE_MAX_BYTES)).toBe(true);
+
+        const reassembled = Object.assign(
+            {},
+            ...pages.map(({ page }) => page.tool_input_key_orders as Record<string, string[]>),
+        );
+        expect(reassembled).toEqual(toolInputKeyOrders);
+
+        const complete = { ...pages.at(-1)?.page };
+        for (const field of [
+            "input",
+            "messages",
+            "native_messages",
+            "ts_output",
+            "ts_ck_messages",
+            "normalizations",
+            "tool_input_key_orders",
+        ]) {
+            delete complete[field];
+        }
+        expect(Buffer.byteLength(JSON.stringify(complete))).toBeLessThan(64 * 1024);
+    });
+
+    it("hashes map slices with the Rust canonical page digest", () => {
+        expect(
+            __moduleWireTest.transformPageDigest({
+                messages: [{ mid: "m1", text: "hello" }],
+                tool_input_key_orders: {
+                    "m1#2": ["newString", "filePath"],
+                    "m1#0": ["path", "content"],
+                },
+            }),
+        ).toBe("db28d9596edc518ebe4131403a892c60868ee683f80c248e6c1c1a6f0e9bbf17");
+    });
+
+    it("names the five largest scalar fields when the tail cannot fit", () => {
+        const body = {
+            method: "transform",
+            session_id: "ses-scalar-diagnostic",
+            input: [],
+            largest: "a".repeat(180_000),
+            second: "b".repeat(160_000),
+            third: "c".repeat(140_000),
+            fourth: "d".repeat(120_000),
+            fifth: "e".repeat(100_000),
+            sixth: "f".repeat(80_000),
+        };
+
+        expect(() => buildPagedModuleTransformPayloads(body)).toThrow(
+            "largest scalar fields: largest=180002 bytes, second=160002 bytes, third=140002 bytes, fourth=120002 bytes, fifth=100002 bytes",
+        );
     });
 });

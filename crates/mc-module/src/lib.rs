@@ -622,6 +622,7 @@ const TRANSFORM_PAGE_ARRAY_FIELDS: [&str; 6] = [
     "ts_ck_messages",
     "normalizations",
 ];
+const TRANSFORM_PAGE_MAP_FIELDS: [&str; 1] = ["tool_input_key_orders"];
 const STATE_IMPORT_MAX_ID_BYTES: usize = 128;
 const STATE_IMPORT_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
 const STATE_IMPORT_MAX_PENDING: usize = 64;
@@ -9483,6 +9484,7 @@ impl McHandler {
                         .into_iter()
                         .chain(TRANSFORM_PAGE_FIELDS)
                         .chain(TRANSFORM_PAGE_ARRAY_FIELDS)
+                        .chain(TRANSFORM_PAGE_MAP_FIELDS)
                         .any(|allowed| allowed == key.as_str())
                 })
             })
@@ -9491,7 +9493,7 @@ impl McHandler {
             return transform_page_error(
                 lane,
                 "protocol_mismatch",
-                "non-final transform pages may carry only message arrays",
+                "non-final transform pages may carry only message arrays and pageable maps",
             );
         }
         if transform_page_content_digest(&request) != page_digest {
@@ -9594,9 +9596,17 @@ impl McHandler {
             } => {
                 let assembled = match assemble_transform_pages(pages) {
                     Ok(assembled) => assembled,
-                    Err(message) => {
+                    Err(error) => {
                         self.discard_transform_pages(&binding.session);
-                        return transform_page_error(lane, "protocol_mismatch", message);
+                        let (suffix, message) = match error {
+                            TransformPageAssemblyError::ProtocolMismatch(message) => {
+                                ("protocol_mismatch", message)
+                            }
+                            TransformPageAssemblyError::DigestMismatch(message) => {
+                                ("digest_mismatch", message)
+                            }
+                        };
+                        return transform_page_error(lane, suffix, message);
                     }
                 };
                 let outcome = self
@@ -12968,10 +12978,13 @@ fn canonical_object_fields(request: &Value, fields: &[&str]) -> String {
 }
 
 fn transform_page_content_digest(request: &Value) -> String {
-    // Keep the digest's canonical object shape while borrowing page arrays. The page is
-    // subsequently consumed by assembly, so cloning these values just to hash them would
-    // duplicate the largest allocation in the request.
-    sha256_hex(canonical_object_fields(request, &TRANSFORM_PAGE_ARRAY_FIELDS).as_bytes())
+    // Hash only pageable content: scalar fields arrive on the final page, while arrays
+    // and map slices must be protected independently as each page is staged.
+    let fields = TRANSFORM_PAGE_ARRAY_FIELDS
+        .into_iter()
+        .chain(TRANSFORM_PAGE_MAP_FIELDS)
+        .collect::<Vec<_>>();
+    sha256_hex(canonical_object_fields(request, &fields).as_bytes())
 }
 
 fn transform_continuation_chunk<'a>(
@@ -13074,12 +13087,28 @@ fn assemble_transform_page_field(field: &str, values: Vec<Value>) -> Result<Vec<
     Ok(assembled)
 }
 
-fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
-    let mut final_page = pages
-        .pop()
-        .ok_or_else(|| "transform page collection was empty".to_string())?;
+#[derive(Debug)]
+enum TransformPageAssemblyError {
+    ProtocolMismatch(String),
+    DigestMismatch(String),
+}
+
+impl From<String> for TransformPageAssemblyError {
+    fn from(message: String) -> Self {
+        Self::ProtocolMismatch(message)
+    }
+}
+
+fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, TransformPageAssemblyError> {
+    let mut final_page = pages.pop().ok_or_else(|| {
+        TransformPageAssemblyError::ProtocolMismatch(
+            "transform page collection was empty".to_string(),
+        )
+    })?;
     if !final_page.is_object() {
-        return Err("transform page was not an object".to_string());
+        return Err(TransformPageAssemblyError::ProtocolMismatch(
+            "transform page was not an object".to_string(),
+        ));
     }
     if let Some(object) = final_page.as_object_mut() {
         for field in [
@@ -13106,9 +13135,45 @@ fn assemble_transform_pages(mut pages: Vec<Value>) -> Result<Value, String> {
         if had_field || !values.is_empty() {
             let values = assemble_transform_page_field(field, values)?;
             let Some(object) = final_page.as_object_mut() else {
-                return Err("transform page was not an object".to_string());
+                return Err(TransformPageAssemblyError::ProtocolMismatch(
+                    "transform page was not an object".to_string(),
+                ));
             };
             object.insert(field.to_string(), Value::Array(values));
+        }
+    }
+    for field in TRANSFORM_PAGE_MAP_FIELDS {
+        let had_field = final_page.get(field).is_some();
+        let mut merged = serde_json::Map::new();
+        for page in pages.iter_mut().chain(std::iter::once(&mut final_page)) {
+            let Some(object) = page.as_object_mut() else {
+                return Err(TransformPageAssemblyError::ProtocolMismatch(
+                    "transform page was not an object".to_string(),
+                ));
+            };
+            let Some(value) = object.remove(field) else {
+                continue;
+            };
+            let Value::Object(entries) = value else {
+                return Err(TransformPageAssemblyError::ProtocolMismatch(format!(
+                    "transform pageable map field {field} was not an object"
+                )));
+            };
+            for (key, value) in entries {
+                if merged.insert(key.clone(), value).is_some() {
+                    return Err(TransformPageAssemblyError::DigestMismatch(format!(
+                        "transform pageable map field {field} repeated key {key} across pages"
+                    )));
+                }
+            }
+        }
+        if had_field || !merged.is_empty() {
+            let Some(object) = final_page.as_object_mut() else {
+                return Err(TransformPageAssemblyError::ProtocolMismatch(
+                    "transform page was not an object".to_string(),
+                ));
+            };
+            object.insert(field.to_string(), Value::Object(merged));
         }
     }
     Ok(final_page)
@@ -30534,6 +30599,7 @@ mod tests {
                 }
             ],
             "native_messages": [{"text": "native first"}],
+            "tool_input_key_orders": {"m0#0": ["filePath", "content"]},
             "transform_page_id": "golden-page",
             "transform_generation": 4,
             "transform_page_index": 0,
@@ -30557,6 +30623,7 @@ mod tests {
                 {"mid": "m2", "text": "last"}
             ],
             "native_messages": [{"text": "native last"}],
+            "tool_input_key_orders": {"m2#0": ["filePath", "oldString", "newString"]},
             "extra": "preserved",
             "transform_page_id": "golden-page",
             "transform_generation": 4,
@@ -30581,8 +30648,220 @@ mod tests {
                     {"text": "native first"},
                     {"text": "native last"}
                 ],
+                "tool_input_key_orders": {
+                    "m0#0": ["filePath", "content"],
+                    "m2#0": ["filePath", "oldString", "newString"]
+                },
                 "extra": "preserved"
             })
+        );
+    }
+
+    #[test]
+    fn pageable_map_digest_matches_the_typescript_canonical_fixture() {
+        let request = json!({
+            "messages": [{"mid": "m1", "text": "hello"}],
+            "tool_input_key_orders": {
+                "m1#2": ["newString", "filePath"],
+                "m1#0": ["path", "content"]
+            }
+        });
+        assert_eq!(
+            transform_page_content_digest(&request),
+            "db28d9596edc518ebe4131403a892c60868ee683f80c248e6c1c1a6f0e9bbf17"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pageable_key_order_map_accepts_over_cap_input_and_preserves_served_bytes() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) = handler_with_store(state, default_test_config());
+        let key_order_map = |start: usize, end: usize| {
+            Value::Object(
+                (start..end)
+                    .map(|index| {
+                        (
+                            format!("msg_{index:024x}#0"),
+                            json!(["filePath", "oldString", "newString"]),
+                        )
+                    })
+                    .collect(),
+            )
+        };
+        let large_map = key_order_map(0, 12_000);
+        assert!(serde_json::to_vec(&large_map).unwrap().len() > TRANSFORM_PAGE_MAX_BYTES);
+
+        let mut large_response = None;
+        for index in 0..3 {
+            let complete = index == 2;
+            let messages = if complete {
+                vec![
+                    serde_json::to_value(ck("large-map-message", 0, "large map accepted")).unwrap(),
+                ]
+            } else {
+                Vec::new()
+            };
+            let mut page = paged_transform_page(
+                "transform",
+                "ses",
+                "large-key-order-map",
+                0,
+                index,
+                3,
+                complete,
+                messages,
+            );
+            page["tool_input_key_orders"] = key_order_map(index * 4_000, (index + 1) * 4_000);
+            page["transform_page_digest"] = json!(transform_page_content_digest(&page));
+            assert!(serde_json::to_vec(&page).unwrap().len() <= TRANSFORM_PAGE_MAX_BYTES);
+            match handler.dispatch_value(7, page).await {
+                HandlerOutcome::Response(bytes) if complete => large_response = Some(bytes),
+                HandlerOutcome::Response(_) => {}
+                other => panic!("large key-order map page should be accepted: {other:?}"),
+            }
+        }
+        assert!(large_response.is_some());
+        let large_request = handler
+            .transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .ready_request_clone("ses")
+            .expect("large paged transform snapshot");
+        assert_eq!(large_request.tool_input_key_orders.len(), 12_000);
+
+        let project_root = project.to_str().expect("test project path");
+        handler.bind_route(8, binding(project_root, "unpaged-map-parity"));
+        handler.bind_route(9, binding(project_root, "paged-map-parity"));
+        let messages = vec![ck("parity-message", 0, "paging parity")];
+        let small_map = json!({
+            "unused#0": ["filePath", "content"],
+            "unused#1": ["filePath", "oldString", "newString"]
+        });
+        let mut unpaged_request = request(messages.clone());
+        unpaged_request["method"] = json!("transform");
+        unpaged_request["session_id"] = json!("unpaged-map-parity");
+        unpaged_request["tool_input_key_orders"] = small_map.clone();
+        let unpaged_output = match handler.dispatch_value(8, unpaged_request).await {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("unpaged parity control should execute: {other:?}"),
+        };
+
+        let mut first = paged_transform_page(
+            "transform",
+            "paged-map-parity",
+            "small-key-order-map",
+            0,
+            0,
+            2,
+            false,
+            Vec::new(),
+        );
+        first["tool_input_key_orders"] = json!({"unused#0": ["filePath", "content"]});
+        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
+        let mut final_page = paged_transform_page(
+            "transform",
+            "paged-map-parity",
+            "small-key-order-map",
+            0,
+            1,
+            2,
+            true,
+            messages
+                .into_iter()
+                .map(|message| serde_json::to_value(message).unwrap())
+                .collect(),
+        );
+        final_page["usage"] = json!({
+            "current_total_input_tokens": 45_000,
+            "context_limit_tokens": 50_000,
+            "final_wire_input_tokens": 0,
+            "final_wire_trusted": false,
+        });
+        final_page["tool_input_key_orders"] =
+            json!({"unused#1": ["filePath", "oldString", "newString"]});
+        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
+        let assembled = assemble_transform_pages(vec![first.clone(), final_page.clone()]).unwrap();
+        let mut parity_control = request(vec![ck("parity-message", 0, "paging parity")]);
+        parity_control["method"] = json!("transform");
+        parity_control["session_id"] = json!("paged-map-parity");
+        parity_control["tool_input_key_orders"] = small_map;
+        assert_eq!(assembled, parity_control);
+
+        assert!(matches!(
+            handler.dispatch_value(9, first).await,
+            HandlerOutcome::Response(_)
+        ));
+        let paged_output = match handler.dispatch_value(9, final_page).await {
+            HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+            other => panic!("paged parity request should execute: {other:?}"),
+        };
+        assert_eq!(
+            serde_json::to_vec(&paged_output["ck_messages"]).unwrap(),
+            serde_json::to_vec(&unpaged_output["ck_messages"]).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pageable_map_digest_rejects_tampering() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
+        let mut tampered = paged_transform_page(
+            "transform",
+            "ses",
+            "tampered-map",
+            0,
+            0,
+            1,
+            true,
+            vec![serde_json::to_value(ck("tampered", 0, "tampered map")).unwrap()],
+        );
+        tampered["tool_input_key_orders"] = json!({"tampered#0": ["filePath", "content"]});
+        tampered["transform_page_digest"] = json!(transform_page_content_digest(&tampered));
+        tampered["tool_input_key_orders"]["tampered#0"] = json!(["content", "filePath"]);
+
+        assert_eq!(
+            error_code(handler.dispatch_value(7, tampered).await),
+            "authority_transform_page_digest_mismatch"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pageable_map_duplicate_keys_are_integrity_errors() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(state, default_test_config());
+        let mut first = paged_transform_page(
+            "transform",
+            "ses",
+            "duplicate-map-key",
+            0,
+            0,
+            2,
+            false,
+            Vec::new(),
+        );
+        first["tool_input_key_orders"] = json!({"duplicate#0": ["filePath", "content"]});
+        first["transform_page_digest"] = json!(transform_page_content_digest(&first));
+        assert!(matches!(
+            handler.dispatch_value(7, first).await,
+            HandlerOutcome::Response(_)
+        ));
+
+        let mut final_page = paged_transform_page(
+            "transform",
+            "ses",
+            "duplicate-map-key",
+            0,
+            1,
+            2,
+            true,
+            vec![serde_json::to_value(ck("duplicate", 0, "duplicate map key")).unwrap()],
+        );
+        final_page["tool_input_key_orders"] = json!({"duplicate#0": ["oldString", "newString"]});
+        final_page["transform_page_digest"] = json!(transform_page_content_digest(&final_page));
+
+        assert_eq!(
+            error_code(handler.dispatch_value(7, final_page).await),
+            "authority_transform_page_digest_mismatch"
         );
     }
 

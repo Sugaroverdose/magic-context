@@ -45,9 +45,9 @@ function canonicalJson(value: unknown): string {
     return encoded === undefined ? "null" : encoded;
 }
 
-function transformPageDigest(arrays: Record<string, unknown[]>): string {
-    const wireArrays = JSON.parse(JSON.stringify(arrays)) as Record<string, unknown[]>;
-    return crypto.createHash("sha256").update(canonicalJson(wireArrays)).digest("hex");
+function transformPageDigest(pageContent: Record<string, unknown>): string {
+    const wireContent = JSON.parse(JSON.stringify(pageContent)) as Record<string, unknown>;
+    return crypto.createHash("sha256").update(canonicalJson(wireContent)).digest("hex");
 }
 
 function getMessageId(message: MessageLike): string | null {
@@ -308,26 +308,46 @@ export function buildPagedModuleTransformPayloads(
         "ts_ck_messages",
         "normalizations",
     ].filter((field) => Array.isArray(body[field]));
+    const mapFields = ["tool_input_key_orders"].filter((field) => {
+        const value = body[field];
+        return value !== null && typeof value === "object" && !Array.isArray(value);
+    });
     if (arrayFields.length === 0) {
         throw new Error("module transform body has no pageable message arrays");
     }
     const scalarFields = { ...body };
-    for (const field of arrayFields) delete scalarFields[field];
+    for (const field of [...arrayFields, ...mapFields]) delete scalarFields[field];
     const transformPageId = crypto.randomUUID();
-    const items = arrayFields.flatMap((field) =>
+    const arrayItems = arrayFields.flatMap((field) =>
         (body[field] as unknown[]).map((value, itemIndex) => ({ field, value, itemIndex })),
+    );
+    const mapItems = mapFields.flatMap((field) =>
+        Object.entries(body[field] as Record<string, unknown>).map(([key, value]) => ({
+            field,
+            key,
+            value,
+        })),
     );
     const emptyArrays = (): Record<string, unknown[]> =>
         Object.fromEntries(arrayFields.map((field) => [field, []]));
+    const emptyMaps = (): Record<string, Record<string, unknown>> =>
+        Object.fromEntries(
+            mapFields.map((field) => [field, Object.create(null) as Record<string, unknown>]),
+        );
     const makePage = (args: {
         index: number;
         total: number;
         complete: boolean;
         arrays: Record<string, unknown[]>;
+        maps: Record<string, Record<string, unknown>>;
     }): ModuleTransformWirePage => {
         const pageArrays = Object.fromEntries(
             arrayFields.map((field) => [field, args.arrays[field] ?? []]),
         );
+        const pageMaps = Object.fromEntries(
+            mapFields.map((field) => [field, args.maps[field] ?? {}]),
+        );
+        const pageContent = { ...pageArrays, ...pageMaps };
         const page: Record<string, unknown> = {
             method: body.method,
             session_id: body.session_id,
@@ -340,27 +360,48 @@ export function buildPagedModuleTransformPayloads(
             transform_page_index: args.index,
             transform_page_total: args.total,
             transform_page_complete: args.complete,
-            transform_page_digest: transformPageDigest(pageArrays),
-            ...pageArrays,
+            transform_page_digest: transformPageDigest(pageContent),
+            ...pageContent,
         };
         if (args.complete) Object.assign(page, scalarFields);
         // Admission already counted candidate sizes incrementally. Stringify once
         // here so transport telemetry can reuse the exact UTF-8 length.
         return { page, bytes: Buffer.byteLength(JSON.stringify(page)) };
     };
-    const hasItems = (arrays: Record<string, unknown[]>): boolean =>
-        Object.values(arrays).some((values) => values.length > 0);
+    const hasUnits = (
+        arrays: Record<string, unknown[]>,
+        maps: Record<string, Record<string, unknown>>,
+    ): boolean =>
+        Object.values(arrays).some((values) => values.length > 0) ||
+        Object.values(maps).some((values) => Object.keys(values).length > 0);
 
-    // Page admission used to clone and canonicalize the entire candidate page for every
-    // message. The wire representation is unchanged, so count its UTF-8 bytes incrementally
-    // and only build the digest once a page is actually emitted.
+    // Count the wire bytes incrementally so page admission does not clone and
+    // canonicalize the growing candidate after every array item or map entry.
     const serializedItemBytes = (value: unknown): number =>
         Buffer.byteLength(JSON.stringify(value) ?? "null");
+    const serializedMapEntryBytes = (key: string, value: unknown): number =>
+        Buffer.byteLength(JSON.stringify(key)) + 1 + serializedItemBytes(value);
+    const scalarTailError = (): Error => {
+        const largest = Object.entries(scalarFields)
+            .map(([field, value], index) => ({
+                field,
+                bytes: serializedItemBytes(value),
+                index,
+            }))
+            .sort((left, right) => right.bytes - left.bytes || left.index - right.index)
+            .slice(0, 5)
+            .map(({ field, bytes }) => `${field}=${bytes} bytes`)
+            .join(", ");
+        return new Error(
+            `module transform scalar tail exceeds the 512 KiB page limit; largest scalar fields: ${largest}`,
+        );
+    };
     const pageByteLength = (args: {
         index: number;
         total: number;
         complete: boolean;
         arrayBytes: Record<string, number>;
+        mapBytes: Record<string, number>;
     }): number => {
         const skeleton: Record<string, unknown> = {
             method: body.method,
@@ -373,69 +414,100 @@ export function buildPagedModuleTransformPayloads(
             transform_page_complete: args.complete,
             transform_page_digest: "0".repeat(64),
             ...Object.fromEntries(arrayFields.map((field) => [field, []])),
+            ...Object.fromEntries(mapFields.map((field) => [field, {}])),
         };
         if (args.complete) Object.assign(skeleton, scalarFields);
-        const emptyArrayBytes = 2 * arrayFields.length;
-        const contentsBytes = arrayFields.reduce(
-            (sum, field) => sum + (args.arrayBytes[field] ?? 2),
-            0,
-        );
-        return Buffer.byteLength(JSON.stringify(skeleton)) - emptyArrayBytes + contentsBytes;
+        const emptyCollectionBytes = 2 * (arrayFields.length + mapFields.length);
+        const contentsBytes =
+            arrayFields.reduce((sum, field) => sum + (args.arrayBytes[field] ?? 2), 0) +
+            mapFields.reduce((sum, field) => sum + (args.mapBytes[field] ?? 2), 0);
+        return Buffer.byteLength(JSON.stringify(skeleton)) - emptyCollectionBytes + contentsBytes;
     };
 
     let assumedTotal = 1;
     for (let attempt = 0; attempt < 10; attempt += 1) {
         const pages: ModuleTransformWirePage[] = [];
-        let current = emptyArrays();
-        let currentBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
-        const appendUnit = (field: string, value: unknown): boolean => {
+        let currentArrays = emptyArrays();
+        let currentMaps = emptyMaps();
+        let currentArrayBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
+        let currentMapBytes = Object.fromEntries(mapFields.map((field) => [field, 2]));
+        let currentMapCounts = Object.fromEntries(mapFields.map((field) => [field, 0]));
+        const resetCurrent = (): void => {
+            currentArrays = emptyArrays();
+            currentMaps = emptyMaps();
+            currentArrayBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
+            currentMapBytes = Object.fromEntries(mapFields.map((field) => [field, 2]));
+            currentMapCounts = Object.fromEntries(mapFields.map((field) => [field, 0]));
+        };
+        const flushCurrent = (): void => {
+            pages.push(
+                makePage({
+                    index: pages.length,
+                    total: assumedTotal,
+                    complete: false,
+                    arrays: currentArrays,
+                    maps: currentMaps,
+                }),
+            );
+            resetCurrent();
+        };
+        const currentPageFits = (): boolean =>
+            pageByteLength({
+                index: pages.length,
+                total: assumedTotal,
+                complete: false,
+                arrayBytes: currentArrayBytes,
+                mapBytes: currentMapBytes,
+            }) <= MODULE_PAGE_MAX_BYTES;
+        const appendArrayUnit = (field: string, value: unknown): boolean => {
             const valueBytes = serializedItemBytes(value);
-            const previousBytes = currentBytes[field] ?? 2;
-            current[field].push(value);
-            currentBytes[field] = previousBytes + valueBytes + (current[field].length > 1 ? 1 : 0);
-            if (
-                pageByteLength({
-                    index: pages.length,
-                    total: assumedTotal,
-                    complete: false,
-                    arrayBytes: currentBytes,
-                }) <= MODULE_PAGE_MAX_BYTES
-            ) {
-                return true;
+            const previousBytes = currentArrayBytes[field] ?? 2;
+            currentArrays[field].push(value);
+            currentArrayBytes[field] =
+                previousBytes + valueBytes + (currentArrays[field].length > 1 ? 1 : 0);
+            if (currentPageFits()) return true;
+
+            currentArrays[field].pop();
+            currentArrayBytes[field] = previousBytes;
+            if (hasUnits(currentArrays, currentMaps)) flushCurrent();
+
+            currentArrays[field].push(value);
+            currentArrayBytes[field] = 2 + valueBytes;
+            if (!currentPageFits()) {
+                currentArrays[field].pop();
+                currentArrayBytes[field] = 2;
+                return false;
             }
-            current[field].pop();
-            currentBytes[field] = previousBytes;
-            if (hasItems(current)) {
-                pages.push(
-                    makePage({
-                        index: pages.length,
-                        total: assumedTotal,
-                        complete: false,
-                        arrays: current,
-                    }),
-                );
-                current = emptyArrays();
-                currentBytes = Object.fromEntries(arrayFields.map((name) => [name, 2]));
-            }
-            current[field].push(value);
-            currentBytes[field] = 2 + valueBytes;
-            if (
-                pageByteLength({
-                    index: pages.length,
-                    total: assumedTotal,
-                    complete: false,
-                    arrayBytes: currentBytes,
-                }) > MODULE_PAGE_MAX_BYTES
-            ) {
-                current[field].pop();
-                currentBytes[field] = 2;
+            return true;
+        };
+        const appendMapUnit = (field: string, key: string, value: unknown): boolean => {
+            const entryBytes = serializedMapEntryBytes(key, value);
+            const previousBytes = currentMapBytes[field] ?? 2;
+            const previousCount = currentMapCounts[field] ?? 0;
+            currentMaps[field][key] = value;
+            currentMapCounts[field] = previousCount + 1;
+            currentMapBytes[field] = previousBytes + entryBytes + (previousCount > 0 ? 1 : 0);
+            if (currentPageFits()) return true;
+
+            delete currentMaps[field][key];
+            currentMapCounts[field] = previousCount;
+            currentMapBytes[field] = previousBytes;
+            if (hasUnits(currentArrays, currentMaps)) flushCurrent();
+
+            currentMaps[field][key] = value;
+            currentMapCounts[field] = 1;
+            currentMapBytes[field] = 2 + entryBytes;
+            if (!currentPageFits()) {
+                delete currentMaps[field][key];
+                currentMapCounts[field] = 0;
+                currentMapBytes[field] = 2;
                 return false;
             }
             return true;
         };
 
-        for (const item of items) {
-            if (appendUnit(item.field, item.value)) continue;
+        for (const item of arrayItems) {
+            if (appendArrayUnit(item.field, item.value)) continue;
             const serialized = JSON.stringify(item.value) ?? "null";
             const bytes = Buffer.from(serialized, "utf8");
             const chunks: string[] = [];
@@ -456,9 +528,14 @@ export function buildPagedModuleTransformPayloads(
                     },
                     chunk,
                 };
-                if (!appendUnit(item.field, marker)) {
+                if (!appendArrayUnit(item.field, marker)) {
                     throw new Error("module transform continuation exceeds the 512 KiB page limit");
                 }
+            }
+        }
+        for (const item of mapItems) {
+            if (!appendMapUnit(item.field, item.key, item.value)) {
+                throw new Error("module transform map entry exceeds the 512 KiB page limit");
             }
         }
 
@@ -466,31 +543,20 @@ export function buildPagedModuleTransformPayloads(
             index: pages.length,
             total: assumedTotal,
             complete: true,
-            arrays: current,
+            arrays: currentArrays,
+            maps: currentMaps,
         });
         if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) {
-            if (!hasItems(current)) {
-                throw new Error("module transform scalar tail exceeds the 512 KiB page limit");
-            }
-            pages.push(
-                makePage({
-                    index: pages.length,
-                    total: assumedTotal,
-                    complete: false,
-                    arrays: current,
-                }),
-            );
-            current = emptyArrays();
-            currentBytes = Object.fromEntries(arrayFields.map((field) => [field, 2]));
+            if (!hasUnits(currentArrays, currentMaps)) throw scalarTailError();
+            flushCurrent();
             finalPage = makePage({
                 index: pages.length,
                 total: assumedTotal,
                 complete: true,
-                arrays: current,
+                arrays: currentArrays,
+                maps: currentMaps,
             });
-            if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) {
-                throw new Error("module transform scalar tail exceeds the 512 KiB page limit");
-            }
+            if (finalPage.bytes > MODULE_PAGE_MAX_BYTES) throw scalarTailError();
         }
         pages.push(finalPage);
         if (pages.length === assumedTotal) return pages;
@@ -585,6 +651,7 @@ export function moduleRawBlockMappings(message: RawMessageParts | null): ModuleR
 export const __moduleWireTest = {
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
+    transformPageDigest,
     moduleRawBlockMappings,
     moduleWireBodyBytes,
     resolveOrdinalsForModule,

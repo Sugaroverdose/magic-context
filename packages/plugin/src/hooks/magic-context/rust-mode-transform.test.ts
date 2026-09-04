@@ -460,6 +460,54 @@ describe("Rust mode authority adapter", () => {
         expect("geometry" in body).toBe(false);
     });
 
+    it("captures input key order only for edit-marker tools", () => {
+        const input = [
+            {
+                mid: "tool-message",
+                ck: {
+                    content: [
+                        {
+                            kind: {
+                                type: "tool_call",
+                                name: "read",
+                                input: { filePath: "read.ts", offset: 1 },
+                            },
+                        },
+                        {
+                            kind: {
+                                type: "tool_call",
+                                name: "edit",
+                                input: { filePath: "edit.ts", oldString: "old", newString: "new" },
+                            },
+                        },
+                        {
+                            kind: {
+                                type: "tool_call",
+                                name: "write",
+                                input: { filePath: "write.ts", content: "contents" },
+                            },
+                        },
+                    ],
+                },
+            },
+        ];
+        const body = __rustModeTransformTest.buildTransformBody({
+            sessionId: "key-order-filter",
+            input,
+            nativeMessages: [],
+            passInputs: {},
+            usage: {},
+            modelKey: null,
+            providerId: null,
+            midTurn: false,
+        });
+
+        expect(body.tool_input_key_orders).toEqual({
+            "tool-message#1": ["filePath", "oldString", "newString"],
+            "tool-message#2": ["filePath", "content"],
+        });
+    });
+
     it("copies the resolved history budget onto the authority wire", () => {
         const body = __rustModeTransformTest.buildTransformBody({
             sessionId: "budget-wire",
