@@ -123,6 +123,18 @@
             ]
         },
         {
+            "path": "tests/notice-loop-race.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1.18.x MessageV2.latest / parentID loop-exit ordering for noReply ignored notices is a host-session contract exercised on the TS OpenCode harness",
+            "contract_refs": [
+                "TS-HARNESS"
+            ]
+        },
+        {
             "path": "tests/overflow-recovery.test.ts",
             "tier": "both-modes",
             "invocation": {

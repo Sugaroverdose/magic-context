@@ -537,6 +537,19 @@ const server: Plugin = async (ctx) => {
         }
     }
 
+    const serverUrl = (ctx as Record<string, unknown>).serverUrl;
+    const serverUrlStr =
+        serverUrl instanceof URL
+            ? serverUrl.toString().replace(/\/$/, "")
+            : typeof serverUrl === "string"
+              ? serverUrl.replace(/\/$/, "")
+              : undefined;
+    void import("./hooks/magic-context/send-session-notification").then(
+        ({ setNotificationServerUrl }) => {
+            setNotificationServerUrl(serverUrlStr);
+        },
+    );
+
     // Conflict warning / cleanup for Desktop mode.
     // TUI handles this via a startup dialog; this covers Desktop where we can't show dialogs.
     if (conflictResult?.hasConflict) {
@@ -548,9 +561,6 @@ const server: Plugin = async (ctx) => {
         );
     } else if (pluginConfig.enabled) {
         // No conflicts — clean up any leftover warning messages from previous disabled runs
-        const serverUrl = (ctx as Record<string, unknown>).serverUrl;
-        const serverUrlStr =
-            serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
         void cleanupConflictWarnings(
             ctx.client as unknown as Record<string, unknown>,
             ctx.directory,

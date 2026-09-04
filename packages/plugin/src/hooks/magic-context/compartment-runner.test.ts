@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -46,10 +46,17 @@ import {
     hasRunnableCompartmentWindow,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
+import { __ignoredNotificationTest } from "./send-session-notification";
 import { tagMessages } from "./tag-messages";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+
+beforeEach(() => {
+    // These fixtures end on real user rows, so the notice hold would queue.
+    // This file tests recomp behavior, not that gate.
+    __ignoredNotificationTest.setMidTurnDetector(() => false);
+});
 
 async function runCompartmentAgentWithLease(
     deps: Parameters<typeof runCompartmentAgent>[0],
@@ -64,6 +71,7 @@ async function runCompartmentAgentWithLease(
 }
 
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;

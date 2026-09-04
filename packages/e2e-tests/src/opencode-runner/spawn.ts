@@ -610,6 +610,11 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
         if (key === "OPENCODE_SERVER_PASSWORD") continue;
         if (key === "OPENCODE_SERVER_USERNAME") continue;
         if (key === "NODE_ENV") continue;
+        // Plugin unit-test preload sets this so bare openDatabase() cannot touch
+        // the developer's real DB. The OpenCode child must use the harness data
+        // dir instead; leaking the preload path makes the plugin look at a
+        // throwaway tree that is not the isolated session under test.
+        if (key === "MAGIC_CONTEXT_TEST_DATA_DIR") continue;
         // Strip any inherited subc supervised-launch identity. When the test
         // process is itself launched under a subc supervisor (e.g. an AFT/Alfonso
         // worktree sets SUBC_MODULE_ID=aft), the plugin's Rust module client would

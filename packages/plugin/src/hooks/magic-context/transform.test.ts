@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -54,6 +54,7 @@ import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/mod
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
+import { __ignoredNotificationTest } from "./send-session-notification";
 import { createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
@@ -91,7 +92,12 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
+beforeEach(() => {
+    __ignoredNotificationTest.setMidTurnDetector(() => false);
+});
+
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     __resetMessageIndexAsyncForTests();
     transformDecisionTest.reset();
     resetLkgSlotsForTest();

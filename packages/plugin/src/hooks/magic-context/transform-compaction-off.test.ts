@@ -11,7 +11,7 @@
  * un-gating the covered surface makes the assertion go red.
  */
 
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -50,6 +50,7 @@ import { clearModelsDevCache } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
+import { __ignoredNotificationTest } from "./send-session-notification";
 import { createTransform } from "./transform";
 
 type TestMessage = {
@@ -68,7 +69,12 @@ type TestMessage = {
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
+beforeEach(() => {
+    __ignoredNotificationTest.setMidTurnDetector(() => false);
+});
+
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     __resetMessageIndexAsyncForTests();
     __resetProjectIdentityForTests();
     closeDatabase();
