@@ -183,8 +183,15 @@ describe("FM-PI-4: provider-proven pressure at the Pi refusal boundary", () => {
 			"FM-PI-4-CONTINUE-95-PROVIDER",
 			"FM-PI-4-REFUSE-95-PROVIDER",
 		]);
-		const source = readRepositorySource("packages/pi-plugin/src/index.ts");
-		expect(source).toContain("record the recovery flag");
-		expect(source).toContain("detectOverflow");
+		// Fence the mechanism, not a comment: Pi's message_end payload is classified
+		// by handlePiProviderFailure, which persists the overflow verdict the next
+		// context pass reads as provider-proven pressure.
+		const entry = readRepositorySource("packages/pi-plugin/src/index.ts");
+		expect(entry).toContain("handlePiProviderFailure(");
+		const recovery = readRepositorySource(
+			"packages/pi-plugin/src/provider-error-recovery-pi.ts",
+		);
+		expect(recovery).toContain("detectOverflow(message.errorMessage)");
+		expect(recovery).toContain("recordOverflowDetected(");
 	});
 });
