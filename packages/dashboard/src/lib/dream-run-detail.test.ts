@@ -23,7 +23,29 @@ describe("getDreamRunTaskDetail", () => {
     ).toEqual({ text: "verify-broad cycle: verified 33, 0 remain", tone: "neutral" });
   });
 
-  test("keeps genuine failures red", () => {
+  test("renders structured failure detail for new rows", () => {
+    expect(
+      getDreamRunTaskDetail(
+        task({
+          error: "classify returned no output",
+          failure: {
+            failure_class: "provider_error",
+            model_attempted: "anthropic/claude-sonnet",
+            models_tried: ["primary", "anthropic/claude-sonnet"],
+            provider_error: "HTTP 429 rate limited\nrequest id: hidden",
+            timeout_ms: null,
+            child_session_id: "child-123",
+          },
+        }),
+        1,
+      ),
+    ).toEqual({
+      text: "provider_error · model: anthropic/claude-sonnet · HTTP 429 rate limited",
+      tone: "error",
+    });
+  });
+
+  test("keeps the legacy error string for old failed rows", () => {
     expect(getDreamRunTaskDetail(task({ error: "provider unavailable" }), 1)).toEqual({
       text: "provider unavailable",
       tone: "error",

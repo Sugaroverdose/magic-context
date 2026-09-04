@@ -636,6 +636,28 @@ describe("task-scheduler — runManualDream", () => {
         expect(result.skippedNoWork).toEqual(["verify"]);
     });
 
+    it("reports structured failure detail while preserving the legacy scheduler error", async () => {
+        db = freshDb();
+        const tasks = [cfg("verify", "0 3 * * *")];
+        const executor = async (): Promise<TaskExecOutcome> => ({
+            status: "failed",
+            transient: true,
+            error: "verify returned no output",
+            failureDetail: "empty_completion · model: provider/model",
+        });
+        const result = await runManualDream({
+            db,
+            projectIdentity: PROJECT,
+            tasks,
+            executor,
+            task: "verify",
+        });
+        expect(result.failureDetails).toEqual(["verify: empty_completion · model: provider/model"]);
+        expect(getTaskScheduleState(db, PROJECT, "verify")?.lastError).toBe(
+            "verify returned no output",
+        );
+    });
+
     it("an unknown forced task name is a no-op", async () => {
         db = freshDb();
         const tasks = [cfg("verify", "0 3 * * *")];

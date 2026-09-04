@@ -15,6 +15,7 @@ import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { describeError } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import { sanitizeDiagnosticText } from "../../../shared/redaction";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import { getCompartmentEvents } from "../compartment-events";
@@ -59,7 +60,12 @@ import {
     type RetrospectiveRawProvider,
     readRetrospectiveScanWindow,
 } from "./retrospective-raw-provider";
-import { type DreamRunMemoryChanges, insertDreamRun } from "./storage-dream-runs";
+import {
+    type DreamRunFailureDetail,
+    type DreamRunMemoryChanges,
+    formatDreamRunFailure,
+    insertDreamRun,
+} from "./storage-dream-runs";
 import {
     getTaskScheduleState,
     isRetrospectiveWindowProcessed,
@@ -136,6 +142,37 @@ export interface DreamTaskExecutorDeps {
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
  *  timeout/abort/lease/busy) or advances to the next cron slot (permanent:
  *  model-not-found, validation, parse). Classify off the error shape. */
+function dreamRunFailureDetail(error: unknown): DreamRunFailureDetail {
+    const prompt = shared.getPromptFailureDetail(error);
+    if (prompt) {
+        return {
+            failure_class: prompt.failureClass,
+            model_attempted: prompt.modelAttempted,
+            models_tried: prompt.modelsTried,
+            provider_error: prompt.providerError,
+            timeout_ms: prompt.timeoutMs,
+            child_session_id: prompt.childSessionId,
+        };
+    }
+
+    const described = describeError(error);
+    const message = described.brief;
+    const providerFailure =
+        error instanceof Error && error.name === "DreamerProviderOutputFailureError";
+    return {
+        failure_class: providerFailure
+            ? "provider_error"
+            : /no models?|model chain is empty/i.test(message)
+              ? "no_models"
+              : "unknown",
+        model_attempted: null,
+        models_tried: [],
+        provider_error: providerFailure ? sanitizeDiagnosticText(message).slice(0, 500) : null,
+        timeout_ms: null,
+        child_session_id: null,
+    };
+}
+
 function classifyFailure(error: unknown): { transient: boolean; brief: string } {
     const described = describeError(error);
     const brief = described.brief;
@@ -311,6 +348,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 /** Successful progress/detail; empty strings are omitted so absent
                  *  and empty have the same persisted meaning. */
                 progress?: string | null;
+                failure?: DreamRunFailureDetail;
             },
         ): void => {
             try {
@@ -325,6 +363,13 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                             durationMs: Date.now() - startedAt,
                             resultChars: 0,
                             ...(status === "failed" && error ? { error } : {}),
+                            ...(status === "failed"
+                                ? {
+                                      failure:
+                                          extra?.failure ??
+                                          dreamRunFailureDetail(error ?? "unknown dreamer failure"),
+                                  }
+                                : {}),
                             ...(extra?.progress ? { progress: extra.progress } : {}),
                             backlog: (() => {
                                 const end =
@@ -701,9 +746,15 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             });
         } catch (error) {
             const { transient, brief } = classifyFailure(error);
-            recordRun("failed", brief);
+            const failure = dreamRunFailureDetail(error);
+            recordRun("failed", brief, { failure });
             log(`[dreamer] task ${config.task} failed (transient=${transient}): ${brief}`);
-            return { status: "failed", transient, error: brief };
+            return {
+                status: "failed",
+                transient,
+                error: brief,
+                failureDetail: formatDreamRunFailure(failure),
+            };
         } finally {
             deps.onProgress?.(null, config.task);
         }
@@ -1149,6 +1200,7 @@ async function runAgenticTask(
                     merged: number;
                 } | null;
                 progress?: string | null;
+                failure?: DreamRunFailureDetail;
             },
         ) => void;
         computeMemoryDelta: (

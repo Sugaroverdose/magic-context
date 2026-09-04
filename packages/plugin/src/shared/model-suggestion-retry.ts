@@ -3,6 +3,7 @@ import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { detectOverflow } from "../features/magic-context/overflow-detection";
 import { log } from "./logger";
 import type { ModelInput } from "./model-resolution";
+import { sanitizeDiagnosticText } from "./redaction";
 import { parseProviderModel, toModelEntry } from "./resolve-fallbacks";
 
 type Client = ReturnType<typeof createOpencodeClient>;
@@ -98,6 +99,33 @@ export interface ValidatedPromptRetryResult<TOutput, TValidated> {
     output: TOutput;
     validated: TValidated;
     attempt: PromptAttemptInfo;
+}
+
+export type PromptFailureClass =
+    | "provider_timeout"
+    | "provider_error"
+    | "empty_completion"
+    | "no_models"
+    | "child_aborted"
+    | "parse_failed"
+    | "unknown";
+
+/** Diagnostic facts retained when a validated child prompt ultimately fails. */
+export interface PromptFailureDetail {
+    failureClass: PromptFailureClass;
+    modelAttempted: string | null;
+    modelsTried: string[];
+    providerError: string | null;
+    timeoutMs: number | null;
+    childSessionId: string | null;
+}
+
+const promptFailureDetails = new WeakMap<object, PromptFailureDetail>();
+
+export function getPromptFailureDetail(error: unknown): PromptFailureDetail | null {
+    return error !== null && typeof error === "object"
+        ? (promptFailureDetails.get(error) ?? null)
+        : null;
 }
 
 export interface ModelSuggestionInfo {
@@ -279,6 +307,61 @@ function shortErr(error: unknown): string {
     return extractMessage(error);
 }
 
+type PromptFailurePhase = "prompt" | "output" | "validation";
+
+interface FailedAttempt {
+    error: unknown;
+    failureClass: PromptFailureClass;
+    attempt: PromptAttemptInfo;
+}
+
+function classifyPromptFailure(
+    error: unknown,
+    phase: PromptFailurePhase,
+    externalSignal?: AbortSignal,
+): PromptFailureClass {
+    const message = extractMessage(error);
+    if (externalSignal?.aborted || message === "prompt aborted by external signal") {
+        return "child_aborted";
+    }
+    if (/^prompt timed out after \d+ms$/.test(message)) return "provider_timeout";
+    if (phase === "validation") {
+        if (/returned no (?:assistant )?output|no assistant output/i.test(message)) {
+            return "empty_completion";
+        }
+        if (error instanceof Error && error.name === "DreamerProviderOutputFailureError") {
+            return "provider_error";
+        }
+        return "parse_failed";
+    }
+    return phase === "prompt" || phase === "output" ? "provider_error" : "unknown";
+}
+
+function throwWithPromptFailure(
+    legacyError: unknown,
+    failedAttempts: FailedAttempt[],
+    args: PromptArgs,
+    timeoutMs: number,
+): never {
+    const error =
+        legacyError instanceof Error ? legacyError : new Error(extractMessage(legacyError));
+    const last = failedAttempts.at(-1);
+    const failureClass = last?.failureClass ?? "unknown";
+    const providerError =
+        failureClass === "provider_error"
+            ? sanitizeDiagnosticText(shortErr(last?.error ?? legacyError)).slice(0, 500)
+            : null;
+    promptFailureDetails.set(error, {
+        failureClass,
+        modelAttempted: last?.attempt.label ?? null,
+        modelsTried: failedAttempts.map((failure) => failure.attempt.label),
+        providerError,
+        timeoutMs: failureClass === "provider_timeout" ? timeoutMs : null,
+        childSessionId: args.path.id || null,
+    });
+    throw error;
+}
+
 /**
  * Try a single prompt attempt against the supplied body, with the existing
  * single-suggestion retry layered inside (so "did you mean X?" still self-heals
@@ -449,23 +532,43 @@ async function attemptAndValidate<TOutput, TValidated>(
     attempt: PromptAttemptInfo,
     options: ValidatedPromptRetryOptions<TOutput, TValidated>,
 ): Promise<ValidatedPromptRetryResult<TOutput, TValidated>> {
-    await attemptOnce(client, args, timeoutMs, signal, callContext, attempt.label);
-    const output = await options.fetchOutput(args, attempt);
-    const validated = await options.validateOutput(output, attempt);
-    return { output, validated, attempt };
+    try {
+        await attemptOnce(client, args, timeoutMs, signal, callContext, attempt.label);
+    } catch (error) {
+        throw {
+            error,
+            failureClass: classifyPromptFailure(error, "prompt", signal),
+            attempt,
+        } satisfies FailedAttempt;
+    }
+
+    let output: TOutput;
+    try {
+        output = await options.fetchOutput(args, attempt);
+    } catch (error) {
+        throw {
+            error,
+            failureClass: classifyPromptFailure(error, "output", signal),
+            attempt,
+        } satisfies FailedAttempt;
+    }
+
+    try {
+        const validated = await options.validateOutput(output, attempt);
+        return { output, validated, attempt };
+    } catch (error) {
+        throw {
+            error,
+            failureClass: classifyPromptFailure(error, "validation", signal),
+            attempt,
+        } satisfies FailedAttempt;
+    }
 }
 
 /**
- * Run a prompt with model fallback support, but accept an attempt only after the
- * caller validates the model's actual output. This covers "empty success" cases
- * where the provider/OpenCode prompt call completes successfully but the subagent
- * produced no usable assistant text / JSON.
- *
- * The happy path is still one prompt + one caller-owned output fetch: callers
- * should use the returned output instead of fetching messages a second time.
- * Validation failures are retryable across configured fallback models. If every
- * attempt produces invalid output (or otherwise fails retryably), the first
- * failure is re-thrown so callers surface the original failure semantics.
+ * Run a prompt across the configured model chain and retain which attempt failed.
+ * Output validation remains caller-owned so empty completions and malformed
+ * responses can be distinguished from provider transport failures.
  */
 export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = TOutput>(
     client: Client,
@@ -486,7 +589,7 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
             ? `${baseBody.model.providerID}/${baseBody.model.modelID}`
             : "primary";
     const totalAttempts = fallbacks.length + 1;
-
+    const failedAttempts: FailedAttempt[] = [];
     let firstError: unknown = null;
     let lastError: unknown = null;
 
@@ -506,17 +609,21 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
             },
             options,
         );
-    } catch (error) {
-        firstError = error;
-        lastError = error;
-        if (isNonRetryable(error, options.signal)) throw error;
+    } catch (caught) {
+        const failure = caught as FailedAttempt;
+        failedAttempts.push(failure);
+        firstError = failure.error;
+        lastError = failure.error;
+        if (isNonRetryable(failure.error, options.signal)) {
+            throwWithPromptFailure(failure.error, failedAttempts, args, timeoutMs);
+        }
 
         if (fallbacks.length === 0) {
-            throw error;
+            throwWithPromptFailure(failure.error, failedAttempts, args, timeoutMs);
         }
 
         log(
-            `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(error)}; trying ${fallbacks.length} fallback(s)`,
+            `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; trying ${fallbacks.length} fallback(s)`,
         );
     }
 
@@ -557,22 +664,30 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
                 `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${fallbacks.length + 1})`,
             );
             return result;
-        } catch (error) {
-            if (firstError === null) firstError = error;
-            lastError = error;
-            if (isNonRetryable(error, options.signal)) throw error;
+        } catch (caught) {
+            const failure = caught as FailedAttempt;
+            failedAttempts.push(failure);
+            lastError = failure.error;
+            if (isNonRetryable(failure.error, options.signal)) {
+                throwWithPromptFailure(failure.error, failedAttempts, args, timeoutMs);
+            }
 
             const remaining = fallbacks.length - i - 1;
             if (remaining > 0) {
                 log(
-                    `[${callContext}] ${label} failed validation/prompt: ${shortErr(error)}; ${remaining} fallback(s) left`,
+                    `[${callContext}] ${label} failed validation/prompt: ${shortErr(failure.error)}; ${remaining} fallback(s) left`,
                 );
             }
         }
     }
 
     log(
-        `[${callContext}] all models exhausted; tried: ${[explicitPrimaryLabel, ...fallbacks.map((fallback) => toModelEntry(fallback)?.model ?? String(fallback))].join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
+        `[${callContext}] all models exhausted; tried: ${failedAttempts.map((failure) => failure.attempt.label).join(", ")}; original error: ${shortErr(firstError)}; last error: ${shortErr(lastError)}`,
     );
-    throw firstError ?? lastError ?? new Error("All fallback models failed validation");
+    throwWithPromptFailure(
+        firstError ?? lastError ?? new Error("All fallback models failed validation"),
+        failedAttempts,
+        args,
+        timeoutMs,
+    );
 }

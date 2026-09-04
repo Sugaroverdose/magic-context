@@ -1,6 +1,24 @@
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import type { DreamTaskRunBacklog } from "./task-registry";
 
+export type DreamRunFailureClass =
+    | "provider_timeout"
+    | "provider_error"
+    | "empty_completion"
+    | "no_models"
+    | "child_aborted"
+    | "parse_failed"
+    | "unknown";
+
+export interface DreamRunFailureDetail {
+    failure_class: DreamRunFailureClass;
+    model_attempted: string | null;
+    models_tried: string[];
+    provider_error: string | null;
+    timeout_ms: number | null;
+    child_session_id: string | null;
+}
+
 export interface DreamRunTaskSummary {
     name: string;
     durationMs: number;
@@ -8,10 +26,21 @@ export interface DreamRunTaskSummary {
     /** Failure detail only. Missing means no failure was recorded; an empty
      * string is treated as absent and is not persisted. */
     error?: string;
+    /** Structured failure facts. Stored inside tasks_json so existing databases
+     *  remain readable without a schema migration. */
+    failure?: DreamRunFailureDetail;
     /** Successful progress/detail. Missing means no progress was reported; an
      * empty string is treated as absent and is not persisted. */
     progress?: string;
     backlog?: DreamTaskRunBacklog;
+}
+
+export function formatDreamRunFailure(failure: DreamRunFailureDetail): string {
+    const parts: string[] = [failure.failure_class];
+    if (failure.model_attempted) parts.push(`model: ${failure.model_attempted}`);
+    if (failure.provider_error) parts.push(failure.provider_error.split(/\r?\n/, 1)[0].trim());
+    else if (failure.timeout_ms !== null) parts.push(`timeout: ${failure.timeout_ms}ms`);
+    return parts.join(" · ");
 }
 
 export interface DreamRunMemoryChanges {
