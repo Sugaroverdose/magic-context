@@ -198,6 +198,23 @@ impl CkWireMessage {
         self.original = None;
     }
 
+    /// Serialize canonical JSON without rebuilding retained ingress messages as a second JSON tree.
+    /// Typed messages continue through the sorted-key value form that defines the existing wire
+    /// format; an unchanged retained value already has that canonical representation.
+    pub fn to_canonical_json_vec(&self) -> Result<Vec<u8>, serde_json::Error> {
+        if let Some(original) = &self.original {
+            serde_json::to_vec(original)
+        } else {
+            let canonical = serde_json::to_value(self)?;
+            serde_json::to_vec(&canonical)
+        }
+    }
+
+    /// The parsed object retained for lossless pass-through, when this message is unchanged.
+    pub fn retained_original_json(&self) -> Option<&Value> {
+        self.original.as_ref()
+    }
+
     fn mark_fully_typed(&mut self) {
         self.original = None;
         for block in &mut self.content {
@@ -285,6 +302,11 @@ impl CkWireBlock {
     /// bytes and the edit never reaches the wire.
     pub fn mark_modified(&mut self) {
         self.original = None;
+    }
+
+    /// The parsed object retained for lossless pass-through, when this block is unchanged.
+    pub fn retained_original_json(&self) -> Option<&Value> {
+        self.original.as_ref()
     }
 }
 

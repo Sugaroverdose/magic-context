@@ -154,6 +154,19 @@ pub struct ServedMessage {
     retained_bytes: usize,
 }
 
+fn canonical_message_bytes(message: &CkWireMessage) -> Vec<u8> {
+    message
+        .to_canonical_json_vec()
+        .expect("CK wire messages must always serialize")
+}
+
+#[cfg(test)]
+fn canonical_message_bytes_reference(message: &CkWireMessage) -> Vec<u8> {
+    let value = serde_json::to_value(message)
+        .expect("CK wire messages must always have a JSON representation");
+    serde_json::to_vec(&value).expect("CK wire message values must always serialize")
+}
+
 impl ServedMessage {
     fn from_message(message: CkWireMessage) -> Self {
         Self::from_message_reusing(message, None)
@@ -169,10 +182,7 @@ impl ServedMessage {
         message: CkWireMessage,
         projected_blocks: Option<&[&FlatBlock]>,
     ) -> Self {
-        let canonical = serde_json::to_value(&message)
-            .expect("CK wire messages must always have a JSON representation");
-        let canonical_bytes =
-            serde_json::to_vec(&canonical).expect("CK wire message values must always serialize");
+        let canonical_bytes = canonical_message_bytes(&message);
         let block_fingerprints = message
             .content
             .iter()
@@ -1259,6 +1269,8 @@ pub struct TransformTimings {
     #[serde(default)]
     pub build_serialize_misses: f64,
     #[serde(default)]
+    pub build_serialized_messages: usize,
+    #[serde(default)]
     pub build_tail_loop: f64,
     #[serde(default)]
     pub divergence: f64,
@@ -1351,7 +1363,7 @@ pub fn format_pass_timing_line(
          transition_detection={:.3} emergency_reasoning_exclusions={} todo={:.1} \
          blocks_by_mid={:.1} build_frozen_unit_index={:.1} full_drop_tool_ids={:.1} \
          build_output={:.1} build_identity={:.1} build_identity_max={:.1} build_frozen_unit_scan={:.1} \
-         build_cache_lookup={:.1} build_serialize_misses={:.1} build_tail_loop={:.1} \
+         build_cache_lookup={:.1} build_serialize_misses={:.1} build_serialized_messages={} build_tail_loop={:.1} \
            divergence={:.1} store_commit={:.1} trigger_ms={:.1} trigger_boundary_build={:.1} trigger_eval={:.1} \
              trigger_cache_store={:.1} trigger_token_cache_hits={} trigger_tokenized_blocks={} \
              post_attach_ms={:.1} native_cache_reused_messages={} native_cache_encoded_messages={} \
@@ -1420,6 +1432,7 @@ pub fn format_pass_timing_line(
         timings.build_frozen_unit_scan,
         timings.build_cache_lookup,
         timings.build_serialize_misses,
+        timings.build_serialized_messages,
         timings.build_tail_loop,
         timings.divergence,
         timings.store_commit,
@@ -5490,6 +5503,7 @@ fn apply_once(
     timings.build_frozen_unit_scan = build_timings.frozen_unit_scan;
     timings.build_cache_lookup = build_timings.cache_lookup;
     timings.build_serialize_misses = build_timings.serialize_misses;
+    timings.build_serialized_messages = build_timings.serialized_messages;
     timings.build_tail_loop = build_timings.tail_loop;
     timings.build_identity_messages = build_timings.identity_messages;
     timings.cache_hits = build_timings.cache_hits;
@@ -10885,11 +10899,6 @@ fn message_strip_unit<'a>(core: &'a CoreState, kind: &str, mid: &str) -> Option<
     core.frozen_units.iter().find(|unit| unit.key == key)
 }
 
-fn block_strip_unit<'a>(core: &'a CoreState, kind: &str, block_id: &str) -> Option<&'a FrozenUnit> {
-    let key = format!("strip:{kind}:{block_id}");
-    core.frozen_units.iter().find(|unit| unit.key == key)
-}
-
 fn message_tag_number(message: &CkIngressMessage, tag_numbers: &BTreeMap<String, u64>) -> u64 {
     // TypeScript represents a missing tag as age zero for processed-image stripping. Reasoning
     // callers separately require a positive tag before mutating signed or authored text.
@@ -11093,14 +11102,14 @@ struct ReasoningMutationPolicy {
 }
 
 fn remove_frozen_historical_reasoning(
-    core: &CoreState,
+    frozen_units: &FrozenUnitLookup<'_>,
     message: &CkIngressMessage,
     reasoning_mutation_exempt: bool,
     rebuilt: &mut CkWireMessage,
 ) -> usize {
     if reasoning_mutation_exempt
         || message.ck.role != "assistant"
-        || message_strip_unit(core, "reasoning_age", &message.mid).is_none()
+        || output_message_strip_unit(frozen_units, "reasoning_age", &message.mid).is_none()
     {
         return 0;
     }
@@ -11118,7 +11127,7 @@ fn remove_frozen_historical_reasoning(
 }
 
 fn apply_surface_strips(
-    core: &CoreState,
+    frozen_units: &FrozenUnitLookup<'_>,
     req: &TransformRequest,
     message: &CkIngressMessage,
     blocks: &[&FlatBlock],
@@ -11129,8 +11138,9 @@ fn apply_surface_strips(
     let sentinel = provider_sentinel_text(req);
     let whole_strip = (!reasoning_policy.exempt)
         .then(|| {
-            message_strip_unit(core, "placeholder", &message.mid)
-                .or_else(|| message_strip_unit(core, "system_injected", &message.mid))
+            output_message_strip_unit(frozen_units, "placeholder", &message.mid).or_else(|| {
+                output_message_strip_unit(frozen_units, "system_injected", &message.mid)
+            })
         })
         .flatten();
     if whole_strip.is_some() {
@@ -11139,8 +11149,10 @@ fn apply_surface_strips(
         return;
     }
 
-    let stale_reduce = message_strip_unit(core, "stale_reduce", &message.mid).is_some();
-    let image_seed = message_strip_unit(core, "processed_image", &message.mid).is_some();
+    let stale_reduce =
+        output_message_strip_unit(frozen_units, "stale_reduce", &message.mid).is_some();
+    let image_seed =
+        output_message_strip_unit(frozen_units, "processed_image", &message.mid).is_some();
     let message_tag = message_tag_number(message, tag_numbers);
     let aged = message_tag > 0 && message_tag <= reasoning_policy.watermark;
     let mut touched = false;
@@ -11150,7 +11162,9 @@ fn apply_surface_strips(
             continue;
         }
         if !reasoning_policy.exempt {
-            if let Some(unit) = block_strip_unit(core, "system_injected_block", block.id()) {
+            if let Some(unit) =
+                output_message_strip_unit(frozen_units, "system_injected_block", block.id())
+            {
                 rebuilt.content[index].kind = ck_wire::CkKind::Text {
                     text: unit.frozen_payload.clone(),
                 };
@@ -11179,10 +11193,9 @@ fn apply_surface_strips(
                     && request_accepts_empty_content(req)
                     && image_block_is_large(&block.wire))
                     || (request_accepts_empty_content(req)
-                        && core.frozen_units.iter().any(|unit| {
-                            unit.key == format!("{RED_KEY_PREFIX}{}", block.id())
-                                && unit.kind == "image"
-                        })))
+                        && frozen_units
+                            .red_by_block_id(block.id())
+                            .is_some_and(|unit| unit.kind == "image")))
                 || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
         if should_strip {
             replace_with_sentinel(&mut rebuilt.content[index], &sentinel);
@@ -11671,6 +11684,7 @@ struct BuildOutputTimings {
     cache_lookup: f64,
     serialize_misses: f64,
     tail_loop: f64,
+    serialized_messages: usize,
     identity_messages: usize,
     cache_hits: usize,
     cache_misses: usize,
@@ -11764,6 +11778,41 @@ impl<'a> FrozenUnitLookup<'a> {
                     .collect(),
             ),
         }
+    }
+}
+
+fn output_message_strip_unit<'a>(
+    frozen_units: &FrozenUnitLookup<'a>,
+    kind: &str,
+    target: &str,
+) -> Option<&'a FrozenUnit> {
+    frozen_units.by_key(&format!("strip:{kind}:{target}"))
+}
+
+fn output_trailing_blank_keep_count(
+    frozen_units: &FrozenUnitLookup<'_>,
+    mid: &str,
+) -> Option<usize> {
+    let unit = output_message_strip_unit(frozen_units, "trailing_blank_keep", mid)?;
+    if unit.frozen_payload.is_empty() {
+        return Some(1);
+    }
+    unit.frozen_payload
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (2..=10_000).contains(count))
+}
+
+fn output_trailing_blank_decision(
+    frozen_units: &FrozenUnitLookup<'_>,
+    mid: &str,
+) -> Option<FrozenTrailingBlankDecision> {
+    if output_trailing_blank_keep_count(frozen_units, mid).is_some() {
+        Some(FrozenTrailingBlankDecision::Keep)
+    } else if output_message_strip_unit(frozen_units, "trailing_blank_strip", mid).is_some() {
+        Some(FrozenTrailingBlankDecision::Strip)
+    } else {
+        None
     }
 }
 
@@ -11899,6 +11948,7 @@ fn cached_or_serialize_output(
             let serialization_started_at = Instant::now();
             let served = ServedMessage::from_message(build());
             timings.serialize_misses += elapsed_ms(serialization_started_at);
+            timings.serialized_messages = timings.serialized_messages.saturating_add(1);
             (served, false)
         }
     }
@@ -12309,8 +12359,8 @@ fn canonical_blank_block() -> CkWireBlock {
     })
 }
 
-pub(crate) fn apply_frozen_trailing_blank_decision(
-    core: &CoreState,
+fn apply_frozen_trailing_blank_decision_from_lookup(
+    frozen_units: &FrozenUnitLookup<'_>,
     profile: SerializerProfile,
     provider_id: Option<&str>,
     mid: &str,
@@ -12322,7 +12372,29 @@ pub(crate) fn apply_frozen_trailing_blank_decision(
     {
         return 0;
     }
-    let Some(decision) = frozen_trailing_blank_decision(core, mid) else {
+    apply_frozen_trailing_blank_decision_resolved(
+        profile,
+        provider_id,
+        output_trailing_blank_decision(frozen_units, mid),
+        output_trailing_blank_keep_count(frozen_units, mid),
+        message,
+    )
+}
+
+fn apply_frozen_trailing_blank_decision_resolved(
+    profile: SerializerProfile,
+    provider_id: Option<&str>,
+    decision: Option<FrozenTrailingBlankDecision>,
+    frozen_keep_count: Option<usize>,
+    message: &mut CkWireMessage,
+) -> usize {
+    if profile != SerializerProfile::OpencodeAiSdk
+        || provider_id != Some("anthropic")
+        || message.role != "assistant"
+    {
+        return 0;
+    }
+    let Some(decision) = decision else {
         return 0;
     };
 
@@ -12347,7 +12419,7 @@ pub(crate) fn apply_frozen_trailing_blank_decision(
     // Apply a frozen strip while the assistant is newest so the suffix is stable from
     // streaming (no completion blank) through completion and historical replay.
     let keep_count = if decision == FrozenTrailingBlankDecision::Keep {
-        frozen_trailing_blank_keep_count(core, mid).unwrap_or(1)
+        frozen_keep_count.unwrap_or(1)
     } else if trailing_count > 0 && is_reasoning_block(&message.content[last_meaningful_index]) {
         1
     } else {
@@ -12382,6 +12454,28 @@ pub(crate) fn apply_frozen_trailing_blank_decision(
     message.content.truncate(last_meaningful_index + 1);
     message.mark_modified();
     trailing_count
+}
+
+pub(crate) fn apply_frozen_trailing_blank_decision(
+    core: &CoreState,
+    profile: SerializerProfile,
+    provider_id: Option<&str>,
+    mid: &str,
+    message: &mut CkWireMessage,
+) -> usize {
+    if profile != SerializerProfile::OpencodeAiSdk
+        || provider_id != Some("anthropic")
+        || message.role != "assistant"
+    {
+        return 0;
+    }
+    apply_frozen_trailing_blank_decision_resolved(
+        profile,
+        provider_id,
+        frozen_trailing_blank_decision(core, mid),
+        frozen_trailing_blank_keep_count(core, mid),
+        message,
+    )
 }
 
 fn heal_poisoned_trailing_blank_decisions(
@@ -12966,7 +13060,7 @@ fn build_output_with_tags_inner(
                 }
                 if !mutation_exempt {
                     apply_surface_strips(
-                        core,
+                        &frozen_units,
                         req,
                         msg,
                         blocks,
@@ -13008,14 +13102,21 @@ fn build_output_with_tags_inner(
                 }
                 rebuilt
             };
-            remove_frozen_historical_reasoning(core, msg, reasoning_mutation_exempt, &mut rendered);
+            remove_frozen_historical_reasoning(
+                &frozen_units,
+                msg,
+                reasoning_mutation_exempt,
+                &mut rendered,
+            );
 
             let present = !rendered.content.is_empty()
                 || rendered.meta.synthetic
                 || !blocks_by_mid.contains_key(msg.mid.as_str());
             let output = if present {
                 if let Some(profile) = serializer_profile {
-                    if message_strip_unit(core, "merged_reasoning", &msg.mid).is_some() {
+                    if output_message_strip_unit(&frozen_units, "merged_reasoning", &msg.mid)
+                        .is_some()
+                    {
                         apply_serializer_residual_to_message(
                             profile,
                             req.provider_id.as_deref(),
@@ -13024,8 +13125,8 @@ fn build_output_with_tags_inner(
                             &mut rendered,
                         );
                     }
-                    apply_frozen_trailing_blank_decision(
-                        core,
+                    apply_frozen_trailing_blank_decision_from_lookup(
+                        &frozen_units,
                         profile,
                         req.provider_id.as_deref(),
                         &msg.mid,
@@ -13033,13 +13134,16 @@ fn build_output_with_tags_inner(
                     );
                 }
                 (
-                    Some(
-                        ServedMessage::from_message_reusing(
+                    Some({
+                        let served = ServedMessage::from_message_reusing(
                             rendered,
                             (!blocks.is_empty()).then_some(blocks),
                         )
-                        .with_output_identity(&identity),
-                    ),
+                        .with_output_identity(&identity);
+                        build_timings.serialized_messages =
+                            build_timings.serialized_messages.saturating_add(1);
+                        served
+                    }),
                     false,
                 )
             } else {
@@ -14181,6 +14285,7 @@ pub(crate) mod tests {
             "projection_blocks",
             "tail_messages_emitted",
             "build_identity_messages",
+            "build_serialized_messages",
             "cache_hits",
             "cache_misses",
             "cache_dirty_skips",
@@ -16025,6 +16130,31 @@ pub(crate) mod tests {
              canonical fixture, update GOLDEN_SHA256 to match; otherwise restore the \
              vendored bytes."
         );
+    }
+
+    #[test]
+    fn canonical_message_serializer_matches_value_round_trip_for_golden_corpus() {
+        let messages: Vec<CkWireMessage> =
+            serde_json::from_str(include_str!("../testdata/ck_wire_golden.json")).unwrap();
+
+        for message in messages {
+            assert_eq!(
+                canonical_message_bytes(&message),
+                canonical_message_bytes_reference(&message),
+                "retained golden wire must stay byte-identical"
+            );
+
+            let mut typed = message;
+            typed.mark_modified();
+            for block in &mut typed.content {
+                block.mark_modified();
+            }
+            assert_eq!(
+                canonical_message_bytes(&typed),
+                canonical_message_bytes_reference(&typed),
+                "typed golden wire must stay byte-identical"
+            );
+        }
     }
 
     #[test]
@@ -33397,6 +33527,42 @@ pub(crate) mod tests {
             canonical_output(&replay.messages),
             canonical_output(&fresh.messages)
         );
+    }
+
+    #[test]
+    fn cold_output_cache_serializes_only_the_uncovered_tail() {
+        let (core, mut meta, request, projection) = output_cache_fixture("m0-v1", "m1-v1");
+        meta.coverage_ordinal = Some(1);
+
+        let cold = build_cached_fixture(&core, &meta, &request, &projection, None, None, true);
+        assert_eq!(cold.timings.serialized_messages, 3);
+        assert_eq!(cold.cache_entries.len(), 3);
+        assert!(!cold.cache_entries.contains_key("tail:a"));
+        assert!(cold.cache_entries.contains_key("tail:b"));
+        assert_eq!(
+            cold.messages
+                .iter()
+                .filter(|message| !message.meta.synthetic)
+                .filter_map(|message| message.meta.harness_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+
+        let snapshot = SerializedOutputCacheSnapshot {
+            entries: cold.cache_entries,
+        };
+        let replay = build_cached_fixture(
+            &core,
+            &meta,
+            &request,
+            &projection,
+            None,
+            Some(&snapshot),
+            false,
+        );
+        assert_eq!(replay.timings.serialized_messages, 0);
+        assert_eq!(replay.cache_stats.serialized_items, 0);
+        assert_eq!(replay.cache_stats.reused_items, 3);
     }
 
     #[test]

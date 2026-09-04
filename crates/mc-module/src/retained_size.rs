@@ -12,7 +12,6 @@ use mc_store::{
     CkKind, CkOutputKind, CkToolOutput, CkWireBlock, CkWireMessage, HarnessMeta, MediaBlock,
     MessageOrigin, OpaqueBlock, ProviderExtras, ResultBlock, ResultBlockKind,
 };
-use serde::Serialize;
 use serde_json::Value;
 
 pub(crate) const ARC_ALLOCATION_OVERHEAD_BYTES: usize = size_of::<usize>() * 2;
@@ -61,11 +60,6 @@ pub(crate) fn value_heap_bytes(value: &Value) -> usize {
                     .sum::<usize>(),
             ),
     }
-}
-
-fn serialized_value_retained_bytes(value: &impl Serialize) -> usize {
-    let value = serde_json::to_value(value).expect("CK wire values must serialize for accounting");
-    value_retained_bytes(&value)
 }
 
 pub(crate) fn provider_extras_heap_bytes(extras: &ProviderExtras) -> usize {
@@ -179,11 +173,14 @@ pub(crate) fn ck_wire_block_retained_bytes(block: &CkWireBlock) -> usize {
     size_of::<CkWireBlock>()
         .saturating_add(kind_heap_bytes(&block.kind))
         .saturating_add(provider_extras_heap_bytes(&block.provider_extras))
-        // Deserialized CK blocks retain their original JSON in addition to typed fields. The
-        // field is private to mc-store, so serialization is the lossless way to inspect its
-        // actual shape. Constructed/modified blocks may have cleared it; charging the equivalent
-        // tree in that case is conservative and avoids an accounting side channel in mc-store.
-        .saturating_add(serialized_value_retained_bytes(block))
+        // Deserialized blocks retain their parsed object in addition to the typed fields.
+        // Read that tree directly: serializing every block merely to estimate its memory was
+        // the dominant cost of cold output-cache population.
+        .saturating_add(
+            block
+                .retained_original_json()
+                .map_or(0, value_retained_bytes),
+        )
 }
 
 pub(crate) fn ck_wire_message_retained_bytes(message: &CkWireMessage) -> usize {
@@ -206,7 +203,11 @@ pub(crate) fn ck_wire_message_retained_bytes(message: &CkWireMessage) -> usize {
         .saturating_add(origin_heap_bytes(message.origin.as_ref()))
         .saturating_add(provider_extras_heap_bytes(&message.provider_extras))
         .saturating_add(harness_meta_heap_bytes(&message.meta))
-        // Message deserialization also retains the complete original object, independently of
-        // each block's original object accounted above.
-        .saturating_add(serialized_value_retained_bytes(message))
+        // Message deserialization also retains the complete parsed object independently of each
+        // block object accounted above.
+        .saturating_add(
+            message
+                .retained_original_json()
+                .map_or(0, value_retained_bytes),
+        )
 }
