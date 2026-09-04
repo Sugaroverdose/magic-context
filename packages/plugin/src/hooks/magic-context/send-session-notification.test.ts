@@ -169,6 +169,26 @@ describe("sendIgnoredMessage", () => {
         expect(body.variant).toBe("thinking");
     });
 
+    it("rolls back a notice that lands after a run starts and re-queues it", async () => {
+        const session = titledClientWithLastTurn();
+        let hold = false;
+        __ignoredNotificationTest.setMidTurnDetector(() => hold);
+        const deleter = mock(async () => true);
+        __ignoredNotificationTest.setNoticeDeleter(deleter);
+        session.prompt = mock(async () => {
+            hold = true;
+            return { info: { id: "msg_notice" } };
+        });
+
+        const result = await sendIgnoredMessage({ session }, "ses-rollback", "late status", {});
+
+        expect(result).toBe("queued");
+        expect(deleter).toHaveBeenCalledTimes(1);
+        expect(deleter.mock.calls[0]?.[0]).toBe("ses-rollback");
+        expect(deleter.mock.calls[0]?.[1]).toBe("msg_notice");
+        expect(__ignoredNotificationTest.pendingTexts("ses-rollback")).toEqual(["late status"]);
+    });
+
     it("caller-supplied model/agent win over resolution", async () => {
         const session = titledClientWithLastTurn();
         await sendIgnoredMessage({ session }, "ses-titled", "explicit", {

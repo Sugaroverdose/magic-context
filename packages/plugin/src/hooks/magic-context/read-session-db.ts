@@ -97,19 +97,43 @@ export function isMidTurn(_deps: unknown, sessionId: string): boolean {
     }
 }
 
+/**
+ * Whether a noReply/ignored status notice must be held instead of appended.
+ *
+ * `isMidTurn` only covers an assistant waiting on tools, and it *releases*
+ * when a newer real user message exists. That release is correct for the
+ * mid-turn valve (a human interrupt ends the tool wait) and wrong for
+ * notices: OpenCode's MessageV2.latest is role-based and does not skip
+ * ignored rows, so a notice that becomes the newest user row while a run
+ * is starting or in flight makes the loop-exit parentID check fail and
+ * can fire a phantom generation. Hold whenever a run is in flight or an
+ * unanswered real user prompt exists.
+ */
+export function shouldHoldIgnoredNotificationFromOpenCodeDb(
+    db: Database,
+    sessionId: string,
+): boolean {
+    if (isMidTurnFromOpenCodeDb(db, sessionId)) return true;
+    if (hasUnfinishedAssistant(db, sessionId)) return true;
+    if (hasUnansweredRealUser(db, sessionId)) return true;
+    return false;
+}
+
+export function shouldHoldIgnoredNotification(sessionId: string): boolean {
+    if (process.env.MAGIC_CONTEXT_NOTICE_GATE === "bypass") return false;
+    if (process.env.MAGIC_CONTEXT_NOTICE_GATE === "hold") return true;
+    try {
+        return withReadOnlySessionDb((db) =>
+            shouldHoldIgnoredNotificationFromOpenCodeDb(db, sessionId),
+        );
+    } catch (error) {
+        log("[magic-context] failed to inspect notice-hold state:", error);
+        return false;
+    }
+}
+
 export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
-    const latestAssistant = db
-        .prepare(
-            `SELECT id,
-                    json_extract(data, '$.finish') as finish,
-                    time_created as timeCreated
-             FROM message
-             WHERE session_id = ?
-               AND json_extract(data, '$.role') = 'assistant'
-             ORDER BY time_created DESC
-             LIMIT 1`,
-        )
-        .get(sessionId) as AssistantMidTurnRow | null;
+    const latestAssistant = latestAssistantRow(db, sessionId);
 
     if (typeof latestAssistant?.id !== "string") return false;
     if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
@@ -130,7 +154,7 @@ export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolea
     });
 }
 
-function hasNewerRealUserMessage(
+export function hasNewerRealUserMessage(
     db: Database,
     sessionId: string,
     latestAssistantTimeCreated: unknown,
@@ -174,6 +198,36 @@ function hasNewerRealUserMessage(
     // machine-generated" trivially, so it must count as real to avoid incorrectly
     // suppressing a lock release.
     return row?.one === 1;
+}
+
+function latestAssistantRow(db: Database, sessionId: string): AssistantMidTurnRow | null {
+    return db
+        .prepare(
+            `SELECT id,
+                    json_extract(data, '$.finish') as finish,
+                    time_created as timeCreated
+             FROM message
+             WHERE session_id = ?
+               AND json_extract(data, '$.role') = 'assistant'
+             ORDER BY time_created DESC
+             LIMIT 1`,
+        )
+        .get(sessionId) as AssistantMidTurnRow | null;
+}
+
+function hasUnfinishedAssistant(db: Database, sessionId: string): boolean {
+    const latestAssistant = latestAssistantRow(db, sessionId);
+    if (typeof latestAssistant?.id !== "string") return false;
+    const finish = latestAssistant.finish;
+    if (typeof finish !== "string" || finish.length === 0) return true;
+    return finish === "tool-calls" || finish === "unknown";
+}
+
+function hasUnansweredRealUser(db: Database, sessionId: string): boolean {
+    const latestAssistant = latestAssistantRow(db, sessionId);
+    const latestAssistantTime =
+        typeof latestAssistant?.timeCreated === "number" ? latestAssistant.timeCreated : -1;
+    return hasNewerRealUserMessage(db, sessionId, latestAssistantTime);
 }
 
 interface AssistantModelRow {

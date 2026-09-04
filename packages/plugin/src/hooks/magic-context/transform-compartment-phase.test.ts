@@ -10,6 +10,7 @@ import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
+import { __ignoredNotificationTest } from "./send-session-notification";
 import { runCompartmentPhase } from "./transform-compartment-phase";
 
 function createOpenCodeDb(
@@ -79,9 +80,11 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "mc-compartment-phase-"));
     process.env.XDG_DATA_HOME = tempDir;
+    __ignoredNotificationTest.setMidTurnDetector(() => false);
 });
 
 afterEach(() => {
+    __ignoredNotificationTest.reset();
     closeDatabase();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;

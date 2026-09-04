@@ -9,7 +9,9 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     closeReadOnlySessionDb,
     findLastAssistantModelFromOpenCodeDb,
+    hasNewerRealUserMessage,
     isMidTurnFromOpenCodeDb,
+    shouldHoldIgnoredNotificationFromOpenCodeDb,
 } from "./read-session-db";
 
 const tempDirs: string[] = [];
@@ -342,6 +344,20 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
 
+    it("hasNewerRealUserMessage excludes ignored-only rows so they cannot release the mid-turn lock", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "status notification" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "## Claude Routing Status",
+            ignored: true,
+        });
+
+        expect(hasNewerRealUserMessage(db, "session-1", 100)).toBe(false);
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
     it("does not release mid-turn for message marker parts after a stale tool-calls tail", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
@@ -359,6 +375,50 @@ describe("isMidTurnFromOpenCodeDb", () => {
         });
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+});
+
+describe("shouldHoldIgnoredNotificationFromOpenCodeDb", () => {
+    it("holds when a newer real user message exists even though isMidTurn is false", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "do the thing" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "do the thing",
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("holds while the latest assistant has no finish (generation in flight)", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", {}, 100);
+
+        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("does not hold after a finished assistant with no newer real user", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
+
+        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("does not treat an ignored-only notice as an unanswered real user", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "status" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "status",
+            ignored: true,
+        });
+
+        expect(hasNewerRealUserMessage(db, "session-1", 100)).toBe(false);
+        expect(shouldHoldIgnoredNotificationFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 });
 
