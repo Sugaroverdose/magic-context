@@ -9,8 +9,8 @@ import {
     buildPagedModuleTransformPayloads,
     encodeOpenCodeMessagesToCk,
     MODULE_PAGE_MAX_BYTES,
-    SUBC_MAX_FRAME_BODY_BYTES,
     resolveOrdinalsForModule,
+    SUBC_MAX_FRAME_BODY_BYTES,
 } from "./module-wire";
 import { setRawMessageProvider } from "./read-session-chunk";
 import type { MessageLike } from "./transform-operations";
