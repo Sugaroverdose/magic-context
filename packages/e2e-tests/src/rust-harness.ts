@@ -23,7 +23,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { MockProvider, type MockResponse } from "./mock-provider/server";
 import {
@@ -68,6 +68,8 @@ export interface RustTestHarnessOptions {
      * Default: true.
      */
     startHistorianProducer?: boolean;
+    /** Copy an existing module store into the isolated data directory before ck-mc starts. */
+    seedModuleStorePath?: string;
 }
 
 export interface SdkClient {
@@ -215,12 +217,45 @@ export class RustTestHarness {
         // <dataDir>/cortexkit/run/ before opencode boots and the plugin's Rust
         // client connects on the first transform.
         const env = createIsolatedEnv();
+        if (options.seedModuleStorePath) {
+            const moduleStoreDir = join(env.dataDir, "cortexkit", "magic-context");
+            mkdirSync(moduleStoreDir, { recursive: true });
+            const moduleStorePath = join(moduleStoreDir, "store.db");
+            copyFileSync(options.seedModuleStorePath, moduleStorePath);
+            // The copied database retains the source writer's fence epoch, while the isolated
+            // lease starts at epoch one. Reset only lease metadata so ck-mc can claim the copy.
+            const seededStore = new Database(moduleStorePath);
+            try {
+                seededStore.run("UPDATE cortexkit_fence SET epoch = 0 WHERE id = 0");
+            } finally {
+                seededStore.close();
+            }
+        }
         const subc = await HermeticSubcStack.start({
             dataDir: env.dataDir,
             ckMcBin,
             ckSubcBin,
             startProducer: options.startHistorianProducer ?? true,
         });
+        if (options.seedModuleStorePath) {
+            const deadline = Date.now() + 65_000;
+            let lastError: unknown;
+            while (Date.now() < deadline) {
+                try {
+                    await subc.moduleStatus("__seed_store_probe__", env.workdir);
+                    lastError = undefined;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                }
+            }
+            if (lastError) {
+                const moduleLog = subc.moduleLog();
+                await subc.stop();
+                throw new Error(`seeded module store did not open: ${String(lastError)}\n${moduleLog}`);
+            }
+        }
 
         const logPath = join(env.dataDir, "cortexkit", "magic-context-e2e.log");
 

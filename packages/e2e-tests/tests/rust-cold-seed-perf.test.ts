@@ -8,6 +8,8 @@ import { rustPrereqs } from "../src/rust-scenario-support";
 
 const PERF_GATE = process.env.MC_PERF_GATE === "1";
 const PERF_FULL_OUTPUT = process.env.MC_PERF_FULL_OUTPUT === "1";
+const REPLAY_STORE_PATH = process.env.MC_PERF_STORE_PATH;
+const REPLAY_SESSION_ID = process.env.MC_PERF_SESSION_ID;
 const MESSAGE_COUNT = 9_600;
 const TOOL_MESSAGE_COUNT = 8_000;
 const COVERED_MESSAGE_COUNT = 9_200;
@@ -142,7 +144,10 @@ describe.skipIf(!rustPrereqs.ok)("rust performance: ASTRO-shape cold seed", () =
     let h: RustTestHarness;
 
     beforeAll(async () => {
-        h = await RustTestHarness.create({ startHistorianProducer: false });
+        h = await RustTestHarness.create({
+            startHistorianProducer: false,
+            seedModuleStorePath: REPLAY_STORE_PATH,
+        });
     });
 
     afterAll(async () => {
@@ -152,8 +157,8 @@ describe.skipIf(!rustPrereqs.ok)("rust performance: ASTRO-shape cold seed", () =
     it(
         "keeps a 9.6k-message, 8k-tool cold full transform below the load-class budget",
         async () => {
-            const sessionId = "ses_astro_shape_perf";
-            if (!PERF_FULL_OUTPUT) {
+            const sessionId = REPLAY_SESSION_ID ?? "ses_astro_shape_perf";
+            if (!PERF_FULL_OUTPUT && !REPLAY_STORE_PATH) {
                 const seed = await h.subc.moduleRequest(sessionId, h.env.workdir, {
                     method: "state_sync",
                     shadow_generation: 0,
