@@ -5556,7 +5556,23 @@ fn apply_once(
     let first_divergence_json = first_divergence
         .as_ref()
         .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
-    meta.served_output_fingerprint = served_fingerprints;
+    let deferred_frozen_prefix_divergence = matches!(plan, PassPlan::Defer)
+        && first_divergence.as_ref().is_some_and(|divergence| {
+            matches!(
+                divergence.block_id_old.as_deref(),
+                Some("mc_m0#0" | "mc_m1#0")
+            ) || matches!(
+                divergence.block_id_new.as_deref(),
+                Some("mc_m0#0" | "mc_m1#0")
+            )
+        });
+    // A deferred pass cannot accept changes to the stable m0/m1 prefix. Keep the fingerprint
+    // from the last served response so retries continue to report the mismatch; only an explicit
+    // cache-invalidating pass may adopt the new prefix. The host can replay its persisted
+    // last-known-good representation while the mismatch remains.
+    if !deferred_frozen_prefix_divergence {
+        meta.served_output_fingerprint = served_fingerprints;
+    }
 
     let channel2_output = channel2_directives(
         serializer_profile,

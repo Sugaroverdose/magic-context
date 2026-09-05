@@ -130,6 +130,15 @@ export class MemoryAuthorityUnavailableError extends Error {
     }
 }
 
+class RustTransformProtocolError extends Error {
+    readonly code = "rust_transform_protocol_error";
+
+    constructor(message: string) {
+        super(message);
+        this.name = "RustTransformProtocolError";
+    }
+}
+
 export const RUST_FAILURE_PARK_THRESHOLD = 3;
 export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
@@ -709,10 +718,8 @@ function assertNativeBoundary(output: unknown[], sessionId: string, boundaryId: 
     const synthetic =
         parts.length > 0 && parts.every((part) => isRecord(part) && part.synthetic === true);
     if (info.role === "user" && info.sessionID === sessionId && synthetic) return;
-    // The failure arm names WHICH clause failed and what the head actually was:
-    // without it, every violation reads identically and the defect is
-    // undiagnosable from logs alone (a live incident required a binary
-    // bisect that a single log line would have answered).
+    // Include the observed head in the error so logs reveal whether the response violated the
+    // expected role, session ID, or synthetic-part shape without requiring a payload dump.
     const headSummary = output.slice(0, 3).map((message) => {
         const mi = messageInfo(message);
         const mParts = isRecord(message) && Array.isArray(message.parts) ? message.parts : [];
@@ -1712,6 +1719,7 @@ export function createRustModeTransform(
     const commitRustCapture = (
         state: RustSessionState,
         plan: RustLkgCapturePlan,
+        requireDurable = false,
     ): "captured" | "superseded" => {
         if (
             states.get(plan.sessionId) !== state ||
@@ -1757,7 +1765,10 @@ export function createRustModeTransform(
         // Durability across restarts: store the exact accepted snapshot (the
         // jsonPrefix string is reused as-is, never re-serialized). Best-effort —
         // a write failure leaves the in-memory slot serving this process.
-        saveLkgSlotToDb(deps.db, plan.sessionId, slot);
+        const persisted = saveLkgSlotToDb(deps.db, plan.sessionId, slot);
+        if (requireDurable && !persisted) {
+            throw new Error("priced LKG snapshot did not reach durable storage");
+        }
         state.lkgLastCapturedRowVersion = plan.rowVersion;
         state.lkgSyncCaptureRequired = false;
         return "captured";
@@ -2658,18 +2669,70 @@ export function createRustModeTransform(
             const nativeContentOmitted = !hasNativeResponseContent(response);
             if (needFullSync || nativeContentOmitted) {
                 if (needFullSync) {
-                    // A module restart can retain durable state while changing the accepted
-                    // state-sync shape, so the next sync must re-probe its capabilities.
+                    // The module restarted and rejected the generation used by the state sync
+                    // above. Synchronize the new process before requesting the full response;
+                    // otherwise this pass may use incomplete restored state while the next pass
+                    // uses the complete state, producing inconsistent output.
                     options.moduleClient.invalidateStateSyncCapabilities?.();
+                    const recoveryCachedCapabilities =
+                        options.moduleClient.getCachedStateSyncCapabilities;
+                    const recoveryStateSyncCapabilities =
+                        options.moduleClient.stateSyncCapabilities;
+                    const recoverySyncStartedAt = performance.now();
+                    try {
+                        const recoverySync = await syncModuleState({
+                            client: {
+                                call: callModule,
+                                getCachedStateSyncCapabilities: recoveryCachedCapabilities
+                                    ? () => recoveryCachedCapabilities.call(options.moduleClient)
+                                    : undefined,
+                                stateSyncCapabilities: recoveryStateSyncCapabilities
+                                    ? (capabilityArgs) =>
+                                          recoveryStateSyncCapabilities.call(
+                                              options.moduleClient,
+                                              capabilityArgs,
+                                          )
+                                    : undefined,
+                            },
+                            state,
+                            pass: syncPass,
+                            projectRoot,
+                            force: true,
+                            options: {
+                                authority: true,
+                                authorityState: state.memoryAuthorityReady ? "MODULE" : undefined,
+                                authoritySeqAdoption,
+                            },
+                        });
+                        stateSyncRetryBusy = recoverySync.status === "retry_busy";
+                    } catch (error) {
+                        // If a compatibility seed cannot be built, including when an older
+                        // module provides a seed that is too large, retain the recovery path that
+                        // sends the complete arrays. Retry state synchronization on a later pass.
+                        sessionLog(
+                            sessionId,
+                            "restart state reconciliation failed; continuing with full transform retry:",
+                            error,
+                        );
+                    } finally {
+                        logStage(
+                            sessionId,
+                            "stateSync",
+                            recoverySyncStartedAt,
+                            timings,
+                            "retry=full reason=need_full_sync",
+                        );
+                    }
                 } else {
                     sessionLog(
                         sessionId,
                         "native_delta_fallback_reason=adapter_response_omitted_native_content retry=full",
                     );
                 }
-                // A wire-cache miss or an invalid successful response says nothing about
-                // context.db state. Retry the transform with complete arrays, but do not
-                // re-seed durable state; that costs tens of seconds on giant sessions.
+                // Retry the transform with complete arrays. A restart-triggered miss was
+                // reconciled with durable state above, so reseeding is appropriate there. A
+                // malformed native response does not prove that the module restarted; retry it
+                // without reseeding state.
                 state.forceFullWire = true;
                 if (wireDelta) {
                     const retryOrdinalStartedAt = performance.now();
@@ -2806,19 +2869,42 @@ export function createRustModeTransform(
                 }
             };
             const explicitDecision =
-                typeof response.decision === "string" ||
-                typeof response.action === "string" ||
-                typeof response.cache_bust === "boolean";
-            const decisionUpper = decision.toUpperCase();
+                typeof response.decision === "string" && response.decision.length > 0
+                    ? response.decision
+                    : typeof response.action === "string" && response.action.length > 0
+                      ? response.action
+                      : undefined;
+            if (!explicitDecision) {
+                throw new RustTransformProtocolError(
+                    "rust transform wire invariant failed: response omitted decision and action",
+                );
+            }
+            const decisionUpper = explicitDecision.toUpperCase();
             const cacheBustingPass =
-                response.cache_bust === true ||
                 decisionUpper === "HARD" ||
                 decisionUpper === "MIGRATE_HARD" ||
                 decisionUpper === "EXECUTE" ||
                 // SOFT re-renders m1 (delta folds, coverage folds): the served bytes changed,
                 // so the previous last-known-good (LKG) snapshot is already stale.
-                decisionUpper === "SOFT" ||
-                !explicitDecision;
+                decisionUpper === "SOFT";
+            const deferredFirstDivergence = isRecord(response.first_divergence)
+                ? response.first_divergence
+                : undefined;
+            const deferredFrozenPrefixDivergence =
+                !cacheBustingPass &&
+                [
+                    deferredFirstDivergence?.block_id_old,
+                    deferredFirstDivergence?.block_id_new,
+                ].some((blockId) => blockId === "mc_m0#0" || blockId === "mc_m1#0");
+            if (deferredFrozenPrefixDivergence) {
+                // The module keeps the fingerprint from its last served response until an
+                // explicit cache invalidation. Freeze the host representation as well, so losing
+                // the process-local cache cannot change m0/m1 during either the first or a later
+                // deferred pass after restart.
+                state.lkgRepresentationFrozen = true;
+                state.forceFullWire = true;
+                sessionLog(sessionId, "deferred frozen-prefix divergence; replaying LKG");
+            }
             const materializedBoundary = materializedCompactionBoundary(response);
             let appliedMessages: unknown[];
             let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
@@ -2938,8 +3024,9 @@ export function createRustModeTransform(
                 if (cacheBustingPass) {
                     dropSlot(sessionId, "lkg_cache_bust_pending_capture");
                 }
-                // Build the capture from the installed array, then defer hashing and persistence so
-                // LKG work stays off the output-installation critical path.
+                // Build the capture from the installed array. A priced replacement commits its
+                // snapshot before this transform can return, so a process death cannot leave the
+                // previous priced representation durable. Defer-only refreshes remain asynchronous.
                 const capturePlan = prepareRustCapture(
                     state,
                     sessionId,
@@ -2967,13 +3054,16 @@ export function createRustModeTransform(
                 };
                 if (!capturePlan) {
                     captureMode = "declined";
-                    captureFailed("async", new Error("LKG snapshot preparation was rejected"));
-                } else if (state.lkgSyncCaptureRequired) {
-                    captureMode = "sync_recovery";
+                    const error = new Error("LKG snapshot preparation was rejected");
+                    captureFailed("async", error);
+                    if (cacheBustingPass) throw error;
+                } else if (cacheBustingPass || state.lkgSyncCaptureRequired) {
+                    captureMode = cacheBustingPass ? "sync_priced" : "sync_recovery";
                     try {
-                        commitRustCapture(state, capturePlan);
+                        commitRustCapture(state, capturePlan, cacheBustingPass);
                     } catch (error) {
                         captureFailed("sync", error);
+                        if (cacheBustingPass) throw error;
                     }
                 } else {
                     try {
