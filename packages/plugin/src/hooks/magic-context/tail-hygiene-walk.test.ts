@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { CTX_REDUCE_KEEP } from "../../features/magic-context/reclaim-protection";
 import type { TagEntry } from "../../features/magic-context/types";
 import { buildChannel1Reminder, decideChannel1 } from "./ctx-reduce-nudge";
@@ -8,6 +8,8 @@ import {
     effectiveTailHygiene,
     measureTailHygiene,
     refreshTailHygieneBaseline,
+    sameTailHygieneStructuralSignature,
+    tailHygieneStructuralSignature,
 } from "./tail-hygiene-walk";
 
 function message(
@@ -588,5 +590,58 @@ describe("tail hygiene walk performance", () => {
         // ceiling tolerates observed shared-runner contention while still rejecting a
         // regression far above the usual 1–3ms measurements.
         expect(p95).toBeLessThan(30);
+    });
+});
+
+describe("tail hygiene structural signature", () => {
+    it("counts nested string lengths, own keys and array elements without serializing or encoding", () => {
+        const messages = [message("m", "user", [{ text: "🙂", nested: ["abc", null, 42, false] }])];
+        const stringify = spyOn(JSON, "stringify").mockImplementation(() => {
+            throw new Error("structural traversal must not serialize");
+        });
+        const encode = spyOn(TextEncoder.prototype, "encode").mockImplementation(() => {
+            throw new Error("structural traversal must not encode");
+        });
+        let signature: ReturnType<typeof tailHygieneStructuralSignature>;
+        try {
+            signature = tailHygieneStructuralSignature(messages);
+            expect(stringify).not.toHaveBeenCalled();
+            expect(encode).not.toHaveBeenCalled();
+        } finally {
+            stringify.mockRestore();
+            encode.mockRestore();
+        }
+        // Six own keys, five array elements, and ten UTF-16 string code units.
+        expect(signature).toEqual({ messageCount: 1, partCounts: [1], totalBytes: 21 });
+    });
+
+    it("detects nested string growth and structural additions on the same objects", () => {
+        const part = { text: "before", nested: ["kept"] };
+        const messages = [message("m", "user", [part])];
+        const before = tailHygieneStructuralSignature(messages);
+        part.text += "!";
+        expect(
+            sameTailHygieneStructuralSignature(before, tailHygieneStructuralSignature(messages)),
+        ).toBe(false);
+        part.text = "before";
+        part.nested.push("");
+        expect(
+            sameTailHygieneStructuralSignature(before, tailHygieneStructuralSignature(messages)),
+        ).toBe(false);
+        part.nested.pop();
+        Object.assign(part, { added: null });
+        expect(
+            sameTailHygieneStructuralSignature(before, tailHygieneStructuralSignature(messages)),
+        ).toBe(false);
+    });
+
+    it("remains a size alarm rather than a same-length content hash", () => {
+        const part = { text: "before" };
+        const messages = [message("m", "user", [part])];
+        const before = tailHygieneStructuralSignature(messages);
+        part.text = "after!";
+        expect(
+            sameTailHygieneStructuralSignature(before, tailHygieneStructuralSignature(messages)),
+        ).toBe(true);
     });
 });
