@@ -23,7 +23,6 @@ import {
     openDatabase,
 } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
-import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import {
     addTrailingBlankDecisions,
     armThinkingBindingRecovery,
@@ -36,6 +35,7 @@ import {
     resetEmergencyRecoveryRegistryForTest,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
 import {
     scheduleOpenCodeTransformDecisionWrite,
     __test as transformDecisionTest,
@@ -909,7 +909,9 @@ describe("Rust mode authority adapter", () => {
             const output = { messages: [...input] as unknown[] };
             await restarted.run(sessionId, input, output, restartMeta);
             expect(servedPrefixSha(output.messages)).toBe(stableSha);
-            expect(JSON.stringify(output.messages)).not.toContain("published historian compartment");
+            expect(JSON.stringify(output.messages)).not.toContain(
+                "published historian compartment",
+            );
             expect(restarted.getState(sessionId).lkgRepresentationFrozen).toBe(true);
         }
 
@@ -1390,7 +1392,9 @@ describe("Rust mode authority adapter", () => {
                     firstSync = false;
                     throw authoritySeqMismatch(5);
                 }
-                return method === "transform" ? { decision: "SOFT+", native_messages: native } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: native }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -1590,7 +1594,9 @@ describe("Rust mode authority adapter", () => {
             call: async ({ method, body }) => {
                 methods.push(method);
                 if (method === "transform") transformRequest = body as Record<string, unknown>;
-                return method === "transform" ? { decision: "SOFT+", native_messages: native } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: native }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -1633,7 +1639,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") requests.push(body as Record<string, unknown>);
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             },
         };
         const deps = makeDeps(db, moduleClient);
@@ -1690,7 +1698,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") transformRequest = body as Record<string, unknown>;
-                return method === "transform" ? { decision: "SOFT+", native_messages: makeMessages(sessionId) } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: makeMessages(sessionId) }
+                    : { ok: true };
             },
         };
         const deps = makeDeps(db, moduleClient);
@@ -1722,7 +1732,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") transformRequest = body as Record<string, unknown>;
-                return method === "transform" ? { decision: "SOFT+", native_messages: makeMessages(sessionId) } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: makeMessages(sessionId) }
+                    : { ok: true };
             },
         };
         const deps = makeDeps(db, moduleClient);
@@ -1793,10 +1805,10 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method }) =>
                 method === "transform"
-                      ? {
-                            decision: "SOFT+",
-                            native_messages: makeMessages(sessionId),
-                            rendered_memory_ids: renderedMemoryIds,
+                    ? {
+                          decision: "SOFT+",
+                          native_messages: makeMessages(sessionId),
+                          rendered_memory_ids: renderedMemoryIds,
                       }
                     : { ok: true },
         };
@@ -1846,7 +1858,9 @@ describe("Rust mode authority adapter", () => {
             private readonly title = "receiver-bound compartment";
 
             async call({ method }: Parameters<RustModeModuleClient["call"]>[0]) {
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             }
 
             async getCompartmentsAfter(_sessionId: string, _afterSequence: number) {
@@ -1897,9 +1911,7 @@ describe("Rust mode authority adapter", () => {
         let mirrorCompleted = false;
         const moduleClient: RustModeModuleClient = {
             call: async ({ method }) =>
-                method === "transform"
-                    ? { decision: "HARD", native_messages: [] }
-                    : { ok: true },
+                method === "transform" ? { decision: "HARD", native_messages: [] } : { ok: true },
             getCompartmentsAfter: async () => {
                 await mirrorBacklog;
                 mirrorCompleted = true;
@@ -1937,7 +1949,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") requestBodies.push(body as Record<string, unknown>);
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -1970,7 +1984,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") requestBody = body as Record<string, unknown>;
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -1997,7 +2013,9 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") requestBody = body as Record<string, unknown>;
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             },
         };
         const deps = makeDeps(db, moduleClient);
@@ -2090,10 +2108,10 @@ describe("Rust mode authority adapter", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method }) =>
                 method === "transform"
-                      ? {
-                            decision: "SOFT+",
-                            native_messages: [{ role: "assistant", parts: [] }],
-                            host_directives: {
+                    ? {
+                          decision: "SOFT+",
+                          native_messages: [{ role: "assistant", parts: [] }],
+                          host_directives: {
                               channel2_nudge: { text: "drop spent tool output" },
                           },
                       }
@@ -3568,7 +3586,9 @@ describe("Rust mode authority adapter", () => {
             call: async ({ method }) => {
                 if (method === "transform") transformCalls += 1;
                 if (shouldFail) throw new Error("daemon unavailable");
-                return method === "transform" ? { decision: "SOFT+", native_messages: [{ role: "assistant", parts: [] }] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [{ role: "assistant", parts: [] }] }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), {
@@ -4374,38 +4394,63 @@ describe("native output delta", () => {
         installRawProvider(sessionId);
         makeMeta(db, sessionId);
         setPersistedCompactionMarkerState(db, sessionId, {
-            boundaryMessageId: "m1", summaryMessageId: "summary",
-            compactionPartId: "compaction", summaryPartId: "summary-part",
-            boundaryOrdinal: 0, targetEndMessageId: "m1",
+            boundaryMessageId: "m1",
+            summaryMessageId: "summary",
+            compactionPartId: "compaction",
+            summaryPartId: "summary-part",
+            boundaryOrdinal: 0,
+            targetEndMessageId: "m1",
         });
         const message = (id: string): MessageLike => ({
             info: { id, role: "assistant", sessionID: sessionId },
-            parts: [{ type: "tool", tool: "work", callID: id, state: {
-                status: "completed", input: { action: "settle" }, output: id,
-            } }],
+            parts: [
+                {
+                    type: "tool",
+                    tool: "work",
+                    callID: id,
+                    state: {
+                        status: "completed",
+                        input: { action: "settle" },
+                        output: id,
+                    },
+                },
+            ],
         });
-        let native: MessageLike[] = [...makeMessages(sessionId), message("settle"), message("board")];
+        let native: MessageLike[] = [
+            ...makeMessages(sessionId),
+            message("settle"),
+            message("board"),
+        ];
         let pass = 0;
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method !== "transform") return { ok: true };
                 const request = body as Record<string, unknown>;
-                if (pass++ === 0) return {
-                    decision: "HARD", reason: "epoch_change", scheduler_decision: "defer",
-                    native_messages: structuredClone(native),
-                };
+                if (pass++ === 0)
+                    return {
+                        decision: "HARD",
+                        reason: "epoch_change",
+                        scheduler_decision: "defer",
+                        native_messages: structuredClone(native),
+                    };
                 const replaceFrom = native.length - 1;
                 native = [...native, message(`step-${pass}`)];
-                return { decision: "SOFT+", scheduler_decision: "defer", native_messages_delta: {
-                    after: (request.tail_delta as { after: string }).after,
-                    replace_from: replaceFrom, messages: structuredClone(native.slice(replaceFrom)),
-                } };
+                return {
+                    decision: "SOFT+",
+                    scheduler_decision: "defer",
+                    native_messages_delta: {
+                        after: (request.tail_delta as { after: string }).after,
+                        replace_from: replaceFrom,
+                        messages: structuredClone(native.slice(replaceFrom)),
+                    },
+                };
             },
         };
         const deps = makeDeps(db, moduleClient);
         deps.tagger = { assignTag: () => 1 } as unknown as TransformDeps["tagger"];
         const transform = createRustModeTransform(deps, { moduleClient });
-        const hash = (messages: unknown[]) => new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex");
+        const hash = (messages: unknown[]) =>
+            new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex");
         let previous: unknown[] = [];
         for (let index = 0; index < 3; index++) {
             const input = makeMessages(sessionId);
@@ -4413,8 +4458,11 @@ describe("native output delta", () => {
             await transform.run(sessionId, input, output, makeMeta(db, sessionId));
             expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
             expect(output.messages).toHaveLength(native.length + 1);
-            if (previous.length > 0) expect(hash(output.messages.slice(0, previous.length))).toBe(hash(previous));
-            expect((output.messages as MessageLike[]).filter((msg) => msg.info.id === "settle")).toHaveLength(1);
+            if (previous.length > 0)
+                expect(hash(output.messages.slice(0, previous.length))).toBe(hash(previous));
+            expect(
+                (output.messages as MessageLike[]).filter((msg) => msg.info.id === "settle"),
+            ).toHaveLength(1);
             previous = structuredClone(output.messages);
         }
     });
@@ -4431,7 +4479,10 @@ describe("native output delta", () => {
                 const request = body as Record<string, unknown>;
                 transformBodies.push(request);
                 if (transformBodies.length === 1) {
-                    return { decision: "SOFT+", native_messages: structuredClone(request.native_messages) };
+                    return {
+                        decision: "SOFT+",
+                        native_messages: structuredClone(request.native_messages),
+                    };
                 }
                 if (request.tail_delta) return { status: "ok", served_from: "transform" };
                 return { decision: "SOFT+", native_messages: structuredClone(healedNative) };
@@ -4552,7 +4603,10 @@ describe("delta prefix-mutation guard", () => {
                 } else {
                     moduleNativeSnapshot = structuredClone(suffix);
                 }
-                return { decision: "SOFT+", native_messages: structuredClone(moduleNativeSnapshot) };
+                return {
+                    decision: "SOFT+",
+                    native_messages: structuredClone(moduleNativeSnapshot),
+                };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -4641,7 +4695,9 @@ describe("delta prefix-mutation guard", () => {
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, body }) => {
                 if (method === "transform") requestBodies.push(body as Record<string, unknown>);
-                return method === "transform" ? { decision: "SOFT+", native_messages: [] } : { ok: true };
+                return method === "transform"
+                    ? { decision: "SOFT+", native_messages: [] }
+                    : { ok: true };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
@@ -4818,12 +4874,15 @@ describe("delta prefix-mutation guard", () => {
                 if (transformCalls === 2 || transformCalls === 3) {
                     throw new Error("CK message block identity drift");
                 }
-                return { decision: "SOFT+", native_messages: [
-                    {
-                        info: { id: "m1", role: "user", sessionID: sessionId },
-                        parts: [{ type: "text", text: "module recovered" }],
-                    },
-                ] };
+                return {
+                    decision: "SOFT+",
+                    native_messages: [
+                        {
+                            info: { id: "m1", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "module recovered" }],
+                        },
+                    ],
+                };
             },
         };
         const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });

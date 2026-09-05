@@ -2905,10 +2905,9 @@ export function createRustModeTransform(
                 : undefined;
             const deferredFrozenPrefixDivergence =
                 !cacheBustingPass &&
-                [
-                    deferredFirstDivergence?.block_id_old,
-                    deferredFirstDivergence?.block_id_new,
-                ].some((blockId) => blockId === "mc_m0#0" || blockId === "mc_m1#0");
+                [deferredFirstDivergence?.block_id_old, deferredFirstDivergence?.block_id_new].some(
+                    (blockId) => blockId === "mc_m0#0" || blockId === "mc_m1#0",
+                );
             if (deferredFrozenPrefixDivergence) {
                 // The module keeps the fingerprint from its last served response until an
                 // explicit cache invalidation. Freeze the host representation as well, so losing
