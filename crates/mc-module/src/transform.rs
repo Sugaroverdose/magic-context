@@ -6067,10 +6067,94 @@ fn render_config_base(render_config: &str) -> &str {
         .unwrap_or(render_config)
 }
 
+/// Provider-cache facts for model identities whose effort can change without invalidating
+/// cached prompt bytes: Fable 5.1 was observed on 2026-09-02 and GPT-6 Astra on 2026-09-05.
+const VARIANT_CACHE_PRESERVING_MODELS: [(&str, &str); 2] = [
+    ("anthropic/claude-fable-5-1", "2026-09-02"),
+    ("openai/gpt-6-astra", "2026-09-05"),
+];
+
+fn canonical_variant_model_identity(
+    provider_id: Option<&str>,
+    model_key: Option<&str>,
+) -> Option<String> {
+    let (provider, model) = match model_key.and_then(|key| key.split_once('/')) {
+        Some(pair) => pair,
+        None => (provider_id?, model_key?),
+    };
+    let provider = provider.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    let anthropic_family = provider == "anthropic"
+        || provider == "google-vertex-anthropic"
+        || provider.contains("bedrock");
+    static FABLE_51: OnceLock<Regex> = OnceLock::new();
+    if anthropic_family
+        && FABLE_51
+            .get_or_init(|| Regex::new(r"(?:^|[-_.])fable[-_.]?5[-_.]1(?:$|[-_.])").unwrap())
+            .is_match(&model)
+    {
+        return Some("anthropic/claude-fable-5-1".to_string());
+    }
+    if model == "gpt-6-astra"
+        && matches!(
+            provider.as_str(),
+            "openai" | "openai-codex" | "github-copilot"
+        )
+    {
+        return Some("openai/gpt-6-astra".to_string());
+    }
+    let provider = match provider.as_str() {
+        "openai-codex" => "openai",
+        "google-antigravity" => "google",
+        "opencode-zen" => "opencode",
+        other => other,
+    };
+    Some(format!("{provider}/{model}"))
+}
+
+fn variant_change_busts_provider_cache(provider_id: Option<&str>, model_key: Option<&str>) -> bool {
+    let Some(identity) = canonical_variant_model_identity(provider_id, model_key) else {
+        return false;
+    };
+    if VARIANT_CACHE_PRESERVING_MODELS
+        .iter()
+        .any(|(model, _verified_at)| *model == identity)
+    {
+        return false;
+    }
+    let provider = identity
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or("");
+    provider == "anthropic" || provider == "google-vertex-anthropic" || provider.contains("bedrock")
+}
+
+/// Keep the host's effort observation only when it represents a natural provider bust.
+/// Removing it here prevents a cache-preserving flip from changing the durable render identity.
+fn cache_relevant_render_config<'a>(req: &'a TransformRequest) -> Cow<'a, str> {
+    if req.render_config.is_empty()
+        || variant_change_busts_provider_cache(req.provider_id.as_deref(), req.model_key.as_deref())
+        || !req
+            .render_config
+            .split('|')
+            .any(|part| part.starts_with("variant:"))
+    {
+        return Cow::Borrowed(&req.render_config);
+    }
+    Cow::Owned(
+        req.render_config
+            .split('|')
+            .filter(|part| !part.starts_with("variant:"))
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+}
+
 fn render_identity_base(req: &TransformRequest, prompt_surface_epoch: &str) -> String {
     let mut parts = Vec::new();
-    if !req.render_config.is_empty() {
-        parts.push(req.render_config.clone());
+    let render_config = cache_relevant_render_config(req);
+    if !render_config.is_empty() {
+        parts.push(render_config.into_owned());
     }
     if let Some(provider) = req.provider_id.as_deref().filter(|value| !value.is_empty()) {
         parts.push(format!("provider:{provider}"));
@@ -16854,6 +16938,59 @@ pub(crate) mod tests {
                 input.mid
             );
         }
+    }
+
+    #[test]
+    fn variant_cache_predicate_canonicalizes_astra_aliases_and_preserves_defaults() {
+        for model_key in [
+            "openai/gpt-6-astra",
+            "openai-codex/gpt-6-astra",
+            "github-copilot/gpt-6-astra",
+        ] {
+            assert!(!variant_change_busts_provider_cache(None, Some(model_key)));
+        }
+        assert!(!variant_change_busts_provider_cache(
+            Some("anthropic"),
+            Some("anthropic/claude-fable-5-1")
+        ));
+        assert!(!variant_change_busts_provider_cache(
+            Some("bedrock"),
+            Some("bedrock/anthropic.claude-fable-5-1-v1:0")
+        ));
+        assert!(variant_change_busts_provider_cache(
+            Some("anthropic"),
+            Some("anthropic/claude-opus-4-1")
+        ));
+        assert!(!variant_change_busts_provider_cache(
+            Some("openai"),
+            Some("openai/gpt-5.6-sol")
+        ));
+        assert!(!variant_change_busts_provider_cache(None, None));
+    }
+
+    #[test]
+    fn astra_variant_flip_next_defer_keeps_served_array_sha256_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = req(
+            "astra-variant",
+            "provider:openai|model:openai/gpt-6-astra|variant:xhigh",
+            vec![item("a", 1, "keep me")],
+        );
+        request.serializer_profile = "opencode-aisdk".to_string();
+        request.provider_id = Some("openai".to_string());
+        request.model_key = Some("openai/gpt-6-astra".to_string());
+        run(&s, &request, &spine());
+        let before = run(&s, &request, &spine());
+        assert_eq!(before.scheduler_decision.as_deref(), Some("defer"));
+        let before_hash = canonical_response_hash(&before);
+        s.append_pending_agent_drops("astra-variant", &["a#0".to_string()], 1)
+            .unwrap();
+
+        request.render_config = "provider:openai|model:openai/gpt-6-astra|variant:high".to_string();
+        let after = run(&s, &request, &spine());
+        assert_eq!(after.scheduler_decision.as_deref(), Some("defer"));
+        assert_eq!(canonical_response_hash(&after), before_hash);
     }
 
     #[test]

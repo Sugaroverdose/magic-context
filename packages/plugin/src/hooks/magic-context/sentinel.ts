@@ -1,4 +1,5 @@
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
+import { canonicalModelIdentity } from "../../shared/harness-provider-map";
 import { isRecord } from "../../shared/record-type-guard";
 
 /**
@@ -38,13 +39,35 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
 }
 
 /**
+ * Provider-cache facts for model identities whose effort can change without
+ * invalidating cached prompt bytes: Anthropic Fable 5.1 was observed on
+ * 2026-09-02 and OpenAI GPT-6 Astra on 2026-09-05.
+ */
+const VARIANT_CACHE_PRESERVING_MODELS: Readonly<Record<string, string>> = {
+    "anthropic/claude-fable-5-1": "2026-09-02",
+    "openai/gpt-6-astra": "2026-09-05",
+};
+
+function canonicalVariantModelIdentity(providerID: string, modelID: string): string {
+    const normalizedProviderID = providerID.toLowerCase();
+    const isAnthropicFamily =
+        normalizedProviderID === "anthropic" ||
+        normalizedProviderID === "google-vertex-anthropic" ||
+        normalizedProviderID.includes("bedrock");
+    if (isAnthropicFamily && isFable51ThinkingBindingModel("anthropic", modelID)) {
+        return "anthropic/claude-fable-5-1";
+    }
+    return canonicalModelIdentity(`${providerID}/${modelID}`).toLowerCase();
+}
+
+/**
  * Decide whether a reasoning-variant change busts the provider cache naturally.
  *
  * Older Anthropic-family models serialize thinking configuration into cached
  * message blocks, so an effort/budget change already busts that prefix and
- * pending work can ride the provider's bust. Fable 5.1 instead carries effort
- * on user boundaries via mid-conversation output config, leaving the existing
- * prefix byte-identical; manufacturing our own flush would rewrite the suffix.
+ * pending work can ride the provider's bust. The explicit models above instead
+ * carry effort outside the cached prefix; manufacturing our own flush would
+ * rewrite an otherwise byte-identical suffix.
  *
  * Deferring is the safe side of the ambiguity: pending work rides the next
  * natural bust (ARCHITECTURE.md invariant 3), while a false-positive flush
@@ -53,18 +76,15 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
  */
 export function variantChangeBustsProviderCache(providerID?: string, modelID?: string): boolean {
     if (!providerID || !modelID) return false;
+    const identity = canonicalVariantModelIdentity(providerID, modelID);
+    if (Object.hasOwn(VARIANT_CACHE_PRESERVING_MODELS, identity)) return false;
+
     const normalizedProviderID = providerID.toLowerCase();
-    const isAnthropicFamily =
+    return (
         normalizedProviderID === "anthropic" ||
         normalizedProviderID === "google-vertex-anthropic" ||
-        normalizedProviderID.includes("bedrock");
-    if (!isAnthropicFamily) return false;
-
-    // The shared matcher accepts only the canonical Anthropic provider because
-    // overflow recovery is narrower than this cache decision. This branch has
-    // already established an Anthropic-family route, so normalize only the
-    // matcher input and avoid duplicating its model-ID pattern.
-    return !isFable51ThinkingBindingModel("anthropic", modelID);
+        normalizedProviderID.includes("bedrock")
+    );
 }
 
 /**

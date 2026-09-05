@@ -16,6 +16,7 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -855,6 +856,72 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
         ).find((message) => JSON.stringify(message).includes("The static flag didn't take"));
 
         expect(replayAssistant).toEqual(foldAssistant);
+    });
+
+    it("Astra xhigh -> high keeps the next defer pass byte-identical and pending", async () => {
+        useTempDataHome("ctx-astra-variant-defer-");
+        const sessionId = "ses-astra-variant-defer";
+        const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const systemPromptRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const lastHeuristicsTurnId = new Map<string, string>();
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
+        const variantBySession = new Map<string, string | undefined>();
+        const shouldExecute = mock(() => "defer" as const);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            liveModelBySession,
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId,
+            clearReasoningAge: 50,
+            protectedTags: 0,
+        });
+        const hook = createChatMessageHook({
+            db,
+            liveModelBySession,
+            variantBySession,
+            agentBySession: new Map<string, string>(),
+            historyRefreshSessions,
+            systemPromptRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId,
+        });
+        await hook({
+            sessionID: sessionId,
+            variant: "xhigh",
+            model: { providerID: "openai-codex", modelID: "gpt-6-astra" },
+        });
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+        const beforeFlip = buildSimpleMessages(sessionId);
+        await transform({}, { messages: beforeFlip });
+        const beforeHash = createHash("sha256").update(JSON.stringify(beforeFlip)).digest("hex");
+        queuePendingOp(db, sessionId, 1, "drop");
+
+        await hook({
+            sessionID: sessionId,
+            variant: "high",
+            model: { providerID: "github-copilot", modelID: "gpt-6-astra" },
+        });
+        const afterFlip = buildSimpleMessages(sessionId);
+        await transform({}, { messages: afterFlip });
+        const afterHash = createHash("sha256").update(JSON.stringify(afterFlip)).digest("hex");
+
+        expect(afterHash).toBe(beforeHash);
+        expect(historyRefreshSessions.size).toBe(0);
+        expect(systemPromptRefreshSessions.size).toBe(0);
+        expect(pendingMaterializationSessions.size).toBe(0);
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        expect(shouldExecute).toHaveBeenCalled();
     });
 
     it("Fable 5.1 variant change keeps the next pass deferred and pending ops untouched", async () => {

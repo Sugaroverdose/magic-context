@@ -58,6 +58,10 @@ const OMP_TO_CANONICAL_PROVIDER: Readonly<Record<string, string>> = {
     "opencode-zen": "opencode",
 };
 
+const CANONICAL_MODEL_IDENTITY_ALIASES: Readonly<Record<string, string>> = {
+    "github-copilot/gpt-6-astra": "openai/gpt-6-astra",
+};
+
 /** Remap only the provider prefix (text before the first "/"), preserving the
  *  model id verbatim. No "/", empty provider, or unmapped provider -> unchanged.
  *  Lookups are own-property only, so provider ids that collide with
@@ -70,6 +74,17 @@ function remapProviderPrefix(ref: string, map: Readonly<Record<string, string>>)
     const provider = ref.slice(0, slash);
     if (!Object.hasOwn(map, provider)) return ref;
     return `${map[provider]}${ref.slice(slash)}`;
+}
+
+/**
+ * Canonicalize only for identity comparisons and cache policy; callers must not
+ * use the result as a provider spawn route. Provider-wide Pi/OMP aliases are
+ * normalized first; model-specific aliases stay explicit because GitHub Copilot
+ * also serves non-OpenAI model families.
+ */
+export function canonicalModelIdentity(ref: string): string {
+    const harnessCanonical = piModelRefToCanonical(ompModelRefToCanonical(ref));
+    return CANONICAL_MODEL_IDENTITY_ALIASES[harnessCanonical.toLowerCase()] ?? harnessCanonical;
 }
 
 /** Pi-native `provider/model` -> canonical (OpenCode). Identity when unmapped.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+    canonicalModelIdentity,
     modelRefLookupOrder,
     ompModelRefToCanonical,
     piModelRefToCanonical,
@@ -8,6 +9,21 @@ import {
 } from "./harness-provider-map";
 
 describe("harness-provider-map", () => {
+    describe("canonicalModelIdentity", () => {
+        it("collapses Astra route aliases without changing unrelated Copilot models", () => {
+            for (const ref of [
+                "openai/gpt-6-astra",
+                "openai-codex/gpt-6-astra",
+                "github-copilot/gpt-6-astra",
+            ]) {
+                expect(canonicalModelIdentity(ref)).toBe("openai/gpt-6-astra");
+            }
+            expect(canonicalModelIdentity("github-copilot/claude-opus-5")).toBe(
+                "github-copilot/claude-opus-5",
+            );
+        });
+    });
+
     describe("resolveModelRefForPi (canonical -> Pi, used when spawning)", () => {
         it("maps the diverging auth-plugin providers, preserving the model id", () => {
             expect(resolveModelRefForPi("openai/gpt-5.5")).toBe("openai-codex/gpt-5.5");

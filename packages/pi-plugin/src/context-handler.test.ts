@@ -61,6 +61,7 @@ import {
 	consumePendingMaterialization,
 	__test as contextHandlerInternals,
 	hasPendingMaterialization,
+	piVariantChangeBustsProviderCache,
 	recordPiLiveModel,
 	registerPiContextHandler,
 	resolvePiHistorianTriggerInputs,
@@ -123,6 +124,71 @@ describe("Pi pressure guards", () => {
 				"const alreadyMutatingThisPass = executedWorkThisPass",
 			);
 		});
+	});
+});
+
+describe("Pi reasoning variant cache policy", () => {
+	it.each([
+		["Astra canonical xhigh -> high", "openai", "gpt-6-astra", false],
+		["Astra Codex alias xhigh -> high", "openai-codex", "gpt-6-astra", false],
+		[
+			"Astra Copilot alias xhigh -> high",
+			"github-copilot",
+			"gpt-6-astra",
+			false,
+		],
+		["Fable 5.1 remains non-busting", "anthropic", "claude-fable-5-1", false],
+		[
+			"older Anthropic behavior remains busting",
+			"anthropic",
+			"claude-opus-4-1",
+			true,
+		],
+		[
+			"unrelated OpenAI behavior remains non-busting",
+			"openai",
+			"gpt-5.6-sol",
+			false,
+		],
+	] as const)("%s", (_label, provider, model, expected) => {
+		expect(piVariantChangeBustsProviderCache(provider, model)).toBe(expected);
+	});
+
+	it("Astra thinking-level event logs deferral and leaves all flush signals clear", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-astra-variant";
+		const fake = createFakePi();
+		const logs: string[] = [];
+		const restoreLog =
+			contextHandlerInternals.setVariantChangeLogObserverForTests((message) =>
+				logs.push(message),
+			);
+		try {
+			registerPiContextHandler(fake.pi as never, { db });
+			const handler = fake.handlers.get("thinking_level_select") as (
+				event: { level: string; previousLevel: string },
+				ctx: never,
+			) => Promise<void>;
+			await handler({ level: "high", previousLevel: "xhigh" }, {
+				...fakeContext(sessionId),
+				model: { provider: "openai-codex", id: "gpt-6-astra" },
+			} as never);
+
+			expect(
+				contextHandlerInternals.variantRefreshStateForTests(sessionId),
+			).toEqual({
+				history: false,
+				systemPrompt: false,
+				materialization: false,
+			});
+			expect(logs).toEqual([
+				"variant changed (xhigh -> high) on openai-codex/gpt-6-astra without a proven natural cache bust; deferring flush to next natural bust",
+			]);
+		} finally {
+			restoreLog();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
 	});
 });
 
