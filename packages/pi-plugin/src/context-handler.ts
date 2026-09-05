@@ -2769,8 +2769,7 @@ export function registerPiContextHandler(
 				`[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
 			);
 
-			// At the derived force band, enable aggressive drop-all-tools mode.
-			// Mirrors OpenCode transform-postprocess-phase.ts:145-146.
+			// At the derived force band, evaluate tiered target-headroom reclaim.
 			const forceMaterialization =
 				!options.compactionOff &&
 				usagePercentage >= forceMaterializationPercentage;
@@ -2784,25 +2783,10 @@ export function registerPiContextHandler(
 				clearEmergencyDropSample(options.db, sessionId);
 			}
 
-			// 95% emergency block: usage is dangerous enough that we
-			// MUST wait for any in-flight historian to finish so its
-			// queued drops can materialize on this pass, AND we apply
-			// drop-all-tools cleanup to shrink the prompt as much as
-			// possible before the LLM call. Mirrors OpenCode's >=95%
-			// emergency path in transform.ts (~line 514+).
-			//
-			// Pi differences vs OpenCode:
-			//   - We can't `client.session.abort()` mid-pass (Pi
-			//     doesn't expose that surface to extensions). The next
-			//     best is to await the in-flight historian here so the
-			//     LLM call still happens, but with a freshly-shrunk
-			//     prompt. If no historian is in flight we still apply
-			//     dropAllTools via forceMaterialization so the prompt
-			//     shrinks regardless.
-			//   - We cap the wait at 30s to avoid stalling the user's
-			//     turn forever if historian hangs. After 30s we fall
-			//     through to the normal pipeline (with drop-all-tools
-			//     still active via the derived force-band branch).
+			// At 95%, wait up to 30s for an in-flight historian, then evaluate
+			// tiered reclaim with only open arcs and ctx_reduce exemplars protected.
+			// The wait does not abort the child: its own runner timeout still bounds
+			// execution, and a late publication can materialize on the next pass.
 			const hardUsagePercentage = needsEmergencyBump
 				? Math.max(EMERGENCY_BLOCK_PERCENTAGE, usagePercentage)
 				: windowGeometry?.usableHard && usageInputTokens > 0
@@ -2828,7 +2812,7 @@ export function registerPiContextHandler(
 					);
 					sessionLog(
 						sessionId,
-						`EMERGENCY: usage=${usagePercentage.toFixed(1)}% — notified user, awaiting in-flight historian + applying drop-all-tools`,
+						`EMERGENCY: usage=${usagePercentage.toFixed(1)}% — notified user, awaiting in-flight historian + evaluating tiered emergency reclaim`,
 					);
 				}
 
@@ -4388,9 +4372,8 @@ interface RunPipelineArgs {
 	/** The defer reason is computed once when the scheduler decision is made; preserve it so refusal logs report the actual reason instead of recomputing it. */
 	schedulerDeferReason: SchedulerDeferReason | null;
 	/**
-	 * Force-materialization signal: when true, drop-all-tools mode
-	 * activates (mirrors OpenCode's derived force-band emergency cleanup). Caller
-	 * computes from current usage percentage.
+	 * Enables tiered emergency selection when usage reaches the derived force band.
+	 * The pressure-episode latch still prevents repeated originating batches.
 	 */
 	forceMaterialization?: boolean;
 	/** Resolved escalation band for this pass (defaults to 85 for test/direct callers). */
@@ -5346,6 +5329,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 							? {
 									currentTotalInputTokens: args.contextUsage.inputTokens,
 									ceilingTokens: args.emergencyCeilingTokens,
+									usagePercentage: args.contextUsage.percentage,
 								}
 							: undefined,
 					caveman: args.isSubagent ? undefined : args.heuristics.caveman,

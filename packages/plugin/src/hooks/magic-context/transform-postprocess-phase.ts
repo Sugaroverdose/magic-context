@@ -1580,6 +1580,7 @@ export async function runPostTransformPhase(
                             ? {
                                   currentTotalInputTokens: args.contextUsage.inputTokens,
                                   ceilingTokens: args.emergencyCeilingTokens,
+                                  usagePercentage: args.contextUsage.percentage,
                               }
                             : undefined,
                     routine: routineCleanupApplied,

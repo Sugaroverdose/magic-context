@@ -42,14 +42,15 @@ export function applyHeuristicCleanup(
     config: {
         protectedTags: number;
         /**
-         * Tiered target-headroom emergency drop. Provided only on the the derived force band
-         * force-materialize (cache-busting) pass; undefined on routine execute
-         * passes (Phase 2 removed routine age-based tool drops entirely). When
+         * Tiered target-headroom emergency drop. Provided only on force-materialization
+         * passes at or above the derived force band; undefined on routine execute
+         * passes, which do not perform age-based tool drops. When
          * present, the emergency drop runs before dedup/injection-strip.
          */
         emergency?: {
             currentTotalInputTokens: number;
             ceilingTokens: number;
+            usagePercentage?: number;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -95,8 +96,8 @@ export function applyHeuristicCleanup(
 
     // ── Tiered target-headroom emergency drop (Phase 2) ──
     // Replaces the old need-blind routine age-drop + `dropAllTools` nuke. Runs
-    // only when the caller supplies `emergency` (i.e. the derived force band force-materialize
-    // cache-busting pass). Selection is pure (`planEmergencyDrop`); we apply the
+    // only when the caller supplies `emergency` on a force-materialization pass.
+    // Selection is pure (`planEmergencyDrop`); we apply the
     // returned plan and latch the pressure episode so it cannot trickle.
     if (config.emergency) {
         const emergency = config.emergency;
@@ -121,6 +122,7 @@ export function applyHeuristicCleanup(
             protectedTags: config.protectedTags,
             currentTotalInputTokens: emergency.currentTotalInputTokens,
             ceilingTokens: emergency.ceilingTokens,
+            usagePercentage: emergency.usagePercentage,
             priorInputSample,
             hasPriorDrop: priorInputSample > 0,
         });
@@ -138,7 +140,9 @@ export function applyHeuristicCleanup(
                     if (!toDrop.has(tag.tagNumber)) continue;
                     if (tag.status !== "active" || tag.type !== "tool") continue;
                     const target = targets.get(tag.tagNumber);
-                    const recent = newestEmergencyTags.has(tag.tagNumber);
+                    const recent =
+                        (emergency.usagePercentage ?? 0) < 95 &&
+                        newestEmergencyTags.has(tag.tagNumber);
                     const result = recent
                         ? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
                         : (target?.drop?.() ?? "absent");
@@ -160,9 +164,10 @@ export function applyHeuristicCleanup(
         } else {
             sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
         }
-        // Latch every force-episode evaluation, including one with no eligible
-        // target, until pressure exits or an independent bust rearms the lane.
-        setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
+        // A no-op spent no cache rewrite and must not consume the episode's batch.
+        if (emergencyDroppedTools > 0) {
+            setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
+        }
     }
 
     if (config.routine !== false) {

@@ -346,6 +346,7 @@ function applyHeadCap(args: {
     lastCompartmentEndOrdinal: number;
     capTokens: number;
     recentOpenArcCutoff: number;
+    allowOversizeFirstArc?: boolean;
 }): { eligibleEndOrdinal: number; oversizeAtomicUnit: boolean } {
     const {
         index,
@@ -360,11 +361,18 @@ function applyHeadCap(args: {
         return { eligibleEndOrdinal: offset, oversizeAtomicUnit: false };
     let end = index.findHeadEndForCap(offset, protectedTailStart, capTokens);
     let oversizeAtomicUnit = end === offset + 1 && index.tokenForOrdinal(offset) > capTokens;
-    const completedFence = fenceBoundaryForCompletedToolArcs(
+    let completedFence = fenceBoundaryForCompletedToolArcs(
         end,
         arcs,
         lastCompartmentEndOrdinal + 1,
     );
+    // The cap can land between the first invocation and its large result. Under
+    // force pressure, admit the whole group of overlapping completed invocation/result
+    // pairs instead of an empty head. The protected tail and open-arc fence still win.
+    if (args.allowOversizeFirstArc && completedFence <= offset && end > offset) {
+        const afterFirstArc = fenceBoundaryForCompletedToolArcs(end, arcs, offset + 1);
+        if (afterFirstArc <= protectedTailStart) completedFence = afterFirstArc;
+    }
     if (completedFence > end) {
         end = Math.min(protectedTailStart, completedFence);
         if (index.rangeTokens(offset, end) > capTokens) oversizeAtomicUnit = true;
@@ -614,6 +622,8 @@ export function resolveProtectedTailBoundary(
         lastCompartmentEndOrdinal: ctx.lastCompartmentEndOrdinal,
         capTokens: perRunCap,
         recentOpenArcCutoff,
+        allowOversizeFirstArc:
+            usagePercentage >= forceMaterializationPercentage || Boolean(ctx.emergencyTailScale),
     });
     const rawRangeFingerprint = computeRawRangeFingerprint(
         messages,
