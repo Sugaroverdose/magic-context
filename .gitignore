@@ -113,3 +113,6 @@ packages/plugin/scripts/mural-test-output/
 AgentLogs/
 .agent-logs/
 tests/docker/.generated/
+
+# Magic Context mints a per-project data dir stub when a session runs inside a package dir
+packages/*/.cortexkit/
