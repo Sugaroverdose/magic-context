@@ -184,6 +184,8 @@ interface ToolAggregate {
     inputByteSize: number;
     /** Persisted input-token count, or null for a legacy/unobserved invocation. */
     inputTokenCount: number | null;
+    /** At least one assistant-side occurrence shares its message with native reasoning. */
+    requiresToolArcSkeleton: boolean;
 }
 
 function textIdentityDigest(value: string): string {
@@ -244,6 +246,8 @@ export function tagTranscript(
         let textOrdinal = 0;
         let toolResultOrdinal = 0;
         const parts = message.parts;
+        const messageHasNativeReasoning =
+            message.info.role === "assistant" && parts.some((part) => part.kind === "thinking");
         const contentDerivedTextIds =
             messageId !== undefined && options.textIdentityDriftMessageIds?.has(messageId) === true
                 ? buildContentDerivedTextIds(messageId, parts)
@@ -345,6 +349,7 @@ export function tagTranscript(
                 const existing = toolAggregates.get(aggregateKey);
                 if (existing) {
                     existing.occurrences.push({ message, part, kind: part.kind });
+                    existing.requiresToolArcSkeleton ||= messageHasNativeReasoning;
                     const canReuseIdentity = reuseIdentity && existing.identityReusable;
                     let text = "";
                     if (canReuseIdentity) {
@@ -463,6 +468,7 @@ export function tagTranscript(
                         toolName: null,
                         inputByteSize: reusableAccounting.inputByteSize,
                         inputTokenCount: reusableAccounting.inputTokenCount,
+                        requiresToolArcSkeleton: messageHasNativeReasoning,
                     };
                     if (part.kind === "tool_result") {
                         text = part.getText() ?? "";
@@ -527,6 +533,7 @@ export function tagTranscript(
                         inputTokenCount:
                             persistedAccounting?.inputTokenCount ??
                             (part.kind === "tool_use" ? firstInputTokenCount : null),
+                        requiresToolArcSkeleton: messageHasNativeReasoning,
                     };
                     if (part.kind === "tool_result") {
                         applyGrownToolResultAccounting({
@@ -678,7 +685,14 @@ function applyToolPrefixAndTarget(args: ApplyToolPrefixAndTargetArgs): void {
         if (args.timing) args.timing.prefix += performance.now() - prefixStart;
     }
     const targetStart = args.timing ? performance.now() : 0;
-    args.targets.set(args.tagId, buildAggregateTarget(args.tagId, args.aggregate.occurrences));
+    args.targets.set(
+        args.tagId,
+        buildAggregateTarget(
+            args.tagId,
+            args.aggregate.occurrences,
+            args.aggregate.requiresToolArcSkeleton,
+        ),
+    );
     if (args.timing) args.timing.targets += performance.now() - targetStart;
 }
 
@@ -1010,7 +1024,11 @@ function setToolContentOrText(part: TranscriptPart, content: string): boolean {
  *
  * Mirrors OpenCode's createToolDropTarget semantics in tool-drop-target.ts.
  */
-function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): TagTarget {
+function buildAggregateTarget(
+    tagId: number,
+    occurrences: ToolOccurrence[],
+    requiresToolArcSkeleton: boolean,
+): TagTarget {
     const role = occurrences[0]?.message.info.role ?? "user";
     const messageId = occurrences[0]?.message.info.id;
 
@@ -1090,6 +1108,7 @@ function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): Tag
         canDrop(): boolean {
             return occurrences.length > 0;
         },
+        requiresToolArcSkeleton,
         // Non-mutating read of the invocation input (the tool_use occurrence
         // carries the arguments). Used by smart-drops supersession selection.
         readInput(): Record<string, unknown> | null {

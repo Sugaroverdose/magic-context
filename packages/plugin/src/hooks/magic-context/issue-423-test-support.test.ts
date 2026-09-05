@@ -9,11 +9,40 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getEmergencyInputSample } from "../../features/magic-context/storage-meta-persisted";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { issue423Fixture } from "./issue-423-fixture";
+import { issue423Fixture, issue423ReasoningFixture } from "./issue-423-fixture";
 import { resolveProtectedTailBoundary } from "./protected-tail-boundary";
 import { setRawMessageProvider } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
 import { buildToolArcs, completedToolArcCrossesBoundary } from "./read-session-true-raw-tokens";
+import type { MessageLike } from "./tag-messages";
+
+type AnthropicWireMessage = { role?: string; content: Array<Record<string, unknown>> };
+
+function serializeAnthropicWireWithAdjacentAssistantMerge(messages: MessageLike[]): string {
+    const merged: MessageLike[] = [];
+    for (const message of messages) {
+        const previous = merged.at(-1);
+        if (previous?.info.role === "assistant" && message.info.role === "assistant") {
+            previous.parts.push(...message.parts);
+        } else {
+            merged.push(structuredClone(message));
+        }
+    }
+    return JSON.stringify(
+        merged.map((message) => ({
+            role: message.info.role,
+            content: message.parts.filter((part) => {
+                if (part === null || typeof part !== "object") return true;
+                const candidate = part as { type?: unknown; text?: unknown };
+                return candidate.type !== "text" || candidate.text !== "";
+            }),
+        })),
+    );
+}
+
+function isReasoningBlock(block: Record<string, unknown>): boolean {
+    return ["thinking", "reasoning", "redacted_thinking"].includes(String(block.type));
+}
 
 export function issue423Boundary(
     sessionId: string,
@@ -53,6 +82,7 @@ export function registerIssue423Tests(
             percentage: number,
         ) => number;
         raw: (fixture: ReturnType<typeof issue423Fixture>) => RawMessage[];
+        anthropicMessages: (fixture: ReturnType<typeof issue423Fixture>) => MessageLike[];
     },
 ) {
     describe(`issue 423 ${harness} single-turn marathon`, () => {
@@ -96,6 +126,56 @@ export function registerIssue423Tests(
                         .filter((tag) => tag.status === "dropped")
                         .every((tag) => tag.dropMode === "full"),
                 ).toBe(true);
+            } finally {
+                closeQuietly(db);
+            }
+        });
+        test("95 percent skeletonizes reasoning-bearing arcs before Anthropic same-role merge", () => {
+            const db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `issue423-reasoning-seam-${harness}`;
+            try {
+                const fixture = issue423ReasoningFixture();
+                expect(adapter.cleanup(db, sessionId, fixture, 95)).toBeGreaterThan(0);
+                const droppedTools = getTagsBySession(db, sessionId).filter(
+                    (tag) => tag.type === "tool" && tag.status === "dropped",
+                );
+                expect(droppedTools.length).toBeGreaterThan(0);
+                expect(droppedTools.every((tag) => tag.dropMode === "truncated")).toBe(true);
+
+                const wire = JSON.parse(
+                    serializeAnthropicWireWithAdjacentAssistantMerge(
+                        adapter.anthropicMessages(fixture),
+                    ),
+                ) as AnthropicWireMessage[];
+                const toolUses = new Set<string>();
+                const toolResults = new Set<string>();
+                let reasoningBlocks = 0;
+                let hasAdjacentReasoning = false;
+                for (const message of wire) {
+                    for (let index = 0; index < message.content.length; index += 1) {
+                        const block = message.content[index];
+                        if (isReasoningBlock(block)) reasoningBlocks += 1;
+                        if (block.type === "tool_use" && typeof block.id === "string") {
+                            toolUses.add(block.id);
+                        }
+                        if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+                            toolResults.add(block.tool_use_id);
+                        }
+                        if (
+                            message.role === "assistant" &&
+                            index > 0 &&
+                            isReasoningBlock(message.content[index - 1]!) &&
+                            isReasoningBlock(block)
+                        ) {
+                            hasAdjacentReasoning = true;
+                        }
+                    }
+                }
+                expect(toolUses.size).toBeGreaterThan(0);
+                expect([...toolUses].every((callId) => toolResults.has(callId))).toBe(true);
+                expect(reasoningBlocks).toBeGreaterThan(1);
+                expect(hasAdjacentReasoning).toBe(false);
             } finally {
                 closeQuietly(db);
             }

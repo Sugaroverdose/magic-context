@@ -9,16 +9,59 @@ registerIssue423Tests("opencode", {
         const tagger = createTagger();
         tagger.initFromDb(sessionId, db);
         const tagged = tagMessages(sessionId, fixture.opencode, tagger, db);
-        return applyHeuristicCleanup(sessionId, db, tagged.targets, tagged.messageTagNumbers, {
-            protectedTags: 24,
-            routine: false,
-            emergency: {
-                currentTotalInputTokens: percentage * 2040,
-                ceilingTokens: 204000 * 0.65,
-                usagePercentage: percentage,
+        const result = applyHeuristicCleanup(
+            sessionId,
+            db,
+            tagged.targets,
+            tagged.messageTagNumbers,
+            {
+                protectedTags: 24,
+                routine: false,
+                emergency: {
+                    currentTotalInputTokens: percentage * 2040,
+                    ceilingTokens: 204000 * 0.65,
+                    usagePercentage: percentage,
+                },
             },
-        }).emergencyDroppedTools;
+        );
+        tagged.batch.finalize();
+        return result.emergencyDroppedTools;
     },
+    anthropicMessages: (fixture) =>
+        fixture.opencode.map((message) => ({
+            info: { id: message.info.id, role: message.info.role },
+            parts: message.parts.flatMap((part) => {
+                if (part === null || typeof part !== "object") return [];
+                const block = part as {
+                    type?: unknown;
+                    tool?: unknown;
+                    callID?: unknown;
+                    args?: unknown;
+                    state?: { input?: unknown; output?: unknown };
+                };
+                if (block.type !== "tool" && block.type !== "tool-invocation") {
+                    return [structuredClone(part)];
+                }
+                if (typeof block.callID !== "string") return [];
+                if (message.info.role === "assistant") {
+                    return [
+                        {
+                            type: "tool_use",
+                            id: block.callID,
+                            name: block.tool,
+                            input: block.args ?? block.state?.input ?? {},
+                        },
+                    ];
+                }
+                return [
+                    {
+                        type: "tool_result",
+                        tool_use_id: block.callID,
+                        content: block.state?.output ?? "",
+                    },
+                ];
+            }),
+        })),
 });
 
 import { mock } from "bun:test";

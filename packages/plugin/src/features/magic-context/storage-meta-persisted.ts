@@ -1009,8 +1009,8 @@ export function getEmergencyInputSample(db: Database, sessionId: string): number
 }
 
 /**
- * Latch every emergency evaluation in a force-band episode, including one with
- * no eligible target. The 95% block remains the backstop for genuine exhaustion.
+ * Latch a force-band episode only after an emergency batch removes content.
+ * Zero-removal evaluations stay armed so later completed outputs can form the batch.
  */
 export function setEmergencyDropSample(db: Database, sessionId: string, inputSample: number): void {
     db.transaction(() => {

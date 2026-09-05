@@ -54,6 +54,7 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    applyHeadCap,
     hasRunnableCompartmentWindow,
     type ProtectedTailBoundarySnapshot,
     recordHighPressureNoEligibleHead,
@@ -569,6 +570,28 @@ it("fingerprints same-length edits to counted content fields", () => {
     expect(computeRawRangeFingerprint(before, 1, 2)).not.toBe(
         computeRawRangeFingerprint(after, 1, 2),
     );
+});
+
+it("re-fences a head cap when a recent open arc lands inside an admitted completed component", () => {
+    const index = buildTrueRawTokenIndexFromTokenCountsForTest(
+        "completed-component-after-open-clamp",
+        Array(10).fill(100),
+    );
+
+    expect(
+        applyHeadCap({
+            index,
+            protectedTailStart: 10,
+            offset: 4,
+            arcs: [
+                { callId: "completed", invOrdinal: 2, resOrdinal: 8 },
+                { callId: "open", invOrdinal: 7, resOrdinal: null },
+            ],
+            lastCompartmentEndOrdinal: 3,
+            capTokens: 10_000,
+            recentOpenArcCutoff: 7,
+        }),
+    ).toEqual({ eligibleEndOrdinal: 9, oversizeAtomicUnit: false });
 });
 
 it("moves a candidate boundary forward to the first later open tool invocation", () => {

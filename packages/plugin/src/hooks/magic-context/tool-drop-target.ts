@@ -263,6 +263,13 @@ function clearThinkingParts(thinkingParts: ThinkingLikePart[]): void {
     }
 }
 
+function messageHasNativeReasoning(message: MessageLike): boolean {
+    return message.parts.some((part) => {
+        if (!isRecord(part)) return false;
+        return ["thinking", "reasoning", "redacted_thinking"].includes(String(part.type));
+    });
+}
+
 /**
  * True when a tool part carries a COMPLETED result — i.e. the arc is closed and
  * OpenCode will not read its input again. This is the selection gate that keeps
@@ -378,6 +385,7 @@ export function createToolDropTarget(
      * makes the plan stop early and under-evict below the ceiling.
      */
     canDrop: () => boolean;
+    requiresToolArcSkeleton: boolean;
     readInput: () => Record<string, unknown> | null;
 } {
     const drop = (): ToolDropResult => {
@@ -450,6 +458,12 @@ export function createToolDropTarget(
             const entry = index.get(compositeKey);
             return !!entry && entry.occurrences.length > 0 && entry.hasResult;
         },
+        requiresToolArcSkeleton:
+            thinkingParts.length > 0 ||
+            (index
+                .get(compositeKey)
+                ?.occurrences.some((occurrence) => messageHasNativeReasoning(occurrence.message)) ??
+                false),
         readInput: (): Record<string, unknown> | null => {
             const entry = index.get(compositeKey);
             if (!entry) return null;

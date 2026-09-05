@@ -338,7 +338,7 @@ function fenceWrapupBoundaryForToolArcs(args: {
     return boundary;
 }
 
-function applyHeadCap(args: {
+export function applyHeadCap(args: {
     index: TrueRawTokenIndex;
     protectedTailStart: number;
     offset: number;
@@ -396,6 +396,9 @@ function applyHeadCap(args: {
             }
         }
     }
+    // An open invocation can sit inside an admitted overlapping component; the
+    // clamp above must not leave the final head boundary through a completed arc.
+    end = fenceBoundaryForCompletedToolArcs(end, arcs, lastCompartmentEndOrdinal + 1);
     if (end <= offset && offset < protectedTailStart) {
         return { eligibleEndOrdinal: offset, oversizeAtomicUnit };
     }
@@ -622,6 +625,7 @@ export function resolveProtectedTailBoundary(
         lastCompartmentEndOrdinal: ctx.lastCompartmentEndOrdinal,
         capTokens: perRunCap,
         recentOpenArcCutoff,
+        // `emergencyTailScale` comes only from compartment-trigger's priced force-materialization retry or transform-compartment-phase's historian retry, whose result is served only by a later HARD fold; 0.25 is the ≥95% variant.
         allowOversizeFirstArc:
             usagePercentage >= forceMaterializationPercentage || Boolean(ctx.emergencyTailScale),
     });

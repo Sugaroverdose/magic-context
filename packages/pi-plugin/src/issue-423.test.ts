@@ -31,6 +31,39 @@ registerIssue423Tests("pi", {
 		transcript.commit();
 		return result.emergencyDroppedTools;
 	},
+	anthropicMessages: (fixture) =>
+		fixture.pi.map((message, index) => {
+			const role =
+				message.role === "toolResult" ? "user" : String(message.role);
+			const source = Array.isArray(message.content)
+				? message.content
+				: [{ type: "text", text: String(message.content ?? "") }];
+			const parts = source.flatMap((part) => {
+				if (part === null || typeof part !== "object") return [];
+				const block = part as Record<string, unknown>;
+				if (message.role === "toolResult") {
+					return [
+						{
+							type: "tool_result",
+							tool_use_id: message.toolCallId,
+							content: block.text ?? block,
+						},
+					];
+				}
+				if (block.type === "toolCall") {
+					return [
+						{
+							type: "tool_use",
+							id: block.id,
+							name: block.name,
+							input: block.arguments,
+						},
+					];
+				}
+				return [structuredClone(block)];
+			});
+			return { info: { id: `wire-${index}`, role }, parts };
+		}),
 });
 
 import { registerIssue423HistorianTest } from "@magic-context/core/hooks/magic-context/issue-423-test-support.test";

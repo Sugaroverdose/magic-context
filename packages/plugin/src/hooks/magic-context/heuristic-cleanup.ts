@@ -143,16 +143,22 @@ export function applyHeuristicCleanup(
                     const recent =
                         (emergency.usagePercentage ?? 0) < 95 &&
                         newestEmergencyTags.has(tag.tagNumber);
-                    const result = recent
-                        ? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
-                        : (target?.drop?.() ?? "absent");
+                    // Removing the result separator beside native reasoning lets Anthropic
+                    // merge signed assistant turns, so this safety case always keeps the pair.
+                    const reasoningSafeSkeleton = target?.requiresToolArcSkeleton === true;
+                    const skeleton = recent || reasoningSafeSkeleton;
+                    const result = reasoningSafeSkeleton
+                        ? (target?.truncate?.() ?? "absent")
+                        : recent
+                          ? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
+                          : (target?.drop?.() ?? "absent");
                     if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                         updateTagDropMode(
                             db,
                             sessionId,
                             tag.tagNumber,
-                            recent ? "truncated" : "full",
+                            skeleton ? "truncated" : "full",
                         );
                         droppedTools++;
                         emergencyDroppedTools++;
