@@ -27,6 +27,7 @@ import {
 import { runCompartmentAgent } from "./compartment-runner-incremental";
 import type { RecompProgress } from "./compartment-runner-types";
 import {
+    describeBoundaryDiagnostics,
     hasRunnableCompartmentWindow,
     resolveWrapupProtectedTailBoundary,
     type WrapupBoundaryPlan,
@@ -439,7 +440,7 @@ export async function runManagedWrapup(
                         0,
                         getCompartments(ctx.db, sessionId).length - startCompartmentCount,
                     ),
-                    note: `Chunk ${chunkIndex}/${expectedChunks}: messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1}…`,
+                    note: `Chunk ${chunkIndex}/${expectedChunks}: messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1}… ${describeBoundaryDiagnostics(plan.snapshot)}`,
                 });
                 if (
                     !renewWrapupMarker({

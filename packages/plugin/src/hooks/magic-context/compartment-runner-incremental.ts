@@ -71,6 +71,7 @@ import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import {
     createDefaultBoundarySnapshotForTests,
+    describeBoundaryDiagnostics,
     hasRunnableCompartmentWindow,
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
@@ -304,7 +305,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         if (protectedTailStart <= offset || eligibleEndOrdinal <= offset) {
             sessionLog(
                 sessionId,
-                `historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact`,
+                `historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
             );
             if (boundarySnapshot.usagePercentage < 80 && !boundarySnapshot.emergencyTailScale) {
                 if (!isWrapupInProgress(db, sessionId)) clearEmergencyRecovery(db, sessionId);
@@ -375,7 +376,15 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             rollbackDrainReservation();
             return;
         }
-        const chunkText = truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+        const chunkText = chunk.oversizeAtomicUnit
+            ? chunk.text
+            : truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+        if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
+            sessionLog(
+                sessionId,
+                `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${estimateTokens(chunkText)} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+            );
+        }
         if (chunkText !== chunk.text) {
             sessionLog(
                 sessionId,

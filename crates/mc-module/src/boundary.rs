@@ -1506,9 +1506,26 @@ fn apply_head_cap(args: HeadCapArgs<'_>) -> HeadCapResult {
     let mut end =
         args.index
             .find_head_end_for_cap(args.offset, args.protected_tail_start, args.cap_tokens);
-    let oversize_atomic_unit =
+    let mut oversize_atomic_unit =
         end == args.offset + 1 && args.index.token_for_ordinal(args.offset) > args.cap_tokens;
-    end = fence_boundary_for_completed_tool_arcs(end, args.arcs, args.offset);
+    let mut completed_fence = fence_boundary_for_completed_tool_arcs(end, args.arcs, args.offset);
+    // Keep a leading completed component whole when the cap cuts through it.
+    // The protected-tail bound, open-arc clamp, and final re-fence still apply.
+    if completed_fence <= args.offset && end > args.offset {
+        let after_first =
+            fence_boundary_for_completed_tool_arcs(end, args.arcs, args.offset.saturating_add(1));
+        if after_first <= args.protected_tail_start {
+            completed_fence = after_first;
+        }
+    }
+    if completed_fence > end {
+        end = completed_fence.min(args.protected_tail_start);
+        if args.index.range_tokens(args.offset, end) > args.cap_tokens {
+            oversize_atomic_unit = true;
+        }
+    } else {
+        end = completed_fence;
+    }
     let mut fenced_by_open_arc = false;
     for arc in args.arcs {
         if arc.res_ordinal.is_some() {
@@ -2202,6 +2219,77 @@ mod tests {
             (got - value).abs() < f64::EPSILON,
             "constant {name} drifted: TS={got} Rust={value}"
         );
+    }
+
+    #[test]
+    fn issue_424_head_cap_matches_typescript_differential_cases() {
+        #[derive(Deserialize)]
+        struct Case {
+            label: String,
+            tokens: Vec<usize>,
+            offset: u64,
+            protected_tail_start: u64,
+            cap_tokens: f64,
+            recent_open_arc_cutoff: u64,
+            arcs: Vec<CompletedArcJson>,
+            expected_end: u64,
+            expected_oversize: bool,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../testdata/issue-424-head-cap.json"))
+                .expect("head-cap differential cases");
+        for case in cases {
+            let messages = case
+                .tokens
+                .iter()
+                .enumerate()
+                .map(|(i, tokens)| {
+                    let mut message = text_msg(i as u64 + 1, Role::Assistant, "fixture");
+                    message.blocks[0].original_token_count = *tokens;
+                    message
+                })
+                .collect::<Vec<_>>();
+            let index = TokenIndex::new(&messages);
+            let arcs = case
+                .arcs
+                .iter()
+                .map(|arc| ToolArc {
+                    inv_ordinal: arc.inv_ordinal,
+                    res_ordinal: arc.res_ordinal,
+                })
+                .collect::<Vec<_>>();
+            let head = apply_head_cap(HeadCapArgs {
+                index: &index,
+                offset: case.offset,
+                protected_tail_start: case.protected_tail_start,
+                arcs: &arcs,
+                cap_tokens: case.cap_tokens,
+                recent_open_arc_cutoff: case.recent_open_arc_cutoff,
+            });
+            assert_eq!(
+                head.eligible_end_ordinal, case.expected_end,
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                head.oversize_atomic_unit, case.expected_oversize,
+                "{}",
+                case.label
+            );
+            for arc in &arcs {
+                if let Some(result) = arc.res_ordinal {
+                    assert!(
+                        !completed_tool_arc_crosses_boundary(
+                            arc.inv_ordinal,
+                            result,
+                            head.eligible_end_ordinal
+                        ),
+                        "{}",
+                        case.label
+                    );
+                }
+            }
+        }
     }
 
     #[test]

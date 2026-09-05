@@ -190,6 +190,8 @@ export interface SessionChunk {
     endMessageId: string;
     messageCount: number;
     tokenEstimate: number;
+    /** The formatted chunk exceeds its budget and contains completed tool arcs; do not clip its text afterward. */
+    oversizeAtomicUnit?: boolean;
     hasMore: boolean;
     text: string;
     lines: SessionChunkLine[];
@@ -619,6 +621,9 @@ export function readSessionChunk(
     // session count whenever the prime recorded one.
     const totalMessageCount = getCachedAbsoluteMessageCount(sessionId) ?? messages.length;
     const startOrdinal = Math.max(1, offset);
+    const completedToolArcs = buildToolArcs(messages).flatMap((arc) =>
+        arc.resOrdinal === null ? [] : [{ start: arc.invOrdinal, end: arc.resOrdinal }],
+    );
     const lines: string[] = [];
     const lineMeta: SessionChunkLine[] = [];
     /**
@@ -649,7 +654,13 @@ export function readSessionChunk(
         const blockText = formatBlock(currentBlock);
         const blockTokens = estimateBlockTokens(blockText);
         if (totalTokens + blockTokens > tokenBudget && totalTokens > 0) {
-            return false;
+            // A user message can interrupt a parallel tool batch. If the emitted
+            // prefix contains an invocation, include its matching result before
+            // stopping between formatted blocks, even when that exceeds the budget.
+            const splitsCompletedArc = completedToolArcs.some(
+                (arc) => arc.start <= lastOrdinal && arc.end > lastOrdinal,
+            );
+            if (!splitsCompletedArc) return false;
         }
 
         // Count commit clusters: an A block with commits after a non-A block (or first block) is a new cluster
@@ -804,9 +815,10 @@ export function readSessionChunk(
         }
     }
 
-    const completedToolArcs = buildToolArcs(messages).flatMap((arc) =>
-        arc.resOrdinal === null ? [] : [{ start: arc.invOrdinal, end: arc.resOrdinal }],
-    );
+    const text = lines.join("\n");
+    const oversizeAtomicUnit =
+        estimateBlockTokens(text) > tokenBudget &&
+        completedToolArcs.some((arc) => arc.start <= lastOrdinal && arc.end >= startOrdinal);
 
     return {
         startIndex: startOrdinal,
@@ -815,12 +827,13 @@ export function readSessionChunk(
         endMessageId: lastMessageId,
         messageCount: messagesProcessed,
         tokenEstimate: totalTokens,
+        ...(oversizeAtomicUnit ? { oversizeAtomicUnit: true } : {}),
         hasMore:
             Math.max(lastOrdinal, highestScannedOrdinal) <
             (eligibleEndOrdinal !== undefined
                 ? Math.min(eligibleEndOrdinal - 1, totalMessageCount)
                 : totalMessageCount),
-        text: lines.join("\n"),
+        text,
         lines: lineMeta,
         commitClusterCount: commitClusters,
         toolOnlyRanges,
