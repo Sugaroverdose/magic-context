@@ -157,7 +157,7 @@ describe("analyze-cache-bust dump discovery", () => {
             body,
         );
 
-        expect(snapshotsFor(dir, session)[0]?.wireBytes).toBe(
+        expect(snapshotsFor(dir, session)[0]?.bodyBytes).toBe(
             Buffer.byteLength(JSON.stringify(body)),
         );
     });
