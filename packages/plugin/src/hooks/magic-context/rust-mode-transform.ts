@@ -2856,9 +2856,12 @@ export function createRustModeTransform(
                     servedFrom = "lkg_frozen";
                     sessionLog(sessionId, "lkg_frozen_replay_served");
                 } else {
-                    appliedMessages = moduleMessages;
+                    appliedMessages = structuredClone(moduleMessages);
                 }
-                pendingWireCache.nativeOutput = appliedMessages;
+                // Delta offsets count the module's array, before host marker insertion or
+                // reasoning recovery. Keep that basis unmodified, including nested parts;
+                // a postprocessed prefix can silently discard a message at the next splice.
+                pendingWireCache.nativeOutput = moduleMessages;
                 // LKG captures postprocessed output, so running postprocess again would stop the
                 // fallback artifact from being an exact replay.
                 if (!replayedFrozenRepresentation) {

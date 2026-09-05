@@ -12202,7 +12202,7 @@ fn attach_native_messages_with_tags(
         return;
     }
     let native_messages = encode_full_native_messages(
-        response.messages(),
+        response,
         request,
         reasoning_watermark,
         tag_numbers,
@@ -12388,7 +12388,7 @@ fn native_reasoning_should_clear(
 }
 
 fn encode_full_native_messages(
-    served: &[transform::ServedMessage],
+    response: &transform::TransformResponse,
     request: &TransformRequest,
     reasoning_watermark: u64,
     tag_numbers: &BTreeMap<String, u64>,
@@ -12396,6 +12396,8 @@ fn encode_full_native_messages(
     lineage_anchor_mid: Option<&str>,
     transition_consumed: bool,
 ) -> Vec<Value> {
+    let served = response.messages();
+    let native_reasoning_keep_mids = &response.native_reasoning_keep_mids;
     let sidecar = request
         .native_messages
         .as_deref()
@@ -12433,7 +12435,28 @@ fn encode_full_native_messages(
             tag_numbers,
         );
     }
+    replay_native_reasoning_keeps(&mut native_messages, &sidecar, native_reasoning_keep_mids);
     native_messages
+}
+
+fn replay_native_reasoning_keeps(
+    messages: &mut [Value],
+    sidecar: &codec::DecodeSidecar,
+    keep_mids: &[String],
+) {
+    for message in messages {
+        let Some(mid) = message["info"]["id"].as_str() else {
+            continue;
+        };
+        if !keep_mids.iter().any(|keep| keep == mid) {
+            continue;
+        }
+        if let Some(meta) = sidecar.messages.get(mid) {
+            if let Some(parts) = meta.raw.get("parts") {
+                message["parts"] = parts.clone();
+            }
+        }
+    }
 }
 
 fn native_ingress_chunks(
@@ -12599,7 +12622,13 @@ fn attach_native_messages_incremental(
             }
             Some(hash)
         });
-        let mutation_exempt = slot.is_some_and(|mid| mutation_exempt_mids.contains(&mid));
+        let mutation_exempt = slot.is_some_and(|mid| {
+            mutation_exempt_mids.contains(&mid)
+                || response
+                    .native_reasoning_keep_mids
+                    .iter()
+                    .any(|keep| keep == mid)
+        });
         let reasoning_exempt = slot.is_some_and(|mid| Some(mid) == newest_assistant_mid);
         let (tag_number, reasoning_should_clear) = native_reasoning_should_clear(
             served,
@@ -12713,6 +12742,11 @@ fn attach_native_messages_incremental(
             tag_numbers,
         );
     }
+    replay_native_reasoning_keeps(
+        &mut suffix_values,
+        &sidecar,
+        &response.native_reasoning_keep_mids,
+    );
     chunks.extend(
         encoded_suffix
             .into_iter()
@@ -12734,7 +12768,7 @@ fn attach_native_messages_incremental(
 
     if native_attachment_differential_enabled() {
         let full = encode_full_native_messages(
-            response.messages(),
+            response,
             request,
             reasoning_watermark,
             tag_numbers,
@@ -12845,7 +12879,7 @@ fn finalize_native_messages_response(
         fallback_reason.get_or_insert(NativeDeltaFallbackReason::MissingNativeContent);
         response.native_messages = Some(
             encode_full_native_messages(
-                response.messages(),
+                response,
                 request,
                 reasoning_watermark,
                 tag_numbers,
@@ -21706,6 +21740,103 @@ mod tests {
             .iter()
             .skip(1)
             .all(|block| block.synthetic));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_hard_defer_preserves_demoted_native_thinking_until_priced_pass() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        let mut native = vec![
+            json!({"info":{"id":"user","role":"user"},"parts":[{"type":"text","text":"start"}]}),
+            json!({"info":{"id":"previous","role":"assistant"},"parts":[{"type":"text","text":"earlier step"}]}),
+        ];
+        let make_request = |native: &Vec<Value>, model: &str| {
+            let decoded = codec::decode_opencode(native);
+            let mut req = request(decoded.messages);
+            req["serializer_profile"] = json!("opencode-aisdk");
+            req["serve_native"] = json!(true);
+            req["tool_present"] = json!(true);
+            req["provider_id"] = json!("anthropic");
+            req["model_key"] = json!(model);
+            req["mid_turn"] = json!(false);
+            req["native_messages"] = json!(native);
+            req
+        };
+        let warm = call_transform_request(&handler, make_request(&native, "claude-opus-5")).await;
+        assert_eq!(warm["action"], "HARD");
+        let thinking = json!({"type":"reasoning","text":"signed thinking", "metadata":{"anthropic":{"signature":"fixture-signature"}}});
+        native.push(json!({"info":{"id":"thinking","role":"assistant"},"parts":[
+            thinking.clone(), {"type":"text","text":"dispatching"},
+            {"type":"tool","tool":"work","callID":"call-thinking","state":{"status":"completed","input":{"action":"run"},"output":"dispatched"}}
+        ]}));
+        native.push(json!({"info":{"id":"continue","role":"user"},"parts":[{"type":"text","text":"continue"}]}));
+        let hard =
+            call_transform_request(&handler, make_request(&native, "claude-fable-5-1")).await;
+        assert_eq!(hard["action"], "HARD");
+        let mut previous = hard["native_messages"].as_array().unwrap().clone();
+        let hash = |messages: &[Value]| -> String {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(messages).unwrap())
+            )
+        };
+        for step in 0..2 {
+            native.push(json!({"info":{"id":format!("step-{step}"),"role":"assistant"},"parts":[
+                {"type":"reasoning","text":format!("adaptive step {step}"),"metadata":{"anthropic":{"signature":format!("signature-{step}")}}},
+                {"type":"tool","tool":"work","callID":format!("call-{step}"),"state":{"status":"completed","input":{"action":"show"},"output":"done"}}
+            ]}));
+            let deferred =
+                call_transform_request(&handler, make_request(&native, "claude-fable-5-1")).await;
+            assert_eq!(deferred["action"], "SOFT+");
+            let served = deferred["native_messages"].as_array().unwrap();
+            assert!(served.len() > previous.len());
+            assert_eq!(
+                hash(&served[..previous.len()]),
+                hash(&previous),
+                "demotion must not rewrite the served prefix: {:?}",
+                served
+                    .iter()
+                    .zip(&previous)
+                    .enumerate()
+                    .filter(|(_, (new, old))| new != old)
+                    .collect::<Vec<_>>()
+            );
+            let target = served
+                .iter()
+                .find(|message| message["info"]["id"] == "thinking")
+                .unwrap();
+            assert_eq!(target["parts"][0], thinking);
+            assert!(!store
+                .load("ses")
+                .unwrap()
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "strip:merged_reasoning:thinking"));
+            previous = served.clone();
+        }
+        let mut priced_request = make_request(&native, "claude-fable-5-1");
+        priced_request["render_config"] = json!("independent-priced-config-change");
+        let priced = call_transform_request(&handler, priced_request).await;
+        assert_eq!(priced["action"], "HARD");
+        let target = priced["native_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["info"]["id"] == "thinking")
+            .unwrap();
+        assert!(target["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|part| part["type"] != "reasoning"));
+        assert!(store
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:merged_reasoning:thinking"));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1473,6 +1473,9 @@ pub struct NativeMessagesDelta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransformResponse {
+    /// Native vectors protected while newest remain unchanged until the next priced pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_reasoning_keep_mids: Vec<String>,
     pub status: TransformStatus,
     pub served_from: ServedFrom,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1569,6 +1572,7 @@ impl TransformResponse {
 
     pub fn need_full_sync(full_array_fingerprint: Option<String>) -> Self {
         Self {
+            native_reasoning_keep_mids: Vec::new(),
             status: TransformStatus::NeedFullSync,
             served_from: ServedFrom::Transform,
             full_array_fingerprint,
@@ -1606,6 +1610,7 @@ impl TransformResponse {
         full_array_fingerprint: Option<String>,
     ) -> Self {
         Self {
+            native_reasoning_keep_mids: Vec::new(),
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
             full_array_fingerprint,
@@ -3094,6 +3099,15 @@ fn apply_additive_only(
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         response: TransformResponse {
+            native_reasoning_keep_mids: core
+                .frozen_units
+                .iter()
+                .filter_map(|unit| {
+                    unit.key
+                        .strip_prefix("strip:native_reasoning_keep:")
+                        .map(str::to_owned)
+                })
+                .collect(),
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
             full_array_fingerprint: req.full_array_fingerprint.clone(),
@@ -5347,6 +5361,26 @@ fn apply_once(
         no_trim_meta = Some(output_meta);
     }
     let output_meta = no_trim_meta.as_ref().unwrap_or(&meta);
+    // OpenCode must replay the newest signed assistant's complete native vector. Its
+    // demotion is not permission to apply previously withheld overlays on a defer.
+    // Release these keeps only when the prefix is already being repriced.
+    if is_provider_prefix_mutation_pass {
+        core.frozen_units
+            .retain(|unit| !unit.key.starts_with("strip:native_reasoning_keep:"));
+    }
+    if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) && req.serve_native {
+        if let Some(mid) = latest_assistant_reasoning_mutation_exempt_mid(&req.messages) {
+            if req.messages.iter().any(|message| {
+                message.mid == mid && message.ck.content.iter().any(is_reasoning_block)
+            }) {
+                let key = format!("strip:native_reasoning_keep:{mid}");
+                if !core.frozen_units.iter().any(|unit| unit.key == key) {
+                    core.frozen_units
+                        .push(strip_unit("native_reasoning_keep", mid, ""));
+                }
+            }
+        }
+    }
     let output_cache_snapshot = output_cache.map(|cache| {
         cache
             .lock()
@@ -5676,6 +5710,15 @@ fn apply_once(
         mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
         lineage_anchor_mid: lineage_anchor_mid.map(str::to_string),
         response: TransformResponse {
+            native_reasoning_keep_mids: core
+                .frozen_units
+                .iter()
+                .filter_map(|unit| {
+                    unit.key
+                        .strip_prefix("strip:native_reasoning_keep:")
+                        .map(str::to_owned)
+                })
+                .collect(),
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
             full_array_fingerprint: req.full_array_fingerprint.clone(),

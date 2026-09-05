@@ -102,6 +102,27 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-bust-body-bytes-"));
+        tempDirs.push(dir);
+        const session = "ses_bodyBytes";
+        const previous = bodyWithTailCheckpoint("old § tail");
+        const current = bodyWithTailCheckpoint("new § tail with more bytes");
+        const previousStem = `2026-09-02T08-41-00-000Z-${session}`;
+        const currentStem = `2026-09-02T08-42-00-000Z-${session}`;
+        writeDump(dir, previousStem, "2026-09-02T08:41:00Z", session, previous);
+        writeDump(dir, currentStem, "2026-09-02T08:42:00Z", session, current);
+        const prettyBody = `${JSON.stringify(current, null, 2)}\n`;
+        writeFileSync(join(dir, `${currentStem}.body.json`), prettyBody);
+        const expected = [Buffer.byteLength(JSON.stringify(previous)), Buffer.byteLength(prettyBody)];
+        expect(snapshotsFor(dir, session).map((snapshot) => snapshot.bodyBytes)).toEqual(expected);
+        const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "analyze-cache-busts.ts"), "--session", session, "--dir", dir, "--all-rows"]);
+        expect(run.exitCode).toBe(0);
+        const output = run.stdout.toString();
+        expect(output).toContain("prevBodyBytes → curBodyBytes");
+        expect(output).toContain("reusableNormalizedPrefix@breakpoint");
+        expect(output).toContain(`${expected[0]!.toLocaleString()}B → ${expected[1]!.toLocaleString()}B`);
+    });
     test("loads and orders legacy and sequence+routing filename layouts by timestamp and sequence", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-fixture-"));
         tempDirs.push(dir);
