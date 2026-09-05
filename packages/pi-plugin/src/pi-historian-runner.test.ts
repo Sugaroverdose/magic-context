@@ -279,8 +279,11 @@ async function runHistorianWith(args: {
 describe("runPiHistorian", () => {
 	it("does not spawn beyond the producer window and still spawns within the margin", async () => {
 		const messages = rawMessages();
+		const firstMessage = messages[0];
+		if (!firstMessage)
+			throw new Error("producer-window fixture requires a source message");
 		messages[0] = {
-			...messages[0]!,
+			...firstMessage,
 			parts: [{ type: "text", text: "producer source token ".repeat(2_000) }],
 		};
 		const refusedRunner = runnerReturning([successXml()]);
@@ -293,9 +296,9 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(refusedRunner.run).toHaveBeenCalledTimes(0);
-			expect(getHistorianFailureState(refused.db, "ses-historian").lastError).toContain(
-				"producer_source_exceeds_window",
-			);
+			expect(
+				getHistorianFailureState(refused.db, "ses-historian").lastError,
+			).toContain("producer_source_exceeds_window");
 		} finally {
 			closeQuietly(refused.db);
 		}

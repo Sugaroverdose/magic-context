@@ -95,6 +95,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { producerWindowFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import {
 	createDefaultBoundarySnapshotForTests,
 	describeBoundaryDiagnostics,
@@ -110,7 +111,6 @@ import {
 	withRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
-import { producerWindowFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import { buildReferenceBlocks } from "@magic-context/core/hooks/magic-context/reference-retrieval";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { sessionLog } from "@magic-context/core/shared/logger";

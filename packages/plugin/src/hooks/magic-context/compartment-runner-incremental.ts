@@ -69,6 +69,7 @@ import {
 } from "./compartment-runner-validation";
 import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
+import { producerWindowFailureReason } from "./producer-window-guard";
 import {
     createDefaultBoundarySnapshotForTests,
     describeBoundaryDiagnostics,
@@ -81,7 +82,6 @@ import {
 import { readSessionChunk } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import { producerWindowFailureReason } from "./producer-window-guard";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
