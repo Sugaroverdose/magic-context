@@ -41,7 +41,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { writeRustTransformDecision } from "../../features/magic-context/transform-decision-log";
 import type { ContextUsage } from "../../features/magic-context/types";
-import { piModelRefToCanonical } from "../../shared/harness-provider-map";
+import { canonicalModelIdentity } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import { promptSurfaceConfigIdentity, resolvePromptSurface } from "../../shared/prompt-surface";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
@@ -1386,6 +1386,7 @@ function buildTransformBody(args: {
     geometry?: TransformGeometryWire;
     modelKey: string | null;
     providerId: string | null;
+    variant?: string;
     systemPromptHash: string;
     upgradeState: string;
     midTurn: boolean;
@@ -1408,12 +1409,13 @@ function buildTransformBody(args: {
         serializer_profile: "opencode-aisdk",
         serve_native: true,
         session_id: args.sessionId,
-        // Model/provider and system-prompt changes are provider-cache eviction signals;
-        // send the same identity inputs used by the TypeScript materializer instead of
-        // leaving the native identity blank.
+        // Send the same model/provider/system identity used by the TypeScript materializer.
+        // The module retains effort only for models where a change naturally busts the
+        // provider cache; cache-preserving models keep it out of the render identity.
         render_config: [
             args.providerId ? `provider:${args.providerId}` : "",
             args.modelKey ? `model:${args.modelKey}` : "",
+            args.variant ? `variant:${args.variant}` : "",
             args.systemPromptHash ? `system:${args.systemPromptHash}` : "",
         ]
             .filter(Boolean)
@@ -1822,7 +1824,7 @@ export function createRustModeTransform(
             }
         }
         const modelKey = model
-            ? piModelRefToCanonical(resolveModelKey(model.providerID, model.modelID) ?? "")
+            ? canonicalModelIdentity(resolveModelKey(model.providerID, model.modelID) ?? "")
             : null;
         let resolvedContextLimit: number | undefined;
         let resolvedWindowGeometry: WindowGeometryResult | undefined;
@@ -1859,8 +1861,8 @@ export function createRustModeTransform(
         if (overflowState) {
             const detectedLimitMatchesModel =
                 overflowState.detectedContextLimitModelKey === null ||
-                piModelRefToCanonical(overflowState.detectedContextLimitModelKey) ===
-                    piModelRefToCanonical(modelKey ?? "");
+                canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
+                    canonicalModelIdentity(modelKey ?? "");
             const hasProviderProof =
                 (overflowState.detectedContextLimit > 0 && detectedLimitMatchesModel) ||
                 // An unknown persisted arm alone is not proof. A second provider rejection
@@ -2514,6 +2516,7 @@ export function createRustModeTransform(
                 geometry: transformGeometry,
                 modelKey: modelKey ?? null,
                 providerId: model?.providerID ?? null,
+                variant: deps.variantBySession?.get(sessionId),
                 systemPromptHash: sessionMeta.systemPromptHash ?? "",
                 upgradeState: String(passInputs.upgrade_state ?? ""),
                 midTurn,

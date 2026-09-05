@@ -560,6 +560,8 @@ export interface TransformDeps {
      */
     pendingMaterializationSessions: Set<string>;
     deferredMaterializationSessions?: Set<string>;
+    /** Live OpenCode reasoning variant, forwarded only as a provider-cache identity signal. */
+    variantBySession?: Map<string, string | undefined>;
     lastHeuristicsTurnId: Map<string, string>;
     commitSeenLastPass?: Map<string, boolean>;
     client?: PluginContext["client"];

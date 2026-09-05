@@ -1126,6 +1126,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deferredHistoryRefreshSessions,
         pendingMaterializationSessions,
         deferredMaterializationSessions,
+        variantBySession,
         lastHeuristicsTurnId,
         commitSeenLastPass,
         internalChildSessions,

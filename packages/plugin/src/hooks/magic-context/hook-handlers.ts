@@ -273,9 +273,9 @@ export function createChatMessageHook(args: {
             previousVariant !== input.variant
         ) {
             // Variant changes alter cached thinking blocks on some models. Fable
-            // 5.1 instead applies effort only at message boundaries, leaving the
-            // existing prefix unchanged. Use both live IDs to decide; if either is
-            // unknown, leave the cache unchanged rather than flushing speculatively.
+            // 5.1 and GPT-6 Astra carry effort outside the cached prefix, leaving
+            // existing prompt bytes unchanged. Use both live IDs to decide; if either
+            // is unknown, leave the cache unchanged rather than flushing speculatively.
             const liveModel = args.liveModelBySession.get(sessionId);
             const providerID = input.model?.providerID ?? liveModel?.providerID;
             const modelID = input.model?.modelID ?? liveModel?.modelID;

@@ -159,7 +159,10 @@ import {
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { invalidateTrueRawTokenCache } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
-import { modelAcceptsEmptyContent } from "@magic-context/core/hooks/magic-context/sentinel";
+import {
+	modelAcceptsEmptyContent,
+	variantChangeBustsProviderCache,
+} from "@magic-context/core/hooks/magic-context/sentinel";
 import {
 	buildEditSupersessionReclaim,
 	buildSupersessionReclaimOps,
@@ -306,6 +309,7 @@ let mutationGateObserverForTests:
 	  }) => void)
 	| undefined;
 let lkgRecoveryLogObserverForTests: ((message: string) => void) | undefined;
+let variantChangeLogObserverForTests: ((message: string) => void) | undefined;
 
 function logPiLkgRecovery(sessionId: string, message: string): void {
 	lkgRecoveryLogObserverForTests?.(message);
@@ -378,6 +382,21 @@ export const __test = {
 		mutationGateObserverForTests = fn;
 		return () => {
 			mutationGateObserverForTests = undefined;
+		};
+	},
+	variantRefreshStateForTests(sessionId: string) {
+		return {
+			history: historyRefreshSessions.has(sessionId),
+			systemPrompt: systemPromptRefreshSessions.has(sessionId),
+			materialization: pendingMaterializationSessions.has(sessionId),
+		};
+	},
+	setVariantChangeLogObserverForTests(
+		fn: typeof variantChangeLogObserverForTests,
+	): () => void {
+		variantChangeLogObserverForTests = fn;
+		return () => {
+			variantChangeLogObserverForTests = undefined;
 		};
 	},
 	setLkgRecoveryLogObserverForTests(
@@ -639,6 +658,13 @@ function logTransformTiming(
 		sessionId,
 		`transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`,
 	);
+}
+
+export function piVariantChangeBustsProviderCache(
+	providerID?: string,
+	modelID?: string,
+): boolean {
+	return variantChangeBustsProviderCache(providerID, modelID);
 }
 
 function resolvePiContextModelKey(ctx: ExtensionContext): string | undefined {
@@ -2114,6 +2140,28 @@ export function registerPiContextHandler(
 		}
 		return s;
 	};
+
+	pi.on("thinking_level_select", async (event, ctx) => {
+		if (event.previousLevel === event.level) return;
+		const sessionId = resolveSessionId(ctx);
+		if (!sessionId) return;
+		const providerID = ctx.model?.provider;
+		const modelID = ctx.model?.id;
+		if (piVariantChangeBustsProviderCache(providerID, modelID)) {
+			sessionLog(
+				sessionId,
+				`variant changed (${event.previousLevel} -> ${event.level}), triggering flush`,
+			);
+			historyRefreshSessions.add(sessionId);
+			systemPromptRefreshSessions.add(sessionId);
+			pendingMaterializationSessions.add(sessionId);
+			lastHeuristicsTurnIdBySession.delete(sessionId);
+			return;
+		}
+		const message = `variant changed (${event.previousLevel} -> ${event.level}) on ${providerID ?? "unknown"}/${modelID ?? "unknown"} without a proven natural cache bust; deferring flush to next natural bust`;
+		variantChangeLogObserverForTests?.(message);
+		sessionLog(sessionId, message);
+	});
 
 	pi.on("context", async (event, ctx) => {
 		const transformStartTime = performance.now();

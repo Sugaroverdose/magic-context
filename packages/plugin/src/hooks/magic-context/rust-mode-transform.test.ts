@@ -1386,7 +1386,7 @@ describe("Rust mode authority adapter", () => {
         );
     });
 
-    it("sends canonical model identity to the Rust wire for a Pi-native alias", async () => {
+    it("sends canonical Astra identity and live effort to the Rust wire for a Pi-native alias", async () => {
         const sessionId = `rust-model-alias-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeDb();
@@ -1402,9 +1402,10 @@ describe("Rust mode authority adapter", () => {
             },
         };
         const deps = makeDeps(db, moduleClient);
+        deps.variantBySession = new Map([[sessionId, "xhigh"]]);
         const transform = createRustModeTransform(deps, { moduleClient });
         const messages = makeMessages(sessionId);
-        messages[0].info.model = { providerID: "openai-codex", modelID: "gpt-5.6-sol" };
+        messages[0].info.model = { providerID: "openai-codex", modelID: "gpt-6-astra" };
 
         await transform.run(
             sessionId,
@@ -1413,9 +1414,10 @@ describe("Rust mode authority adapter", () => {
             makeMeta(db, sessionId),
         );
 
-        expect(transformRequest?.model_key).toBe("openai/gpt-5.6-sol");
-        expect(transformRequest?.prompt_surface_model_key).toBe("openai/gpt-5.6-sol");
-        expect(transformRequest?.render_config).toContain("model:openai/gpt-5.6-sol");
+        expect(transformRequest?.model_key).toBe("openai/gpt-6-astra");
+        expect(transformRequest?.prompt_surface_model_key).toBe("openai/gpt-6-astra");
+        expect(transformRequest?.render_config).toContain("model:openai/gpt-6-astra");
+        expect(transformRequest?.render_config).toContain("variant:xhigh");
     });
 
     it("forwards the model-routed prompt preset and description overrides", async () => {
