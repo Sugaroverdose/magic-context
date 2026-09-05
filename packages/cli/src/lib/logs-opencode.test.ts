@@ -5,7 +5,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DiagnosticReport } from "./diagnostics-opencode";
-import { bundleIssueReport, sanitizeLogContent } from "./logs-opencode";
+import {
+    bundleIssueReport,
+    extractHistorianFailureLines,
+    sanitizeLogContent,
+} from "./logs-opencode";
 
 const tempDirs: string[] = [];
 
@@ -315,6 +319,22 @@ describe("sanitizeLogContent — secret token redaction (council finding #9)", (
             const sanitized = sanitizeLogContent(log);
             expect(sanitized).toContain("anthropic/claude-haiku-4-5");
         });
+    });
+});
+
+describe("extractHistorianFailureLines", () => {
+    it("matches historian messages in both log grammars", () => {
+        const fleet =
+            "2026-09-05T10:41:03.130Z WARN  magic-context tag=hist historian prompt failed: timeout retry=2";
+        const legacy =
+            "[2026-09-05T10:41:04.130Z] [magic-context][ses_abc] historian alert suppressed during cooldown";
+        const unrelated =
+            "2026-09-05T10:41:05.130Z INFO  magic-context transform complete historian_failure=false";
+
+        expect(extractHistorianFailureLines([fleet, legacy, unrelated].join("\n"))).toEqual([
+            fleet,
+            legacy,
+        ]);
     });
 });
 

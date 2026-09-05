@@ -20,6 +20,7 @@ import {
     getProjectMagicContextHistorianDir,
 } from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
+import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
 import {
@@ -28,12 +29,7 @@ import {
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
 } from "./opencode-plugin-cache";
-import {
-    type ConfigPaths,
-    detectConfigPaths,
-    getMagicContextHistorianDir,
-    getMagicContextLogPath,
-} from "./paths";
+import { type ConfigPaths, detectConfigPaths, getMagicContextHistorianDir } from "./paths";
 import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
 
 export interface DiagnosticReport {
@@ -77,11 +73,13 @@ export interface DiagnosticReport {
             prune: boolean;
         };
     };
+    /** Compatibility alias for the first existing candidate, or the legacy path. */
     logFile: {
         path: string;
         exists: boolean;
         sizeKb: number;
     };
+    logFiles?: LogFileInspection[];
     /**
      * Recent active OpenCode sessions (five parent groups, with up to three
      * newest children per group). Used to anchor historian-dump lookups to
@@ -788,8 +786,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const storageDirPath = storageResolution.path;
     const contextDbPath = join(storageDirPath, "context.db");
 
-    const logPath = getMagicContextLogPath("opencode");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    const logFiles = inspectMagicContextLogs("opencode");
+    const primaryLog = logFiles.find((file) => file.exists) ?? logFiles[0];
 
     // Resolve the MC compaction mode via the same loader + accessor the
     // plugin uses, so diagnostics never re-derives the compaction decision.
@@ -847,10 +845,11 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             nativeCompaction: conflictResult.nativeCompaction,
         },
         logFile: {
-            path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
+            path: primaryLog.path,
+            exists: primaryLog.exists,
+            sizeKb: primaryLog.sizeKb,
         },
+        logFiles,
         recentSessions,
         historianDumps: collectHistorianDumps(recentSessions),
         historianFailures: await collectHistorianFailures(storageDirPath),
@@ -995,9 +994,10 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
                   "```",
               ].join("\n"),
         "",
-        "### Log file",
-        `- Path: ${sanitizeString(report.logFile.path)}`,
-        `- Exists: ${report.logFile.exists}`,
-        `- Size: ${report.logFile.sizeKb} KB`,
+        "### Log files",
+        ...(report.logFiles ?? [report.logFile]).map(
+            (file) =>
+                `- ${sanitizeString(file.path)}: exists=${file.exists}, grammar=${"grammar" in file ? file.grammar : "unknown"}, lines=${"lineCount" in file ? file.lineCount : 0}, size=${file.sizeKb} KB`,
+        ),
     ].join("\n");
 }

@@ -53,9 +53,9 @@ import {
     type GhCommandResult,
     submitGithubIssue,
 } from "../lib/github-issue";
+import { formatLogFileInspection, inspectMagicContextLogs, readLogLines } from "../lib/log-lines";
 import { bundleIssueReport } from "../lib/logs-pi";
 import {
-    getMagicContextLogPath,
     getPiAgentConfigDir,
     getPiCacheRoot,
     getPiUserConfigPath,
@@ -896,25 +896,26 @@ async function runHealthChecks(options: {
         add(results, "pass", "Pi extension cache clean (no stale cached package found)");
     }
 
-    const logPath = getMagicContextLogPath("pi");
-    if (existsSync(logPath)) {
-        const stat = statSync(logPath);
-        const sizeKb = (stat.size / 1024).toFixed(0);
-        const lines = readFileSync(logPath, "utf-8")
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean);
-        add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
+    const logFiles = inspectMagicContextLogs("pi");
+    const existingLogFiles = logFiles.filter((file) => file.exists);
+    if (existingLogFiles.length === 0) {
+        add(
+            results,
+            "info",
+            `No plugin log file yet; checked: ${logFiles.map((file) => file.path).join(", ")}`,
+        );
+    } else {
+        for (const file of existingLogFiles) {
+            add(results, "info", `Log file read: ${formatLogFileInspection(file)}`);
+        }
         // Sanitize before printing — a raw log line can carry a secret/path the
         // user then pastes into a public issue.
-        const lastLine = lines.at(-1);
+        const lastLine = readLogLines(existingLogFiles).at(-1);
         add(
             results,
             "info",
             `Last plugin log line: ${lastLine ? sanitizeDiagnosticText(lastLine) : "<empty log>"}`,
         );
-    } else {
-        add(results, "info", `No plugin log file yet at ${logPath}`);
     }
 
     // Historian dumps now live per-project under `<dir>/.cortexkit/magic-context/historian/`

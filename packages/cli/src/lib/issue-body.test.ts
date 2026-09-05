@@ -34,6 +34,24 @@ describe("extractRecentErrors", () => {
         expect(matches).not.toContain("2026-05-20 12:00:07 some other info line");
     });
 
+    it("uses fleet levels and only applies message heuristics to legacy lines", () => {
+        const fleetWarn =
+            "2026-09-05T10:41:03.130Z WARN  magic-context session=opencode:ses_abc retry scheduled";
+        const fleetError =
+            "2026-09-05T10:41:04.130Z ERROR magic-context operation stopped class=timeout";
+        const fleetInfoWithErrorWord =
+            "2026-09-05T10:41:05.130Z INFO  magic-context Error: historical status only";
+        const legacyError =
+            "[2026-09-05T10:41:06.130Z] [magic-context][ses_abc] transform failed: SQLITE_BUSY";
+
+        expect(
+            extractRecentErrors(
+                [fleetWarn, fleetError, fleetInfoWithErrorWord, legacyError].join("\n"),
+                20,
+            ),
+        ).toEqual([fleetWarn, fleetError, legacyError]);
+    });
+
     it("matches V8 stack-trace frames", () => {
         const log = [
             "Error: thing broke",

@@ -20,6 +20,7 @@ import {
     type GhCommandResult,
     submitGithubIssue,
 } from "../lib/github-issue";
+import { formatLogFileInspection, inspectMagicContextLogs } from "../lib/log-lines";
 import {
     detectOmpBinary,
     getOmpSetting,
@@ -30,7 +31,6 @@ import {
     runOmpCommand,
 } from "../lib/omp-helpers";
 import {
-    getMagicContextLogPath,
     getOmpAgentDir,
     getOmpConfigPath,
     getOmpNonGlobalConfigSources,
@@ -70,6 +70,7 @@ interface DoctorDeps {
     runOmpCommand: typeof runOmpCommand;
     openExistingContextDatabase: typeof openExistingContextDatabase;
     now: () => Date;
+    inspectMagicContextLogs: typeof inspectMagicContextLogs;
     execFileSync: typeof execFileSync;
     spawnSync: typeof spawnSync;
 }
@@ -91,6 +92,7 @@ const DEFAULT_DEPS: DoctorDeps = {
     runOmpCommand,
     openExistingContextDatabase,
     now: () => new Date(),
+    inspectMagicContextLogs,
     execFileSync,
     spawnSync,
 };
@@ -310,12 +312,19 @@ async function runHealthChecks(options: {
     for (const source of getOmpNonGlobalConfigSources(options.cwd)) {
         add(results, "info", `OMP non-global config: ${source}`);
     }
-    const logPath = getMagicContextLogPath("pi");
-    add(
-        results,
-        "info",
-        `Pi-compatible runtime log: ${logPath}${existsSync(logPath) ? "" : " (not created yet)"}`,
-    );
+    const logFiles = options.deps.inspectMagicContextLogs("omp");
+    const existingLogFiles = logFiles.filter((file) => file.exists);
+    if (existingLogFiles.length === 0) {
+        add(
+            results,
+            "info",
+            `No OMP runtime log yet; checked: ${logFiles.map((file) => file.path).join(", ")}`,
+        );
+    } else {
+        for (const file of existingLogFiles) {
+            add(results, "info", `OMP runtime log read: ${formatLogFileInspection(file)}`);
+        }
+    }
 
     if (!options.quiet) for (const result of results) printResult(options.prompts, result);
     return {

@@ -10,9 +10,9 @@ import {
 } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc } from "comment-json";
+import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
 import {
     getMagicContextHistorianDir,
-    getMagicContextLogPath,
     getPiAgentConfigDir,
     getPiSessionsRoot,
     getPiUserConfigPath,
@@ -68,11 +68,13 @@ export interface PiDiagnosticReport {
         knownConflicts: string[];
         otherPiExtensions: string[];
     };
+    /** Compatibility alias for the first existing candidate, or the legacy path. */
     logFile: {
         path: string;
         exists: boolean;
         sizeKb: number;
     };
+    logFiles?: LogFileInspection[];
     /**
      * Recent Pi sessions ranked by JSONL mtime, top 5. Used to anchor
      * historian-dump lookups to real project directories and to power the
@@ -395,8 +397,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const storageResolution = getMagicContextStorageResolution();
     const storageDirPath = storageResolution.path;
     const dbPath = join(storageDirPath, "context.db");
-    const logPath = getMagicContextLogPath("pi");
-    const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
+    const logFiles = inspectMagicContextLogs("pi");
+    const primaryLog = logFiles.find((file) => file.exists) ?? logFiles[0];
     const otherPiExtensions = packages
         .filter((entry) => !isPiMagicContextPackageEntry(entry))
         .map(describePiPackageEntry);
@@ -439,10 +441,11 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             otherPiExtensions: otherPiExtensions.map(sanitizeString),
         },
         logFile: {
-            path: logPath,
-            exists: existsSync(logPath),
-            sizeKb: Math.round(logFileSize / 1024),
+            path: primaryLog.path,
+            exists: primaryLog.exists,
+            sizeKb: primaryLog.sizeKb,
         },
+        logFiles,
         recentSessions,
         historianDumps,
     };
@@ -517,9 +520,10 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
         JSON.stringify(report.conflicts, null, 2),
         "```",
         "",
-        "### Log file",
-        `- Path: ${sanitizeString(report.logFile.path)}`,
-        `- Exists: ${report.logFile.exists}`,
-        `- Size: ${report.logFile.sizeKb} KB`,
+        "### Log files",
+        ...(report.logFiles ?? [report.logFile]).map(
+            (file) =>
+                `- ${sanitizeString(file.path)}: exists=${file.exists}, grammar=${"grammar" in file ? file.grammar : "unknown"}, lines=${"lineCount" in file ? file.lineCount : 0}, size=${file.sizeKb} KB`,
+        ),
     ].join("\n");
 }

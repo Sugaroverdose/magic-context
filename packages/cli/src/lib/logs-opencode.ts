@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type DiagnosticReport, renderDiagnosticsMarkdown } from "./diagnostics-opencode";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { parseLogLine, readLogLines } from "./log-lines";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
 
 /**
@@ -73,11 +74,12 @@ function isHistorianLogLine(line: string): boolean {
  * Extract historian-failure log lines from the sanitized log content.
  * Returns the most recent occurrences (up to `limit`), newest first.
  */
-function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
+export function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
     const matches: string[] = [];
     const lines = sanitized.split(/\r?\n/);
     for (let i = lines.length - 1; i >= 0 && matches.length < limit; i -= 1) {
-        if (isHistorianLogLine(lines[i])) {
+        const parsed = parseLogLine(lines[i]);
+        if (parsed && isHistorianLogLine(parsed.message)) {
             matches.push(lines[i]);
         }
     }
@@ -99,9 +101,12 @@ function filterLogLinesBySession(lines: string[], sessionId: string | null): str
     // Pattern matches OpenCode session IDs (`ses_*` with hex/alnum body, up to
     // 32 chars). Anchored with a non-word boundary so we don't trip on names
     // that happen to embed `ses_`.
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
+        const parsed = parseLogLine(line);
+        if (parsed?.session && parsed.session !== sessionId) return false;
+        const matches =
+            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
         if (!matches) return true;
         // Keep the line only if EVERY session ID it mentions matches the chosen
         // one. Mixed-session lines (rare but possible) get dropped to be safe.
@@ -116,9 +121,7 @@ export async function bundleIssueReport(
     sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
-        : [];
+    const allLogLines = readLogLines(report.logFiles ?? [report.logFile]);
     const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 

@@ -431,9 +431,12 @@ export interface DreamRun {
 
 export interface LogEntry {
   timestamp: string;
+  level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | null;
   component: string;
   session_id: string;
+  tags: string[];
   message: string;
+  kv: Record<string, string>;
   raw: string;
   cache_read: number | null;
   cache_write: number | null;
