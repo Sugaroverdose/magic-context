@@ -26242,6 +26242,7 @@ mod tests {
         assert_eq!(initial["status"], "ok", "{initial}");
 
         let mut loaded = store.load("ses").unwrap();
+        let served_fingerprint_before_restart = loaded.meta.served_output_fingerprint.clone();
         let m1 = loaded
             .core
             .frozen_units
@@ -26264,6 +26265,11 @@ mod tests {
         restarted.bind_route(7, binding(project.to_str().unwrap(), "ses"));
 
         let first_after_restart = call_transform_request(&restarted, request_body.clone()).await;
+        assert_eq!(
+            store.load("ses").unwrap().meta.served_output_fingerprint,
+            served_fingerprint_before_restart,
+            "the first divergent SOFT+ restart pass must retain the byte-identical served fingerprint"
+        );
         let second_after_restart = call_transform_request(&restarted, request_body).await;
 
         for response in [&first_after_restart, &second_after_restart] {
@@ -26278,6 +26284,11 @@ mod tests {
                 "{response}"
             );
         }
+        assert_eq!(
+            store.load("ses").unwrap().meta.served_output_fingerprint,
+            served_fingerprint_before_restart,
+            "both divergent SOFT+ restart passes must retain the byte-identical served fingerprint"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

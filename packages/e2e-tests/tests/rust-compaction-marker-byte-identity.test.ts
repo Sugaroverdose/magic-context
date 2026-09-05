@@ -106,8 +106,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
                 .prepare("SELECT * FROM part WHERE session_id = ? AND message_id = ?")
                 .all(sessionId, summaryRows[0]!.id) as SqliteRow[];
 
-            // Control arm: remove only OpenCode's input cursor. The module's durable fold and
-            // host-side persisted marker representation remain unchanged.
+            // For the baseline run, temporarily remove OpenCode's compaction-marker and summary
+            // rows so the host supplies no marker. Restore them before the restart comparison
+            // while leaving the module's durable fold unchanged.
             opencodeDb.transaction(() => {
                 for (const row of [...compactionRows, ...summaryPartRows]) {
                     opencodeDb.prepare("DELETE FROM part WHERE id = ?").run(row.id);
