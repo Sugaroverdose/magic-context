@@ -174,7 +174,7 @@ export function registerIssue424Tests(
                 db.close();
             }
         });
-        test("candidate: an oversized first batch advances below force pressure without admitting the next batch", () => {
+        test("an oversized first batch advances below force pressure without admitting the next batch", () => {
             const raw = convert(issue424Fixture(300, 30));
             const boundary = resolve(raw, "candidate");
             expect(boundary.eligibleEndOrdinal).toBe(harness === "pi" ? 4 : 5);

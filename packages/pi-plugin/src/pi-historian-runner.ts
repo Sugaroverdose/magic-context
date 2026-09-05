@@ -723,10 +723,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				sessionCompartments: priorCompartments,
 			});
 
-			const chunkText = truncateHistorianInputIfNeeded(
-				chunk.text,
-				historianChunkTokens,
-			);
+			const chunkText = chunk.oversizeAtomicUnit
+				? chunk.text
+				: truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+			if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
+				sessionLog(
+					sessionId,
+					`historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${estimateTokens(chunkText)} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+				);
+			}
 			if (chunkText !== chunk.text) {
 				sessionLog(
 					sessionId,
