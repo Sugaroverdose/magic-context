@@ -135,6 +135,10 @@ export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
 export const RUST_PARK_PROBE_PRESSURE_BYPASS_PCT = 90;
 const RUST_SEND_TIMEOUT_MS = 15_000;
+// A frozen defer prevents an immediate LKG/module/LKG double bust. After eight healthy module
+// passes or sixteen new raw messages, continued replay adds more stale-snapshot risk than value.
+const RUST_LKG_FROZEN_HEALTHY_PASS_LIMIT = 8;
+const RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT = 16;
 
 function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -300,9 +304,11 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgCaptureSequence: number;
     lkgLastCapturedRowVersion: number;
     lkgSyncCaptureRequired: boolean;
-    /** A fallback replay is provider-visible output. Keep that exact representation until the
-     * module authorizes a cache-busting pass instead of replacing it during a later defer. */
+    /** A fallback replay is provider-visible output. Keep that exact representation through
+     * deferred recovery; healthy-pass and raw-tail limits prevent indefinite stale replay. */
     lkgRepresentationFrozen: boolean;
+    lkgFrozenHealthyPasses: number;
+    lkgFrozenAtInputCount: number | null;
 }
 
 export interface RustModeTransformOptions {
@@ -846,6 +852,8 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             lkgLastCapturedRowVersion: 0,
             lkgSyncCaptureRequired: false,
             lkgRepresentationFrozen: false,
+            lkgFrozenHealthyPasses: 0,
+            lkgFrozenAtInputCount: null,
         };
         states.set(sessionId, state);
     }
@@ -2810,7 +2818,7 @@ export function createRustModeTransform(
                 typeof response.action === "string" ||
                 typeof response.cache_bust === "boolean";
             const decisionUpper = decision.toUpperCase();
-            const cacheBustingPass =
+            let cacheBustingPass =
                 response.cache_bust === true ||
                 decisionUpper === "HARD" ||
                 decisionUpper === "MIGRATE_HARD" ||
@@ -2820,8 +2828,9 @@ export function createRustModeTransform(
                 decisionUpper === "SOFT" ||
                 !explicitDecision;
             const materializedBoundary = materializedCompactionBoundary(response);
-            let appliedMessages: unknown[];
             let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+            let frozenHealthyPassesAfterApply: number | null = null;
+            let frozenReleaseReason: string | null = null;
             const applyStartedAt = performance.now();
             try {
                 // Validate and postprocess the module result before touching the caller-owned
@@ -2837,8 +2846,12 @@ export function createRustModeTransform(
                           }
                         : undefined,
                 );
+                let appliedMessages = moduleMessages;
                 let replayedFrozenRepresentation = false;
                 if (state.lkgRepresentationFrozen && !cacheBustingPass) {
+                    if (state.lkgFrozenAtInputCount === null) {
+                        state.lkgFrozenAtInputCount = inputCount;
+                    }
                     const keys = resolveLkgModelKeys(messages);
                     const frozen = replayLkg({
                         sessionId,
@@ -2847,16 +2860,28 @@ export function createRustModeTransform(
                         providerKey: keys.providerKey,
                     });
                     if (!frozen.ok) {
-                        throw new Error(
-                            `frozen LKG representation cannot replay on a defer pass: ${frozen.reason}`,
-                        );
+                        cacheBustingPass = true;
+                        frozenReleaseReason = frozen.reason;
+                    } else {
+                        frozenHealthyPassesAfterApply = state.lkgFrozenHealthyPasses + 1;
+                        const rawTailGrowth = Math.max(0, inputCount - state.lkgFrozenAtInputCount);
+                        const releaseReason =
+                            rawTailGrowth >= RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT
+                                ? "raw_tail_growth_limit"
+                                : frozenHealthyPassesAfterApply >=
+                                    RUST_LKG_FROZEN_HEALTHY_PASS_LIMIT
+                                  ? "healthy_pass_limit"
+                                  : null;
+                        if (releaseReason) {
+                            cacheBustingPass = true;
+                            frozenReleaseReason = releaseReason;
+                        } else {
+                            appliedMessages = frozen.messages;
+                            replayedFrozenRepresentation = true;
+                            servedFrom = "lkg_frozen";
+                            sessionLog(sessionId, "lkg_frozen_replay_served");
+                        }
                     }
-                    appliedMessages = frozen.messages;
-                    replayedFrozenRepresentation = true;
-                    servedFrom = "lkg_frozen";
-                    sessionLog(sessionId, "lkg_frozen_replay_served");
-                } else {
-                    appliedMessages = moduleMessages;
                 }
                 pendingWireCache.nativeOutput = appliedMessages;
                 // LKG captures postprocessed output, so running postprocess again would stop the
@@ -3010,7 +3035,17 @@ export function createRustModeTransform(
                 throw error;
             }
             if (cacheBustingPass) {
+                if (frozenReleaseReason) {
+                    sessionLog(
+                        sessionId,
+                        `lkg_frozen_replay_released reason=${frozenReleaseReason}`,
+                    );
+                }
                 state.lkgRepresentationFrozen = false;
+                state.lkgFrozenHealthyPasses = 0;
+                state.lkgFrozenAtInputCount = null;
+            } else if (frozenHealthyPassesAfterApply !== null) {
+                state.lkgFrozenHealthyPasses = frozenHealthyPassesAfterApply;
             }
             try {
                 mirrorRustRenderedMemoryIds({ db: deps.db, sessionId, response });
@@ -3192,8 +3227,18 @@ export function createRustModeTransform(
                 output,
                 sessionMeta.systemPromptTokens,
             );
-            state.lkgRepresentationFrozen = replayed;
-            if (replayed) state.forceFullWire = true;
+            if (replayed) {
+                if (!state.lkgRepresentationFrozen) {
+                    state.lkgFrozenAtInputCount = inputCount;
+                }
+                state.lkgRepresentationFrozen = true;
+                state.lkgFrozenHealthyPasses = 0;
+                state.forceFullWire = true;
+            } else {
+                state.lkgRepresentationFrozen = false;
+                state.lkgFrozenHealthyPasses = 0;
+                state.lkgFrozenAtInputCount = null;
+            }
             servedFrom = replayed ? "lkg" : "raw";
             if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = moduleFailureCode(error) ?? "none";
