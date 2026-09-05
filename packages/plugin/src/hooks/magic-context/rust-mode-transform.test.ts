@@ -31,6 +31,7 @@ import {
     recordDetectedContextLimit,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
+    setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
     scheduleOpenCodeTransformDecisionWrite,
@@ -3910,6 +3911,57 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
 });
 
 describe("native output delta", () => {
+    it("keeps the module delta basis separate from marker insertion after a model-switch HARD", async () => {
+        const sessionId = `rust-marker-delta-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        makeMeta(db, sessionId);
+        setPersistedCompactionMarkerState(db, sessionId, {
+            boundaryMessageId: "m1", summaryMessageId: "summary",
+            compactionPartId: "compaction", summaryPartId: "summary-part",
+            boundaryOrdinal: 0, targetEndMessageId: "m1",
+        });
+        const message = (id: string): MessageLike => ({
+            info: { id, role: "assistant", sessionID: sessionId },
+            parts: [{ type: "tool", tool: "work", callID: id, state: {
+                status: "completed", input: { action: "settle" }, output: id,
+            } }],
+        });
+        let native: MessageLike[] = [...makeMessages(sessionId), message("settle"), message("board")];
+        let pass = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                const request = body as Record<string, unknown>;
+                if (pass++ === 0) return {
+                    decision: "HARD", reason: "epoch_change", scheduler_decision: "defer",
+                    native_messages: structuredClone(native),
+                };
+                const replaceFrom = native.length - 1;
+                native = [...native, message(`step-${pass}`)];
+                return { decision: "SOFT+", scheduler_decision: "defer", native_messages_delta: {
+                    after: (request.tail_delta as { after: string }).after,
+                    replace_from: replaceFrom, messages: structuredClone(native.slice(replaceFrom)),
+                } };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.tagger = { assignTag: () => 1 } as unknown as TransformDeps["tagger"];
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const hash = (messages: unknown[]) => new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex");
+        let previous: unknown[] = [];
+        for (let index = 0; index < 3; index++) {
+            const input = makeMessages(sessionId);
+            const output = { messages: [...input] as unknown[] };
+            await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+            expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
+            expect(output.messages).toHaveLength(native.length + 1);
+            if (previous.length > 0) expect(hash(output.messages.slice(0, previous.length))).toBe(hash(previous));
+            expect((output.messages as MessageLike[]).filter((msg) => msg.info.id === "settle")).toHaveLength(1);
+            previous = structuredClone(output.messages);
+        }
+    });
     it("retries with full arrays when a delta response omits native content", async () => {
         const sessionId = `rust-native-omission-retry-${Date.now()}`;
         sessions.push(sessionId);
