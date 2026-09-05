@@ -2707,8 +2707,10 @@ mod tests {
 
     #[test]
     fn no_fire_cause_taxonomy_discriminates_trigger_decision_sites() {
-        let mut in_flight = TriggerContext::default();
-        in_flight.compartment_in_progress = true;
+        let in_flight = TriggerContext {
+            compartment_in_progress: true,
+            ..TriggerContext::default()
+        };
         let in_flight_decision = check_compartment_trigger(&[], &in_flight);
         assert_eq!(
             in_flight_decision.no_fire_cause,
@@ -2729,9 +2731,11 @@ mod tests {
             "no_new_raw_history"
         );
 
-        let mut redundancy = TriggerContext::default();
-        redundancy.boundary = ctx_for_tests();
-        redundancy.projected_post_drop_percentage = Some(20.0);
+        let redundancy = TriggerContext {
+            boundary: ctx_for_tests(),
+            projected_post_drop_percentage: Some(20.0),
+            ..TriggerContext::default()
+        };
         let redundancy_decision = check_compartment_trigger(
             &[text_msg(1, Role::Assistant, "queued drops cover this tail")],
             &redundancy,
@@ -2745,8 +2749,10 @@ mod tests {
             "redundancy_skip"
         );
 
-        let mut protected = TriggerContext::default();
-        protected.boundary = ctx_for_tests();
+        let protected = TriggerContext {
+            boundary: ctx_for_tests(),
+            ..TriggerContext::default()
+        };
         let protected_decision = check_compartment_trigger(
             &[text_msg(1, Role::Assistant, "only protected live tail")],
             &protected,

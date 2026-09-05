@@ -10413,6 +10413,9 @@ mod nudge_formula_tests {
         ))
         .expect("parse ctx_reduce nudge copy golden");
         assert_eq!(golden.schema, 1);
+        let approximate_tokens = Regex::new(r"~\d+(?:\.\d+)?k\b").unwrap();
+        let percentage = Regex::new(r"\b\d+(?:\.\d+)?\s*%").unwrap();
+        let window = Regex::new(r"(?i)\bwindow\b").unwrap();
 
         for reminder in golden.cases {
             let hint = reminder
@@ -10448,23 +10451,18 @@ mod nudge_formula_tests {
                 reminder.id
             );
             assert_eq!(
-                Regex::new(r"~\d+(?:\.\d+)?k\b")
-                    .unwrap()
-                    .find_iter(&rendered)
-                    .count(),
+                approximate_tokens.find_iter(&rendered).count(),
                 1,
                 "{} exposed more than the reclaimable token mass",
                 reminder.id
             );
             assert!(
-                !Regex::new(r"\b\d+(?:\.\d+)?\s*%")
-                    .unwrap()
-                    .is_match(&rendered),
+                !percentage.is_match(&rendered),
                 "{} exposed a percentage",
                 reminder.id
             );
             assert!(
-                !Regex::new(r"(?i)\bwindow\b").unwrap().is_match(&rendered),
+                !window.is_match(&rendered),
                 "{} exposed context capacity",
                 reminder.id
             );
@@ -22952,7 +22950,7 @@ pub(crate) mod tests {
                 }
             ]
         });
-        let decoded = crate::codec::decode_opencode(&[native_tool_message.clone()]);
+        let decoded = crate::codec::decode_opencode(std::slice::from_ref(&native_tool_message));
         let mut tool_message = decoded.messages[0].clone();
         // The live CK ingress is projected by the host independently of the native sidecar, so it
         // does not carry the Rust decoder's private block-origin stamps.
@@ -31971,11 +31969,13 @@ pub(crate) mod tests {
             },
             &SelectionConfig::default(),
         );
-        let mut core = CoreState::default();
-        core.frozen_units = decisions
-            .iter()
-            .map(|decision| red_unit(&decision.target_id, &decision.kind, &decision.payload))
-            .collect();
+        let core = CoreState {
+            frozen_units: decisions
+                .iter()
+                .map(|decision| red_unit(&decision.target_id, &decision.kind, &decision.payload))
+                .collect(),
+            ..CoreState::default()
+        };
         let served = build_output(
             &core,
             &ModuleMeta::default(),
@@ -32118,11 +32118,13 @@ pub(crate) mod tests {
             reasoning_adjacency_fixture(true, true, true),
         );
         let projection = project_messages(&request.messages).unwrap();
-        let mut core = CoreState::default();
-        core.frozen_units = vec![
-            red_unit("reasoning-adjacency-left#2", "drop", "[dropped]"),
-            red_unit("reasoning-adjacency-result#0", "drop", "[dropped]"),
-        ];
+        let core = CoreState {
+            frozen_units: vec![
+                red_unit("reasoning-adjacency-left#2", "drop", "[dropped]"),
+                red_unit("reasoning-adjacency-result#0", "drop", "[dropped]"),
+            ],
+            ..CoreState::default()
+        };
         let meta = ModuleMeta::default();
         let first = build_output_with_tags(
             &core,
