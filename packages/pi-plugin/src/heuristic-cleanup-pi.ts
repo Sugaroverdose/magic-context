@@ -2,8 +2,8 @@
  * Pi-side heuristic cleanup — mirrors OpenCode's `applyHeuristicCleanup`
  * (packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts).
  *
- * Same four passes, in the same order, with the same DB persistence
- * semantics. The only Pi-specific pieces are:
+ * Applies emergency reclaim before routine stale-call removal, injection stripping,
+ * deduplication, and caveman compression. The Pi-specific pieces are:
  *
  *   - Tool fingerprinting walks Pi `AgentMessage[]` instead of
  *     OpenCode `MessageLike[]`. Pi assistant messages carry tool calls
@@ -15,7 +15,7 @@
  *     `tags.status='dropped'` and lets `applyFlushedStatuses` replay existing
  *     drops on every provider, which is the cache-stable mechanism Pi already uses.
  *
- *   - Everything else (drop aged tools, strip system injections from
+ *   - Everything else (tiered emergency reclaim, strip system injections from
  *     message tags, age-tier caveman compression) is tag-driven and
  *     uses the shared `TagTarget` interface produced by `tagTranscript`,
  *     so the OpenCode helpers `applyCavemanCleanup` and
@@ -98,6 +98,7 @@ export interface PiHeuristicCleanupConfig {
 	emergency?: {
 		currentTotalInputTokens: number;
 		ceilingTokens: number;
+		usagePercentage?: number;
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
@@ -362,6 +363,7 @@ export function applyPiHeuristicCleanup(
 			protectedTags: config.protectedTags,
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
 			ceilingTokens: emergency.ceilingTokens,
+			usagePercentage: emergency.usagePercentage,
 			priorInputSample,
 			hasPriorDrop: priorInputSample > 0,
 		});
@@ -379,31 +381,40 @@ export function applyPiHeuristicCleanup(
 					if (!toDrop.has(tag.tagNumber)) continue;
 					if (tag.status !== "active" || tag.type !== "tool") continue;
 					const target = targets.get(tag.tagNumber);
-					const recent = newestEmergencyTags.has(tag.tagNumber);
-					const result = recent
-						? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
-						: (target?.drop?.() ?? "absent");
+					const recent =
+						(emergency.usagePercentage ?? 0) < 95 &&
+						newestEmergencyTags.has(tag.tagNumber);
+					// Removing the result separator beside native reasoning lets Anthropic
+					// merge signed assistant turns, so this safety case always keeps the pair.
+					const reasoningSafeSkeleton =
+						target?.requiresToolArcSkeleton === true;
+					const skeleton = recent || reasoningSafeSkeleton;
+					const result = reasoningSafeSkeleton
+						? (target?.truncate?.() ?? "absent")
+						: recent
+							? (target?.truncate?.() ?? target?.drop?.() ?? "absent")
+							: (target?.drop?.() ?? "absent");
 					if (result === "removed" || result === "truncated") {
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						updateTagDropMode(
 							db,
 							sessionId,
 							tag.tagNumber,
-							recent ? "truncated" : "full",
+							skeleton ? "truncated" : "full",
 						);
 						droppedTools++;
 						emergencyDroppedTools++;
 					}
 				}
-				// The sample is latched after the transaction below for every acting
-				// emergency pass, including zero removals.
 			})();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {
 			sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
 		}
-		// Record every acting emergency sample, including when no target was eligible.
-		setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
+		// A no-op spent no cache rewrite and must not consume the episode's batch.
+		if (emergencyDroppedTools > 0) {
+			setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
+		}
 	}
 
 	// ── Pass 1b: stale ctx_reduce calls (Pi persisted-drop replay) ──────
