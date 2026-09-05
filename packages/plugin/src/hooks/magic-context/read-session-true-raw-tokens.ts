@@ -501,6 +501,7 @@ export function fenceBoundaryForCompletedToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
     publicationFloorOrdinal: number,
+    observeComponent?: (arcs: ReadonlyArray<{ invocation: number; result: number }>) => void,
 ): number {
     const completed = arcs
         .filter((arc): arc is ToolArc & { resOrdinal: number } => arc.resOrdinal !== null)
@@ -530,6 +531,7 @@ export function fenceBoundaryForCompletedToolArcs(
 
     const minInvocation = Math.min(...component.map((arc) => arc.invocation));
     const maxResult = Math.max(...component.map((arc) => arc.result));
+    observeComponent?.(component);
     return minInvocation < publicationFloorOrdinal ? maxResult + 1 : minInvocation;
 }
 

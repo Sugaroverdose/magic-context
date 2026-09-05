@@ -97,6 +97,7 @@ import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/injec
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import {
 	createDefaultBoundarySnapshotForTests,
+	describeBoundaryDiagnostics,
 	hasRunnableCompartmentWindow,
 	type ProtectedTailBoundarySnapshot,
 	recordHighPressureNoEligibleHead,
@@ -600,7 +601,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (protectedTailStart <= offset || eligibleEndOrdinal <= offset) {
 				sessionLog(
 					sessionId,
-					`historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact`,
+					`historian no-op: protectedTailStart=${protectedTailStart} eligibleEnd=${eligibleEndOrdinal} <= offset=${offset} — nothing to compact; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
 				);
 				if (boundarySnapshot.usagePercentage < 80) {
 					if (!isWrapupInProgress(db, sessionId))

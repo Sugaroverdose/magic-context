@@ -25,6 +25,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import {
+	describeBoundaryDiagnostics,
 	hasRunnableCompartmentWindow,
 	resolveWrapupProtectedTailBoundary,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
@@ -343,6 +344,10 @@ export async function runPiWrapup(
 				lastEnd = getLastCompartmentEndMessage(deps.db, sessionId);
 				if (lastEnd + 1 >= targetEligibleEndOrdinal) break;
 				if (!hasRunnableCompartmentWindow(plan.snapshot)) {
+					sessionLog(
+						sessionId,
+						`wrapup no-op: ${describeBoundaryDiagnostics(plan.snapshot)}`,
+					);
 					failure = `No runnable wrapup boundary is available yet; wrapped up through message ${lastEnd}. Run /ctx-wrapup again to continue.`;
 					break;
 				}
@@ -370,7 +375,7 @@ export async function runPiWrapup(
 				}
 				sendStatus({
 					title: "/ctx-wrapup",
-					text: `## Magic Wrapup\n\nChunk ${chunkIndex}: wrapping messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1} (~${plan.snapshot.trueRawEligibleTokens.toLocaleString()} eligible tokens remain).`,
+					text: `## Magic Wrapup\n\nChunk ${chunkIndex}: wrapping messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1} (~${plan.snapshot.trueRawEligibleTokens.toLocaleString()} eligible tokens remain). ${describeBoundaryDiagnostics(plan.snapshot)}`,
 					level: "info",
 				});
 
