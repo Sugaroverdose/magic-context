@@ -54,8 +54,8 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **`src/plugin/`:**
 - Purpose: Adapt internal services to OpenCode plugin interfaces.
-- Contains: Hook wrappers, tool registry setup, RPC handlers, dream-timer lifecycle, conflict-warning delivery, per-session hook construction, boot quiet period enforcement, and tool backend overrides for Rust mode.
-- Key files: `src/plugin/messages-transform.ts`, `src/plugin/event.ts`, `src/plugin/tool-registry.ts`, `src/plugin/hooks/create-session-hooks.ts`, `src/plugin/rpc-handlers.ts`, `src/plugin/dream-timer.ts`, `src/plugin/conflict-warning-hook.ts`, `src/plugin/boot-quiet.ts`, `src/plugin/rust-tool-backends.ts`
+- Contains: Hook wrappers, tool registry setup, RPC handlers, dream-timer lifecycle, conflict-warning delivery, per-session hook construction, boot quiet period enforcement, whole-server boot deadline coordination, and tool backend overrides for Rust mode.
+- Key files: `src/plugin/messages-transform.ts`, `src/plugin/event.ts`, `src/plugin/tool-registry.ts`, `src/plugin/hooks/create-session-hooks.ts`, `src/plugin/rpc-handlers.ts`, `src/plugin/dream-timer.ts`, `src/plugin/conflict-warning-hook.ts`, `src/plugin/boot-quiet.ts`, `src/plugin/boot-deadline.ts`, `src/plugin/rust-tool-backends.ts`
 
 **`src/hooks/`:**
 - Purpose: Hold hook implementations and hook-specific helpers.
@@ -81,8 +81,8 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **`src/shared/`:**
 - Purpose: Keep cross-feature utilities small and dependency-light.
-- Contains: Logging (with 32 MiB bounded log rotation), path helpers, JSONC parsing, model helpers, runtime-detected SQLite backend (`bun:sqlite` / `node:sqlite`), harness identification, RPC server/client/types/utils/notifications, conflict detection & fixer, test temp directory lifecycle management, fallback chain resolver, models.dev cache, tag-transcript primitive shared with Pi, model-suggestion-retry helper, subagent runner (Pi-only), the commit-detection utility, harness-specific provider translation, process-wide exit-abort coordination, diagnostics numeric redaction, prompt surface preset resolution, export-aware TUI runtime import specifiers mapping, Rust-mode status formatting, and slow write-transaction timing attribution.
-- Key files: `src/shared/logger.ts`, `src/shared/data-path.ts`, `src/shared/jsonc-parser.ts`, `src/shared/sqlite.ts`, `src/shared/test-temp-dir.ts`, `src/shared/rpc-server.ts`, `src/shared/rpc-client.ts`, `src/shared/conflict-detector.ts`, `src/shared/model-resolution.ts`, `src/shared/model-suggestion-retry.ts`, `src/shared/resolve-fallbacks.ts`, `src/shared/models-dev-cache.ts`, `src/shared/window-geometry.ts`, `src/shared/harness.ts`, `src/shared/tag-transcript.ts`, `src/shared/commit-detection.ts`, `src/shared/harness-provider-map.ts`, `src/shared/rust-mode-status.ts`, `src/shared/exit-abort-registry.ts`, `src/shared/redaction.ts`, `src/shared/escalation-bands.ts`, `src/shared/context-limit-provenance.ts`, `src/shared/storage-permissions.ts`, `src/shared/tui-runtime-specifiers.ts`, `src/shared/prompt-surface.ts`, `src/shared/prompt-surface-runtime.ts`, `src/shared/prompt-surface-a1-golden.ts`, `src/shared/write-transaction-timing.ts`
+- Contains: Logging (with 32 MiB bounded log rotation), path helpers, JSONC parsing with prototype-pollution safe recovery, config diagnostics and warning formatting, cache TTL display resolution and model provenance seeding, model helpers, runtime-detected SQLite backend (`bun:sqlite` / `node:sqlite`), harness identification, RPC server/client/types/utils/notifications, conflict detection & fixer, test temp directory lifecycle management, fallback chain resolver, models.dev cache, tag-transcript primitive shared with Pi, model-suggestion-retry helper, subagent runner (Pi-only), the commit-detection utility, harness-specific provider translation, process-wide exit-abort coordination, diagnostics numeric redaction, prompt surface preset resolution, export-aware TUI runtime import specifiers mapping, Rust-mode status formatting, and slow write-transaction timing attribution.
+- Key files: `src/shared/logger.ts`, `src/shared/data-path.ts`, `src/shared/jsonc-parser.ts`, `src/shared/config-diagnostics.ts`, `src/shared/config-warning-surface.ts`, `src/shared/cache-ttl-display.ts`, `src/shared/cache-ttl-seed.ts`, `src/shared/sqlite.ts`, `src/shared/test-temp-dir.ts`, `src/shared/rpc-server.ts`, `src/shared/rpc-client.ts`, `src/shared/conflict-detector.ts`, `src/shared/model-resolution.ts`, `src/shared/model-suggestion-retry.ts`, `src/shared/resolve-fallbacks.ts`, `src/shared/models-dev-cache.ts`, `src/shared/window-geometry.ts`, `src/shared/harness.ts`, `src/shared/tag-transcript.ts`, `src/shared/commit-detection.ts`, `src/shared/harness-provider-map.ts`, `src/shared/rust-mode-status.ts`, `src/shared/exit-abort-registry.ts`, `src/shared/redaction.ts`, `src/shared/escalation-bands.ts`, `src/shared/context-limit-provenance.ts`, `src/shared/storage-permissions.ts`, `src/shared/tui-runtime-specifiers.ts`, `src/shared/prompt-surface.ts`, `src/shared/prompt-surface-runtime.ts`, `src/shared/prompt-surface-a1-golden.ts`, `src/shared/write-transaction-timing.ts`
 
 **`scripts/`:**
 - Purpose: Support local inspection and maintenance outside the plugin runtime.
@@ -104,7 +104,7 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **Pi Sibling Package (`packages/pi-plugin/`):**
 - Purpose: Provide the Pi plugin implementation, mirroring OpenCode semantics and runtime features.
-- Contains: Context transform pipeline, subagent runners, custom system-prompt caching, Pi pressure alignment (`packages/pi-plugin/src/pi-pressure.ts`), Pi-specific commands, and session state clone inheritance (`packages/pi-plugin/src/clone-inheritance.ts`).
+- Contains: Context transform pipeline, subagent runners, custom system-prompt caching, Pi pressure alignment (`packages/pi-plugin/src/pi-pressure.ts`), Pi-specific commands, session state clone inheritance (`packages/pi-plugin/src/clone-inheritance.ts`), Last Known Good (LKG) transform state replay on transient SQLite failure (`packages/pi-plugin/src/pi-lkg.ts`), served-array digest ledger for cache-bust attribution (`packages/pi-plugin/src/served-array-ledger.ts`), deadline-bounded boot with late adoption (`packages/pi-plugin/src/pi-boot-deadline.ts`), first-class OMP harness identification (`packages/pi-plugin/src/pi-harness-kind.ts`), and provider error recovery (`packages/pi-plugin/src/provider-error-recovery-pi.ts`).
 
 ## Key File Locations
 
@@ -112,6 +112,7 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 
 **Entry Points:**
 - `src/index.ts`: Register the plugin, hidden agents (`historian`, `historian-editor`, `dreamer`, `sidekick`), hooks, commands, tools, RPC server, dream-schedule timer, and the auto-update checker.
+- `packages/plugin/src/plugin/boot-deadline.ts`: Coordinate whole-server plugin boot initialization under a 15s deadline (`BOOT_SERVER_DEADLINE_MS`) with per-phase timing attribution and late-settling hooks adoption.
 - `src/tui/index.tsx`: Register TUI command-palette entries and the sidebar slot for OpenCode TUI.
 - `packages/cli/src/index.ts`: Unified setup/doctor/migrate entry for the separate `@cortexkit/magic-context` package.
 - `packages/cli/src/commands/migrate-session.ts`: Re-home OpenCode sessions across working directories/projects and database boundaries with domain authority verification.
@@ -124,6 +125,9 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 
 **Configuration:**
 - `src/config/index.ts`: Load and merge config files with field-level fallback for invalid leaves; collect warnings rather than disable the plugin.
+- `src/shared/config-diagnostics.ts` and `src/shared/config-warning-surface.ts`: Classify config warnings (`file-parse`, `file-io`, `invalid-leaf`) and format loud parse-failure banners and status diagnostics across OpenCode and Pi.
+- `src/shared/cache-ttl-display.ts`: Resolve status-only cache TTL text and provenance from live config and model when session rows are unsynced.
+- `src/shared/cache-ttl-seed.ts`: Seed cache TTL model provenance early on session start.
 - `src/config/profiles.ts`: Resolve user-defined model-selection profiles with project > user > none precedence.
 - `src/config/schema/magic-context.ts`: Define defaults and schema rules.
 - `src/config/schema/agent-overrides.ts`: Define overridable built-in agents.
@@ -147,6 +151,7 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `src/hooks/magic-context/ctx-reduce-nudge.ts`: Evaluate Channel 1 and Channel 2 nudges over the tail hygiene baseline with hygiene ratio bands (0.20/0.40/0.60 for Channel 1, 0.75 for Channel 2), enforcing Channel-1 compliance grace after `ctx_reduce` and a 5-turn sticky floor.
 - `src/hooks/magic-context/channel2-delivery.ts`: Coordinate CAS-leased synthetic user message delivery for Channel 2 nudges.
 - `src/hooks/magic-context/format-embed-failure.ts`: Format classified embedding failures (including Synapse certification and credential refusals) into user-facing status and remediation summaries.
+- `src/hooks/magic-context/send-session-notification.ts`: Deliver ignored messages and hold notices (`holdIgnoredNotification`) during in-flight generation or unanswered real prompts so plugin notices cannot become the newest user turn.
 - `src/hooks/magic-context/stripped-command.ts`: Intercept single-text-part slashless registered Magic Context commands in OpenCode Desktop before persistence, executing through command handlers and throwing a 204 suppression response.
 - `src/features/magic-context/reclaim-protection.ts`: Protect the newest `K=3` `ctx_reduce` tool exemplars across supersession, age-based, and emergency drop reclaim lanes.
 - `src/hooks/magic-context/hook-handlers.ts`: Prompt hook event handlers, provider-aware reasoning-variant flushes, and tool execution lifecycle hooks.
@@ -169,6 +174,7 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `src/hooks/magic-context/historian-prompt.generated.ts`: Generated v8.7.4 historian system prompt (source: `src/hooks/magic-context/historian-prompt.source.md`; re-exported via `compartment-prompt.ts`).
 - `src/features/magic-context/memory/memory-migration.ts`: `/ctx-session-upgrade` 9-cat→5-cat memory re-eval (active-only, permanent-safe, epoch-bumping).
 - `src/features/magic-context/dreamer/memory-claim-safety.ts`: Classify directive-shaped `PROJECT_RULES` and enforce host-level refusal gates for directive updates/archives and content-loss rewrites during verify.
+- `src/features/magic-context/dreamer/storage-dream-runs.ts`: Persist structured dreamer child run failure facts (`DreamRunFailureDetail` with closed-vocabulary `failure_class`, model attempts, redacted provider errors, timeouts) in `tasks_json`.
 - `src/hooks/magic-context/maintenance-authority.ts`: Maintenance command authority resolution and module routing checks.
 - `src/features/magic-context/memory/project-identity.ts`: Resolve stable project identities (`git:<sha>` or fallback `dir:<md5-12>`) using git root commits or directory hashes, caching directory fallbacks, and utilizing a cooldown period for transient git errors. Supported by `storage-identity-merge.ts` for row-level identity merging with durable audit logging (`identity_merge_log`), and `packages/plugin/scripts/export-project-identities.ts` for registry seed exports.
 - `src/features/magic-context/context-authority.ts`: Manage domain authority states (`TS`, `PREPARING`, `MODULE`, `DRAINING`) and changefeed synchronization for shared memory and note state between TS host and Rust module, declaring transitions once per project on settled state changes, and re-binding stable source identities and prebinding page tombstones across authority round-trips.
@@ -206,6 +212,11 @@ Unless specified otherwise, TypeScript paths are relative to `packages/plugin/` 
 - `src/shared/logger.ts`: Buffered diagnostic file logging with 32 MiB bounded log rotation to a single `.1` predecessor, periodic cached stat size checks, and 0600 permission hardening.
 - `src/shared/test-temp-dir.ts`: Provide registered temporary directory creation for test suites with exit/afterAll cleanup and prefix-scoped stale directory sweeps.
 - `packages/pi-plugin/src/context-handler.ts`: Core context transform and hook handler for the Pi plugin.
+- `packages/pi-plugin/src/pi-lkg.ts`: Capture and replay Last Known Good (LKG) transform state on transient SQLite failure for Pi sessions.
+- `packages/pi-plugin/src/served-array-ledger.ts`: Track per-pass served-array digest ledgers for Pi cache-bust attribution.
+- `packages/pi-plugin/src/pi-boot-deadline.ts`: Bound Pi/OMP boot initialization with in-flight open reuse and late runtime adoption.
+- `packages/pi-plugin/src/pi-harness-kind.ts`: Resolve and scope first-class OMP harness runtime via `@oh-my-pi/pi-utils`.
+- `packages/pi-plugin/src/provider-error-recovery-pi.ts`: Handle provider error recovery and Fable thinking-binding recovery for Pi sessions.
 - `packages/pi-plugin/src/pi-pressure.ts`: Resolve and format unified prompt-token and usable-window pressure snapshots across scheduler, trigger, logs, status, and footer without forward-pressure scaling factors.
 - `packages/pi-plugin/src/tail-hygiene-walk-pi.ts`: Single-walk tail hygiene measurement and delta tracking for Pi sessions.
 - `packages/pi-plugin/src/ctx-reduce-nudge-pi.ts`: Evaluate Channel 1 and Channel 2 nudges for Pi sessions with compliance grace, queuing Channel 2 via `deliverAs: "nextTurn"`.
