@@ -6552,7 +6552,18 @@ impl McStore {
                 },
             )
         })?;
-        inner.migrate(NS, MIGRATIONS)?;
+        let migration = inner.migrate(NS, MIGRATIONS)?;
+        if migration.store_ahead() {
+            // A store written by a longer chain than this binary carries is the
+            // rollback shape (#7804 keeps an older ck-mc placeable on purpose), so
+            // startup continues; the line exists so a rolled-back module that later
+            // fails a query on a column it does not know is attributable to the
+            // version skew rather than to data corruption.
+            eprintln!(
+                "mc-store: store schema v{} is ahead of this binary's chain v{} (older binary on a newer store); continuing without migrating",
+                migration.recorded, migration.chain_max
+            );
+        }
         let store = McStore {
             inner,
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
