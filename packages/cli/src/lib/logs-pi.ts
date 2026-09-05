@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
@@ -7,6 +7,7 @@ import {
     sanitizeString,
 } from "./diagnostics-pi";
 import { capBodyToGithubLimit, extractRecentErrors } from "./issue-body";
+import { parseLogLine, readLogLines } from "./log-lines";
 
 export function sanitizeLogContent(content: string): string {
     return sanitizeString(content);
@@ -42,9 +43,12 @@ export interface BundledIssueReport {
  */
 function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
     if (!sessionId) return lines;
-    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{3,64}\b/g;
     return lines.filter((line) => {
-        const matches = line.match(otherSessionPattern);
+        const parsed = parseLogLine(line);
+        if (parsed?.session && parsed.session !== sessionId) return false;
+        const matches =
+            parsed?.message.match(otherSessionPattern) ?? line.match(otherSessionPattern);
         if (!matches) return true;
         return matches.every((id) => id === sessionId);
     });
@@ -62,9 +66,7 @@ export async function bundleIssueReport(
     } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const allLogLines = report.logFile.exists
-        ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
-        : [];
+    const allLogLines = readLogLines(report.logFiles ?? [report.logFile]);
     const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 

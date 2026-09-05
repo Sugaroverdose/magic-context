@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectMagicContextLogs } from "../lib/log-lines";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runDoctor } from "./doctor-omp";
 
@@ -103,6 +104,64 @@ describe("OMP doctor", () => {
         expect(code).toBe(0);
         expect(prompts.messages.join("\n")).toContain("OMP 17.1.7 detected");
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
+    });
+
+    it("reads the OMP legacy log when no Pi log exists", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-log-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        const configDir = join(root, ".config", "cortexkit");
+        const ompLog = join(root, "omp", "magic-context", "magic-context.log");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        mkdirSync(join(root, "omp", "magic-context"), { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        writeFileSync(join(configDir, "magic-context.jsonc"), "{}\n");
+        writeFileSync(ompLog, "[2026-09-05T10:41:03.130Z] [magic-context][ses_omp] OMP started\n");
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    {
+                        name: "@cortexkit/pi-magic-context",
+                        version: "0.41.3",
+                        enabled: true,
+                        path: pluginDir,
+                    },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+                inspectMagicContextLogs: (harness) =>
+                    inspectMagicContextLogs(harness, {
+                        tempDir: root,
+                        storageDir: join(root, "storage"),
+                        override: null,
+                    }),
+            },
+        });
+
+        expect(code).toBe(0);
+        expect(prompts.messages.join("\n")).toContain(
+            `OMP runtime log read: ${ompLog} (grammar=legacy, lines=1`,
+        );
+        expect(prompts.messages.join("\n")).not.toContain(
+            join(root, "pi", "magic-context", "magic-context.log"),
+        );
     });
 
     it("repairs a missing config when it is the only health finding", async () => {

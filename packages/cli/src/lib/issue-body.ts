@@ -20,6 +20,8 @@
  * on what counts as an "error" line.
  */
 
+import { parseLogLine } from "./log-lines";
+
 /**
  * GitHub issue body byte budget. GitHub enforces ~64KB (65536 bytes); we
  * leave 4KB of headroom for: GH's own URL encoding when opening the
@@ -65,7 +67,15 @@ const ERROR_LOG_PATTERNS = [
 ];
 
 function isErrorLogLine(line: string): boolean {
-    return ERROR_LOG_PATTERNS.some((rx) => rx.test(line));
+    const parsed = parseLogLine(line);
+    if (parsed?.level !== null && parsed?.level !== undefined) {
+        return parsed.level === "ERROR" || parsed.level === "WARN";
+    }
+    // A line beginning like the fleet envelope but failing its strict grammar is
+    // malformed fleet output, not a legacy line eligible for text heuristics.
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(line)) return false;
+    const message = parsed?.message ?? line;
+    return ERROR_LOG_PATTERNS.some((rx) => rx.test(message));
 }
 
 /**
