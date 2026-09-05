@@ -3878,6 +3878,7 @@ impl McHandler {
                 auto_promote: true,
                 user_memory_collection_enabled: false,
                 historian_context_limit_tokens: 128_000,
+                historian_context_limit_known: false,
                 memory_budget_tokens: 4_000.0,
                 user_profile_budget_tokens: 4_000.0,
                 inject_docs: true,
@@ -5243,6 +5244,10 @@ impl McHandler {
                 project_slug: project_slug.clone(),
                 model_chain: model_chain.to_vec(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                historian_context_limit_tokens: cfg
+                    .historian_context_limit_known
+                    .then_some(cfg.historian_context_limit_tokens),
+                max_output_tokens: historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS,
                 boundary,
                 memory_enabled: cfg.memory_enabled,
                 auto_promote: cfg.auto_promote,
@@ -5432,6 +5437,10 @@ impl McHandler {
                 project_slug: project_slug.clone(),
                 model_chain: cfg.model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                historian_context_limit_tokens: cfg
+                    .historian_context_limit_known
+                    .then_some(cfg.historian_context_limit_tokens),
+                max_output_tokens: historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS,
                 boundary: boundary.clone(),
                 memory_enabled: cfg.memory_enabled,
                 auto_promote: cfg.auto_promote,
@@ -17610,6 +17619,7 @@ mod tests {
             auto_promote: true,
             user_memory_collection_enabled: false,
             historian_context_limit_tokens: 128_000,
+            historian_context_limit_known: false,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,

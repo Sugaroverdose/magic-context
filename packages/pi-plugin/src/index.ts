@@ -67,6 +67,7 @@ import { setCtxReduceRegisteredGlobally } from "@magic-context/core/hooks/magic-
 import {
 	deriveHistorianChunkTokens,
 	resolveHistorianContextLimit,
+	resolveKnownHistorianContextLimit,
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveCacheTtl } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import {
@@ -717,6 +718,7 @@ export function resolveHistorianFromConfig(
 		model,
 		fallbackModels,
 		historianChunkTokens,
+		historianContextLimit: resolveKnownHistorianContextLimit(model),
 		timeoutMs: config.historian_timeout_ms,
 		temperature: historian?.temperature,
 		maxOutputTokens: historian?.maxTokens ?? 32_000,

@@ -81,6 +81,7 @@ import {
 import { readSessionChunk } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { producerWindowFailureReason } from "./producer-window-guard";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendIgnoredMessage } from "./send-session-notification";
 
@@ -379,11 +380,27 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         const chunkText = chunk.oversizeAtomicUnit
             ? chunk.text
             : truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+        const producerSourceTokens = estimateTokens(chunkText);
         if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
             sessionLog(
                 sessionId,
-                `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${estimateTokens(chunkText)} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+                `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${producerSourceTokens} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
             );
+        }
+        const producerWindowFailure = producerWindowFailureReason({
+            producerSourceTokens,
+            contextLimitTokens: deps.historianContextLimit,
+            maxOutputTokens: deps.historianMaxOutputTokens ?? 32_000,
+        });
+        if (producerWindowFailure) {
+            telemetry.failureReason = producerWindowFailure;
+            retainDrainReservationForRetryThrottle = true;
+            incrementHistorianFailure(db, sessionId, producerWindowFailure);
+            sessionLog(
+                sessionId,
+                `historian oversize admission refused before spawn: ${producerWindowFailure}`,
+            );
+            return;
         }
         if (chunkText !== chunk.text) {
             sessionLog(
@@ -477,6 +494,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             sequenceOffset,
             dumpLabelBase: `incremental-${sessionId}-${chunk.startIndex}-${chunk.endIndex}`,
             timeoutMs: historianTimeoutMs,
+            model: deps.model,
             fallbackModelId: deps.fallbackModelId,
             fallbackModels: deps.fallbackModels,
             twoPass: deps.historianTwoPass,

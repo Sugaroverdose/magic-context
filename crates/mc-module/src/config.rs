@@ -103,6 +103,8 @@ pub struct McModuleConfig {
     pub user_memory_collection_enabled: bool,
     /// Historian model context limit; configurable until the module has a model catalog.
     pub historian_context_limit_tokens: usize,
+    /// True only when the user supplied a known historian model window.
+    pub historian_context_limit_known: bool,
     pub memory_budget_tokens: f64,
     pub user_profile_budget_tokens: f64,
     /// Controls whether the frozen m0 baseline includes the canonical project-docs block.
@@ -134,6 +136,7 @@ impl Default for McModuleConfig {
             auto_promote: true,
             user_memory_collection_enabled: false,
             historian_context_limit_tokens: DEFAULT_HISTORIAN_CONTEXT_LIMIT_TOKENS,
+            historian_context_limit_known: false,
             memory_budget_tokens: DEFAULT_MEMORY_BUDGET_TOKENS,
             user_profile_budget_tokens: DEFAULT_USER_PROFILE_BUDGET_TOKENS,
             inject_docs: true,
@@ -481,6 +484,7 @@ fn merge_tiers_with_warnings(
         }
         if let Some(limit) = positive_usize_at(user, "/historian/context_limit_tokens") {
             cfg.historian_context_limit_tokens = limit;
+            cfg.historian_context_limit_known = true;
         }
         if let Some(enabled) = user.pointer("/smart_drops").and_then(Value::as_bool) {
             cfg.smart_drops = enabled;
@@ -927,6 +931,7 @@ mod tests {
         assert_eq!(cfg.memory_budget_tokens, 5_000.0);
         assert_eq!(cfg.user_profile_budget_tokens, 2_500.0);
         assert_eq!(cfg.historian_context_limit_tokens, 64_000);
+        assert!(cfg.historian_context_limit_known);
         for key in [
             "/memory/budget_tokens",
             "/memory/user_profile_budget_tokens",

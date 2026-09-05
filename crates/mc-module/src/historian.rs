@@ -1035,6 +1035,9 @@ pub struct HistorianFireRequest<'a> {
     pub prompt: &'a str,
     pub model_chain: &'a [String],
     pub temperature: Option<f64>,
+    pub producer_source_tokens: usize,
+    pub historian_context_limit_tokens: Option<usize>,
+    pub max_output_tokens: u32,
     pub from_ordinal: u64,
     pub to_ordinal: u64,
     pub chunk_fingerprint: &'a str,
@@ -1331,6 +1334,29 @@ fn prefixed_detail(prefix: Option<&str>, detail: String) -> String {
     }
 }
 
+pub(crate) const PRODUCER_WINDOW_REFUSAL_MARGIN_PERCENT: usize = 15;
+
+pub(crate) fn producer_window_failure_reason(
+    producer_source_tokens: usize,
+    context_limit_tokens: Option<usize>,
+    max_output_tokens: u32,
+) -> Option<String> {
+    let context_limit_tokens = context_limit_tokens?;
+    if producer_source_tokens == 0 {
+        return None;
+    }
+    let usable_input_tokens = context_limit_tokens.saturating_sub(max_output_tokens as usize);
+    let source_scaled = (producer_source_tokens as u128).saturating_mul(100);
+    let refusal_scaled = (usable_input_tokens as u128)
+        .saturating_mul((100 + PRODUCER_WINDOW_REFUSAL_MARGIN_PERCENT) as u128);
+    if source_scaled < refusal_scaled {
+        return None;
+    }
+    Some(format!(
+        "producer_source_exceeds_window producer_source_tokens={producer_source_tokens} usable_input_tokens={usable_input_tokens} context_limit_tokens={context_limit_tokens} max_output_tokens={max_output_tokens} refusal_margin=0.15"
+    ))
+}
+
 pub async fn run_historian_firing<P>(
     producer: &mut P,
     request: HistorianFireRequest<'_>,
@@ -1340,6 +1366,26 @@ where
 {
     if request.model_chain.is_empty() {
         return Err(HistorianDriveError::NoModels);
+    }
+    if let Some(reason) = producer_window_failure_reason(
+        request.producer_source_tokens,
+        request.historian_context_limit_tokens,
+        request.max_output_tokens,
+    ) {
+        let loaded = request.store.load(request.session_id)?;
+        let mut meta = loaded.meta.clone();
+        meta.historian.last_failure = Some(reason.clone());
+        meta.historian.failure_backoff_at_ms = Some(request.failure_backoff_at_ms);
+        request
+            .store
+            .commit(request.session_id, loaded.row_version, &loaded.core, &meta)?;
+        eprintln!(
+            "[mc-module][{}] historian oversize admission refused before spawn: {reason}",
+            request.session_id
+        );
+        return Err(HistorianDriveError::Producer(
+            HistorianProducerError::context_overflow(reason),
+        ));
     }
 
     let mut auth_blocked_providers = Vec::new();
@@ -2369,6 +2415,9 @@ mod tests {
             prompt,
             model_chain: models,
             temperature: None,
+            producer_source_tokens: 1,
+            historian_context_limit_tokens: None,
+            max_output_tokens: 32_000,
             from_ordinal: 2,
             to_ordinal: 4,
             chunk_fingerprint: "fp",
@@ -2433,6 +2482,62 @@ mod tests {
             last_no_fire: None,
             consecutive_publish_failures: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn producer_window_guard_refuses_two_x_and_admits_one_point_zero_five_x() {
+        let refused_dir = tempfile::tempdir().unwrap();
+        let refused_store = store(refused_dir.path());
+        seed_prior_compartment(&refused_store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_string()];
+        let mut refused_request = fire_request(
+            &refused_store,
+            "placeholder prompt",
+            &models,
+            &chunk,
+            &prior,
+        );
+        refused_request.producer_source_tokens = 20_000;
+        refused_request.historian_context_limit_tokens = Some(11_000);
+        refused_request.max_output_tokens = 1_000;
+        let mut refused_producer = ScriptedProducer::default();
+
+        assert!(run_historian_firing(&mut refused_producer, refused_request)
+            .await
+            .is_err());
+        assert!(refused_producer.observed_starts.is_empty());
+        let refused_state = refused_store.load("ses").unwrap().meta.historian;
+        assert_eq!(refused_state.failure_backoff_at_ms, Some(999));
+        assert_eq!(
+            refused_state.last_failure.as_deref(),
+            Some("producer_source_exceeds_window producer_source_tokens=20000 usable_input_tokens=10000 context_limit_tokens=11000 max_output_tokens=1000 refusal_margin=0.15")
+        );
+
+        let admitted_dir = tempfile::tempdir().unwrap();
+        let admitted_store = store(admitted_dir.path());
+        seed_prior_compartment(&admitted_store);
+        let mut admitted_request = fire_request(
+            &admitted_store,
+            "placeholder prompt",
+            &models,
+            &chunk,
+            &prior,
+        );
+        admitted_request.producer_source_tokens = 10_500;
+        admitted_request.historian_context_limit_tokens = Some(11_000);
+        admitted_request.max_output_tokens = 1_000;
+        let mut admitted_producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-window-edge")))
+            .with_output(Ok(producer_output(historian_xml("within margin"))));
+
+        assert!(
+            run_historian_firing(&mut admitted_producer, admitted_request)
+                .await
+                .is_ok()
+        );
+        assert_eq!(admitted_producer.observed_starts.len(), 1);
     }
 
     #[tokio::test]

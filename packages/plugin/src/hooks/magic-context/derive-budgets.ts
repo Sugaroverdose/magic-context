@@ -89,16 +89,26 @@ export function deriveHistorianChunkTokens(historianContextLimit: number): numbe
  * OpenCode's SDK-resolved provider config (models.dev + snapshot + opencode.json
  * overrides + auth-plugin caps), bounded to a sane range.
  */
+export function resolveKnownHistorianContextLimit(
+    historianModelOverride?: string,
+): number | undefined {
+    if (typeof historianModelOverride !== "string" || !historianModelOverride.includes("/")) {
+        return undefined;
+    }
+    const [providerID, ...rest] = historianModelOverride.split("/");
+    const modelID = rest.join("/");
+    if (!providerID || !modelID) return undefined;
+    const limit = getSdkContextLimit(providerID, modelID, undefined, { reservation: "none" });
+    return typeof limit === "number" && limit > 0 ? limit : undefined;
+}
+
 export function resolveHistorianContextLimit(historianModelOverride?: string): number {
     // Explicit override with full provider/model form — user intent wins.
     if (typeof historianModelOverride === "string" && historianModelOverride.includes("/")) {
-        const [providerID, ...rest] = historianModelOverride.split("/");
-        const modelID = rest.join("/");
-        if (providerID && modelID) {
-            const limit = getSdkContextLimit(providerID, modelID);
-            if (typeof limit === "number" && limit > 0) return limit;
-        }
-        return DEFAULT_HISTORIAN_CONTEXT_FALLBACK;
+        return (
+            resolveKnownHistorianContextLimit(historianModelOverride) ??
+            DEFAULT_HISTORIAN_CONTEXT_FALLBACK
+        );
     }
 
     // Malformed override (no provider prefix): surface at log level, not a crash,

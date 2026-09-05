@@ -49,6 +49,8 @@ interface RunCompartmentPhaseArgs {
     historyBudgetTokens?: number;
     historianTimeoutMs?: number;
     historianModel?: ModelInput;
+    historianContextLimit?: number;
+    historianMaxOutputTokens?: number;
     fallbackModels?: readonly ModelInput[];
     compartmentDirectory: string;
     messages: MessageLike[];
@@ -328,6 +330,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 model: args.historianModel,
+                historianContextLimit: args.historianContextLimit,
+                historianMaxOutputTokens: args.historianMaxOutputTokens,
                 fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,
@@ -373,6 +377,8 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 historyBudgetTokens: args.historyBudgetTokens,
                 historianTimeoutMs: args.historianTimeoutMs,
                 model: args.historianModel,
+                historianContextLimit: args.historianContextLimit,
+                historianMaxOutputTokens: args.historianMaxOutputTokens,
                 fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,

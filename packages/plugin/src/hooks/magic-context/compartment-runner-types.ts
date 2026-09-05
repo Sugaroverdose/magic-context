@@ -79,6 +79,10 @@ export interface CompartmentRunnerDeps {
     currentContextLimit?: number;
     /** Active OpenCode historian entry, including its request variant. */
     model?: ModelInput;
+    /** Known context limit for the same resolved historian model. Unknown means no producer guard. */
+    historianContextLimit?: number;
+    /** Output reservation configured on the historian agent request. */
+    historianMaxOutputTokens?: number;
     /** Resolved fallback chain for historian-family calls (historian + compressor). */
     fallbackModels?: readonly ModelInput[];
     language?: string;

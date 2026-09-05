@@ -76,7 +76,11 @@ import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications
 import type { Database } from "../../shared/sqlite";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
-import { deriveHistorianChunkTokens, resolveHistorianContextLimit } from "./derive-budgets";
+import {
+    deriveHistorianChunkTokens,
+    resolveHistorianContextLimit,
+    resolveKnownHistorianContextLimit,
+} from "./derive-budgets";
 import {
     autoEmbedAttemptedBySession,
     clearEmbedSessionState,
@@ -374,6 +378,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             resolveHistorianContextLimit(resolveHistorianAttempts().primary?.model),
         );
     const historianModel = resolveHistorianAttempts().primary;
+    const historianContextLimit = resolveKnownHistorianContextLimit(historianModel?.model);
+    const historianMaxOutputTokens = deps.config.historian?.maxTokens ?? 32_000;
     const historianFallbackModels = resolveHistorianAttempts().fallbacks;
 
     // Three independent cache-busting signal sets, sourced from the
@@ -527,6 +533,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         memoryEnabled: deps.config.memory?.enabled ?? true,
         autoPromote: deps.config.memory?.auto_promote ?? true,
         historianModel,
+        historianContextLimit,
+        historianMaxOutputTokens,
         fallbackModels: historianFallbackModels,
         language: deps.config.language,
         fallbackModelId: (() => {
@@ -1150,6 +1158,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
         historianModel,
+        historianContextLimit,
+        historianMaxOutputTokens,
         fallbackModels: historianFallbackModels,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(
