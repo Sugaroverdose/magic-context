@@ -162,7 +162,10 @@ import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import { resolvePiUsableContextLimit } from "./pi-context-limit";
-import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
+import {
+	type PiHarnessKind,
+	resolvePiHarnessDetection,
+} from "./pi-harness-kind";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
@@ -190,7 +193,8 @@ import {
 	setTodoSnapshot,
 } from "./tools/todo-view-pi";
 
-const PI_HARNESS_KIND = resolvePiHarnessKind();
+const PI_HARNESS_DETECTION = await resolvePiHarnessDetection();
+const PI_HARNESS_KIND = PI_HARNESS_DETECTION.kind;
 const PREFIX = `[magic-context][${PI_HARNESS_KIND}]`;
 const PI_BOOT_DEADLINE_MS = 15_000;
 
@@ -1021,7 +1025,7 @@ async function startPiMagicContextRuntime(
 		"";
 	if (projectIdentity) seenDreamerProjectIdentities.add(projectIdentity);
 	info(
-		`loaded v${PLUGIN_VERSION} | harness=${PI_HARNESS_KIND} | db=${dbPath} | ` +
+		`loaded v${PLUGIN_VERSION} | harness=${PI_HARNESS_KIND} (via ${PI_HARNESS_DETECTION.via}) | db=${dbPath} | ` +
 			`project=${projectIdentity} | dir=${projectDir}`,
 	);
 	// Pi tools are registered once per process, so this mode is intentionally

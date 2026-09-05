@@ -13,16 +13,17 @@ export function getDataDir(): string {
  * Layout:
  *   - OpenCode: `${os.tmpdir()}/opencode/magic-context/`
  *   - Pi:       `${os.tmpdir()}/pi/magic-context/`
+ *   - OMP:      `${os.tmpdir()}/omp/magic-context/`
  *
  * Why a per-harness subtree of `os.tmpdir()`:
  *   1. OpenCode Desktop runs as an Electron app with a permission sandbox.
  *      Writing to arbitrary tmp paths can trigger user-visible permission
  *      prompts; the `${tmpdir}/opencode/` subtree is allow-listed by
  *      OpenCode, so anything we put under it never asks for permission.
- *   2. Splitting OpenCode from Pi keeps their logs and historian dump
- *      directories cleanly separated. `doctor --issue` for each harness
- *      reports diagnostics from the matching subtree, so an OpenCode
- *      issue report never includes Pi log noise (and vice versa).
+ *   2. Splitting harnesses keeps their logs and historian dump directories
+ *      cleanly separated. `doctor --issue` for each harness reports diagnostics
+ *      from the matching subtree, so issue reports do not include another
+ *      harness's log noise.
  *   3. Pi has no permission sandbox, so the path choice is purely
  *      cosmetic for Pi — it just keeps the layout symmetric.
  *
@@ -37,13 +38,13 @@ export function getMagicContextTempDir(harness: HarnessId = getHarness()): strin
 }
 
 /**
- * Standard log file path the plugin writes to. Pi and OpenCode write to
- * SEPARATE logs under their respective harness subtrees so a single
- * machine running both harnesses doesn't interleave session traces.
+ * Standard log file path the plugin writes to. Each harness writes to a
+ * separate log under its own subtree so a machine running multiple harnesses
+ * does not interleave session traces.
  *
  * The plugin's buffered logger calls this on every flush rather than
- * caching, so `setHarness("pi")` taking effect after module load is
- * reflected in the next flush.
+ * caching, so the boot-time `setHarness()` call is reflected in the next
+ * flush.
  */
 export function getMagicContextLogPath(harness: HarnessId = getHarness()): string {
     // An explicit override wins over the harness temp-dir default, so users on

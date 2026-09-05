@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { OMP_PLUGIN_PACKAGE } from "../lib/omp-helpers";
 import { OmpAdapter } from "./omp";
 
@@ -30,6 +32,9 @@ describe("OmpAdapter", () => {
         expect(adapter.isInstalled()).toBe(true);
         expect(adapter.hasPluginEntry()).toBe(true);
         expect(adapter.getInstalledPluginVersion()).toBe("0.33.0");
+        expect(adapter.getLogPath()).toBe(
+            join(tmpdir(), "omp", "magic-context", "magic-context.log"),
+        );
         expect(detectionProbes).toEqual([binaryPath, binaryPath, binaryPath]);
         expect(pluginListProbes).toEqual([binaryPath, binaryPath]);
     });
