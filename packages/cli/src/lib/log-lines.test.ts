@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import golden from "./__fixtures__/log_format_golden.json";
+import opaqueMessages from "./__fixtures__/opaque-log-messages.json";
 import {
     getMagicContextLogPaths,
     inspectLogFile,
@@ -10,6 +11,7 @@ import {
     parseLogLine,
     readLogLines,
 } from "./log-lines";
+import { extractHistorianFailureLines } from "./logs-opencode";
 
 const roots: string[] = [];
 const original = {
@@ -43,6 +45,33 @@ describe("parseLogLine", () => {
         });
     });
 
+    it("preserves message escaping and quoted field suffixes from every golden case", () => {
+        for (const fixture of golden.cases) {
+            const line = fixture.line.replace(` ${fixture.event.module} `, " magic-context ");
+            const parsed = parseLogLine(line);
+            expect(parsed?.message, fixture.name).toBe(fixture.event.message);
+            expect(parsed?.kv, fixture.name).toEqual(Object.fromEntries(fixture.event.fields));
+        }
+    });
+
+    it("retains opaque bodies even when no field or message escape grammar applies", () => {
+        for (const body of [
+            "",
+            'invalid "',
+            'invalid "  ',
+            String.raw`invalid \q`,
+            "status=failed",
+            "failure \u001b[31m",
+        ]) {
+            for (const envelope of [
+                "[2026-09-05T10:41:03.130Z] [magic-context][ses_opaque] ",
+                "2026-09-05T10:41:03.130Z ERROR magic-context ",
+            ]) {
+                expect(parseLogLine(envelope + body)?.message).toBe(body);
+            }
+        }
+    });
+
     it("parses the legacy bracketed grammar and maps synthetic global to no session", () => {
         expect(
             parseLogLine(
@@ -66,6 +95,49 @@ describe("parseLogLine", () => {
                 ?.session,
         ).toBeNull();
     });
+
+    for (const fixture of opaqueMessages) {
+        it(`retains ${fixture.name} in historian failure extraction`, async () => {
+            let line = fixture.line;
+            if (fixture.name.startsWith("legacy")) {
+                const root = mkdtempSync(join(tmpdir(), "mc-opaque-log-"));
+                roots.push(root);
+                const logPath = join(root, "writer.log");
+                const loggerPath = resolve(import.meta.dir, "../../../plugin/src/shared/logger.ts");
+                const body = fixture.line.slice(
+                    fixture.line.indexOf("] ", fixture.line.indexOf("[magic-context]")) + 2,
+                );
+                const child = Bun.spawn(
+                    [
+                        process.execPath,
+                        "-e",
+                        `const {sessionLog, flushLogger} = await import(${JSON.stringify(loggerPath)});
+                     Date.prototype.toISOString = () => "2026-09-05T10:41:03.130Z";
+                     sessionLog("ses_opaque", ${JSON.stringify(body)}); flushLogger();`,
+                    ],
+                    {
+                        env: {
+                            ...process.env,
+                            NODE_ENV: "development",
+                            MAGIC_CONTEXT_LOG_PATH: logPath,
+                        },
+                        stdout: "pipe",
+                        stderr: "pipe",
+                    },
+                );
+                const stderr = await new Response(child.stderr).text();
+                expect(await child.exited, stderr).toBe(0);
+                line = readFileSync(logPath, "utf8").trimEnd();
+                expect(line).toBe(fixture.line);
+            }
+            expect(extractHistorianFailureLines(line)).toEqual([line]);
+            const parsed = parseLogLine(line);
+            expect(parsed?.message).toBe(fixture.message);
+            expect(parsed?.kv).toEqual(
+                fixture.name.endsWith("before-fields") ? { "cache.read": "5" } : {},
+            );
+        });
+    }
 
     it("rejects wrong-grammar lines instead of silently splitting them", () => {
         expect(

@@ -163,15 +163,15 @@ lazy_static::lazy_static! {
         r"^\[([^\]]+)\] \[magic-context\]\[([^\]]*)\]\s+(.*)$"
     ).unwrap();
     static ref FLEET_LOG_LINE_RE: Regex = Regex::new(
-        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (TRACE|DEBUG|INFO |WARN |ERROR) magic-context (.+)$"
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (TRACE|DEBUG|INFO |WARN |ERROR) magic-context (.*)$"
     ).unwrap();
 }
 
-fn tokenize(input: &str) -> Option<Vec<(usize, &str)>> {
+fn tokenize(input: &str, limit: usize) -> Option<Vec<(usize, &str)>> {
     let bytes = input.as_bytes();
     let mut tokens = Vec::new();
     let mut index = 0;
-    while index < bytes.len() {
+    while index < bytes.len() && tokens.len() < limit {
         while index < bytes.len() && bytes[index] == b' ' {
             index += 1;
         }
@@ -241,80 +241,103 @@ fn parse_field(token: &str) -> Option<(String, String)> {
     Some((key.to_string(), value))
 }
 
+fn trailing_token(input: &str, end: usize) -> Option<(usize, &str)> {
+    let bytes = input.as_bytes();
+    let mut index = end;
+    let mut quoted = false;
+    while index > 0 {
+        match bytes[index - 1] {
+            b'"' => {
+                let mut slash_start = index - 1;
+                while slash_start > 0 && bytes[slash_start - 1] == b'\\' {
+                    slash_start -= 1;
+                }
+                if (index - 1 - slash_start) % 2 == 0 {
+                    quoted = !quoted;
+                }
+                index = slash_start;
+            }
+            b' ' if !quoted => break,
+            _ => index -= 1,
+        }
+    }
+    (!quoted).then(|| (index, &input[index..end]))
+}
+
 fn split_message_and_fields(
     input: &str,
     decode_message: bool,
-) -> Option<(String, HashMap<String, String>)> {
-    let tokens = tokenize(input)?;
-    if tokens.is_empty() {
-        return None;
-    }
-    let mut field_start = tokens.len();
-    for index in (0..tokens.len()).rev() {
-        if parse_field(tokens[index].1).is_none() {
+) -> (String, HashMap<String, String>) {
+    // Message prose is opaque: only consume a well-formed field suffix from the right.
+    // An unmatched quote earlier in the message must not hide the entire record.
+    let mut message_end = input.trim_end().len();
+    let mut suffix = Vec::new();
+    while message_end > 0 {
+        let Some((start, token)) = trailing_token(input, message_end) else {
+            break;
+        };
+        let Some(field) = parse_field(token) else {
+            break;
+        };
+        if start == 0 {
             break;
         }
-        field_start = index;
+        suffix.push(field);
+        message_end = start;
+        while message_end > 0 && input.as_bytes()[message_end - 1] == b' ' {
+            message_end -= 1;
+        }
     }
-    if field_start == 0 {
-        return None;
-    }
-    let message_end = tokens
-        .get(field_start)
-        .map(|(start, _)| *start)
-        .unwrap_or(input.len());
-    let raw_message = input[..message_end].trim_end();
+    let raw_message = if suffix.is_empty() {
+        input
+    } else {
+        &input[..message_end]
+    };
     let message = if decode_message {
-        decode_escapes(raw_message)?
+        decode_escapes(raw_message).unwrap_or_else(|| raw_message.to_string())
     } else {
         raw_message.to_string()
     };
-    if message.is_empty() {
-        return None;
-    }
-    let mut fields = HashMap::new();
-    for (_, token) in &tokens[field_start..] {
-        let (key, value) = parse_field(token)?;
-        fields.insert(key, value);
-    }
-    Some((message, fields))
+    let fields = suffix.into_iter().rev().collect();
+    (message, fields)
 }
 
 pub fn parse_log_record(line: &str) -> Option<ParsedLogLine> {
-    if line.contains('\u{1b}') {
-        return None;
-    }
     if let Some(caps) = FLEET_LOG_LINE_RE.captures(line) {
         let ts = caps.get(1)?.as_str().to_string();
         chrono::DateTime::parse_from_rfc3339(&ts).ok()?;
         let level = caps.get(2)?.as_str().trim().to_string();
-        let body = caps.get(3)?.as_str();
-        let tokens = tokenize(body)?;
-        let mut index = 0;
+        let mut body = caps.get(3)?.as_str().trim_start();
         let mut session = None;
         let mut tags = Vec::new();
-        if tokens.get(index)?.1.starts_with("session=") {
-            let (_, value) = parse_field(tokens[index].1)?;
+        if body.starts_with("session=") {
+            let tokens = tokenize(body, 1)?;
+            let token = tokens.first()?.1;
+            if token.contains('\u{1b}') {
+                return None;
+            }
+            let (_, value) = parse_field(token)?;
             let (issuer, id) = value.split_once(':')?;
             if issuer.is_empty() || id.is_empty() || value == "global" {
                 return None;
             }
             session = Some(id.to_string());
-            index += 1;
+            body = body[token.len()..].trim_start();
         }
-        while let Some((_, token)) = tokens.get(index) {
-            if !token.starts_with("tag=") {
-                break;
+        while body.starts_with("tag=") {
+            let tokens = tokenize(body, 1)?;
+            let token = tokens.first()?.1;
+            if token.contains('\u{1b}') {
+                return None;
             }
             let (_, tag) = parse_field(token)?;
             if tag.is_empty() {
                 return None;
             }
             tags.push(tag);
-            index += 1;
+            body = body[token.len()..].trim_start();
         }
-        let body_start = tokens.get(index)?.0;
-        let (message, kv) = split_message_and_fields(&body[body_start..], true)?;
+        let (message, kv) = split_message_and_fields(body, true);
         return Some(ParsedLogLine {
             ts,
             level: Some(level),
@@ -328,12 +351,15 @@ pub fn parse_log_record(line: &str) -> Option<ParsedLogLine> {
     let ts = caps.get(1)?.as_str().to_string();
     chrono::DateTime::parse_from_rfc3339(&ts).ok()?;
     let raw_session = caps.get(2)?.as_str().trim();
+    if raw_session.contains('\u{1b}') {
+        return None;
+    }
     let session = if raw_session.is_empty() || raw_session == "global" {
         None
     } else {
         Some(raw_session.to_string())
     };
-    let (message, kv) = split_message_and_fields(caps.get(3)?.as_str(), false)?;
+    let (message, kv) = split_message_and_fields(caps.get(3)?.as_str(), false);
     Some(ParsedLogLine {
         ts,
         level: None,
@@ -685,7 +711,7 @@ pub fn read_log_tails(paths: &[PathBuf], max_lines: usize) -> Vec<LogEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_cache_events, parse_log_line, parse_log_record, read_log_tails,
+        extract_cache_events, parse_log_line, parse_log_record, read_log_tail, read_log_tails,
         resolve_log_path_for, resolve_log_path_from_temp_dir, resolve_log_paths, Harness,
     };
     use std::path::{Path, PathBuf};
@@ -729,6 +755,84 @@ mod tests {
         assert_eq!(legacy.session, None);
         assert_eq!(legacy.message, "transform complete");
         assert_eq!(legacy.kv.get("cache.read").map(String::as_str), Some("7"));
+    }
+
+    #[test]
+    fn preserves_every_golden_message_and_field_suffix() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../cli/src/lib/__fixtures__/log_format_golden.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let module = case["event"]["module"].as_str().unwrap();
+            let line = case["line"].as_str().unwrap().replacen(
+                &format!(" {module} "),
+                " magic-context ",
+                1,
+            );
+            let record = parse_log_record(&line).unwrap();
+            assert_eq!(record.message, case["event"]["message"].as_str().unwrap());
+            let fields: std::collections::HashMap<String, String> = case["event"]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|field| {
+                    (
+                        field[0].as_str().unwrap().to_string(),
+                        field[1].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            assert_eq!(record.kv, fields, "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn retains_opaque_bodies_without_field_or_escape_grammar() {
+        for body in [
+            "",
+            "invalid \"",
+            "invalid \"  ",
+            r"invalid \q",
+            "status=failed",
+            "failure \u{1b}[31m",
+        ] {
+            for envelope in [
+                "[2026-09-05T10:41:03.130Z] [magic-context][ses_opaque] ",
+                "2026-09-05T10:41:03.130Z ERROR magic-context ",
+            ] {
+                assert_eq!(
+                    parse_log_record(&format!("{envelope}{body}"))
+                        .unwrap()
+                        .message,
+                    body
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_tail_retains_opaque_messages_and_trailing_fields() {
+        // The CLI test verifies these legacy fixture bytes against the real writer.
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../cli/src/lib/__fixtures__/opaque-log-messages.json"
+        ))
+        .unwrap();
+        for fixture in fixtures.as_array().unwrap() {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let line = fixture["line"].as_str().unwrap();
+            std::fs::write(file.path(), format!("{line}\n")).unwrap();
+            let entries = read_log_tail(&file.path().to_path_buf(), 10);
+            assert_eq!(entries.len(), 1, "{}", fixture["name"]);
+            assert_eq!(entries[0].raw, line);
+            assert_eq!(entries[0].message, fixture["message"].as_str().unwrap());
+            let expected = fixture["name"]
+                .as_str()
+                .unwrap()
+                .ends_with("before-fields")
+                .then_some(5);
+            assert_eq!(entries[0].cache_read, expected);
+        }
     }
 
     #[test]
