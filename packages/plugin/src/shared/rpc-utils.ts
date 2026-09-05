@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { log } from "./logger";
+import { PI_IMAGE_NAMES, piHarnessKindFromExecutable } from "./pi-executable";
 
 export type ProcessKind = "OpenCode server" | "OpenCode instance (TUI/CLI)" | "Pi" | "process";
 
@@ -102,8 +103,6 @@ const PI_HARNESS_ARC_MARKERS = [
     "cljs/dist",
     "dist/bundle/cli",
 ];
-const PI_IMAGE_NAMES = new Set(["pi", "pi.cmd", "omp", "oh-my-pi"]);
-
 let rpcIdentityReadFileSync: typeof readFileSync = readFileSync;
 let rpcIdentityExecFileSync: typeof execFileSync = execFileSync;
 let rpcIdentityProcessKill: typeof process.kill = process.kill;
@@ -346,7 +345,7 @@ function commandHasOpenCodeExecutable(tokens: readonly string[]): number {
 function commandHasPiExecutable(tokens: readonly string[]): boolean {
     for (let index = 0; index < tokens.length; index += 1) {
         const executable = executableName(tokens[index]).replace(/\.(?:exe|cmd)$/, "");
-        if (["pi", "omp", "oh-my-pi"].includes(executable)) return true;
+        if (piHarnessKindFromExecutable(executable) !== undefined) return true;
         if (["node", "bun", "deno"].includes(executable)) {
             const script = executableName(tokens[index + 1]).replace(/\.(?:exe|cmd)$/, "");
             if (

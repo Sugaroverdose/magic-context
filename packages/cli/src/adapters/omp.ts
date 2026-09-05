@@ -177,9 +177,7 @@ export class OmpAdapter implements HarnessAdapter {
     }
 
     getLogPath(): string {
-        // OMP executes the Pi-compatible runtime, which intentionally keeps the
-        // existing `pi` DB/log discriminator for cross-host session semantics.
-        return getMagicContextLogPath("pi");
+        return getMagicContextLogPath("omp");
     }
 
     getInstalledPluginVersion(): string | null {
