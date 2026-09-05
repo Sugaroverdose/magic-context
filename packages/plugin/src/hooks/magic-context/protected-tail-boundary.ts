@@ -393,7 +393,6 @@ export function applyHeadCap(args: {
     lastCompartmentEndOrdinal: number;
     capTokens: number;
     recentOpenArcCutoff: number;
-    allowOversizeFirstArc?: boolean;
     observeDiagnostics?: (diagnostics: HeadCapDiagnostics) => void;
 }): { eligibleEndOrdinal: number; oversizeAtomicUnit: boolean } {
     const {
@@ -442,10 +441,10 @@ export function applyHeadCap(args: {
     diagnostics.completedFence.from = end;
     diagnostics.completedFence.to = completedFence;
     diagnostics.oversizeAdmission.from = completedFence;
-    // The cap can land between the first invocation and its large result. Under
-    // force pressure, admit the whole group of overlapping completed invocation/result
-    // pairs instead of an empty head. The protected tail and open-arc fence still win.
-    if (args.allowOversizeFirstArc && completedFence <= offset && end > offset) {
+    // If the cap cuts the leading completed tool-arc component, admit the entire
+    // overlapping component rather than returning an empty head. Never cross the
+    // protected tail; the open-arc clamp and final completed-arc fence below still apply.
+    if (completedFence <= offset && end > offset) {
         const afterFirstArc = fenceBoundaryForCompletedToolArcs(end, arcs, offset + 1);
         if (afterFirstArc <= protectedTailStart) completedFence = afterFirstArc;
     }
@@ -733,9 +732,6 @@ export function resolveProtectedTailBoundary(
         lastCompartmentEndOrdinal: ctx.lastCompartmentEndOrdinal,
         capTokens: perRunCap,
         recentOpenArcCutoff,
-        // `emergencyTailScale` comes only from compartment-trigger's priced force-materialization retry or transform-compartment-phase's historian retry, whose result is served only by a later HARD fold; 0.25 is the ≥95% variant.
-        allowOversizeFirstArc:
-            usagePercentage >= forceMaterializationPercentage || Boolean(ctx.emergencyTailScale),
     });
     const rawRangeFingerprint = computeRawRangeFingerprint(
         messages,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { validateHistorianOutput } from "./compartment-runner-validation";
@@ -63,10 +64,10 @@ export function registerIssue424Tests(
                 ).toBe(false);
             }
         });
-        test("oversized first batch explains a below-force no-op without a turn-wide overlap chain", () => {
+        test("oversized first batch reports cap retraction and whole-component admission separately", () => {
             const boundary = resolve(convert(issue424Fixture(300, 30)), "large");
             expect(boundary.protectedTailStart).toBeGreaterThan(400);
-            expect(boundary.eligibleEndOrdinal).toBe(boundary.offset);
+            expect(boundary.eligibleEndOrdinal).toBe(harness === "pi" ? 4 : 5);
             const diagnostics = boundary.diagnostics!;
             expect(diagnostics.usable).toBe(123878);
             expect(diagnostics.capTokens).toBe(30970);
@@ -75,7 +76,14 @@ export function registerIssue424Tests(
             expect(diagnostics.head.completedFence.to).toBe(2);
             expect(diagnostics.head.completedFence.arcs.length).toBe(2);
             expect(diagnostics.head.completedFence.tokenMass).toBeGreaterThan(100000);
-            expect(diagnostics.head.openArcClamp).toEqual({ from: 2, to: 2 });
+            expect(diagnostics.head.oversizeAdmission).toEqual({
+                from: 2,
+                to: harness === "pi" ? 4 : 5,
+            });
+            expect(diagnostics.head.openArcClamp).toEqual({
+                from: harness === "pi" ? 4 : 5,
+                to: harness === "pi" ? 4 : 5,
+            });
             expect(diagnostics.livePromptFloor.to).toBeGreaterThan(400);
             expect(describeBoundaryDiagnostics(boundary)).toContain('"capTokens":30970');
             expect(describeBoundaryDiagnostics(boundary)).toContain(
@@ -119,9 +127,66 @@ export function registerIssue424Tests(
                 expect(plan.snapshot.diagnostics!.head.completedFence.tokenMass).toBeGreaterThan(
                     100000,
                 );
+                let current = plan;
+                let chunks = 0;
+                const arcs = buildToolArcs(raw);
+                while (current.snapshot.offset < plan.targetEligibleEndOrdinal) {
+                    expect(current.snapshot.eligibleEndOrdinal).toBeGreaterThan(
+                        current.snapshot.offset,
+                    );
+                    for (const arc of arcs) {
+                        expect(
+                            completedToolArcCrossesBoundary(
+                                arc.invOrdinal,
+                                arc.resOrdinal!,
+                                current.snapshot.eligibleEndOrdinal,
+                            ),
+                        ).toBe(false);
+                    }
+                    appendCompartments(db, sessionId, [
+                        {
+                            sequence: chunks++,
+                            startMessage: current.snapshot.offset,
+                            endMessage: current.snapshot.eligibleEndOrdinal - 1,
+                            startMessageId: current.snapshot.offsetMessageId!,
+                            endMessageId: current.snapshot.eligibleEndMessageId!,
+                            title: "completed",
+                            content: "Completed batch.",
+                        },
+                    ]);
+                    expect(chunks).toBeLessThan(200);
+                    current = resolveWrapupProtectedTailBoundary({
+                        db,
+                        sessionId,
+                        mode: "manual-wrapup",
+                        contextLimit: 206464,
+                        executeThresholdPercentage: 60,
+                        usage: { percentage: 0, inputTokens: 0 },
+                        usageSource: "manual-none",
+                        providerShapeVersion: harness === "pi" ? "pi-folded-v1" : "opencode-v1",
+                        messagesToKeep: 20,
+                        anchorRawMessageCount: plan.anchorRawMessageCount,
+                    });
+                }
+                expect(chunks).toBeGreaterThan(10);
             } finally {
                 dispose();
                 db.close();
+            }
+        });
+        test("candidate: an oversized first batch advances below force pressure without admitting the next batch", () => {
+            const raw = convert(issue424Fixture(300, 30));
+            const boundary = resolve(raw, "candidate");
+            expect(boundary.eligibleEndOrdinal).toBe(harness === "pi" ? 4 : 5);
+            expect(boundary.oversizeAtomicUnit).toBe(true);
+            for (const arc of buildToolArcs(raw)) {
+                expect(
+                    completedToolArcCrossesBoundary(
+                        arc.invOrdinal,
+                        arc.resOrdinal!,
+                        boundary.eligibleEndOrdinal,
+                    ),
+                ).toBe(false);
             }
         });
         test("random sequential batches preserve every whole arc and historian range validation", () => {
