@@ -95,6 +95,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/compartment-runner-validation";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { producerWindowFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import {
 	createDefaultBoundarySnapshotForTests,
 	describeBoundaryDiagnostics,
@@ -365,8 +366,10 @@ export interface PiHistorianDeps {
 	fallbackModels?: readonly ModelInput[];
 	/** Live session model used as the final fallback after configured fallbacks. */
 	fallbackModelId?: string;
-	/** Historian context window — used to derive chunk token budget. */
+	/** Historian chunk budget derived from its context window. */
 	historianChunkTokens: number;
+	/** Known context limit for the same resolved historian model. Unknown means no producer guard. */
+	historianContextLimit?: number;
 	/** Boundary resolved by the Pi trigger/recovery decision with the real model context. */
 	boundarySnapshot?: ProtectedTailBoundarySnapshot;
 	/**
@@ -443,6 +446,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		fallbackModels,
 		fallbackModelId,
 		historianChunkTokens,
+		historianContextLimit,
 		boundarySnapshot: providedBoundarySnapshot,
 		refreshBoundarySnapshot,
 		currentContextLimit,
@@ -726,11 +730,27 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const chunkText = chunk.oversizeAtomicUnit
 				? chunk.text
 				: truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+			const producerSourceTokens = estimateTokens(chunkText);
 			if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
 				sessionLog(
 					sessionId,
-					`historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${estimateTokens(chunkText)} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+					`historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${producerSourceTokens} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
 				);
+			}
+			const producerWindowFailure = producerWindowFailureReason({
+				producerSourceTokens,
+				contextLimitTokens: historianContextLimit,
+				maxOutputTokens,
+			});
+			if (producerWindowFailure) {
+				telemetry.failureReason = producerWindowFailure;
+				retainDrainReservationForRetryThrottle = true;
+				incrementHistorianFailure(db, sessionId, producerWindowFailure);
+				sessionLog(
+					sessionId,
+					`historian oversize admission refused before spawn: ${producerWindowFailure}`,
+				);
+				return;
 			}
 			if (chunkText !== chunk.text) {
 				sessionLog(

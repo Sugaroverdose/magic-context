@@ -983,8 +983,10 @@ export interface PiHistorianOptions {
 	model: string;
 	/** Optional ordered fallback chain, retaining each entry's Pi thinking level. */
 	fallbackModels?: readonly ModelInput[];
-	/** Historian context window — used to derive chunk token budget. */
+	/** Historian chunk budget derived from its context window. */
 	historianChunkTokens: number;
+	/** Known context limit for the resolved historian model. */
+	historianContextLimit?: number;
 	/** Optional per-call timeout (default 600s). */
 	timeoutMs?: number;
 	/** Provider sampling temperature; when omitted, uses the temperature configured for historian runs. */
@@ -3845,6 +3847,7 @@ function spawnPiHistorianRun(args: {
 				fallbackModels: historian.fallbackModels,
 				fallbackModelId,
 				historianChunkTokens: historian.historianChunkTokens,
+				historianContextLimit: historian.historianContextLimit,
 				boundarySnapshot,
 				refreshBoundarySnapshot,
 				currentContextLimit,

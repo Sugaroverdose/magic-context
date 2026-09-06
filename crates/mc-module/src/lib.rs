@@ -3878,6 +3878,7 @@ impl McHandler {
                 auto_promote: true,
                 user_memory_collection_enabled: false,
                 historian_context_limit_tokens: 128_000,
+                historian_context_limit_known: false,
                 memory_budget_tokens: 4_000.0,
                 user_profile_budget_tokens: 4_000.0,
                 inject_docs: true,
@@ -5243,6 +5244,10 @@ impl McHandler {
                 project_slug: project_slug.clone(),
                 model_chain: model_chain.to_vec(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                historian_context_limit_tokens: cfg
+                    .historian_context_limit_known
+                    .then_some(cfg.historian_context_limit_tokens),
+                max_output_tokens: historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS,
                 boundary,
                 memory_enabled: cfg.memory_enabled,
                 auto_promote: cfg.auto_promote,
@@ -5432,6 +5437,10 @@ impl McHandler {
                 project_slug: project_slug.clone(),
                 model_chain: cfg.model_chain,
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
+                historian_context_limit_tokens: cfg
+                    .historian_context_limit_known
+                    .then_some(cfg.historian_context_limit_tokens),
+                max_output_tokens: historian_producer::HISTORIAN_MAX_OUTPUT_TOKENS,
                 boundary: boundary.clone(),
                 memory_enabled: cfg.memory_enabled,
                 auto_promote: cfg.auto_promote,
@@ -17610,6 +17619,7 @@ mod tests {
             auto_promote: true,
             user_memory_collection_enabled: false,
             historian_context_limit_tokens: 128_000,
+            historian_context_limit_known: false,
             memory_budget_tokens: 4_000.0,
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
@@ -23385,19 +23395,20 @@ mod tests {
                 ),
             },
         ];
-        let mut snapshots = handler
-            .transform_snapshots
-            .lock()
-            .expect("transform snapshots mutex");
-        let generation = snapshots.begin("ses");
-        snapshots.finish_ready(
-            "ses",
-            generation,
-            Arc::new(transform_request(raw_messages, 45_000, 50_000)),
-            0,
-            0,
-        );
-        drop(snapshots);
+        {
+            let mut snapshots = handler
+                .transform_snapshots
+                .lock()
+                .expect("transform snapshots mutex");
+            let generation = snapshots.begin("ses");
+            snapshots.finish_ready(
+                "ses",
+                generation,
+                Arc::new(transform_request(raw_messages, 45_000, 50_000)),
+                0,
+                0,
+            );
+        }
 
         let verbose = tool_text(
             call_facade(
@@ -27273,13 +27284,11 @@ mod tests {
     /// must refuse at the bootstrap fold: the minted boundary has to name a real
     /// live block. Pins the anchor-acceptance rule that seeded/imported sessions
     /// depend on (a synthetic-anchor seed can never compose, regardless of ranges).
-
     /// Desk rehearsal of the drive's final seed shape: 20 live messages with a
     /// role=system message mid-span at ordinal 1, four imported compartments
     /// partitioning 0..=16 on real live block ids, live tail 17..=19. Must
     /// bootstrap-HARD-fold with the last covered block as the minted boundary —
     /// and the mid-span system ordinal must be absorbed, not rejected.
-
     /// Desk rehearsal of the round-3 drive seed: 18 live messages (system at
     /// ordinal 1 mid-span), four imported compartments partitioning 0..=14 on
     /// real live block ids, tail 15..=17. Must bootstrap-HARD-fold with

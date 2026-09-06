@@ -476,6 +476,8 @@ pub struct HistorianAssemblerConfig {
     pub project_slug: String,
     pub model_chain: Vec<String>,
     pub token_budget: usize,
+    pub historian_context_limit_tokens: Option<usize>,
+    pub max_output_tokens: u32,
     pub boundary: BoundaryResolution,
     pub memory_enabled: bool,
     pub auto_promote: bool,
@@ -523,6 +525,9 @@ impl HistorianNoFireReason {
 pub struct AssembledHistorianFiring {
     pub prompt: String,
     pub model_chain: Vec<String>,
+    pub producer_source_tokens: usize,
+    pub historian_context_limit_tokens: Option<usize>,
+    pub max_output_tokens: u32,
     pub chunk: HistorianBuiltChunk,
     /// Original CK messages in the compacted interval, serialized for durable ctx_expand.
     pub raw_chunk_messages: String,
@@ -566,6 +571,9 @@ impl AssembledHistorianFiring {
             prompt: &self.prompt,
             model_chain: &self.model_chain,
             temperature: None,
+            producer_source_tokens: self.producer_source_tokens,
+            historian_context_limit_tokens: self.historian_context_limit_tokens,
+            max_output_tokens: self.max_output_tokens,
             from_ordinal: self.from_ordinal,
             to_ordinal: self.to_ordinal,
             chunk_fingerprint: &self.chunk_fingerprint,
@@ -728,6 +736,7 @@ pub fn assemble_historian_firing(
     } else {
         truncate_historian_input_if_needed(&chunk.text, config.token_budget)
     };
+    let producer_source_tokens = estimate_tokens(&input_source);
     if config.boundary.oversize_atomic_unit || oversize_atomic_unit {
         let raw_chunk_tokens: usize = live
             .iter()
@@ -738,7 +747,12 @@ pub fn assemble_historian_firing(
             })
             .map(|block| estimate_tokens(&block.bytes))
             .sum();
-        eprintln!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, estimate_tokens(&input_source), config.token_budget);
+        let guard_reason = crate::historian::producer_window_failure_reason(
+            producer_source_tokens,
+            config.historian_context_limit_tokens,
+            config.max_output_tokens,
+        );
+        eprintln!("[mc-module][{}] historian oversize admission: range={}-{} rawChunkTokens={} producerSourceTokens={} historianChunkTokens={} guardReason={}", config.session_id, chunk.chunk.start_index, chunk.chunk.end_index, raw_chunk_tokens, producer_source_tokens, config.token_budget, guard_reason.as_deref().unwrap_or("none"));
     }
     let prompt = build_compartment_agent_prompt(&CompartmentPromptInputs {
         seed_examples: &reference_blocks.seed_examples,
@@ -766,6 +780,9 @@ pub fn assemble_historian_firing(
         AssembledHistorianFiring {
             prompt,
             model_chain: config.model_chain,
+            producer_source_tokens,
+            historian_context_limit_tokens: config.historian_context_limit_tokens,
+            max_output_tokens: config.max_output_tokens,
             from_ordinal: chunk.chunk.start_index,
             to_ordinal: chunk.chunk.end_index,
             raw_chunk_messages,
@@ -1549,6 +1566,8 @@ mod tests {
                 project_slug: "proj".to_string(),
                 model_chain: vec!["test/model".to_string()],
                 token_budget: 32000,
+                historian_context_limit_tokens: None,
+                max_output_tokens: 32_000,
                 boundary: crate::boundary::BoundaryResolution {
                     protected_start_ordinal: 4,
                     eligible_head: 1..4,
@@ -1660,6 +1679,8 @@ mod tests {
                 project_slug: "proj".to_string(),
                 model_chain: vec!["prov/model".to_string()],
                 token_budget: 32_000,
+                historian_context_limit_tokens: None,
+                max_output_tokens: 32_000,
                 boundary: crate::boundary::BoundaryResolution {
                     protected_start_ordinal: 2,
                     eligible_head: 0..2,
@@ -1715,6 +1736,8 @@ mod tests {
                 project_slug: "proj".to_string(),
                 model_chain: vec!["prov/model".to_string()],
                 token_budget: 32_000,
+                historian_context_limit_tokens: None,
+                max_output_tokens: 32_000,
                 boundary: crate::boundary::BoundaryResolution {
                     protected_start_ordinal: 2,
                     eligible_head: 0..2,
@@ -1795,6 +1818,8 @@ mod tests {
                 project_slug: "proj".to_string(),
                 model_chain: vec!["prov/model".to_string()],
                 token_budget: 32_000,
+                historian_context_limit_tokens: None,
+                max_output_tokens: 32_000,
                 boundary: crate::boundary::BoundaryResolution {
                     protected_start_ordinal: 10,
                     eligible_head: 0..10,

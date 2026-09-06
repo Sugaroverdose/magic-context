@@ -592,6 +592,8 @@ export interface TransformDeps {
     historianTimeoutMs?: number;
     /** Active OpenCode historian entry, including its outbound request variant. */
     historianModel?: ModelInput;
+    historianContextLimit?: number;
+    historianMaxOutputTokens?: number;
     /** Resolved fallback chain for historian-family calls. */
     fallbackModels?: readonly ModelInput[];
     /** False when historian.disable=true, blocking historian-backed child agents. */
@@ -2113,6 +2115,8 @@ export function createTransform(deps: TransformDeps) {
             historyBudgetTokens,
             historianTimeoutMs: deps.historianTimeoutMs,
             historianModel: deps.historianModel,
+            historianContextLimit: deps.historianContextLimit,
+            historianMaxOutputTokens: deps.historianMaxOutputTokens,
             fallbackModels: deps.fallbackModels,
             compartmentDirectory,
             messages,

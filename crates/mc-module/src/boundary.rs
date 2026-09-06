@@ -2224,6 +2224,11 @@ mod tests {
     #[test]
     fn issue_424_head_cap_matches_typescript_differential_cases() {
         #[derive(Deserialize)]
+        struct FixtureSet {
+            _comment: String,
+            cases: Vec<Case>,
+        }
+        #[derive(Deserialize)]
         struct Case {
             label: String,
             tokens: Vec<usize>,
@@ -2231,15 +2236,24 @@ mod tests {
             protected_tail_start: u64,
             cap_tokens: f64,
             recent_open_arc_cutoff: u64,
-            arcs: Vec<CompletedArcJson>,
+            arcs: Vec<CaseArc>,
             expected_end: u64,
             expected_oversize: bool,
         }
-        let cases: Vec<Case> =
+        #[derive(Deserialize)]
+        struct CaseArc {
+            #[serde(rename = "invOrdinal")]
+            inv_ordinal: u64,
+            #[serde(rename = "resOrdinal")]
+            res_ordinal: Option<u64>,
+            result_shape: Option<String>,
+        }
+
+        let fixture_set: FixtureSet =
             serde_json::from_str(include_str!("../testdata/issue-424-head-cap.json"))
                 .expect("head-cap differential cases");
-        for case in cases {
-            let messages = case
+        for case in fixture_set.cases {
+            let mut messages = case
                 .tokens
                 .iter()
                 .enumerate()
@@ -2249,15 +2263,91 @@ mod tests {
                     message
                 })
                 .collect::<Vec<_>>();
+            for (arc_index, arc) in case.arcs.iter().enumerate() {
+                let arc_id = format!("fixture-call-{arc_index}");
+                let call_original: Arc<str> = Arc::from(
+                    serde_json::json!({
+                        "type": "tool",
+                        "callID": arc_id,
+                        "state": { "input": { "fixture": true } }
+                    })
+                    .to_string(),
+                );
+                messages
+                    .iter_mut()
+                    .find(|message| message.message_ordinal == arc.inv_ordinal)
+                    .expect("fixture invocation ordinal")
+                    .blocks
+                    .push(BoundaryBlock {
+                        id: format!("fixture-call-block-{arc_index}"),
+                        ordinal: 10_000 + arc_index as u64 * 2,
+                        kind: SelKind::ToolCall {
+                            name: "fixture".to_string(),
+                            input: serde_json::json!({ "fixture": true }),
+                        },
+                        provider_executed: false,
+                        byte_size: call_original.len(),
+                        arc_id: Some(arc_id.clone()),
+                        original: call_original,
+                        original_token_count: 0,
+                        rendered: None,
+                        ignored: false,
+                    });
+                let Some(result_ordinal) = arc.res_ordinal else {
+                    continue;
+                };
+                let result_original: Arc<str> = Arc::from(
+                    match arc.result_shape.as_deref() {
+                        Some("error") => serde_json::json!({
+                            "type": "tool",
+                            "callID": arc_id,
+                            "state": { "status": "error", "error": "fixture error" }
+                        }),
+                        Some("empty") => serde_json::json!({
+                            "type": "tool",
+                            "callID": arc_id,
+                            "state": { "status": "completed", "output": "" }
+                        }),
+                        _ => serde_json::json!({
+                            "type": "tool",
+                            "callID": arc_id,
+                            "state": { "status": "completed", "output": "fixture" }
+                        }),
+                    }
+                    .to_string(),
+                );
+                messages
+                    .iter_mut()
+                    .find(|message| message.message_ordinal == result_ordinal)
+                    .expect("fixture result ordinal")
+                    .blocks
+                    .push(BoundaryBlock {
+                        id: format!("fixture-result-block-{arc_index}"),
+                        ordinal: 10_001 + arc_index as u64 * 2,
+                        kind: SelKind::ToolResult {
+                            tool_name: "fixture".to_string(),
+                        },
+                        provider_executed: false,
+                        byte_size: result_original.len(),
+                        arc_id: Some(arc_id),
+                        original: result_original,
+                        original_token_count: 0,
+                        rendered: None,
+                        ignored: false,
+                    });
+            }
             let index = TokenIndex::new(&messages);
-            let arcs = case
+            let arcs = build_tool_arcs(&messages);
+            let actual_arcs = arcs
+                .iter()
+                .map(|arc| (arc.inv_ordinal, arc.res_ordinal))
+                .collect::<Vec<_>>();
+            let expected_arcs = case
                 .arcs
                 .iter()
-                .map(|arc| ToolArc {
-                    inv_ordinal: arc.inv_ordinal,
-                    res_ordinal: arc.res_ordinal,
-                })
+                .map(|arc| (arc.inv_ordinal, arc.res_ordinal))
                 .collect::<Vec<_>>();
+            assert_eq!(actual_arcs, expected_arcs, "{} ingress arcs", case.label);
             let head = apply_head_cap(HeadCapArgs {
                 index: &index,
                 offset: case.offset,
@@ -2617,8 +2707,10 @@ mod tests {
 
     #[test]
     fn no_fire_cause_taxonomy_discriminates_trigger_decision_sites() {
-        let mut in_flight = TriggerContext::default();
-        in_flight.compartment_in_progress = true;
+        let in_flight = TriggerContext {
+            compartment_in_progress: true,
+            ..TriggerContext::default()
+        };
         let in_flight_decision = check_compartment_trigger(&[], &in_flight);
         assert_eq!(
             in_flight_decision.no_fire_cause,
@@ -2639,9 +2731,11 @@ mod tests {
             "no_new_raw_history"
         );
 
-        let mut redundancy = TriggerContext::default();
-        redundancy.boundary = ctx_for_tests();
-        redundancy.projected_post_drop_percentage = Some(20.0);
+        let redundancy = TriggerContext {
+            boundary: ctx_for_tests(),
+            projected_post_drop_percentage: Some(20.0),
+            ..TriggerContext::default()
+        };
         let redundancy_decision = check_compartment_trigger(
             &[text_msg(1, Role::Assistant, "queued drops cover this tail")],
             &redundancy,
@@ -2655,8 +2749,10 @@ mod tests {
             "redundancy_skip"
         );
 
-        let mut protected = TriggerContext::default();
-        protected.boundary = ctx_for_tests();
+        let protected = TriggerContext {
+            boundary: ctx_for_tests(),
+            ..TriggerContext::default()
+        };
         let protected_decision = check_compartment_trigger(
             &[text_msg(1, Role::Assistant, "only protected live tail")],
             &protected,

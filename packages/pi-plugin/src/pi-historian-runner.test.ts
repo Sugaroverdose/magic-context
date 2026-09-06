@@ -232,6 +232,8 @@ async function runHistorianWith(args: {
 	providerMessages?: RawMessage[];
 	forceKeepLastCompartment?: boolean;
 	historianChunkTokens?: number;
+	historianContextLimit?: number;
+	maxOutputTokens?: number;
 	beforeRun?: (db: ReturnType<typeof createTestDb>) => void;
 	ensureProjectRegistered?: Parameters<
 		typeof runPiHistorian
@@ -252,6 +254,8 @@ async function runHistorianWith(args: {
 		fallbackModels: args.fallbackModels,
 		fallbackModelId: args.fallbackModelId,
 		historianChunkTokens: args.historianChunkTokens ?? 20_000,
+		historianContextLimit: args.historianContextLimit,
+		maxOutputTokens: args.maxOutputTokens,
 		signal: args.signal,
 		retryBackoffMs: args.retryBackoffMs,
 		twoPass: args.twoPass,
@@ -273,6 +277,47 @@ async function runHistorianWith(args: {
 }
 
 describe("runPiHistorian", () => {
+	it("does not spawn beyond the producer window and still spawns within the margin", async () => {
+		const messages = rawMessages();
+		const firstMessage = messages[0];
+		if (!firstMessage)
+			throw new Error("producer-window fixture requires a source message");
+		messages[0] = {
+			...firstMessage,
+			parts: [{ type: "text", text: "producer source token ".repeat(2_000) }],
+		};
+		const refusedRunner = runnerReturning([successXml()]);
+		const refused = await runHistorianWith({
+			runner: refusedRunner,
+			providerMessages: messages,
+			historianChunkTokens: 100_000,
+			historianContextLimit: 32_001,
+			maxOutputTokens: 32_000,
+		});
+		try {
+			expect(refusedRunner.run).toHaveBeenCalledTimes(0);
+			expect(
+				getHistorianFailureState(refused.db, "ses-historian").lastError,
+			).toContain("producer_source_exceeds_window");
+		} finally {
+			closeQuietly(refused.db);
+		}
+
+		const admittedRunner = runnerReturning([successXml()]);
+		const admitted = await runHistorianWith({
+			runner: admittedRunner,
+			providerMessages: messages,
+			historianChunkTokens: 100_000,
+			historianContextLimit: 1_000_000,
+			maxOutputTokens: 32_000,
+		});
+		try {
+			expect(admittedRunner.run).toHaveBeenCalledTimes(1);
+		} finally {
+			closeQuietly(admitted.db);
+		}
+	});
+
 	it("clears emergency recovery on protected-tail-only no-op", async () => {
 		const db = createTestDb();
 		const runner = runnerReturning([successXml()]);

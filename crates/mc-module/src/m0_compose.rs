@@ -612,7 +612,7 @@ mod tests {
             temporal_awareness: true,
             mural: None,
         };
-        let m0 = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let m0 = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
 
         // coverage anchors at the LAST compartment (the m0+m1 coverage end)
         assert_eq!(m0.boundary_id, "m20");
@@ -645,7 +645,7 @@ mod tests {
             temporal_awareness: true,
             mural: None,
         };
-        let composed = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let composed = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
         assert!(!composed.m0_bytes.contains("secret docs"));
         assert!(!composed.m0_bytes.contains("<project-docs>"));
         assert!(composed.docs_hash.is_empty());
@@ -673,7 +673,7 @@ mod tests {
             temporal_awareness: true,
             mural: None,
         };
-        let m0 = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let m0 = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
 
         // nothing summarized → no covered prefix → empty anchor, the whole array is tail
         assert_eq!(m0.boundary_id, "");
@@ -723,7 +723,7 @@ mod tests {
             mural: Some(&mural),
         };
 
-        let composed = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let composed = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
         assert!(!composed.m0_bytes.contains("must stay hidden"));
         assert!(!composed.m0_bytes.contains("<project-memory>"));
         assert!(!composed.m0_bytes.contains("<user-profile>"));
@@ -762,7 +762,7 @@ mod tests {
             temporal_awareness: true,
             mural: None,
         };
-        let composed = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let composed = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
         assert_eq!(composed.coverage_ordinal, Some(30));
         assert_eq!(composed.boundary_id, "m30");
     }
@@ -1071,8 +1071,8 @@ mod tests {
             temporal_awareness: true,
             mural: None,
         };
-        let a = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
-        let b = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
+        let a = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
+        let b = compose_m0_from_store(store, &inputs, no_estimate).unwrap();
         assert_eq!(
             a.m0_bytes, b.m0_bytes,
             "same store + inputs → identical m0 bytes"

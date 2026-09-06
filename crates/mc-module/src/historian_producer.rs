@@ -35,7 +35,7 @@ const DEFAULT_RUNNER_MODULE_ID: &str = "broca";
 /// a real 50k-input chunk mid-XML on the rig: a tiered compartment doc for a full chunk
 /// legitimately needs five figures. The provider clamps to its own per-model limit, so a
 /// generous request costs nothing unless the model actually generates that much.
-const HISTORIAN_MAX_OUTPUT_TOKENS: u32 = 32_000;
+pub(crate) const HISTORIAN_MAX_OUTPUT_TOKENS: u32 = 32_000;
 
 #[derive(Serialize)]
 struct GenerationRequest {

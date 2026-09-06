@@ -1603,6 +1603,77 @@ describe("runCompartmentAgent", () => {
         ]);
     });
 
+    it("refuses a producer source far beyond the known window but admits one within the margin", async () => {
+        useTempDataHome("compartment-runner-producer-window-");
+        const source = "producer source token ".repeat(2_000);
+        const makeMessages = (prefix: string) => [
+            { id: `${prefix}-1`, role: "user", text: source },
+            { id: `${prefix}-2`, role: "assistant", text: "Second eligible message" },
+            { id: `${prefix}-3`, role: "user", text: "protected 1" },
+            { id: `${prefix}-4`, role: "user", text: "protected 2" },
+            { id: `${prefix}-5`, role: "user", text: "protected 3" },
+            { id: `${prefix}-6`, role: "user", text: "protected 4" },
+            { id: `${prefix}-7`, role: "user", text: "protected 5" },
+        ];
+        createOpenCodeDb("ses-window-refuse", makeMessages("refuse"));
+        createOpenCodeDb("ses-window-admit", makeMessages("admit"));
+        const db = openDatabase();
+        const createSession = mock(async () => ({ data: { id: "ses-agent-window" } }));
+        const promptSession = mock(async () => ({}));
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/producer-window" } })),
+                create: createSession,
+                prompt: promptSession,
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: '<compartment start="1" end="2" title="Window edge"><p1>Summary</p1></compartment>',
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-window-refuse",
+            historianChunkTokens: 100_000,
+            historianContextLimit: 32_001,
+            historianMaxOutputTokens: 32_000,
+            model: "test/model",
+            directory: "/tmp",
+        });
+
+        expect(createSession).toHaveBeenCalledTimes(0);
+        expect(promptSession).toHaveBeenCalledTimes(0);
+        expect(getHistorianFailureState(db, "ses-window-refuse").lastError).toContain(
+            "producer_source_exceeds_window",
+        );
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-window-admit",
+            historianChunkTokens: 100_000,
+            historianContextLimit: 1_000_000,
+            historianMaxOutputTokens: 32_000,
+            model: "test/model",
+            directory: "/tmp",
+        });
+
+        expect(createSession).toHaveBeenCalledTimes(1);
+        expect(promptSession).toHaveBeenCalledTimes(1);
+    });
+
     it("records length-capped reasoning-only output with the actionable error and drain backoff", async () => {
         useTempDataHome("compartment-runner-length-capped-reasoning-");
         const sessionId = "ses-length-capped-reasoning";

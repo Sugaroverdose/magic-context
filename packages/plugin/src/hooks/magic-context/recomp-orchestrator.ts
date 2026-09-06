@@ -67,6 +67,8 @@ export interface ManagedRecompContext {
     autoPromote: boolean;
     /** Active OpenCode historian entry, including its outbound request variant. */
     historianModel?: ModelInput;
+    historianContextLimit?: number;
+    historianMaxOutputTokens?: number;
     /** Resolved historian fallback chain (config `fallback_models` → builtin). */
     fallbackModels: readonly ModelInput[];
     language?: string;
@@ -241,6 +243,8 @@ function buildRecompDeps(ctx: ManagedRecompContext, sessionId: string) {
         //  - fallbackModels: configured chain (e.g. anthropic/claude-sonnet-4-6)
         //  - fallbackModelId: the live session model as a last-ditch retry
         model: ctx.historianModel,
+        historianContextLimit: ctx.historianContextLimit,
+        historianMaxOutputTokens: ctx.historianMaxOutputTokens,
         fallbackModels: ctx.fallbackModels,
         language: ctx.language,
         fallbackModelId:
