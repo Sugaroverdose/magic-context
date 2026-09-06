@@ -40,10 +40,7 @@ import type {
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
-import {
-	type PiHarnessKind,
-	resolvePiHarnessKind,
-} from "./pi-harness-kind";
+import { type PiHarnessKind, resolvePiHarnessKind } from "./pi-harness-kind";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 const PI_CODING_AGENT_PACKAGE_NAMES = new Set([
@@ -423,8 +420,7 @@ function resolvePiInvocation(
 				return {
 					command,
 					prefixArgs: ["/d", "/s", "/c", resolved.path],
-					targetHarness:
-						piHarnessKindFromExecutable(resolved.path) ?? "pi",
+					targetHarness: piHarnessKindFromExecutable(resolved.path) ?? "pi",
 					fallbackDiagnostic: diagnostic,
 				};
 			}
@@ -447,16 +443,14 @@ function resolvePiInvocation(
 						"-File",
 						resolved.path,
 					],
-					targetHarness:
-						piHarnessKindFromExecutable(resolved.path) ?? "pi",
+					targetHarness: piHarnessKindFromExecutable(resolved.path) ?? "pi",
 					fallbackDiagnostic: diagnostic,
 				};
 			}
 			return {
 				command: resolved.path,
 				prefixArgs: [],
-				targetHarness:
-					piHarnessKindFromExecutable(resolved.path) ?? "pi",
+				targetHarness: piHarnessKindFromExecutable(resolved.path) ?? "pi",
 				fallbackDiagnostic: diagnostic,
 			};
 		}
