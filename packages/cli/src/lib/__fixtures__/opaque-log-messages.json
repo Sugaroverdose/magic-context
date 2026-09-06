@@ -1,0 +1,17 @@
+[
+  {
+    "name": "legacy-unmatched-quote",
+    "message": "historian: prompt attempt 1 failed: invalid character \" at offset 17",
+    "line": "[2026-09-05T10:41:03.130Z] [magic-context][ses_opaque] historian: prompt attempt 1 failed: invalid character \" at offset 17"
+  },
+  {
+    "name": "legacy-unmatched-quote-before-fields",
+    "message": "historian: prompt attempt 1 failed: invalid character \" at offset 17",
+    "line": "[2026-09-05T10:41:03.130Z] [magic-context][ses_opaque] historian: prompt attempt 1 failed: invalid character \" at offset 17 cache.read=5"
+  },
+  {
+    "name": "fleet-unmatched-quote-before-fields",
+    "message": "historian: prompt attempt 1 failed: invalid character \" at offset 17",
+    "line": "2026-09-05T10:41:03.130Z ERROR magic-context session=opencode:ses_opaque tag=perf historian: prompt attempt 1 failed: invalid character \" at offset 17 cache.read=5"
+  }
+]

@@ -30,7 +30,7 @@ export interface LogFileInspection {
 }
 
 const FLEET_PREFIX =
-    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (TRACE|DEBUG|INFO |WARN |ERROR) magic-context (.+)$/;
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) (TRACE|DEBUG|INFO |WARN |ERROR) magic-context (.*)$/;
 const LEGACY_LINE = /^\[([^\]]+)\] \[magic-context\]\[([^\]]*)\]\s+(.*)$/;
 const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 
@@ -39,10 +39,10 @@ interface Token {
     start: number;
 }
 
-function tokenize(input: string): Token[] | null {
+function tokenize(input: string, limit: number): Token[] | null {
     const tokens: Token[] = [];
     let index = 0;
-    while (index < input.length) {
+    while (index < input.length && tokens.length < limit) {
         while (input[index] === " ") index += 1;
         if (index >= input.length) break;
         const start = index;
@@ -101,31 +101,45 @@ function parseField(token: string): [string, string] | null {
     return [key, rawValue];
 }
 
+function trailingToken(input: string, end: number): Token | null {
+    let index = end;
+    let quoted = false;
+    while (index > 0) {
+        const char = input[index - 1];
+        if (char === '"') {
+            let slashStart = index - 1;
+            while (input[slashStart - 1] === "\\") slashStart -= 1;
+            if ((index - 1 - slashStart) % 2 === 0) quoted = !quoted;
+            index = slashStart;
+        } else if (char === " " && !quoted) {
+            break;
+        } else {
+            index -= 1;
+        }
+    }
+    return quoted ? null : { raw: input.slice(index, end), start: index };
+}
+
 function splitMessageAndFields(
     input: string,
     decodeMessage = true,
-): { message: string; kv: Record<string, string> } | null {
-    const tokens = tokenize(input);
-    if (!tokens || tokens.length === 0) return null;
-
-    let fieldStart = tokens.length;
-    for (let index = tokens.length - 1; index >= 0; index -= 1) {
-        if (!parseField(tokens[index].raw)) break;
-        fieldStart = index;
+): { message: string; kv: Record<string, string> } {
+    // Message prose is opaque: only consume a well-formed field suffix from the right.
+    // An unmatched quote earlier in the message must not hide the entire record.
+    let messageEnd = input.trimEnd().length;
+    const fields: [string, string][] = [];
+    while (messageEnd > 0) {
+        const token = trailingToken(input, messageEnd);
+        const field = token && parseField(token.raw);
+        if (!token || !field || token.start === 0) break;
+        fields.push(field);
+        messageEnd = token.start;
+        while (messageEnd > 0 && input[messageEnd - 1] === " ") messageEnd -= 1;
     }
-    if (fieldStart === 0) return null;
-
-    const messageEnd = fieldStart < tokens.length ? tokens[fieldStart].start : input.length;
-    const rawMessage = input.slice(0, messageEnd).trimEnd();
-    const message = decodeMessage ? decodeEscapes(rawMessage) : rawMessage;
-    if (!message) return null;
-
+    const rawMessage = fields.length > 0 ? input.slice(0, messageEnd) : input;
+    const message = decodeMessage ? (decodeEscapes(rawMessage) ?? rawMessage) : rawMessage;
     const kv: Record<string, string> = {};
-    for (const token of tokens.slice(fieldStart)) {
-        const field = parseField(token.raw);
-        if (!field) return null;
-        kv[field[0]] = field[1];
-    }
+    for (const [key, value] of fields.reverse()) kv[key] = value;
     return { message, kv };
 }
 
@@ -137,42 +151,38 @@ function rawSessionId(value: string): string | null {
 }
 
 export function parseLogLine(line: string): ParsedLogLine | null {
-    if (line.includes("\u001b")) return null;
-
     const fleet = FLEET_PREFIX.exec(line);
     if (fleet) {
         const ts = fleet[1];
         if (Number.isNaN(Date.parse(ts)) || new Date(ts).toISOString() !== ts) return null;
         const level = fleet[2].trim() as LogLevel;
-        const tokens = tokenize(fleet[3]);
-        if (!tokens) return null;
-
-        let index = 0;
+        let remaining = fleet[3].trimStart();
         let session: string | null = null;
         const tags: string[] = [];
-        if (tokens[index]?.raw.startsWith("session=")) {
-            const sessionField = parseField(tokens[index].raw);
+        if (remaining.startsWith("session=")) {
+            const token = tokenize(remaining, 1)?.[0];
+            if (!token || token.raw.includes("\u001b")) return null;
+            const sessionField = parseField(token.raw);
             if (!sessionField) return null;
             session = rawSessionId(sessionField[1]);
             if (!session) return null;
-            index += 1;
+            remaining = remaining.slice(token.raw.length).trimStart();
         }
-        while (tokens[index]?.raw.startsWith("tag=")) {
-            const tagField = parseField(tokens[index].raw);
+        while (remaining.startsWith("tag=")) {
+            const token = tokenize(remaining, 1)?.[0];
+            if (!token || token.raw.includes("\u001b")) return null;
+            const tagField = parseField(token.raw);
             if (!tagField?.[1]) return null;
             tags.push(tagField[1]);
-            index += 1;
+            remaining = remaining.slice(token.raw.length).trimStart();
         }
-        if (index >= tokens.length) return null;
-        const body = splitMessageAndFields(fleet[3].slice(tokens[index].start));
-        if (!body) return null;
+        const body = splitMessageAndFields(remaining);
         return { ts, level, session, tags, ...body, grammar: "fleet" };
     }
 
     const legacy = LEGACY_LINE.exec(line);
-    if (!legacy || Number.isNaN(Date.parse(legacy[1]))) return null;
+    if (!legacy || legacy[2].includes("\u001b") || Number.isNaN(Date.parse(legacy[1]))) return null;
     const body = splitMessageAndFields(legacy[3], false);
-    if (!body) return null;
     const legacySession = legacy[2].trim();
     return {
         ts: legacy[1],
