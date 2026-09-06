@@ -122,9 +122,8 @@ describe("resolvePiHarnessDetection", () => {
 		});
 	});
 
-	it("detects the bun-global OMP layout after both former CJS probes fail", async () => {
+	it("detects bun-global OMP from launcher and broker-style host argv without CJS resolution", async () => {
 		const fixture = bunGlobalHost();
-		process.argv[1] = fixture.launcher;
 
 		expect(() =>
 			createRequire(fixture.launcher).resolve("@oh-my-pi/pi-utils"),
@@ -135,10 +134,15 @@ describe("resolvePiHarnessDetection", () => {
 		expect(() =>
 			createRequire(fixture.hostEntry).resolve("@oh-my-pi/pi-utils"),
 		).toThrow();
-		expect(await resolvePiHarnessDetection()).toEqual({
-			kind: "omp",
-			via: "package-name",
-		});
+
+		for (const argv1 of [fixture.launcher, fixture.hostEntry]) {
+			__setPiHarnessKindForTesting(undefined);
+			process.argv[1] = argv1;
+			expect(await resolvePiHarnessDetection()).toEqual({
+				kind: "omp",
+				via: "package-name",
+			});
+		}
 	});
 
 	it("loads APP_NAME through an ESM-only export relative to the host entry", async () => {

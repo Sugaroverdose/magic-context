@@ -165,6 +165,7 @@ function runnerWith(
 		invocation?: {
 			command: string;
 			prefixArgs: string[];
+			targetHarness: "pi" | "omp";
 			fallbackDiagnostic?: string;
 		};
 		platform?: NodeJS.Platform;
@@ -317,6 +318,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node.exe",
 				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "pi",
 			});
 			expect(__test.isPiCliScript(fixture.entry)).toBe(true);
 		} finally {
@@ -335,6 +337,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node",
 				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "pi",
 			});
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -352,6 +355,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node",
 				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "pi",
 			});
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -373,9 +377,52 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node",
 				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "omp",
 			});
 			expect(invocation.command).not.toBe("pi");
 			expect(invocation.fallbackDiagnostic).toBeUndefined();
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses OMP argv when the resolved binary is OMP despite a Pi host label", () => {
+		const fixture = writeOmpCliFixture("dist/cli.js");
+		try {
+			__setPiHarnessKindForTesting("pi");
+			const invocation = __test.resolvePiInvocation({
+				execPath: "/runtime/node",
+				argv1: fixture.entry,
+				resolvePackageJson: () => null,
+			});
+			const args = buildArgsForTest(baseOptions, {
+				targetHarness: invocation.targetHarness,
+			});
+
+			expect(args).toContain("--no-rules");
+			expect(args).not.toContain("--no-prompt-templates");
+			expect(args).not.toContain("--no-context-files");
+		} finally {
+			rmSync(fixture.root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses Pi argv when the resolved binary is Pi despite an OMP host label", () => {
+		const fixture = writePiCliFixture("dist/cli.js");
+		try {
+			__setPiHarnessKindForTesting("omp");
+			const invocation = __test.resolvePiInvocation({
+				execPath: "/runtime/node",
+				argv1: fixture.entry,
+				resolvePackageJson: () => null,
+			});
+			const args = buildArgsForTest(baseOptions, {
+				targetHarness: invocation.targetHarness,
+			});
+
+			expect(args).toContain("--no-prompt-templates");
+			expect(args).toContain("--no-context-files");
+			expect(args).not.toContain("--no-rules");
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
 		}
@@ -392,6 +439,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node",
 				prefixArgs: [realpathSync(fixture.cliPath)],
+				targetHarness: "pi",
 			});
 		} finally {
 			rmSync(fixture.root, { recursive: true, force: true });
@@ -425,6 +473,7 @@ describe("subagent-runner pure helpers", () => {
 			expect(invocation).toEqual({
 				command: "/runtime/node",
 				prefixArgs: [realpathSync(cliPath)],
+				targetHarness: "pi",
 			});
 		} finally {
 			rmSync(root, { recursive: true, force: true });
@@ -1248,6 +1297,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			invocation: {
 				command: "pi",
 				prefixArgs: [],
+				targetHarness: "pi",
 				fallbackDiagnostic:
 					"script-detection miss on /host/cli.js, /host/node_modules/@earendil-works/pi-coding-agent/package.json",
 			},

@@ -403,9 +403,16 @@ fn lookup_session_identity(
     harness: Harness,
     session_id: &str,
 ) -> String {
+    if let Some(identity) = identities.get(&(harness, session_id.to_string())) {
+        return identity.clone();
+    }
+
+    // A session recorded under the wrong compatible harness still needs its project
+    // on dashboard rows. Compare the complete ID so short-prefix collisions remain
+    // isolated by the persisted (harness, session_id) primary key.
     identities
-        .get(&(harness, session_id.to_string()))
-        .cloned()
+        .iter()
+        .find_map(|((_, stored_id), identity)| (stored_id == session_id).then(|| identity.clone()))
         .unwrap_or_default()
 }
 
@@ -6889,6 +6896,52 @@ mod session_identity_map_tests {
                 .find(|row| row.session_id == "unmapped")
                 .expect("unmapped row");
             assert_eq!(unmapped.project_identity, "");
+        });
+    }
+
+    #[test]
+    fn omp_session_display_falls_back_to_exact_pi_identity_without_prefix_matching() {
+        with_temp_data_home(|data_home| {
+            const MATCHED_ID: &str = "123e4567-e89b-12d3-a456-426614174000";
+            const UNMATCHED_ID: &str = "123e4567-e89b-12d3-a456-426614174001";
+            const PROJECT_IDENTITY: &str = "git:omp-project";
+
+            let context = create_context_db(data_home, true);
+            insert_session_project(&context, MATCHED_ID, "pi", PROJECT_IDENTITY);
+            insert_session_project(&context, "123e4567", "pi", PROJECT_IDENTITY);
+            drop(context);
+
+            let omp_root = tempfile::tempdir().expect("OMP sessions");
+            let project_dir = omp_root.path().join("omp-project");
+            std::fs::create_dir_all(&project_dir).expect("OMP project session dir");
+            for (session_id, file_name) in [
+                (MATCHED_ID, "matched.jsonl"),
+                (UNMATCHED_ID, "prefix-only.jsonl"),
+            ] {
+                std::fs::write(
+                    project_dir.join(file_name),
+                    format!(
+                        "{{\"type\":\"session\",\"version\":3,\"id\":\"{session_id}\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/tmp/omp-project\"}}\n{{\"type\":\"message\",\"id\":\"u1\",\"parentId\":null,\"timestamp\":\"2026-01-01T00:00:01.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"hello from OMP\"}}}}\n"
+                    ),
+                )
+                .expect("write OMP session");
+            }
+
+            let sessions = crate::pi_sessions::scan_pi_session_dir_at(omp_root.path());
+            assert_eq!(sessions.len(), 2, "the OMP fixture must be scanned");
+            let rows = list_pi_compatible_sessions(
+                &SessionFilter {
+                    project_identity: Some(PROJECT_IDENTITY.to_string()),
+                    ..SessionFilter::default()
+                },
+                Harness::Omp,
+                sessions,
+            );
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].harness, Harness::Omp);
+            assert_eq!(rows[0].session_id, MATCHED_ID);
+            assert_eq!(rows[0].project_identity, PROJECT_IDENTITY);
         });
     }
 

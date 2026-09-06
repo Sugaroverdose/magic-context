@@ -32,6 +32,7 @@ import {
 } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { ResolvedModelEntry } from "@magic-context/core/shared/model-resolution";
+import { piHarnessKindFromExecutable } from "@magic-context/core/shared/pi-executable";
 import type {
 	SubagentProgressEvent,
 	SubagentRunner,
@@ -39,7 +40,10 @@ import type {
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
 import { summarizeChildStderr } from "@magic-context/core/shared/summarize-child-stderr";
-import { resolvePiHarnessKind } from "./pi-harness-kind";
+import {
+	type PiHarnessKind,
+	resolvePiHarnessKind,
+} from "./pi-harness-kind";
 
 const PI_CODING_AGENT_MODULE = "@earendil-works/pi-coding-agent";
 const PI_CODING_AGENT_PACKAGE_NAMES = new Set([
@@ -70,6 +74,7 @@ interface FoundPiPackage {
 
 interface PiCliResolution {
 	cliPath: string | null;
+	targetHarness: PiHarnessKind | null;
 	checkedPaths: string[];
 }
 
@@ -78,6 +83,8 @@ interface PiCliResolution {
 interface PiInvocation {
 	command: string;
 	prefixArgs: string[];
+	/** The resolved CLI package or executable that will parse prefixArgs and argv. */
+	targetHarness: PiHarnessKind;
 	/** Present only after the resolver fell through to a PATH-based invocation. */
 	fallbackDiagnostic?: string;
 }
@@ -90,6 +97,14 @@ interface ResolvePiInvocationOptions {
 	fs?: Partial<PiResolutionFs>;
 	/** Override used by tests to control package.json resolution from the running entry's Node module paths. */
 	resolvePackageJson?: (from: string | undefined) => string | null;
+}
+
+function packageHarnessKind(packageName: unknown): PiHarnessKind | undefined {
+	if (packageName === "@oh-my-pi/pi-coding-agent") return "omp";
+	return typeof packageName === "string" &&
+		PI_CODING_AGENT_PACKAGE_NAMES.has(packageName)
+		? "pi"
+		: undefined;
 }
 
 function readPiManifest(
@@ -200,20 +215,22 @@ function resolvePiCliFromPackageJson(
 	packageJsonPath: string,
 	fs: PiResolutionFs,
 	checkedPaths: string[],
-): string | null {
+): PiCliResolution {
 	checkedPaths.push(packageJsonPath);
 	const manifest = readPiManifest(packageJsonPath, fs);
-	if (
-		typeof manifest?.name !== "string" ||
-		!PI_CODING_AGENT_PACKAGE_NAMES.has(manifest.name)
-	) {
-		return null;
+	const targetHarness = packageHarnessKind(manifest?.name);
+	if (!manifest || targetHarness === undefined) {
+		return { cliPath: null, targetHarness: null, checkedPaths };
 	}
-	return resolvePiBin(
-		{ dir: dirname(packageJsonPath), manifest },
-		fs,
+	return {
+		cliPath: resolvePiBin(
+			{ dir: dirname(packageJsonPath), manifest },
+			fs,
+			checkedPaths,
+		),
+		targetHarness,
 		checkedPaths,
-	);
+	};
 }
 
 /**
@@ -227,22 +244,23 @@ function resolvePiCliFromRunningEntry(
 ): PiCliResolution {
 	const checkedPaths = [entry ?? "process.argv[1] (missing)"];
 	if (!entry || entry.startsWith(BUN_VIRTUAL_SCRIPT_PREFIX)) {
-		return { cliPath: null, checkedPaths };
+		return { cliPath: null, targetHarness: null, checkedPaths };
 	}
 	try {
 		if (!fs.existsSync(entry) || !fs.statSync(entry).isFile()) {
-			return { cliPath: null, checkedPaths };
+			return { cliPath: null, targetHarness: null, checkedPaths };
 		}
 		const realEntry = fs.realpathSync(entry);
 		if (realEntry !== entry) checkedPaths.push(realEntry);
 		const found = findPiPackageRoot(dirname(realEntry), fs);
-		if (!found) return { cliPath: null, checkedPaths };
+		if (!found) return { cliPath: null, targetHarness: null, checkedPaths };
 		return {
 			cliPath: resolvePiBin(found, fs, checkedPaths),
+			targetHarness: packageHarnessKind(found.manifest.name) ?? null,
 			checkedPaths,
 		};
 	} catch {
-		return { cliPath: null, checkedPaths };
+		return { cliPath: null, targetHarness: null, checkedPaths };
 	}
 }
 
@@ -268,13 +286,13 @@ function resolveBundledPiCli(
 	fs: PiResolutionFs,
 	resolvePackageJson: (from: string | undefined) => string | null,
 	checkedPaths: string[],
-): string | null {
+): PiCliResolution {
 	const packageJsonPath = resolvePackageJson(from);
 	if (!packageJsonPath) {
 		checkedPaths.push(
 			`${PI_CODING_AGENT_MODULE}/package.json (unresolvable from running module paths)`,
 		);
-		return null;
+		return { cliPath: null, targetHarness: null, checkedPaths };
 	}
 	return resolvePiCliFromPackageJson(packageJsonPath, fs, checkedPaths);
 }
@@ -358,12 +376,24 @@ function resolvePiInvocation(
 	const checkedPaths = [...running.checkedPaths];
 
 	if (running.cliPath) {
-		return { command: execPath, prefixArgs: [running.cliPath] };
+		return {
+			command: execPath,
+			prefixArgs: [running.cliPath],
+			targetHarness:
+				running.targetHarness ??
+				piHarnessKindFromExecutable(running.cliPath) ??
+				resolvePiHarnessKind(),
+		};
 	}
 
 	if (!isGenericRuntimeExecutable(execPath)) {
-		// A packaged single-file binary: execPath itself is Pi.
-		return { command: execPath, prefixArgs: [] };
+		// For a packaged single-file CLI, the executable itself parses argv.
+		return {
+			command: execPath,
+			prefixArgs: [],
+			targetHarness:
+				piHarnessKindFromExecutable(execPath) ?? resolvePiHarnessKind(),
+		};
 	}
 
 	const bundled = resolveBundledPiCli(
@@ -372,8 +402,15 @@ function resolvePiInvocation(
 		resolvePackageJson,
 		checkedPaths,
 	);
-	if (bundled) {
-		return { command: execPath, prefixArgs: [bundled] };
+	if (bundled.cliPath) {
+		return {
+			command: execPath,
+			prefixArgs: [bundled.cliPath],
+			targetHarness:
+				bundled.targetHarness ??
+				piHarnessKindFromExecutable(bundled.cliPath) ??
+				resolvePiHarnessKind(),
+		};
 	}
 
 	const detectionMiss = `script-detection miss on ${formatCheckedPaths(checkedPaths)}`;
@@ -386,6 +423,8 @@ function resolvePiInvocation(
 				return {
 					command,
 					prefixArgs: ["/d", "/s", "/c", resolved.path],
+					targetHarness:
+						piHarnessKindFromExecutable(resolved.path) ?? "pi",
 					fallbackDiagnostic: diagnostic,
 				};
 			}
@@ -408,12 +447,16 @@ function resolvePiInvocation(
 						"-File",
 						resolved.path,
 					],
+					targetHarness:
+						piHarnessKindFromExecutable(resolved.path) ?? "pi",
 					fallbackDiagnostic: diagnostic,
 				};
 			}
 			return {
 				command: resolved.path,
 				prefixArgs: [],
+				targetHarness:
+					piHarnessKindFromExecutable(resolved.path) ?? "pi",
 				fallbackDiagnostic: diagnostic,
 			};
 		}
@@ -423,6 +466,7 @@ function resolvePiInvocation(
 	return {
 		command: "pi",
 		prefixArgs: [],
+		targetHarness: "pi",
 		fallbackDiagnostic: `script-detection miss on ${formatCheckedPaths(checkedPaths)}`,
 	};
 }
@@ -492,9 +536,9 @@ function normalizedOmpProfile(): string | undefined {
 // OMP exposes a profile/custom agent directory via PI_CODING_AGENT_DIR.
 // A named profile is authoritative and deliberately ignores a stale/custom
 // override, matching OMP path resolution. Plain Pi also supports the same
-// variable, so never consume it without positive OMP host identification.
-function getHostAgentSettingsDir(): string {
-	if (!isOmpHostProcess()) return join(homedir(), ".pi", "agent");
+// variable, so consume it only when the child target is positively OMP.
+function getHostAgentSettingsDir(targetHarness: PiHarnessKind): string {
+	if (targetHarness !== "omp") return join(homedir(), ".pi", "agent");
 	const configRoot = join(
 		homedir(),
 		process.env.PI_CONFIG_DIR?.trim() || ".omp",
@@ -505,14 +549,20 @@ function getHostAgentSettingsDir(): string {
 	return configured ? resolvePath(configured) : join(configRoot, "agent");
 }
 
-function modelRefToCanonicalForHost(ref: string): string {
-	return isOmpHostProcess()
+function modelRefToCanonicalForTarget(
+	ref: string,
+	targetHarness: PiHarnessKind,
+): string {
+	return targetHarness === "omp"
 		? ompModelRefToCanonical(ref)
 		: piModelRefToCanonical(ref);
 }
 
-function resolveModelRefForHost(ref: string): string {
-	return isOmpHostProcess()
+function resolveModelRefForTarget(
+	ref: string,
+	targetHarness: PiHarnessKind,
+): string {
+	return targetHarness === "omp"
 		? resolveModelRefForOmp(ref)
 		: resolveModelRefForPi(ref);
 }
@@ -525,11 +575,14 @@ export function configurePiSubagentExtensions(
 	configuredSubagentExtensions = extensions?.slice();
 }
 
-function resolveSubagentExtensionEntry(entry: string): string {
+function resolveSubagentExtensionEntry(
+	entry: string,
+	targetHarness: PiHarnessKind,
+): string {
 	const trimmed = entry.trim();
 	const isNpmSource = trimmed.startsWith("npm:");
 	return !isNpmSource && !isAbsolute(trimmed)
-		? resolvePath(getHostAgentSettingsDir(), trimmed)
+		? resolvePath(getHostAgentSettingsDir(targetHarness), trimmed)
 		: trimmed;
 }
 
@@ -858,7 +911,13 @@ export class PiSubagentRunner implements SubagentRunner {
 		this.invocation =
 			options.invocation ??
 			(options.piBinary
-				? { command: options.piBinary, prefixArgs: [] }
+				? {
+						command: options.piBinary,
+						prefixArgs: [],
+						targetHarness:
+							piHarnessKindFromExecutable(options.piBinary) ??
+							resolvePiHarnessKind(),
+					}
 				: resolvePiInvocation({ platform: options.platform }));
 		this.spawnImpl = options.spawnImpl ?? childProcess.spawn;
 		this.platform = options.platform ?? process.platform;
@@ -868,7 +927,10 @@ export class PiSubagentRunner implements SubagentRunner {
 	}
 
 	async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
-		const providerAttempt = resolveProviderModelAttempt(options.model);
+		const providerAttempt = resolveProviderModelAttempt(
+			options.model,
+			this.invocation.targetHarness,
+		);
 		const firstOptions = providerAttempt
 			? { ...options, model: providerAttempt.canonicalRef }
 			: options;
@@ -1179,6 +1241,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			}
 		}
 		const args = buildArgs(options, {
+			targetHarness: this.invocation.targetHarness,
 			disableDiscoveredExtensions: runMode.disableDiscoveredExtensions,
 			subagentExtensions: this.subagentExtensions,
 			omitPositionalMessage: deliverViaStdin,
@@ -1844,14 +1907,15 @@ function replaceProviderPrefix(ref: string, provider: string): string {
 
 function resolveProviderModelAttempt(
 	model: string | undefined,
+	targetHarness: PiHarnessKind,
 ): ProviderModelAttempt | undefined {
 	if (typeof model !== "string" || model.length === 0) return undefined;
 
-	const canonicalRef = modelRefToCanonicalForHost(model);
+	const canonicalRef = modelRefToCanonicalForTarget(model, targetHarness);
 	const canonicalProvider = providerPrefix(canonicalRef);
 	if (!canonicalProvider) return undefined;
 
-	const translatedRef = resolveModelRefForHost(canonicalRef);
+	const translatedRef = resolveModelRefForTarget(canonicalRef, targetHarness);
 	const translatedProvider = providerPrefix(translatedRef);
 	const cachedProvider = PI_PROVIDER_FORM_CACHE.get(canonicalProvider);
 	if (
@@ -1910,6 +1974,7 @@ export const PROMPT_ARGV_MAX_BYTES = 96 * 1024;
 export function buildArgs(
 	options: SubagentRunOptions,
 	opts?: {
+		targetHarness?: PiHarnessKind;
 		disableDiscoveredExtensions?: boolean;
 		subagentExtensions?: readonly string[];
 		omitPositionalMessage?: boolean;
@@ -1919,7 +1984,8 @@ export function buildArgs(
 		historianCalibrationEntryPath?: string | null;
 	},
 ): string[] {
-	const ompHost = isOmpHostProcess();
+	const targetHarness = opts?.targetHarness ?? resolvePiHarnessKind();
+	const ompTarget = targetHarness === "omp";
 	const args: string[] = [
 		"--print",
 		"--mode",
@@ -1945,7 +2011,7 @@ export function buildArgs(
 		// OMP rejects Pi's --no-prompt-templates and --no-context-files flags.
 		// It folds AGENTS.md-style context into rules, so --no-rules is the
 		// equivalent way to preserve the exact child system prompt.
-		...(ompHost
+		...(ompTarget
 			? (["--no-rules"] as const)
 			: (["--no-prompt-templates", "--no-context-files"] as const)),
 		// --no-tools is applied below only for unknown or explicitly zero-tool agents.
@@ -1964,7 +2030,10 @@ export function buildArgs(
 
 	if (opts?.subagentExtensions !== undefined) {
 		for (const extension of opts.subagentExtensions) {
-			args.push("--extension", resolveSubagentExtensionEntry(extension));
+			args.push(
+				"--extension",
+				resolveSubagentExtensionEntry(extension, targetHarness),
+			);
 		}
 	}
 
@@ -2020,7 +2089,7 @@ export function buildArgs(
 		);
 		args.push("--no-tools");
 	} else {
-		const hostTools = resolveHostToolAllowlist(strictTools, ompHost);
+		const hostTools = resolveHostToolAllowlist(strictTools, ompTarget);
 		if (hostTools.length > 0) {
 			args.push("--tools", hostTools.join(","));
 		} else {
@@ -2053,7 +2122,7 @@ export function buildArgs(
 		// canonical everywhere else (accounting, logging, fallback selection).
 		args.push(
 			"--model",
-			opts?.modelRef ?? resolveModelRefForHost(options.model),
+			opts?.modelRef ?? resolveModelRefForTarget(options.model, targetHarness),
 		);
 	}
 
