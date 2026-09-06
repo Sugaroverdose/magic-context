@@ -3,6 +3,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { assertHistorianMockRouting } from "./mock-routing";
 import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { prepareContextDatabase } from "./prepare-context-db";
 import { createPiIsolatedEnv, type PiIsolatedEnv, type PiRunResult } from "./pi-runner/spawn";
@@ -333,16 +334,19 @@ export class PiTestHarness {
     return this.mock.requests();
   }
 
-  async dispose(): Promise<void> {
-    if (this.contextDbCached) {
-      try {
-        this.contextDbCached.close();
-      } catch {
-        // ignore close errors
-      }
-      this.contextDbCached = null;
+  assertHistorianRequestsUseMock(): void {
+    if (this.expectMagicContext && this.hasContextDb()) {
+      assertHistorianMockRouting(this.contextDb(), "pi", "anthropic/claude-haiku-4-5");
     }
-    await this.rpc.shutdown();
-    await this.mock.stop();
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      this.assertHistorianRequestsUseMock();
+    } finally {
+      this.closeContextDb();
+      await this.rpc.shutdown();
+      await this.mock.stop();
+    }
   }
 }

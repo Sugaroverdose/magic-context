@@ -18,6 +18,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { assertHistorianMockRouting } from "./mock-routing";
 import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { spawnOpencode, type SpawnedOpencode, type SpawnOptions } from "./opencode-runner/spawn";
 
@@ -473,16 +474,26 @@ export class TestHarness {
         return this.mock.requests();
     }
 
-    async dispose(): Promise<void> {
-        if (this.contextDbCached) {
-            try {
-                this.contextDbCached.close();
-            } catch {
-                // ignore close errors
-            }
-            this.contextDbCached = null;
+    assertHistorianRequestsUseMock(): void {
+        if (this.expectMagicContext && this.hasContextDb()) {
+            assertHistorianMockRouting(this.contextDb(), "opencode", "mock-anthropic/mock-sonnet");
         }
-        await this.opencode.kill();
-        await this.mock.stop();
+    }
+
+    async dispose(): Promise<void> {
+        try {
+            this.assertHistorianRequestsUseMock();
+        } finally {
+            if (this.contextDbCached) {
+                try {
+                    this.contextDbCached.close();
+                } catch {
+                    // The child still needs cleanup if a cached reader was already closed.
+                }
+                this.contextDbCached = null;
+            }
+            await this.opencode.kill();
+            await this.mock.stop();
+        }
     }
 }
