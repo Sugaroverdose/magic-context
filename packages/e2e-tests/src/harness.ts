@@ -18,6 +18,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { assertHistorianMockRouting } from "./mock-routing";
 import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { spawnOpencode, type SpawnedOpencode, type SpawnOptions } from "./opencode-runner/spawn";
 
@@ -310,8 +311,11 @@ export class TestHarness {
                 ...(options.agent ? { agent: options.agent } : {}),
             },
         });
-        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
-        const result = await Promise.race([promptPromise, timeout]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), timeoutMs);
+        });
+        const result = await Promise.race([promptPromise, timeout]).finally(() => clearTimeout(timer));
         if (result === null) {
             throw new Error(
                 `sendPrompt did not complete within ${timeoutMs}ms. stderr:\n${this.opencode.stderr().slice(-2000)}`,
@@ -323,6 +327,12 @@ export class TestHarness {
                     `stdout:\n${this.opencode.stdout().slice(-2000)}\n` +
                     `stderr:\n${this.opencode.stderr().slice(-2000)}`,
             );
+        }
+        // OpenCode returns provider failures inside a successful HTTP/SDK envelope.
+        // Presence of session data does not prove that the assistant answered.
+        const assistant = result.data as { info?: { error?: unknown } } | null;
+        if (assistant?.info?.error) {
+            throw new Error(`sendPrompt assistant error: ${JSON.stringify(assistant.info.error)}`);
         }
         this.assertMagicContextProcessed(sessionId);
         return result;
@@ -464,16 +474,26 @@ export class TestHarness {
         return this.mock.requests();
     }
 
-    async dispose(): Promise<void> {
-        if (this.contextDbCached) {
-            try {
-                this.contextDbCached.close();
-            } catch {
-                // ignore close errors
-            }
-            this.contextDbCached = null;
+    assertHistorianRequestsUseMock(): void {
+        if (this.expectMagicContext && this.hasContextDb()) {
+            assertHistorianMockRouting(this.contextDb(), "opencode", "mock-anthropic/mock-sonnet");
         }
-        await this.opencode.kill();
-        await this.mock.stop();
+    }
+
+    async dispose(): Promise<void> {
+        try {
+            this.assertHistorianRequestsUseMock();
+        } finally {
+            if (this.contextDbCached) {
+                try {
+                    this.contextDbCached.close();
+                } catch {
+                    // The child still needs cleanup if a cached reader was already closed.
+                }
+                this.contextDbCached = null;
+            }
+            await this.opencode.kill();
+            await this.mock.stop();
+        }
     }
 }

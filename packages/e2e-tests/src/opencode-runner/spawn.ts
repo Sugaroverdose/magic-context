@@ -20,6 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { prepareContextDatabase } from "../prepare-context-db";
+import { assertMockEndpoint, pinMockAgents } from "../mock-routing";
 import {
     buildHermeticBinaries,
     detectRustModePrereqs,
@@ -317,6 +318,9 @@ function writeConfigs(
         ...(opts.openCodeConfigExtra ?? {}),
     };
 
+    const registeredProviders = opencodeConfig.provider as Record<string, { options?: { baseURL?: string } }>;
+    assertMockEndpoint(registeredProviders[mockProviderID]?.options?.baseURL, mockProviderURL);
+
     // magic-context defaults tuned for fast triggering in tests. This is the
     // USER-tier config: thresholds live here because project-tier thresholds are
     // security-clamped raise-only, so a small/fast threshold must come from the
@@ -331,7 +335,7 @@ function writeConfigs(
         history_budget_percentage: 0.15,
         dreamer: { disable: true },
         sidekick: { disable: true },
-        ...(opts.magicContextConfig ?? {}),
+        ...pinMockAgents(opts.magicContextConfig, `${mockProviderID}/${mockModelID}`),
     };
     if (opts.userSubcConnectionFile) {
         magicContext.subc = { connection_file: opts.userSubcConnectionFile };

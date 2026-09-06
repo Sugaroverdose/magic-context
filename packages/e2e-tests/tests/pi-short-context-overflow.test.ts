@@ -62,6 +62,9 @@ beforeAll(async () => {
         magicContextConfig: {
             execute_threshold_percentage: 40,
             historian: { model: "anthropic/claude-haiku-4-5" },
+            dreamer: { disable: true, model: "anthropic/claude-haiku-4-5" },
+            memory: { auto_search: { enabled: false }, git_commit_indexing: { enabled: false } },
+            embedding: { provider: "off" },
         },
     });
 });
@@ -142,7 +145,9 @@ describe("pi short context accumulating overflow", () => {
                 if (state && typeof state.sessionId === "string") sessionId = sessionId ?? state.sessionId;
             }
             const reqs = h.mock.requests().slice(reqBefore);
-            const mainReq = reqs.find((r) => !isHistorian(r.body));
+            const mainReq = reqs.find((r) => !isHistorian(r.body) &&
+                JSON.stringify(r.body.messages).includes(`user turn ${i}: continue.`));
+            if (!mainReq) turnErrors.push({ turn: i, error: "No mock provider request for submitted user turn" });
             const observed = mainReq ? Math.floor(JSON.stringify(mainReq.body).length / 4) : 0;
             turnUsage.push(Math.round((observed / 128_000) * 1000) / 10);
             if (sessionId) {
@@ -182,6 +187,7 @@ describe("pi short context accumulating overflow", () => {
         console.log(
             `[PI-OVERFLOW-GUARD] historians=${historianRequests.length} peak=${peakObservedPct}% final=${finalPct}% scheduler_peak=${Math.max(...schedulerUsage)}% force_band=${forceBandSeen} historian_busy=${historianBusyAtForceBand} latch=${latchArmed} force_drop=${Boolean(forceDropDecision)}`,
         );
+        console.log(`[PI-OVERFLOW-GUARD] per-turn %: ${turnUsage.join(", ")}`);
         if (turnErrors.length > 0) {
             console.log(
                 `[PI-OVERFLOW-GUARD] prompt failures (${turnErrors.length}):`,
@@ -192,6 +198,7 @@ describe("pi short context accumulating overflow", () => {
         expect(sessionId).toBeTruthy();
         expect(turnErrors).toEqual([]);
         expect(historianRequests.length).toBeGreaterThan(0);
+        h.assertHistorianRequestsUseMock();
         expect(forceBandSeen).toBe(true);
         expect(historianBusyAtForceBand).toBe(true);
         expect(latchArmed).toBe(true);

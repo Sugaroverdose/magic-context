@@ -3,6 +3,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { assertHistorianMockRouting } from "./mock-routing";
 import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { prepareContextDatabase } from "./prepare-context-db";
 import { createPiIsolatedEnv, type PiIsolatedEnv, type PiRunResult } from "./pi-runner/spawn";
@@ -123,13 +124,28 @@ export class PiTestHarness {
     const timeoutMs = options.timeoutMs ?? 180_000;
     const events: PiRpcEvent[] = [];
     let capturing = false;
+    let submittedTurnEnded = false;
     const unsubscribe = this.rpc.onEvent((event) => {
       if (event.type === "agent_start") capturing = true;
       if (capturing) events.push(event);
+      if (event.type === "agent_end" && Array.isArray(event.messages)) {
+        submittedTurnEnded ||= event.messages.some((message: { role?: string; content?: unknown }) => {
+          if (message.role !== "user") return false;
+          const content = typeof message.content === "string"
+            ? message.content
+            : Array.isArray(message.content)
+              ? message.content.filter((part) => part.type === "text").map((part) => part.text).join("")
+              : undefined;
+          return content === text;
+        });
+      }
     });
+    // Pi 0.83 emits agent_end before extension-triggered continuations. Only
+    // agent_settled closes the run, including any ceiling-nudge steer; an end
+    // event for a different user/custom message cannot complete this prompt.
     const agentEnd = this.rpc.waitForEvent(
-      (event) => capturing && event.type === "agent_end",
-      { timeoutMs, label: "agent_end" },
+      (event) => submittedTurnEnded && event.type === "agent_settled",
+      { timeoutMs, label: "submitted turn agent_settled" },
     );
 
     try {
@@ -318,16 +334,19 @@ export class PiTestHarness {
     return this.mock.requests();
   }
 
-  async dispose(): Promise<void> {
-    if (this.contextDbCached) {
-      try {
-        this.contextDbCached.close();
-      } catch {
-        // ignore close errors
-      }
-      this.contextDbCached = null;
+  assertHistorianRequestsUseMock(): void {
+    if (this.expectMagicContext && this.hasContextDb()) {
+      assertHistorianMockRouting(this.contextDb(), "pi", "anthropic/claude-haiku-4-5");
     }
-    await this.rpc.shutdown();
-    await this.mock.stop();
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      this.assertHistorianRequestsUseMock();
+    } finally {
+      this.closeContextDb();
+      await this.rpc.shutdown();
+      await this.mock.stop();
+    }
   }
 }
