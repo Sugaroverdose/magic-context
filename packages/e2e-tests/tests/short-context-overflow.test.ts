@@ -63,6 +63,11 @@ beforeAll(async () => {
         modelContextLimit: 128_000,
         magicContextConfig: {
             execute_threshold_percentage: 40,
+            historian: { model: "mock-anthropic/mock-sonnet" },
+            dreamer: { disable: true, model: "mock-anthropic/mock-sonnet" },
+            // This drill measures emergency pressure, not embedding startup latency.
+            memory: { auto_search: { enabled: false }, git_commit_indexing: { enabled: false } },
+            embedding: { provider: "off" },
         },
     });
 });
@@ -141,7 +146,9 @@ describe("short context accumulating overflow", () => {
                     });
                 }
                 const reqs = h.mock.requests().slice(reqBefore);
-                const mainReq = reqs.find((r) => !isHistorian(r.body));
+                const mainReq = reqs.find((r) => !isHistorian(r.body) &&
+                    JSON.stringify(r.body.messages).includes(`user turn ${i}: continue.`));
+                if (!mainReq) turnErrors.push({ turn: i, error: "No mock provider request for submitted user turn" });
                 const observed = mainReq ? Math.floor(JSON.stringify(mainReq.body).length / 4) : 0;
                 turnUsage.push(Math.round((observed / 128_000) * 1000) / 10);
             }
@@ -164,6 +171,8 @@ describe("short context accumulating overflow", () => {
             // inspect `turnErrors` in the log above to see which turn(s) overflowed
             // or timed out.
             expect(turnErrors).toEqual([]);
+            expect(h.mock.requests().filter((r) => isHistorian(r.body)).length).toBeGreaterThan(0);
+            h.assertHistorianRequestsUseMock();
 
             // Verify drops actually materialized in the DB — this is the core
             // fix: pending ops apply even when compartmentRunning at emergency.
