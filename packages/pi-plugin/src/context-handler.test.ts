@@ -3622,8 +3622,10 @@ describe("registerPiContextHandler", () => {
 	it("restores reasoning bytes when the durable watermark write fails", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-reasoning-watermark-failure";
+		let watermarkWriteAttempted = false;
 		const restorePersistence =
 			contextHandlerInternals.setReasoningWatermarkPersistenceForTests(() => {
+				watermarkWriteAttempted = true;
 				throw new Error("faulted reasoning watermark write");
 			});
 		try {
@@ -3642,6 +3644,16 @@ describe("registerPiContextHandler", () => {
 				{
 					role: "assistant",
 					timestamp: 2,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						dt: true,
+						items: [
+							{
+								type: "reasoning",
+								encrypted_content: "durable native reasoning",
+							},
+						],
+					},
 					content: [
 						{
 							type: "thinking",
@@ -3664,10 +3676,20 @@ describe("registerPiContextHandler", () => {
 						messages as never,
 					),
 					getContextUsage: () => ({
-						tokens: 70_000,
-						percent: 70,
+						tokens: 90_000,
+						percent: 90,
 						contextWindow: 100_000,
 					}),
+					model: {
+						id: "test-codex",
+						api: "openai-codex-responses",
+						provider: "openai-codex",
+						contextWindow: 100_000,
+						compat: {
+							requiresReasoningContentForAllAssistantTurns: false,
+							requiresReasoningContentForToolCalls: false,
+						},
+					},
 				} as never);
 				if (!result) throw new Error("expected transformed messages");
 				return result.messages;
@@ -3675,11 +3697,22 @@ describe("registerPiContextHandler", () => {
 
 			const first = await runPass();
 			const second = await runPass();
+			expect(watermarkWriteAttempted).toBe(true);
 			const firstThinking = (first[1] as { content: Record<string, unknown>[] })
 				.content[0];
 			expect(firstThinking).toMatchObject({
 				thinking: "durable secret",
 				thinkingSignature: "sig",
+			});
+			expect(first[1]).toMatchObject({
+				providerPayload: {
+					items: [
+						{
+							type: "reasoning",
+							encrypted_content: "durable native reasoning",
+						},
+					],
+				},
 			});
 			expect(JSON.stringify(second)).toBe(JSON.stringify(first));
 			expect(

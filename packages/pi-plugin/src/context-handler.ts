@@ -223,6 +223,7 @@ import {
 	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
+import { canClearNativeReasoning } from "./native-replay-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
 	resolvePiUsableContextLimit,
@@ -3086,6 +3087,7 @@ export function registerPiContextHandler(
 					clearReasoningAge:
 						options.heuristics?.clearReasoningAge ??
 						DEFAULT_CLEAR_REASONING_AGE,
+					nativeReasoningMayClear: canClearNativeReasoning(ctx.model),
 				},
 				canUseEmptySentinels,
 				temporalAwareness: options.injection?.temporalAwareness === true,
@@ -4529,6 +4531,7 @@ interface RunPipelineArgs {
 	 */
 	reasoningClearing?: {
 		clearReasoningAge: number;
+		nativeReasoningMayClear: boolean;
 	};
 	/** True only when the active provider filters empty sentinel content safely. */
 	canUseEmptySentinels: boolean;
@@ -4624,16 +4627,27 @@ function captureReasoningMutationRollback(
 ): () => void {
 	const snapshots: Array<{
 		part: Record<string, unknown>;
-		field: "thinking" | "text";
+		field: "thinking" | "text" | "providerPayload";
 		value: unknown;
 		hadSignature?: boolean;
 		signature?: unknown;
 	}> = [];
 	for (const raw of messages) {
 		if (!raw || typeof raw !== "object") continue;
-		const message = raw as { role?: unknown; content?: unknown };
+		const message = raw as {
+			role?: unknown;
+			content?: unknown;
+			providerPayload?: unknown;
+		};
 		if (message.role !== "assistant" || !Array.isArray(message.content))
 			continue;
+		if (Object.hasOwn(message, "providerPayload")) {
+			snapshots.push({
+				part: message,
+				field: "providerPayload",
+				value: message.providerPayload,
+			});
+		}
 		for (const rawPart of message.content) {
 			if (!rawPart || typeof rawPart !== "object") continue;
 			const part = rawPart as Record<string, unknown>;
@@ -5339,6 +5353,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				sessionId: args.sessionId,
 				messages: workingMessages,
 				messageIdToMaxTag,
+				nativeReasoningMayClear: args.reasoningClearing.nativeReasoningMayClear,
 				piMessageStableId: stableIdResolver,
 			});
 			const inlineReplay = replayStrippedInlineThinkingPi({
@@ -5651,6 +5666,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
+				nativeReasoningMayClear: args.reasoningClearing.nativeReasoningMayClear,
 				piMessageStableId: stableIdResolver,
 			});
 			const stripOutcome = stripInlineThinkingPi({

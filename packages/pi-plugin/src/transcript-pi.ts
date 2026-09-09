@@ -77,6 +77,7 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
+import { rewriteNativeToolInput } from "./native-replay-pi";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
@@ -674,6 +675,7 @@ function createPiAssistantPart(
 					...(working[messageIndex] as PiAssistantMessage),
 					content: newContent,
 				};
+				rewriteNativeToolInput(working[messageIndex], p.id, replacementArgs);
 				markDirty(messageIndex);
 				return true;
 			}
@@ -733,6 +735,7 @@ function createPiAssistantPart(
 				...(working[messageIndex] as PiAssistantMessage),
 				content: newContent,
 			};
+			rewriteNativeToolInput(working[messageIndex], p.id, input);
 			markDirty(messageIndex);
 			return true;
 		},
@@ -777,6 +780,14 @@ function createPiAssistantPart(
 				...(working[messageIndex] as PiAssistantMessage),
 				content: newContent,
 			};
+			const replacement = newContent[partIndex];
+			if (existing?.type === "toolCall" && replacement?.type === "toolCall") {
+				rewriteNativeToolInput(
+					working[messageIndex],
+					existing.id,
+					replacement.arguments,
+				);
+			}
 			markDirty(messageIndex);
 			return true;
 		},

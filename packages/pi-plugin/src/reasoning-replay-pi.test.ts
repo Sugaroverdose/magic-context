@@ -128,6 +128,119 @@ describe("clearOldReasoningPi", () => {
 		});
 	});
 
+	it("clears native-only reasoning and replays the same durable watermark", () => {
+		const db = makeDb();
+		const sessionId = "ses-native-reasoning";
+		try {
+			const native = {
+				type: "openaiResponsesHistory",
+				dt: true,
+				items: [
+					{ type: "reasoning", encrypted_content: "persisted-only-reasoning" },
+					{
+						type: "function_call",
+						id: "fc1",
+						call_id: "call1",
+						name: "read",
+						arguments: "{}",
+					},
+				],
+			};
+			const original = {
+				role: "assistant",
+				timestamp: 1,
+				content: [
+					{ type: "thinking", thinking: "" },
+					{ type: "toolCall", id: "call1|fc1", name: "read", arguments: {} },
+				],
+				providerPayload: native,
+			};
+			const first = structuredClone(original);
+			const messageIdToMaxTag = new Map<string, number>();
+			messageIdToMaxTag.set("a", 1);
+			messageIdToMaxTag.set("recent", 10);
+			const options = {
+				messageIdToMaxTag,
+				piMessageStableId: () => "a",
+				nativeReasoningMayClear: true,
+			};
+			const cleared = clearOldReasoningPi({
+				...options,
+				messages: [first],
+				clearReasoningAge: 3,
+			});
+			expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
+			expect(first.providerPayload.items).toEqual([native.items[1]]);
+
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				clearedReasoningThroughTag: cleared.newWatermark,
+			});
+			const resumed = structuredClone(original);
+			expect(
+				replayClearedReasoningPi({
+					...options,
+					messages: [resumed],
+					db,
+					sessionId,
+				}),
+			).toBe(1);
+			expect(resumed.providerPayload).toEqual(first.providerPayload);
+			expect(native.items[0]).toEqual({
+				type: "reasoning",
+				encrypted_content: "persisted-only-reasoning",
+			});
+		} finally {
+			db.close();
+		}
+	});
+
+	it("does not claim to clear reasoning owned by a full native snapshot", () => {
+		const db = makeDb();
+		const sessionId = "ses-native-snapshot";
+		try {
+			const message = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "required history",
+						thinkingSignature: "sig",
+					},
+				],
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					dt: false,
+					items: [
+						{ type: "reasoning", encrypted_content: "snapshot-reasoning" },
+					],
+				},
+			};
+			const before = JSON.stringify(message);
+			const messageIdToMaxTag = new Map<string, number>();
+			messageIdToMaxTag.set("a", 1);
+			messageIdToMaxTag.set("recent", 10);
+			const options = {
+				messages: [message],
+				messageIdToMaxTag,
+				nativeReasoningMayClear: true,
+				piMessageStableId: () => "a",
+			};
+			expect(clearOldReasoningPi({ ...options, clearReasoningAge: 3 })).toEqual(
+				{
+					cleared: 0,
+					newWatermark: 0,
+				},
+			);
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, { clearedReasoningThroughTag: 1 });
+			expect(replayClearedReasoningPi({ ...options, db, sessionId })).toBe(0);
+			expect(JSON.stringify(message)).toBe(before);
+		} finally {
+			db.close();
+		}
+	});
+
 	it("does nothing when ageCutoff is 0 or below", () => {
 		const messages = [
 			{

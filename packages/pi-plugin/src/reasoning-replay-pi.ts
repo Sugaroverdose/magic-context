@@ -37,6 +37,7 @@
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
+import { clearNativeReasoning } from "./native-replay-pi";
 
 type PiTextContent = { type: "text"; text: string };
 type PiThinkingContent = {
@@ -120,6 +121,7 @@ export function clearOldReasoningPi(args: {
 	messages: unknown[];
 	messageIdToMaxTag: Map<string, number>;
 	clearReasoningAge: number;
+	nativeReasoningMayClear?: boolean;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 }): { cleared: number; newWatermark: number } {
 	const { messages, messageIdToMaxTag, clearReasoningAge, piMessageStableId } =
@@ -145,6 +147,13 @@ export function clearOldReasoningPi(args: {
 		if (!id) continue;
 		const msgTag = messageIdToMaxTag.get(id) ?? 0;
 		if (msgTag === 0 || msgTag > ageCutoff) continue;
+
+		const nativeReasoning = clearNativeReasoning(
+			msg,
+			args.nativeReasoningMayClear === true,
+		);
+		if (nativeReasoning === "preserved") continue;
+		const clearedBefore = cleared;
 
 		for (const part of msg.content) {
 			if (
@@ -173,6 +182,7 @@ export function clearOldReasoningPi(args: {
 				}
 			}
 		}
+		if (nativeReasoning === "cleared" && cleared === clearedBefore) cleared++;
 
 		if (cleared > 0 && msgTag > newWatermark) newWatermark = msgTag;
 	}
@@ -251,6 +261,7 @@ export function replayClearedReasoningPi(args: {
 	sessionId: string;
 	messages: unknown[];
 	messageIdToMaxTag: Map<string, number>;
+	nativeReasoningMayClear?: boolean;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 }): number {
 	const { db, sessionId, messages, messageIdToMaxTag, piMessageStableId } =
@@ -271,6 +282,13 @@ export function replayClearedReasoningPi(args: {
 		if (!id) continue;
 		const msgTag = messageIdToMaxTag.get(id) ?? 0;
 		if (msgTag === 0 || msgTag > watermark) continue;
+
+		const nativeReasoning = clearNativeReasoning(
+			msg,
+			args.nativeReasoningMayClear === true,
+		);
+		if (nativeReasoning === "preserved") continue;
+		const clearedBefore = cleared;
 
 		for (const part of msg.content) {
 			if (
@@ -293,6 +311,7 @@ export function replayClearedReasoningPi(args: {
 				}
 			}
 		}
+		if (nativeReasoning === "cleared" && cleared === clearedBefore) cleared++;
 	}
 	return cleared;
 }

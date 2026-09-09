@@ -75,6 +75,91 @@ describe("createPiTranscript", () => {
 		expect(transcript.getOutputMessages()).toBe(messages);
 	});
 
+	it("keeps native text stable while reducing a paired tool input", () => {
+		const db = createTestDb();
+		try {
+			const text = "  Keep the indentation and the explanation";
+			const reasoning = {
+				type: "reasoning",
+				encrypted_content: "unrelated-encrypted-reasoning",
+			};
+			const hostedOutput = {
+				type: "image_generation_call",
+				result: "image-data",
+			};
+			const native = {
+				type: "openaiResponsesHistory",
+				dt: true,
+				items: [
+					reasoning,
+					hostedOutput,
+					{
+						type: "message",
+						role: "assistant",
+						id: "msg-answer",
+						content: [{ type: "output_text", text }],
+					},
+					{
+						type: "function_call",
+						id: "fc-write",
+						call_id: "call-write",
+						name: "write",
+						arguments: JSON.stringify({ content: "large original input" }),
+					},
+				],
+			};
+			const original = {
+				...assistantMessage(text, 1, {
+					content: [
+						{ type: "text", text, textSignature: "msg-answer" },
+						{
+							type: "toolCall",
+							id: "call-write|fc-write",
+							name: "write",
+							arguments: { content: "large original input" },
+						},
+					],
+				}),
+				providerPayload: native,
+			};
+			const messages = [
+				original,
+				toolResultMessage("call-write|fc-write", "written", 2),
+			];
+			const sessionId = "ses-native-replay";
+			const tagger = createTagger();
+			tagger.initFromDb(sessionId, db);
+			const tagged = createPiTranscript(messages, sessionId);
+			tagTranscript(sessionId, tagged, tagger, db);
+			tagged.commit();
+			const taggedAssistant = messages[0] as typeof original;
+			expect(textOf(taggedAssistant)).not.toBe(text);
+			expect(taggedAssistant.providerPayload).toBe(native);
+
+			const reduced = createPiTranscript(messages, sessionId);
+			const toolPart = reduced.messages[0]?.parts[1];
+			if (!toolPart) throw new Error("missing tool part");
+			toolPart.replaceWithSentinel("[dropped input]");
+			reduced.commit();
+			const payload = (messages[0] as typeof original).providerPayload;
+			expect(payload.items[2]).toEqual(native.items[2]);
+			expect(payload.items[3]).toMatchObject({
+				type: "function_call",
+				id: "fc-write",
+				call_id: "call-write",
+				name: "write",
+				arguments: JSON.stringify({ dropped: "[dropped input]" }),
+			});
+			expect(payload.items[0]).toEqual(reasoning);
+			expect(payload.items[1]).toEqual(hostedOutput);
+			expect(native.items[3]).toMatchObject({
+				arguments: JSON.stringify({ content: "large original input" }),
+			});
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("leaves Pi and OMP whitespace-only assistant framing untagged after peeling MC tags", () => {
 		const vectors = [
 			{
