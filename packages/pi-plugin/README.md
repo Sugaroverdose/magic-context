@@ -80,6 +80,8 @@ OMP can replay Responses/Codex history from `providerPayload` instead of ordinar
 
 Display summaries (`summary`) are removed with eligible old encrypted reasoning; they are the source of ordinary Pi `thinking`, not a native preservation requirement. Retaining a native payload does not prevent per-part cleanup of stale non-redacted Pi thinking and its signature.
 
+OMP exposes no dedicated native-item mutation API, so this adapter targets its current Responses history representation. It changes the request transcript; it does not perform a stored session-JSONL rewrite.
+
 ---
 
 ## Configuration
