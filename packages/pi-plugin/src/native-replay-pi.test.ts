@@ -84,6 +84,43 @@ describe("native tool input reductions", () => {
 		expect(call.input).toBe("original patch");
 	});
 
+	it("leaves native function input untouched when generic arguments cannot produce JSON", () => {
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		const unsupportedInputs: Record<string, unknown>[] = [
+			circular,
+			{ count: BigInt(1) },
+			{
+				toJSON() {
+					throw new Error("serialization failed");
+				},
+			},
+			{
+				toJSON() {
+					return undefined;
+				},
+			},
+		];
+
+		for (const input of unsupportedInputs) {
+			const call = {
+				type: "function_call",
+				id: "fc1",
+				call_id: "call1",
+				name: "read",
+				arguments: JSON.stringify({ path: "original.txt" }),
+			};
+			const message = nativeMessage([call]);
+			const payload = message.providerPayload;
+			const before = structuredClone(payload);
+
+			rewriteNativeToolInput(message, "call1|fc1", input);
+
+			expect(message.providerPayload).toBe(payload);
+			expect(message.providerPayload).toEqual(before);
+		}
+	});
+
 	it("matches unique id-less calls when OMP supplies a synthesized block id", () => {
 		const call = {
 			type: "function_call",
@@ -248,6 +285,25 @@ describe("native reasoning retention", () => {
 		expect(clearNativeReasoning(message, true)).toBe("cleared");
 		expect(message.providerPayload.items).toEqual([text, call, image]);
 		expect(original.items).toEqual([reasoning, text, call, image]);
+	});
+
+	it("clears eligible encrypted native reasoning with a display summary", () => {
+		const reasoning = {
+			type: "reasoning",
+			encrypted_content: "opaque-encrypted-content",
+			summary: [{ type: "summary_text", text: "displayed thinking" }],
+		};
+		const text = {
+			type: "message",
+			role: "assistant",
+			content: [{ type: "output_text", text: "keep" }],
+		};
+		const message = nativeMessage([reasoning, text]);
+		const original = message.providerPayload;
+
+		expect(clearNativeReasoning(message, true)).toBe("cleared");
+		expect(message.providerPayload.items).toEqual([text]);
+		expect(original.items).toEqual([reasoning, text]);
 	});
 
 	it("retains native reasoning when the active model has not authorized omission", () => {

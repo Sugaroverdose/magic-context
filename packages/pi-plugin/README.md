@@ -78,6 +78,8 @@ OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-p
 
 OMP can replay Responses/Codex history from `providerPayload` instead of ordinary message content. Tool-input reductions update the matched native call without discarding unrelated native results. Old encrypted reasoning is cleared only for Codex models whose resolved compatibility settings explicitly allow omission, and only from incremental history. Other models, full snapshots, plaintext or malformed reasoning, redacted thinking, and computer-linked reasoning retain their native reasoning. Native text and user/developer history carriers are not rewritten.
 
+Display summaries (`summary`) are removed with eligible old encrypted reasoning; they are the source of ordinary Pi `thinking`, not a native preservation requirement. Retaining a native payload does not prevent per-part cleanup of stale non-redacted Pi thinking and its signature.
+
 ---
 
 ## Configuration

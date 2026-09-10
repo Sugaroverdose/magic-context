@@ -152,7 +152,8 @@ export function clearOldReasoningPi(args: {
 			msg,
 			args.nativeReasoningMayClear === true,
 		);
-		if (nativeReasoning === "preserved") continue;
+		// Native preservation protects providerPayload only; local Pi thinking
+		// still follows the ordinary per-part cleanup policy.
 		const clearedBefore = cleared;
 
 		for (const part of msg.content) {
@@ -287,7 +288,8 @@ export function replayClearedReasoningPi(args: {
 			msg,
 			args.nativeReasoningMayClear === true,
 		);
-		if (nativeReasoning === "preserved") continue;
+		// Native preservation protects providerPayload only; local Pi thinking
+		// still follows the ordinary per-part cleanup policy.
 		const clearedBefore = cleared;
 
 		for (const part of msg.content) {

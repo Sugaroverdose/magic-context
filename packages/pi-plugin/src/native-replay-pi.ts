@@ -99,12 +99,16 @@ export function rewriteNativeToolInput(
 	if (!match) return;
 
 	const field = match.kind === "function_call" ? "arguments" : "input";
-	const nextValue =
-		match.kind === "function_call"
-			? JSON.stringify(input)
-			: typeof input.input === "string"
-				? input.input
-				: "";
+	let nextValue: string | undefined;
+	if (match.kind === "function_call") {
+		try {
+			nextValue = JSON.stringify(input);
+		} catch {
+			return;
+		}
+	} else {
+		nextValue = typeof input.input === "string" ? input.input : "";
+	}
 	if (typeof nextValue !== "string" || match.item[field] === nextValue) return;
 
 	const items = envelope.items.slice();

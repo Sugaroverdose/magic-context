@@ -3619,6 +3619,76 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("replays an inline-only watermark after restart without fresh age cleanup", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-inline-reasoning-watermark";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				heuristics: { clearReasoningAge: 1 },
+				scheduler: { executeThresholdPercentage: 80 },
+			});
+			let handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] } | undefined>;
+			const runPass = async (percent: number, newUser = false) => {
+				const messages = [
+					userMessage("first", 1),
+					assistantMessage(
+						"Keep <think>stale private thought</think> visible",
+						2,
+					),
+					userMessage("second", 3),
+					assistantMessage("latest answer", 4),
+				];
+				const entryIds = [
+					"entry-u1",
+					"entry-inline",
+					"entry-u2",
+					"entry-latest",
+				];
+				if (newUser) {
+					messages.push(userMessage("new request", 5));
+					entryIds.push("entry-new");
+				}
+				const result = await handler({ messages: messages as never[] }, {
+					...fakeContext(sessionId, process.cwd(), entryIds, messages as never),
+					getContextUsage: () => ({
+						tokens: percent * 1_000,
+						percent,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				if (!result) throw new Error("expected transformed messages");
+				return result.messages;
+			};
+
+			const executed = await runPass(90);
+			expect(textOf(executed[1])).toContain("Keep visible");
+			expect(textOf(executed[1])).not.toContain("stale private thought");
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 1,
+				lastInputTokens: 1_000,
+			});
+			clearContextHandlerSession(sessionId);
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				heuristics: { clearReasoningAge: 100 },
+				scheduler: { executeThresholdPercentage: 80 },
+			});
+			handler = fake.handlers.get("context") as typeof handler;
+			const replayed = await runPass(1, true);
+			expect(textOf(replayed[1])).toBe(textOf(executed[1]));
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
 	it("restores reasoning bytes when the durable watermark write fails", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-reasoning-watermark-failure";

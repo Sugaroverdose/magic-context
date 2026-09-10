@@ -195,11 +195,16 @@ describe("clearOldReasoningPi", () => {
 		}
 	});
 
-	it("does not claim to clear reasoning owned by a full native snapshot", () => {
+	it("preserves a full native snapshot while clearing local Pi thinking and replaying its watermark", () => {
 		const db = makeDb();
 		const sessionId = "ses-native-snapshot";
 		try {
-			const message = {
+			const native = {
+				type: "openaiResponsesHistory",
+				dt: false,
+				items: [{ type: "reasoning", encrypted_content: "snapshot-reasoning" }],
+			};
+			const original = {
 				role: "assistant",
 				content: [
 					{
@@ -207,35 +212,146 @@ describe("clearOldReasoningPi", () => {
 						thinking: "required history",
 						thinkingSignature: "sig",
 					},
+					{ type: "text", text: "reply" },
 				],
-				providerPayload: {
-					type: "openaiResponsesHistory",
-					dt: false,
-					items: [
-						{ type: "reasoning", encrypted_content: "snapshot-reasoning" },
-					],
-				},
+				providerPayload: native,
 			};
-			const before = JSON.stringify(message);
-			const messageIdToMaxTag = new Map<string, number>();
-			messageIdToMaxTag.set("a", 1);
-			messageIdToMaxTag.set("recent", 10);
+			const nativeSnapshot = structuredClone(native);
+			const messageIdToMaxTag = new Map<string, number>([
+				["a", 1],
+				["recent", 10],
+			]);
 			const options = {
-				messages: [message],
 				messageIdToMaxTag,
 				nativeReasoningMayClear: true,
 				piMessageStableId: () => "a",
 			};
-			expect(clearOldReasoningPi({ ...options, clearReasoningAge: 3 })).toEqual(
-				{
-					cleared: 0,
-					newWatermark: 0,
-				},
-			);
+
+			const first = structuredClone(original);
+			const cleared = clearOldReasoningPi({
+				...options,
+				messages: [first],
+				clearReasoningAge: 3,
+			});
+			expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
+			expect(first.content).toEqual([
+				{ type: "thinking", thinking: "" },
+				{ type: "text", text: "reply" },
+			]);
+			expect(first.providerPayload).toEqual(nativeSnapshot);
+
 			getOrCreateSessionMeta(db, sessionId);
-			updateSessionMeta(db, sessionId, { clearedReasoningThroughTag: 1 });
-			expect(replayClearedReasoningPi({ ...options, db, sessionId })).toBe(0);
-			expect(JSON.stringify(message)).toBe(before);
+			updateSessionMeta(db, sessionId, {
+				clearedReasoningThroughTag: cleared.newWatermark,
+			});
+			const resumed = structuredClone(original);
+			expect(
+				replayClearedReasoningPi({
+					...options,
+					messages: [resumed],
+					db,
+					sessionId,
+				}),
+			).toBe(1);
+			expect(resumed).toEqual(first);
+			expect(resumed.providerPayload).toEqual(nativeSnapshot);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("cleans local thinking when native clearing is disallowed or native reasoning has plaintext", () => {
+		const db = makeDb();
+		try {
+			for (const fixture of [
+				{
+					label: "native-clearing-disallowed",
+					nativeReasoningMayClear: false,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						dt: true,
+						items: [
+							{
+								type: "reasoning",
+								encrypted_content: "opaque-encrypted-content",
+							},
+						],
+					},
+				},
+				{
+					label: "plaintext-native-reasoning",
+					nativeReasoningMayClear: true,
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						dt: true,
+						items: [
+							{
+								type: "reasoning",
+								encrypted_content: "opaque-encrypted-content",
+								content: [
+									{
+										type: "reasoning_text",
+										text: "required plaintext",
+									},
+								],
+							},
+						],
+					},
+				},
+			] as const) {
+				const original = {
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: "ordinary local thinking",
+							thinkingSignature: "local-signature",
+						},
+						{ type: "text", text: "reply" },
+					],
+					providerPayload: fixture.providerPayload,
+				};
+				const nativeSnapshot = structuredClone(fixture.providerPayload);
+				const messageIdToMaxTag = new Map<string, number>([
+					["a", 1],
+					["recent", 4],
+				]);
+				const options = {
+					messageIdToMaxTag,
+					nativeReasoningMayClear: fixture.nativeReasoningMayClear,
+					piMessageStableId: () => "a",
+				};
+
+				const first = structuredClone(original);
+				const cleared = clearOldReasoningPi({
+					...options,
+					messages: [first],
+					clearReasoningAge: 2,
+				});
+				expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
+				expect(first.content).toEqual([
+					{ type: "thinking", thinking: "" },
+					{ type: "text", text: "reply" },
+				]);
+				expect(first.providerPayload).toEqual(nativeSnapshot);
+
+				const sessionId = `ses-${fixture.label}`;
+				getOrCreateSessionMeta(db, sessionId);
+				updateSessionMeta(db, sessionId, {
+					clearedReasoningThroughTag: cleared.newWatermark,
+				});
+				const resumed = structuredClone(original);
+				expect(
+					replayClearedReasoningPi({
+						...options,
+						messages: [resumed],
+						db,
+						sessionId,
+					}),
+				).toBe(1);
+				expect(resumed).toEqual(first);
+				expect(resumed.providerPayload).toEqual(nativeSnapshot);
+			}
 		} finally {
 			db.close();
 		}
@@ -262,15 +378,23 @@ describe("clearOldReasoningPi", () => {
 		expect(result.newWatermark).toBe(0);
 	});
 
-	it("leaves REDACTED thinking blocks untouched (signature + data preserved)", () => {
-		// A redacted block bypasses the empty-thinking drop in Pi's serializers
-		// (transform-messages.ts / anthropic.ts serialize `redacted` before the
-		// empty check), so emptying it + dropping the signature would leave a
-		// malformed redacted block on the wire. It must be preserved verbatim.
-		const messages = [
-			{
+	it("preserves redacted and native blocks while clearing ordinary local thinking", () => {
+		// Redacted blocks serialize before empty blocks, so they remain verbatim;
+		// ordinary local thinking in the same message must still be cleared.
+		const db = makeDb();
+		const sessionId = "ses-mixed-generic-thinking";
+		try {
+			const native = {
+				type: "openaiResponsesHistory",
+				dt: true,
+				items: [
+					{ type: "reasoning", encrypted_content: "opaque native reasoning" },
+				],
+			};
+			const original = {
 				role: "assistant",
 				timestamp: 1,
+				providerPayload: native,
 				content: [
 					{
 						type: "thinking",
@@ -278,25 +402,60 @@ describe("clearOldReasoningPi", () => {
 						thinkingSignature: "sig-abc",
 						redacted: true,
 					},
+					{
+						type: "thinking",
+						thinking: "ordinary local thinking",
+						thinkingSignature: "ordinary-signature",
+					},
+					{ type: "text", text: "reply" },
 				],
-			},
-		];
-		const id0 = piMessageStableId(messages[0], 0);
-		if (!id0) throw new Error("piMessageStableId returned undefined");
-		const messageIdToMaxTag = new Map<string, number>([[id0, 1]]);
-		const result = clearOldReasoningPi({
-			messages,
-			messageIdToMaxTag,
-			clearReasoningAge: 1,
-			piMessageStableId,
-		});
-		expect(result.cleared).toBe(0);
-		expect(messages[0].content[0]).toMatchObject({
-			type: "thinking",
-			thinking: "opaque-redacted-payload",
-			thinkingSignature: "sig-abc",
-			redacted: true,
-		});
+			};
+			const messageIdToMaxTag = new Map<string, number>([
+				[requireId(original, 0), 1],
+				["recent", 4],
+			]);
+			const options = {
+				messageIdToMaxTag,
+				piMessageStableId,
+				nativeReasoningMayClear: true,
+			};
+
+			const first = structuredClone(original);
+			const cleared = clearOldReasoningPi({
+				...options,
+				messages: [first],
+				clearReasoningAge: 2,
+			});
+			expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
+			expect(first.content).toEqual([
+				{
+					type: "thinking",
+					thinking: "opaque-redacted-payload",
+					thinkingSignature: "sig-abc",
+					redacted: true,
+				},
+				{ type: "thinking", thinking: "" },
+				{ type: "text", text: "reply" },
+			]);
+			expect(first.providerPayload).toEqual(native);
+
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				clearedReasoningThroughTag: cleared.newWatermark,
+			});
+			const resumed = structuredClone(original);
+			expect(
+				replayClearedReasoningPi({
+					...options,
+					messages: [resumed],
+					db,
+					sessionId,
+				}),
+			).toBe(1);
+			expect(resumed).toEqual(first);
+		} finally {
+			db.close();
+		}
 	});
 });
 

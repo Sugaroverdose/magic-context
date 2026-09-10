@@ -4624,6 +4624,7 @@ function pendingPiMarkerCoveredByRenderedBoundary(
 
 function captureReasoningMutationRollback(
 	messages: readonly unknown[],
+	nativeReasoningMayClear: boolean,
 ): () => void {
 	const snapshots: Array<{
 		part: Record<string, unknown>;
@@ -4641,7 +4642,7 @@ function captureReasoningMutationRollback(
 		};
 		if (message.role !== "assistant" || !Array.isArray(message.content))
 			continue;
-		if (Object.hasOwn(message, "providerPayload")) {
+		if (nativeReasoningMayClear && Object.hasOwn(message, "providerPayload")) {
 			snapshots.push({
 				part: message,
 				field: "providerPayload",
@@ -5658,7 +5659,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// wire on a pass that already dropped tools (inconsistent + a missed
 	// same-pass mutation). shouldRunHeuristics is the broader, correct set.
 	if (args.reasoningClearing && shouldRunHeuristics && routineCleanupApplied) {
-		const rollbackReasoning = captureReasoningMutationRollback(workingMessages);
+		const rollbackReasoning = captureReasoningMutationRollback(
+			workingMessages,
+			args.reasoningClearing.nativeReasoningMayClear,
+		);
 		try {
 			const tClearReasoning = performance.now();
 			const prevWatermark = args.sessionMeta.clearedReasoningThroughTag ?? 0;
