@@ -37,7 +37,6 @@
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
-import { clearNativeReasoning } from "./native-replay-pi";
 
 type PiTextContent = { type: "text"; text: string };
 type PiThinkingContent = {
@@ -110,10 +109,10 @@ export function buildMessageIdToMaxTag(
 }
 
 /**
- * Clear typed reasoning on assistant messages whose tag number is
- * older than `(maxTag - clearReasoningAge)`. Returns the highest tag
- * number that was actually cleared, so the caller can persist the
- * watermark via `setReasoningWatermark`.
+ * Clear local typed reasoning on assistant messages whose tag number is older
+ * than `(maxTag - clearReasoningAge)`. Returns the highest tag number that was
+ * actually cleared, so the caller can persist the local watermark via
+ * `setReasoningWatermark`.
  *
  * Mirrors OpenCode's `clearOldReasoning` (strip-content.ts).
  */
@@ -121,7 +120,6 @@ export function clearOldReasoningPi(args: {
 	messages: unknown[];
 	messageIdToMaxTag: Map<string, number>;
 	clearReasoningAge: number;
-	nativeReasoningMayClear?: boolean;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 }): { cleared: number; newWatermark: number } {
 	const { messages, messageIdToMaxTag, clearReasoningAge, piMessageStableId } =
@@ -148,14 +146,7 @@ export function clearOldReasoningPi(args: {
 		const msgTag = messageIdToMaxTag.get(id) ?? 0;
 		if (msgTag === 0 || msgTag > ageCutoff) continue;
 
-		const nativeReasoning = clearNativeReasoning(
-			msg,
-			args.nativeReasoningMayClear === true,
-		);
-		// Native preservation protects providerPayload only; local Pi thinking
-		// still follows the ordinary per-part cleanup policy.
-		const clearedBefore = cleared;
-
+		let clearedThisMessage = false;
 		for (const part of msg.content) {
 			if (
 				part &&
@@ -180,12 +171,13 @@ export function clearOldReasoningPi(args: {
 					tp.thinking = CLEARED;
 					tp.thinkingSignature = undefined;
 					cleared++;
+					clearedThisMessage = true;
 				}
 			}
 		}
-		if (nativeReasoning === "cleared" && cleared === clearedBefore) cleared++;
-
-		if (cleared > 0 && msgTag > newWatermark) newWatermark = msgTag;
+		if (clearedThisMessage && msgTag > newWatermark) {
+			newWatermark = msgTag;
+		}
 	}
 
 	return { cleared, newWatermark };
@@ -252,17 +244,15 @@ export function stripInlineThinkingPi(args: {
 }
 
 /**
- * Replay typed-reasoning clearing on EVERY pass (execute or defer).
- * Mirrors OpenCode's `replayClearedReasoning` — required for cache
- * stability so the Pi assistant content array stays byte-identical
- * across passes.
+ * Replay local typed-reasoning clearing on EVERY pass (execute or defer).
+ * Mirrors OpenCode's `replayClearedReasoning` — required for cache stability
+ * so the Pi assistant content array stays byte-identical across passes.
  */
 export function replayClearedReasoningPi(args: {
 	db: ContextDatabase;
 	sessionId: string;
 	messages: unknown[];
 	messageIdToMaxTag: Map<string, number>;
-	nativeReasoningMayClear?: boolean;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 }): number {
 	const { db, sessionId, messages, messageIdToMaxTag, piMessageStableId } =
@@ -283,14 +273,6 @@ export function replayClearedReasoningPi(args: {
 		if (!id) continue;
 		const msgTag = messageIdToMaxTag.get(id) ?? 0;
 		if (msgTag === 0 || msgTag > watermark) continue;
-
-		const nativeReasoning = clearNativeReasoning(
-			msg,
-			args.nativeReasoningMayClear === true,
-		);
-		// Native preservation protects providerPayload only; local Pi thinking
-		// still follows the ordinary per-part cleanup policy.
-		const clearedBefore = cleared;
 
 		for (const part of msg.content) {
 			if (
@@ -313,7 +295,6 @@ export function replayClearedReasoningPi(args: {
 				}
 			}
 		}
-		if (nativeReasoning === "cleared" && cleared === clearedBefore) cleared++;
 	}
 	return cleared;
 }

@@ -77,7 +77,6 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
-import { rewriteNativeToolInput } from "./native-replay-pi";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
@@ -133,6 +132,7 @@ type PiToolResultMessage = {
 };
 
 type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
+type MarkDirty = (messageIndex: number, toolCallId?: string) => void;
 
 /**
  * Wrap a Pi `AgentMessage[]` as a Transcript. Builds the normalized
@@ -164,8 +164,8 @@ export function createPiTranscript(
 	 * (tagging, drops, caveman) write to and `commit()` flushes back to source.
 	 *
 	 * Phases that mutate messages OUTSIDE the transcript part API — reasoning
-	 * clearing/replay, which set `part.thinking = "[cleared]"` in place — MUST
-	 * target this array, not the original `source`. Tagging/drops/caveman
+	 * clearing/replay, which empty local `part.thinking` in place — MUST target
+	 * this array, not the original `source`. Tagging/drops/caveman
 	 * REASSIGN `working[idx]` to fresh spread-copied objects; if reasoning mutated
 	 * `source[idx]` (a now-divergent object) instead, the later `commit()` would
 	 * overwrite `source[idx] = working[idx]` and silently discard the reasoning
@@ -175,9 +175,16 @@ export function createPiTranscript(
 	 * mutation in the single channel `commit()` flushes.
 	 */
 	getWorkingMessages(): PiAgentMessage[];
+	/**
+	 * Pi-only change inventory for the native replay stage. Keys are current
+	 * working-array indices; values are tool-call IDs whose arguments changed
+	 * through a transcript part setter.
+	 */
+	getToolInputChanges(): ReadonlyMap<number, ReadonlySet<string>>;
 } {
 	const working = source.slice() as unknown as PiAgentMessage[];
 	const dirtyMessages = new Set<number>();
+	const toolInputChanges = new Map<number, Set<string>>();
 
 	// Normalize: fold consecutive toolResult runs into the immediately
 	// following user message as tool_result transcript parts. Track
@@ -185,8 +192,15 @@ export function createPiTranscript(
 	const transcriptMessages: TranscriptMessage[] = buildTranscriptView(
 		working,
 		sessionId,
-		(messageIndex) => {
+		(messageIndex, toolCallId) => {
 			dirtyMessages.add(messageIndex);
+			if (toolCallId === undefined) return;
+			let toolCallIds = toolInputChanges.get(messageIndex);
+			if (toolCallIds === undefined) {
+				toolCallIds = new Set<string>();
+				toolInputChanges.set(messageIndex, toolCallIds);
+			}
+			toolCallIds.add(toolCallId);
 		},
 		entryIds,
 	);
@@ -228,6 +242,9 @@ export function createPiTranscript(
 		getWorkingMessages(): PiAgentMessage[] {
 			return working;
 		},
+		getToolInputChanges(): ReadonlyMap<number, ReadonlySet<string>> {
+			return toolInputChanges;
+		},
 	};
 }
 
@@ -241,7 +258,7 @@ export function createPiTranscript(
 function buildTranscriptView(
 	working: PiAgentMessage[],
 	sessionId: string | undefined,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage[] {
 	const result: TranscriptMessage[] = [];
@@ -343,7 +360,7 @@ function createUserTranscriptMessage(
 	index: number,
 	sessionId: string | undefined,
 	foldedToolResults: { msg: PiToolResultMessage; index: number }[],
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const userMsg = working[index] as PiUserMessage;
@@ -405,7 +422,7 @@ function createSyntheticToolResultUserMessage(
 	working: PiAgentMessage[],
 	sessionId: string | undefined,
 	toolResultRun: { msg: PiToolResultMessage; index: number }[],
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	return {
@@ -450,7 +467,7 @@ function createAssistantTranscriptMessage(
 	working: PiAgentMessage[],
 	index: number,
 	sessionId: string | undefined,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const msg = working[index] as PiAssistantMessage;
@@ -472,7 +489,7 @@ function createOpaqueTranscriptMessage(
 	working: PiAgentMessage[],
 	index: number,
 	sessionId: string | undefined,
-	_markDirty: (messageIndex: number) => void,
+	_markDirty: MarkDirty,
 	entryIds: readonly (string | undefined)[] | undefined,
 ): TranscriptMessage {
 	const msg = working[index];
@@ -500,7 +517,7 @@ function createOpaqueTranscriptMessage(
 function createPiUserStringPart(
 	working: PiAgentMessage[],
 	messageIndex: number,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 ): TranscriptPart {
 	return {
 		kind: "text",
@@ -544,7 +561,7 @@ function createPiUserArrayPart(
 	working: PiAgentMessage[],
 	messageIndex: number,
 	partIndex: number,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 ): TranscriptPart {
 	const msg = working[messageIndex] as PiUserMessage;
 	const part = Array.isArray(msg.content) ? msg.content[partIndex] : undefined;
@@ -605,7 +622,7 @@ function createPiAssistantPart(
 	working: PiAgentMessage[],
 	messageIndex: number,
 	partIndex: number,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 ): TranscriptPart {
 	const msg = working[messageIndex] as PiAssistantMessage;
 	const part = msg.content[partIndex];
@@ -675,8 +692,7 @@ function createPiAssistantPart(
 					...(working[messageIndex] as PiAssistantMessage),
 					content: newContent,
 				};
-				rewriteNativeToolInput(working[messageIndex], p.id, replacementArgs);
-				markDirty(messageIndex);
+				markDirty(messageIndex, p.id);
 				return true;
 			}
 			return false;
@@ -735,8 +751,7 @@ function createPiAssistantPart(
 				...(working[messageIndex] as PiAssistantMessage),
 				content: newContent,
 			};
-			rewriteNativeToolInput(working[messageIndex], p.id, input);
-			markDirty(messageIndex);
+			markDirty(messageIndex, p.id);
 			return true;
 		},
 		// Replace this assistant part's content with a sentinel placeholder.
@@ -780,15 +795,10 @@ function createPiAssistantPart(
 				...(working[messageIndex] as PiAssistantMessage),
 				content: newContent,
 			};
-			const replacement = newContent[partIndex];
-			if (existing?.type === "toolCall" && replacement?.type === "toolCall") {
-				rewriteNativeToolInput(
-					working[messageIndex],
-					existing.id,
-					replacement.arguments,
-				);
-			}
-			markDirty(messageIndex);
+			markDirty(
+				messageIndex,
+				existing?.type === "toolCall" ? existing.id : undefined,
+			);
 			return true;
 		},
 	};
@@ -798,7 +808,7 @@ function createPiToolResultPart(
 	working: PiAgentMessage[],
 	messageIndex: number,
 	partIndex: number,
-	markDirty: (messageIndex: number) => void,
+	markDirty: MarkDirty,
 ): TranscriptPart {
 	const msg = working[messageIndex] as PiToolResultMessage;
 	// Every block inside one Pi ToolResultMessage belongs to the same
