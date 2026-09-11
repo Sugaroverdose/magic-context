@@ -1147,7 +1147,8 @@ export const MagicContextConfigSchema = z
             .optional()
             .describe(
                 "Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead.",
-            ),
+            )
+            .meta({ deprecated: true }),
         clear_reasoning_age: z
             .number()
             .min(10)

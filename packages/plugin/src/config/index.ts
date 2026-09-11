@@ -25,6 +25,7 @@ import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
 import { resolveConfigProfile } from "./profiles";
 import {
+    attachProtectedTokensTierOverrides,
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
     stripUnsafeProjectConfigFields,
@@ -714,6 +715,10 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
     const recoveredTopLevelKeys: string[] = [];
     const cacheTtlConfigured = Object.hasOwn(mergedRaw, "cache_ttl");
     const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    attachProtectedTokensTierOverrides(config, {
+        trustedUser: trustedBaseConfig.protected_tokens,
+        project: projectLoaded ? profileResolution.projectBase.protected_tokens : undefined,
+    });
     if (profileResolution.activeProfile) config.profile = profileResolution.activeProfile;
     setOutputReserveConfig(config.output_reserve);
     setWindowOverlayPath(config.models?.window_overlay_path);

@@ -66,7 +66,7 @@ A work repository then needs only a selection key:
 { "profile": "work" }
 ```
 
-Resolution is `user base → selected user profile → project config`; a project selection wins over the user default. Profile overlays deep-merge, so a profile can override one harness model while base fallback chains and other settings stay intact. Profiles are defined only in user config: a project may select a known name, but project-supplied `profiles` content is ignored with a warning. An unknown selected name also warns and uses the base configuration with no profile rather than disabling Magic Context. Profiles admit only hidden-agent model selection (`historian.opencode` / `historian.pi` / `historian.omp`, `dreamer.opencode` / `dreamer.pi` / `dreamer.omp`, ); embeddings, prompts, storage, compaction, memory gates, thresholds, and other durable behavior stay outside them.
+Resolution is `user base → selected user profile → project config`; a project selection wins over the user default. Profile overlays deep-merge, so a profile can override one harness model while base fallback chains and other settings stay intact. Profiles are defined only in user config: a project may select a known name, but project-supplied `profiles` content is ignored with a warning. An unknown selected name also warns and uses the base configuration with no profile rather than disabling Magic Context. Profiles admit only hidden-agent model selection (`historian.opencode` / `historian.pi` / `historian.omp`, `dreamer.opencode` / `dreamer.pi` / `dreamer.omp`); embeddings, prompts, storage, compaction, memory gates, thresholds, and other durable behavior stay outside them.
 
 ### Cross-harness scoping
 
@@ -218,7 +218,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `language` | `string` | unset | User-config-only output language for Magic Context generated prose and primary guidance, as a 2-letter ISO 639-1 code, for example `"tr"`, `"es"`, or `"pt"`. Structural tokens stay in English. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
 | `output_reserve` | `number` or `object` | automatic | User-config-only output-token reservation override. `0` disables reservation; supports per-model maps. See below. |
-| `protected_tags` | `number` (1–100) | `20` | Last N active tags immune from immediate dropping. |
+| `protected_tokens` | absolute integer (4,000–1,000,000) | derived | Token floor protected from automatic reclaim. When omitted, derives as `clamp(round(0.05 × usableSoft), min(16,000, round(0.08 × usableSoft)), 64,000)`. Project config may only raise the resolved user-or-derived floor. |
 | `toast_duration_ms` | `number` (0–60000) | `5000` | TUI toast lifetime for Magic Context notifications in milliseconds. Increase this if toasts disappear too quickly, or set to `0` to disable Magic Context toasts entirely. |
 | `execute_threshold_percentage` | `number` (20–90) or `object` | `65` | Context usage that forces queued ops to execute. Capped at 90% of the output-reserved safe window, leaving about 10% for in-turn input growth. Supports per-model maps. |
 | `execute_threshold_tokens` | `object` (per-model map) | — | **Optional absolute-tokens variant of `execute_threshold_percentage`.** Per-model map (e.g. `{ "default": 150000, "github-copilot/gpt-5.2-codex": 40000 }`). When set for a model, overrides the percentage-based threshold for that model. Clamped to `90% × context_limit` with a warn log. Requires a resolvable context limit — falls through to percentage if unavailable. See below. |
@@ -232,6 +232,8 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `todowrite` | `object` | See below | **Pi only.** Controls Magic Context's built-in `todowrite` tool and persistent task overlay. OpenCode has its own built-in `todowrite`, so this setting has no effect there. |
 | `sqlite` | `object` | See below | Per-connection SQLite tuning for Magic Context's own `context.db`. |
 | `storage.enforce_private_permissions` | `boolean` | `true` | User-config-only. Keep owner-only `0700` directories and `0600` files. Set `false` only for an externally managed trusted-group deployment; Magic Context will never re-tighten storage permissions. |
+
+`protected_tags` is deprecated and ignored. Remove it and use `protected_tokens` when an explicit absolute floor is needed.
 
 ### `fail_closed_blocking`
 
@@ -820,7 +822,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "default": 65,
     "anthropic/claude-opus-4-6": 50
   },
-  "protected_tags": 10,
+  "protected_tokens": 20000,
   "toast_duration_ms": 12000,
   "history_budget_percentage": 0.15,
   "temporal_awareness": true,

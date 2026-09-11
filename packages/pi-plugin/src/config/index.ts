@@ -12,6 +12,7 @@ import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2"
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
 import { resolveConfigProfile } from "@magic-context/core/config/profiles";
 import {
+	attachProtectedTokensTierOverrides,
 	constrainProjectThresholdOverrides,
 	dropInheritedEmbeddingKeyOnRedirect,
 	stripUnsafeProjectConfigFields,
@@ -614,6 +615,12 @@ export function loadPiConfigDetailed(
 	const recoveredTopLevelKeys: string[] = [];
 	const cacheTtlConfigured = Object.hasOwn(rawConfig, "cache_ttl");
 	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+	attachProtectedTokensTierOverrides(parsed.config, {
+		trustedUser: trustedBaseConfig.protected_tokens,
+		project: projectLayer
+			? profileResolution.projectBase.protected_tokens
+			: undefined,
+	});
 	if (profileResolution.activeProfile)
 		parsed.config.profile = profileResolution.activeProfile;
 	setOutputReserveConfig(parsed.config.output_reserve);

@@ -29,6 +29,7 @@ import {
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
 import { migrateMagicContextConfigLocations } from "@magic-context/core/config/migrate-config-location";
+import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
 import type {
 	DreamerConfig,
 	HistorianConfig,
@@ -1236,6 +1237,8 @@ async function startPiMagicContextRuntime(
 	): PiContextHandlerOptions => ({
 		db: database,
 		smartDrops: cfg.smart_drops === true,
+		protectedTokens: cfg.protected_tokens,
+		protectedTokenTierOverrides: getProtectedTokensTierOverrides(cfg) ?? {},
 		protectedTags: cfg.protected_tags ?? 20,
 		heuristics: {
 			caveman: cfg.caveman_text_compression

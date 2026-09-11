@@ -2421,8 +2421,10 @@ export function createRustModeTransform(
                 deps.deferredMaterializationSessions?.has(sessionId) === true;
             const protectionFloorResolution = resolveEpochFloorForPass(deps.db, sessionId, {
                 configuredOverride: deps.protectedTokens,
+                tierOverrides: deps.protectedTokenTierOverrides,
                 usableSoft: transformGeometry?.usable_soft ?? 128_000,
                 isCacheBustingPass: protectionFloorCacheBustingPass,
+                onRejectedProjectOverride: (warning) => sessionLog(sessionId, warning),
             });
             if (protectionFloorResolution.snapshotChanged) {
                 sessionLog(

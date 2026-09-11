@@ -1,3 +1,4 @@
+import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import {
     type AuthorityModuleClient,
     checksumAuthoritySeedRows,
@@ -544,8 +545,10 @@ export interface TransformDeps {
     channel1StateBySession?: Map<string, import("./ctx-reduce-nudge").Channel1State>;
     /** Module-authored Channel 2 text held until the terminal `message.updated` event, when the host delivers the pending nudge. */
     channel2DirectiveTextBySession?: Map<string, string>;
-    /** Absolute protected-token floor override. Omitted uses the pass's usableSoft geometry. */
+    /** Direct absolute override for callers that do not load tiered config. */
     protectedTokens?: number;
+    /** User/project values retained until the pass supplies usableSoft geometry. */
+    protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
     /**
      * ctx_reduce visibility is resolved per session from the session's tool
      * allow-list. Tag DB rows are still maintained when the tool is unavailable,
@@ -2220,8 +2223,10 @@ export function createTransform(deps: TransformDeps) {
         const protectionUsableSoft = windowGeometry?.usableSoft ?? boundaryContextLimit;
         const protectionFloor = resolveEpochFloorForPass(db, sessionId, {
             configuredOverride: deps.protectedTokens,
+            tierOverrides: deps.protectedTokenTierOverrides,
             usableSoft: protectionUsableSoft,
             isCacheBustingPass: protectionCacheBustingPass,
+            onRejectedProjectOverride: (warning) => sessionLog(sessionId, warning),
         });
         if (protectionFloor.snapshotChanged) {
             sessionLog(

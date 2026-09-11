@@ -36,6 +36,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { ProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
 import {
 	acquireCompartmentLease,
 	COMPARTMENT_LEASE_RENEWAL_MS,
@@ -56,7 +57,7 @@ import {
 } from "@magic-context/core/features/magic-context/pi-content-decisions";
 import {
 	computeProtectionWindow,
-	readEpochFloorSnapshot,
+	getProtectionWindowForSession,
 } from "@magic-context/core/features/magic-context/protection-window";
 import {
 	createScheduler,
@@ -110,6 +111,7 @@ import {
 	type PendingPiCompactionMarker,
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
+	resolveEpochFloorForPass,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
@@ -292,16 +294,15 @@ import { createPiTranscript } from "./transcript-pi";
 const EMERGENCY_BLOCK_PERCENTAGE = 95;
 
 function newestActiveTagNumbersByCount(
-	tags: readonly { tagNumber: number; status: string }[],
+	tags: readonly { status: string; tagNumber: number }[],
 	count: number,
 ): Set<number> {
-	if (count <= 0) return new Set();
 	return new Set(
 		tags
 			.filter((tag) => tag.status === "active")
-			.map((tag) => tag.tagNumber)
-			.sort((left, right) => right - left)
-			.slice(0, count),
+			.sort((left, right) => right.tagNumber - left.tagNumber)
+			.slice(0, Math.max(0, count))
+			.map((tag) => tag.tagNumber),
 	);
 }
 
@@ -1183,6 +1184,9 @@ export interface PiContextHandlerOptions {
 	 * were getting dropped mid-task.
 	 */
 	protectedTags?: number;
+	/** Direct override for non-loader callers; production also passes tier provenance. */
+	protectedTokens?: number;
+	protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
 	language?: string;
 	/**
 	 * Optional historian wiring (Step 4b.3b). When omitted, the trigger
@@ -3170,6 +3174,9 @@ export function registerPiContextHandler(
 				messages: event.messages,
 				smartDrops: options.smartDrops === true,
 				protectedTags: options.protectedTags ?? 20,
+				protectedTokens: options.protectedTokens,
+				protectedTokenTierOverrides: options.protectedTokenTierOverrides,
+				usableSoft: windowGeometry?.usableSoft ?? usageContextLimit ?? 200_000,
 				heuristics: options.heuristics,
 				emergencyCeilingTokens,
 				injection: options.injection
@@ -4581,6 +4588,9 @@ interface RunPipelineArgs {
 	 *  sent to the model are byte-identical to the age-based-only behavior. */
 	smartDrops?: boolean;
 	protectedTags: number;
+	protectedTokens?: number;
+	protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
+	usableSoft: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
 		caveman?: { enabled: boolean; minChars: number };
@@ -5165,6 +5175,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		agentDrop: false,
 	};
 	let isCacheBustingPass = hasReclaimRide(rideSignals);
+	const usesTokenProtection =
+		args.protectedTokenTierOverrides !== undefined ||
+		args.protectedTokens !== undefined;
+	const resolveProtectionFloor = () =>
+		resolveEpochFloorForPass(args.db, args.sessionId, {
+			configuredOverride: args.protectedTokens,
+			tierOverrides: args.protectedTokenTierOverrides,
+			usableSoft: args.usableSoft,
+			isCacheBustingPass,
+			onRejectedProjectOverride: (warning) =>
+				sessionLog(args.sessionId, warning),
+		});
+	let protectionFloorResolution = resolveProtectionFloor();
 	let shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		isCacheBustingPass &&
@@ -5329,13 +5352,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
 		: [];
+	const protectionWindowForPass = getProtectionWindowForSession(
+		args.db,
+		args.sessionId,
+		protectionFloorResolution.floor,
+	);
+	const protectedTagNumbersForPass = usesTokenProtection
+		? protectionWindowForPass.protectedTagNumbers
+		: newestActiveTagNumbersByCount(
+				getActiveTagsBySession(args.db, args.sessionId),
+				args.protectedTags,
+			);
 	const pendingOperationTags =
 		pendingOps.length > 0
 			? getTagsForPendingOperations(
 					args.db,
 					args.sessionId,
 					pendingOps.map((operation) => operation.tagId),
-					args.protectedTags,
+					usesTokenProtection ? 0 : args.protectedTags,
 					RECENT_TOOL_SKELETON_WINDOW,
 				)
 			: [];
@@ -5384,7 +5418,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				newestActiveTagNumbersByCount(pendingOperationTags, args.protectedTags),
+				protectedTagNumbersForPass,
 				pendingOperationTags,
 				pendingOps,
 			);
@@ -5651,6 +5685,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.messages,
 				{
 					protectedTags: args.protectedTags,
+					protectedCutoff: usesTokenProtection
+						? protectionWindowForPass.cutoff
+						: undefined,
 					routine: routineCleanupApplied,
 					staleReduceStripEnabled: args.canUseEmptySentinels,
 					// Tiered emergency drop fires only at the derived force band AND when the
@@ -5682,6 +5719,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					args.messages,
 					{
 						protectedTags: args.protectedTags,
+						protectedCutoff: usesTokenProtection
+							? protectionWindowForPass.cutoff
+							: undefined,
 						routine: true,
 						staleReduceStripEnabled: args.canUseEmptySentinels,
 						caveman: args.isSubagent ? undefined : args.heuristics.caveman,
@@ -5906,10 +5946,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				newestActiveTagNumbersByCount(
-					getActiveTagsBySession(args.db, args.sessionId),
-					args.protectedTags,
-				),
+				protectedTagNumbersForPass,
 				undefined,
 				[],
 				syntheticPendingOps,
@@ -6380,11 +6417,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	const materialized = injectionResult?.m0Materialized === true;
 	const materializeReason = injectionResult?.m0Reason ?? null;
-	const protectionFloor = readEpochFloorSnapshot(args.db, args.sessionId) ?? 0;
-	const protectedTagNumbers = computeProtectionWindow(
-		allTagsForPass,
-		protectionFloor,
-	).protectedTagNumbers;
+	protectionFloorResolution = resolveProtectionFloor();
+	const protectedTagNumbers = usesTokenProtection
+		? computeProtectionWindow(allTagsForPass, protectionFloorResolution.floor)
+				.protectedTagNumbers
+		: newestActiveTagNumbersByCount(allTagsForPass, args.protectedTags);
 	// A defer pass cannot consume queue rows, so preserve the snapshot loaded at
 	// pass start. Execute passes may remove only a subset (protected/incomplete
 	// targets remain), and therefore retain the one correctness-required re-read.

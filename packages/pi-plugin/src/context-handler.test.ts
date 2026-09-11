@@ -15,6 +15,7 @@ import {
 	__resetMessageIndexAsyncForTests,
 	isSessionReconciled,
 } from "@magic-context/core/features/magic-context/message-index-async";
+import { readEpochFloorSnapshot } from "@magic-context/core/features/magic-context/protection-window";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import {
 	acquireWrapupInProgress,
@@ -138,6 +139,41 @@ describe("Pi context project identity cache", () => {
 			expect(usageReads).toBe(2);
 		} finally {
 			__resetProjectIdentityForTests();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+			rmSync(project, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("Pi protected-token floor wiring", () => {
+	it("snapshots the derived floor instead of a project-only decrease", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-project-protected-floor";
+		const project = mkdtempSync(join(tmpdir(), "mc-pi-protected-floor-"));
+		const fake = createFakePi();
+		try {
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTokens: 4_000,
+				protectedTokenTierOverrides: { project: 4_000 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: unknown[] } | undefined>;
+			const messages = [userMessage("keep the derived protection floor", 1)];
+			await handler({ messages: messages as never[] }, {
+				...fakeContext(sessionId, project, ["entry-user"], messages),
+				getContextUsage: () => ({
+					tokens: 1_000,
+					percent: 0.5,
+					contextWindow: 200_000,
+				}),
+			} as never);
+
+			expect(readEpochFloorSnapshot(db, sessionId)).toBe(16_000);
+		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 			rmSync(project, { recursive: true, force: true });

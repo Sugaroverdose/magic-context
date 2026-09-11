@@ -3,8 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { resolveEpochFloorForPass } from "../features/magic-context/storage-meta-persisted";
 import { buildOpenCodeConfigWarningBanner } from "../shared/config-warning-surface";
 import { resolveHistorianModel } from "../shared/model-resolution";
+import { Database } from "../shared/sqlite";
 import { createTestTempDir } from "../shared/test-temp-dir";
 import {
     getWindowOverlay,
@@ -13,6 +15,7 @@ import {
 } from "../shared/window-geometry";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 import { resolveConfigProfile } from "./profiles";
+import { getProtectedTokensTierOverrides } from "./project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "./schema/magic-context";
 import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
@@ -951,6 +954,109 @@ describe("loadPluginConfig — user-only settings", () => {
 });
 
 describe("loadPluginConfig — project compaction trust boundary", () => {
+    it("keeps protected_tokens scalar-only at both tiers and preserves the user scalar on an invalid project leaf", () => {
+        const vectors = [
+            {
+                name: "user scalar",
+                user: { protected_tokens: 20_000 },
+                project: {},
+                expected: 20_000,
+                warns: false,
+            },
+            {
+                name: "user object",
+                user: { protected_tokens: { default: 20_000 } },
+                project: {},
+                expected: undefined,
+                warns: true,
+            },
+            {
+                name: "project scalar",
+                user: {},
+                project: { protected_tokens: 20_000 },
+                expected: 20_000,
+                warns: false,
+            },
+            {
+                name: "project object",
+                user: {},
+                project: { protected_tokens: { default: 20_000 } },
+                expected: undefined,
+                warns: true,
+            },
+            {
+                name: "invalid project object over user scalar",
+                user: { protected_tokens: 25_000 },
+                project: { protected_tokens: { default: 30_000 } },
+                expected: 25_000,
+                warns: true,
+            },
+        ] as const;
+
+        for (const vector of vectors) {
+            const result = loadWithUserAndProjectConfig(
+                JSON.stringify(vector.user),
+                JSON.stringify(vector.project),
+            );
+            expect(result.protected_tokens, vector.name).toBe(vector.expected);
+            const warned = (result.configWarnings ?? []).some((warning) =>
+                warning.includes("protected_tokens"),
+            );
+            expect(warned, vector.name).toBe(vector.warns);
+        }
+    });
+
+    it("rejects a project protected_tokens floor below the derived floor once geometry is known", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({}),
+            JSON.stringify({ protected_tokens: 4_000 }),
+        );
+        const db = new Database(":memory:");
+        db.exec(`
+            CREATE TABLE session_meta (
+                session_id TEXT PRIMARY KEY,
+                harness TEXT NOT NULL DEFAULT 'opencode',
+                last_response_time INTEGER NOT NULL DEFAULT 0,
+                cache_ttl TEXT NOT NULL DEFAULT '5m',
+                counter INTEGER NOT NULL DEFAULT 0,
+                last_nudge_tokens INTEGER NOT NULL DEFAULT 0,
+                last_nudge_band TEXT NOT NULL DEFAULT '',
+                last_transform_error TEXT NOT NULL DEFAULT '',
+                is_subagent INTEGER NOT NULL DEFAULT 0,
+                last_context_percentage REAL NOT NULL DEFAULT 0,
+                last_input_tokens INTEGER NOT NULL DEFAULT 0,
+                observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_alert_sent INTEGER NOT NULL DEFAULT 0,
+                times_execute_threshold_reached INTEGER NOT NULL DEFAULT 0,
+                compartment_in_progress INTEGER NOT NULL DEFAULT 0,
+                system_prompt_hash TEXT NOT NULL DEFAULT '',
+                cleared_reasoning_through_tag INTEGER NOT NULL DEFAULT 0,
+                protected_tokens_effective INTEGER,
+                protected_tokens_pre_snapshot TEXT
+            )
+        `);
+        const warnings: string[] = [];
+        const tierOverrides = getProtectedTokensTierOverrides(result);
+
+        const resolved = resolveEpochFloorForPass(db, "loader-derived-floor", {
+            tierOverrides,
+            usableSoft: 200_000,
+            isCacheBustingPass: true,
+            onRejectedProjectOverride: (warning) => warnings.push(warning),
+        });
+        resolveEpochFloorForPass(db, "loader-derived-floor-next", {
+            tierOverrides,
+            usableSoft: 200_000,
+            isCacheBustingPass: true,
+            onRejectedProjectOverride: (warning) => warnings.push(warning),
+        });
+
+        expect(resolved.floor).toBe(16_000);
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain("protected_tokens=4000");
+        db.close();
+    });
+
     it("ignores a lower project execute_threshold_percentage with a warning", () => {
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({ execute_threshold_percentage: 60 }),
