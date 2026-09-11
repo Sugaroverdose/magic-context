@@ -17809,6 +17809,163 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cc_explicit_drop_specimen_drains_all_32_on_bust() {
+        use crate::ck_wire::{CkKind, CkOutputKind, CkToolOutput, HarnessMeta, ProviderExtras};
+        let rows: Vec<(i64, String, String, i64)> =
+            serde_json::from_str(include_str!("explicit_drop_specimen.json")).unwrap();
+        let mut messages = Vec::new();
+        let mut tag_rows = Vec::new();
+        for (tag, kind, id, tokens) in &rows {
+            let mid = id.split('#').next().unwrap();
+            let ordinal: u64 = mid.strip_prefix("ccm-").unwrap().parse().unwrap();
+            let block = if kind == "tool_result" {
+                let call_id = format!("toolu_specimen_{tag}");
+                messages.push(CkIngressMessage {
+                    mid: format!("ccm-{}", ordinal - 1),
+                    ordinal: ordinal - 1,
+                    ck: CkWireMessage::from_parts(
+                        "assistant",
+                        vec![CkWireBlock::bare(CkKind::ToolCall {
+                            id: call_id.clone(),
+                            name: "read".into(),
+                            input: serde_json::json!({"tag": tag}),
+                            provider_executed: false,
+                        })],
+                        None,
+                        ProviderExtras::new(),
+                        HarnessMeta::default(),
+                    ),
+                });
+                CkKind::ToolResult {
+                    id: call_id,
+                    tool_name: "read".into(),
+                    output: CkToolOutput::bare(CkOutputKind::Text {
+                        text: "x".repeat(*tokens as usize * 4),
+                    }),
+                    provider_executed: false,
+                }
+            } else {
+                CkKind::Text {
+                    text: "x".repeat(*tokens as usize * 4),
+                }
+            };
+            // Text and the next call can share an assistant owner in Claude Code.
+            if messages.last().is_some_and(|message| message.mid == mid) {
+                panic!("fixture contains duplicate owner {mid}");
+            }
+            messages.push(CkIngressMessage {
+                mid: mid.into(),
+                ordinal,
+                ck: CkWireMessage::from_parts(
+                    if kind == "tool_result" {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    vec![CkWireBlock::bare(block)],
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                ),
+            });
+            tag_rows.push(mc_store::McTagRow {
+                tag_number: *tag,
+                block_id: id.clone(),
+                kind: kind.clone(),
+                token_count: *tokens,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
+            });
+        }
+        // Coalesce assistant text and its following call under the same CC message id.
+        let mut merged: Vec<CkIngressMessage> = Vec::new();
+        for message in messages {
+            if let Some(previous) = merged
+                .last_mut()
+                .filter(|previous| previous.mid == message.mid)
+            {
+                let mut content = previous.ck.content.clone();
+                content.extend(message.ck.content);
+                previous.ck = CkWireMessage::from_parts(
+                    "assistant",
+                    content,
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                );
+            } else {
+                merged.push(message);
+            }
+        }
+        let projection = project_messages(&merged).unwrap();
+        let token_map = tag_rows
+            .iter()
+            .map(|row| (row.block_id.as_str(), row.token_count as usize))
+            .collect();
+        let items = projection
+            .blocks
+            .iter()
+            .map(|block| sel_item_from_flat(block, &token_map))
+            .collect::<Vec<_>>();
+        let protected = ProtectionWindow::from_persisted_rows(&tag_rows, 30_000)
+            .row_identities
+            .block_ids;
+        assert_eq!(protected.len(), 29);
+        let mut ctx = SelectionContext {
+            pass_class: PassClass::EmergencyForce,
+            current_total_input_tokens: 158_855.0,
+            ceiling_tokens: 167_000.0 * 0.85,
+            last_execute_ordinal: 0,
+            scheduler_pressure_execute: true,
+            prior_input_sample: 158_855.0,
+            has_prior_drop: false,
+            agent_drop_ids: rows.iter().map(|row| row.2.clone()).collect(),
+            agent_drop_command_ids: HashMap::new(),
+            first_applied_agent_drop_ids: HashSet::new(),
+            // The observed pass was Force85, not the scheduler's Emergency95 backstop.
+            pass_already_busting: true,
+            supersession_ride_available: true,
+            emergency_window_yields: false,
+            tag_window_protected_block_ids: protected,
+            exempt_message_protected_block_ids: HashSet::new(),
+        };
+        for already_applied in [false, true] {
+            if already_applied {
+                ctx.first_applied_agent_drop_ids
+                    .extend(ctx.agent_drop_ids.iter().cloned());
+                ctx.has_prior_drop = true;
+            }
+            let outcome = select_reductions_with_outcome(
+                &items,
+                &HashSet::new(),
+                &ctx,
+                &SelectionConfig { smart_drops: false },
+            );
+            for (tag, kind, id, _) in &rows {
+                let item = items.iter().find(|item| &item.id == id).unwrap();
+                let applied = outcome
+                    .decisions
+                    .iter()
+                    .any(|decision| &decision.target_id == id);
+                eprintln!("tag={tag} kind={kind} id={id} paired={} protected={} applied={applied} prior_command_application={already_applied}", item.arc_id.is_some(), ctx.tag_window_protected_block_ids.contains(id));
+                if kind == "tool_result" {
+                    assert!(item.arc_id.is_some());
+                }
+            }
+            assert_eq!(
+                outcome.decisions.len(),
+                32,
+                "every explicit target must drain, even when emergency selected zero"
+            );
+            if !already_applied {
+                let emergency = outcome.emergency_drop_assessment.unwrap();
+                assert_eq!(emergency.candidate_tokens, 0.0);
+                assert_eq!(emergency.selected_reclaim_tokens, 0.0);
+            }
+        }
+    }
+
+    #[test]
     fn producer_gate_runs_on_execute_force_and_hard_advisory_never_plain_defer() {
         let ctx = smart_pctx();
 
@@ -30895,7 +31052,8 @@ pub(crate) mod tests {
         for pass in 0..3 {
             let response = run(
                 &store_after_restart,
-                &with_usage(stable_request.clone(), 70, 100),
+                // Below the execute ceiling: pressure alone must not supply a new ride.
+                &with_usage(stable_request.clone(), 10, 100),
                 &spine(),
             );
             assert_eq!(
@@ -31015,7 +31173,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn persisted_tool_row_set_protects_pending_drops_by_exact_identity() {
+    fn persisted_tool_row_protection_does_not_block_explicit_drops_on_hard_bust() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let payload = "word ".repeat(1_000);
@@ -31052,7 +31210,10 @@ pub(crate) mod tests {
             frozen_red_payload(&loaded.core, "result1#0"),
             Some("[dropped]")
         );
-        assert_eq!(frozen_red_payload(&loaded.core, "result2#0"), None);
+        assert_eq!(
+            frozen_red_payload(&loaded.core, "result2#0"),
+            Some("[dropped]")
+        );
         assert_eq!(
             store
                 .load_pending_agent_drops("protected-row-identities")
@@ -31060,7 +31221,7 @@ pub(crate) mod tests {
                 .into_iter()
                 .map(|row| row.target_id)
                 .collect::<Vec<_>>(),
-            vec!["result2#0".to_string()]
+            Vec::<String>::new()
         );
     }
 
