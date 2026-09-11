@@ -18147,6 +18147,81 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn caveman_only_force_batch_holds_newly_aged_tool_until_independent_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let mut context = smart_pctx();
+        context.protected_tokens_floor = 0;
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    item("old", 3, &caveman_test_source("old")),
+                    assistant_tool_call("aged", 4, "aged"),
+                    tool_result("aged-result", 5, "aged", &"x".repeat(20_000)),
+                    item("tail", 6, "tail"),
+                ],
+            ),
+            90_000,
+            100_000,
+        );
+        request.caveman_enabled = true;
+        request.caveman_min_chars = 1;
+        request.protected_tags = 0;
+        request.protected_tokens_effective = Some(0);
+
+        let first = transform(&s, &request, &context).unwrap();
+        assert_eq!(first.action, "SOFT");
+        let first_state = s.load("ses").unwrap();
+        assert!(first_state.meta.has_prior_emergency_drop);
+        assert_eq!(first_state.meta.last_execute_ordinal, 6);
+        assert!(first_state
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "cav:old#0"));
+        assert!(!first_state
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:aged#0"));
+        let assessment = first_state
+            .meta
+            .emergency_drop_assessment
+            .as_ref()
+            .expect("the tiered tool lane must record its empty candidate walk");
+        assert_eq!(assessment.candidate_tokens, 0.0);
+        assert_eq!(assessment.selected_reclaim_tokens, 0.0);
+        assert!(assessment.target_unreachable);
+
+        let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+        request = with_usage(request, 90_100, 100_000);
+        let held = transform(&s, &request, &context).unwrap();
+        assert_eq!(serde_json::to_vec(&held.ck_messages).unwrap(), first_bytes);
+        assert!(!s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:aged#0"));
+
+        s.append_compartments("ses", &[comp(2, 2, 3, "old#0", "published fold")])
+            .unwrap();
+        transform(&s, &request, &context).unwrap();
+        assert!(s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "red:aged#0"));
+    }
+
+    #[test]
     fn force_episode_empty_tool_lane_and_pressure_escape_controls() {
         for escape in ["exit", "refresh", "hard", "fold", "emergency"] {
             let dir = tempfile::tempdir().unwrap();
