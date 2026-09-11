@@ -5431,11 +5431,16 @@ impl McHandler {
                     .is_some_and(|detail| detail.contains("chain_exhausted"))
                 {
                     HistorianNoFireCause::ChainExhausted
+                } else if last_failure
+                    .as_deref()
+                    .is_some_and(|detail| detail.starts_with("validate rejected:"))
+                {
+                    HistorianNoFireCause::ValidationRejected
                 } else {
                     HistorianNoFireCause::FailureBackoff
                 },
                 extra: failure_detail.as_deref(),
-                reason: trigger_reason,
+                reason: failure_detail.clone().or(trigger_reason),
                 state,
                 progress,
                 last_failure,
@@ -31841,7 +31846,10 @@ mod tests {
         let backed_off = call_transform(&handler, messages.clone()).await;
         assert_eq!(backed_off["historian"]["fired"], false);
         assert_eq!(backed_off["historian"]["no_fire"], "backoff");
-        assert_eq!(backed_off["historian"]["canonical_cause"], "rate_limit");
+        assert_eq!(
+            backed_off["historian"]["canonical_cause"],
+            "failure_backoff"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
 
         expire_historian_backoff(&store);
@@ -32054,13 +32062,24 @@ mod tests {
         let response = call_transform(&handler, messages).await;
         assert_eq!(response["historian"]["fired"], false);
         assert_eq!(response["historian"]["no_fire"], "backoff");
-        assert_eq!(response["historian"]["canonical_cause"], "rate_limit");
+        assert_eq!(
+            response["historian"]["canonical_cause"],
+            "validation_rejected"
+        );
+        assert_eq!(
+            response["historian"]["reason"],
+            "validate rejected: stale summary"
+        );
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
         let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(
+            state.recent_decisions.last().unwrap().cause,
+            "validation_rejected"
+        );
         assert_eq!(state.state, HistorianPhase::Idle);
         assert_eq!(
             state.last_no_fire.as_deref(),
-            Some("backoff{raw_cause=FailureBackoff,canonical_cause=rate_limit,validate rejected: stale summary}")
+            Some("backoff{raw_cause=ValidationRejected,canonical_cause=validation_rejected,validate rejected: stale summary}")
         );
         assert!(
             state
@@ -32231,7 +32250,10 @@ mod tests {
         let backed_off = call_transform(&handler, messages.clone()).await;
         assert_eq!(backed_off["historian"]["fired"], false);
         assert_eq!(backed_off["historian"]["no_fire"], "backoff");
-        assert_eq!(backed_off["historian"]["canonical_cause"], "rate_limit");
+        assert_eq!(
+            backed_off["historian"]["canonical_cause"],
+            "failure_backoff"
+        );
         assert_eq!(producer.connects.load(Ordering::SeqCst), 1);
 
         expire_historian_backoff(&store);

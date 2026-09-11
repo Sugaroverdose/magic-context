@@ -17809,6 +17809,226 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cc_explicit_drop_specimen_holds_protected_results_until_aged() {
+        use crate::ck_wire::{CkKind, CkOutputKind, CkToolOutput, HarnessMeta, ProviderExtras};
+        let rows: Vec<(i64, String, String, i64)> = serde_json::from_str(include_str!(
+            "../tests/fixtures/explicit_drop_specimen.json"
+        ))
+        .unwrap();
+        let mut messages = Vec::new();
+        let mut tag_rows = Vec::new();
+        for (tag, kind, id, tokens) in &rows {
+            let mid = id.split('#').next().unwrap();
+            let ordinal: u64 = mid.strip_prefix("ccm-").unwrap().parse().unwrap();
+            let block = if kind == "tool_result" {
+                let call_id = format!("toolu_specimen_{tag}");
+                messages.push(CkIngressMessage {
+                    mid: format!("ccm-{}", ordinal - 1),
+                    ordinal: ordinal - 1,
+                    ck: CkWireMessage::from_parts(
+                        "assistant",
+                        vec![CkWireBlock::bare(CkKind::ToolCall {
+                            id: call_id.clone(),
+                            name: "read".into(),
+                            input: serde_json::json!({"tag": tag}),
+                            provider_executed: false,
+                        })],
+                        None,
+                        ProviderExtras::new(),
+                        HarnessMeta::default(),
+                    ),
+                });
+                CkKind::ToolResult {
+                    id: call_id,
+                    tool_name: "read".into(),
+                    output: CkToolOutput::bare(CkOutputKind::Text {
+                        text: "x".repeat(*tokens as usize * 4),
+                    }),
+                    provider_executed: false,
+                }
+            } else {
+                CkKind::Text {
+                    text: "x".repeat(*tokens as usize * 4),
+                }
+            };
+            // Text and the next call can share an assistant owner in Claude Code.
+            if messages.last().is_some_and(|message| message.mid == mid) {
+                panic!("fixture contains duplicate owner {mid}");
+            }
+            messages.push(CkIngressMessage {
+                mid: mid.into(),
+                ordinal,
+                ck: CkWireMessage::from_parts(
+                    if kind == "tool_result" {
+                        "user"
+                    } else {
+                        "assistant"
+                    },
+                    vec![CkWireBlock::bare(block)],
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                ),
+            });
+            tag_rows.push(mc_store::McTagRow {
+                tag_number: *tag,
+                block_id: id.clone(),
+                kind: kind.clone(),
+                token_count: *tokens,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
+            });
+        }
+        // Coalesce assistant text and its following call under the same CC message id.
+        let mut merged: Vec<CkIngressMessage> = Vec::new();
+        for message in messages {
+            if let Some(previous) = merged
+                .last_mut()
+                .filter(|previous| previous.mid == message.mid)
+            {
+                let mut content = previous.ck.content.clone();
+                content.extend(message.ck.content);
+                previous.ck = CkWireMessage::from_parts(
+                    "assistant",
+                    content,
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta::default(),
+                );
+            } else {
+                merged.push(message);
+            }
+        }
+        let projection = project_messages(&merged).unwrap();
+        let token_map = tag_rows
+            .iter()
+            .map(|row| (row.block_id.as_str(), row.token_count as usize))
+            .collect();
+        let items = projection
+            .blocks
+            .iter()
+            .map(|block| sel_item_from_flat(block, &token_map))
+            .collect::<Vec<_>>();
+        let protected = ProtectionWindow::from_persisted_rows(&tag_rows, 30_000)
+            .row_identities
+            .block_ids;
+        assert_eq!(protected.len(), 29);
+        let mut ctx = SelectionContext {
+            pass_class: PassClass::EmergencyForce,
+            current_total_input_tokens: 158_855.0,
+            ceiling_tokens: 167_000.0 * 0.85,
+            last_execute_ordinal: 0,
+            scheduler_pressure_execute: true,
+            prior_input_sample: 158_855.0,
+            has_prior_drop: false,
+            agent_drop_ids: rows.iter().map(|row| row.2.clone()).collect(),
+            agent_drop_command_ids: HashMap::new(),
+            first_applied_agent_drop_ids: HashSet::new(),
+            // The observed pass was Force85, not the scheduler's Emergency95 backstop.
+            pass_already_busting: true,
+            supersession_ride_available: true,
+            emergency_window_yields: false,
+            tag_window_protected_block_ids: protected,
+            exempt_message_protected_block_ids: HashSet::new(),
+        };
+        let first = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        let mut applied = first
+            .decisions
+            .iter()
+            .map(|decision| decision.target_id.clone())
+            .collect::<HashSet<_>>();
+        for (tag, kind, id, _) in &rows {
+            let item = items.iter().find(|item| &item.id == id).unwrap();
+            let protected = ctx.tag_window_protected_block_ids.contains(id);
+            eprintln!(
+                "tag={tag} kind={kind} id={id} paired={} protected={protected} applied={}",
+                item.arc_id.is_some(),
+                applied.contains(id)
+            );
+            if kind == "tool_result" {
+                assert!(
+                    item.arc_id.is_some(),
+                    "result {tag} must pair with its assistant call"
+                );
+                assert!(protected, "result {tag} must be inside the recent window");
+                assert!(
+                    !applied.contains(id),
+                    "result {tag} stays queued while protected"
+                );
+            } else {
+                assert!(applied.contains(id), "unprotected text {tag} applies now");
+            }
+        }
+        assert_eq!(applied.len(), 3);
+        let emergency = first.emergency_drop_assessment.unwrap();
+        assert_eq!(emergency.candidate_tokens, 0.0);
+        assert_eq!(emergency.selected_reclaim_tokens, 0.0);
+
+        // Partial application consumes only the selected targets. The command-level
+        // first-application marker remains set while its other targets wait to age.
+        ctx.agent_drop_ids.retain(|id| !applied.contains(id));
+        assert_eq!(ctx.agent_drop_ids.len(), 29);
+        ctx.first_applied_agent_drop_ids
+            .extend(ctx.agent_drop_ids.iter().cloned());
+        ctx.has_prior_drop = true;
+        let still_protected = select_reductions_with_outcome(
+            &items,
+            &applied,
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        assert!(still_protected.decisions.is_empty());
+
+        // Three newer persisted tool tags fill the token budget and structural floor,
+        // moving the real protection window entirely past the queued specimen rows.
+        for n in 0..3 {
+            tag_rows.push(mc_store::McTagRow {
+                tag_number: 609 + n,
+                block_id: format!("newer-{n}#0"),
+                kind: "tool_result".into(),
+                token_count: 10_000,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
+            });
+        }
+        ctx.tag_window_protected_block_ids =
+            ProtectionWindow::from_persisted_rows(&tag_rows, 30_000)
+                .row_identities
+                .block_ids;
+        assert_eq!(ctx.tag_window_protected_block_ids.len(), 3);
+        assert!(ctx
+            .agent_drop_ids
+            .iter()
+            .all(|id| !ctx.tag_window_protected_block_ids.contains(id)));
+        let later = select_reductions_with_outcome(
+            &items,
+            &applied,
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        // The later bust may also reclaim unprotected call blocks automatically;
+        // count the explicit queue targets separately from those arc decisions.
+        let applied_remainder = later
+            .decisions
+            .into_iter()
+            .filter(|decision| ctx.agent_drop_ids.contains(&decision.target_id))
+            .collect::<Vec<_>>();
+        assert_eq!(applied_remainder.len(), 29);
+        for decision in applied_remainder {
+            assert_eq!(decision.kind, "drop");
+            applied.insert(decision.target_id);
+        }
+        ctx.agent_drop_ids.retain(|id| !applied.contains(id));
+        assert!(ctx.agent_drop_ids.is_empty());
+        assert_eq!(applied, rows.iter().map(|row| row.2.clone()).collect());
+    }
+
+    #[test]
     fn producer_gate_runs_on_execute_force_and_hard_advisory_never_plain_defer() {
         let ctx = smart_pctx();
 
