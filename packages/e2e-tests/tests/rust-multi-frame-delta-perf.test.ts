@@ -8,6 +8,8 @@ import { RustTestHarness, type RustPassLine } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 import { appendPerfReplay } from "../src/rust-perf-replay";
 
+const STRICT_TRANSPORT_BUDGET_MS = 30;
+
 const formatTiming = (pass: RustPassLine) => ({
     messages: pass.inputCount,
     adapter_overhead_ms: pass.adapterElapsedMs,
@@ -175,8 +177,16 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: large tail delta", () => {
         // Apply timing limits only in strict production-like environments; enforce message,
         // page-count, and payload-size limits in every environment.
         if (process.env.MC_RUST_E2E_STRICT_PERF === "1") {
-            expect(smallDelta.transportMs).toBeLessThan(30);
+            expect(smallDelta.transportMs).toBeLessThan(STRICT_TRANSPORT_BUDGET_MS);
             expect(smallDelta.adapterElapsedMs).toBeLessThan(100);
+        } else {
+            const strictBudgetLine =
+                `[rust-e2e] strict transport gate=off observed_ms=${smallDelta.transportMs} ` +
+                `strict_budget_ms=${STRICT_TRANSPORT_BUDGET_MS}`;
+            console.log(strictBudgetLine);
+            expect(strictBudgetLine).toBe(
+                `[rust-e2e] strict transport gate=off observed_ms=${smallDelta.transportMs} strict_budget_ms=30`,
+            );
         }
         expect(smallDeltas.every((pass) => pass.wireMessages <= 4)).toBe(true);
         expect(smallDeltas.every((pass) => pass.transportPages === 1)).toBe(true);

@@ -3245,6 +3245,8 @@ pub struct McHandler {
     transform_pages: Mutex<TransformPageCoordinator>,
     #[cfg(test)]
     transform_page_discard_logs: Mutex<Vec<String>>,
+    #[cfg(test)]
+    todo_verdict_diagnostic_logs: Mutex<Vec<String>>,
     state_imports: Mutex<StateImportCoordinator>,
     /// Module-minted zero-tool dreamer sessions. Prefixes are diagnostics only;
     /// only registered ids may bypass transform after route validation.
@@ -3817,6 +3819,8 @@ impl McHandler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            todo_verdict_diagnostic_logs: Mutex::new(Vec::new()),
             state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4083,6 +4087,8 @@ impl McHandler {
             transform_pages: Mutex::new(TransformPageCoordinator::default()),
             #[cfg(test)]
             transform_page_discard_logs: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            todo_verdict_diagnostic_logs: Mutex::new(Vec::new()),
             state_imports: Mutex::new(StateImportCoordinator::default()),
             active_dreamer_runs: Arc::new(Mutex::new(HashSet::new())),
             missing_facade_command_id_sessions: Mutex::new(HashSet::new()),
@@ -4217,6 +4223,25 @@ impl McHandler {
         self.transform_page_discard_logs
             .lock()
             .expect("transform page discard logs mutex")
+            .push(line);
+    }
+
+    fn log_unprobed_todo_bust(
+        &self,
+        session_id: &str,
+        possible_stale_mint: bool,
+        decision: &str,
+        reason: &str,
+    ) {
+        let line = format!(
+            "mc-todo-verdict session={session_id} unprobed_bust=1 possible_stale_mint={} decision={decision} reason={reason}",
+            u8::from(possible_stale_mint)
+        );
+        eprintln!("{line}");
+        #[cfg(test)]
+        self.todo_verdict_diagnostic_logs
+            .lock()
+            .expect("todo verdict diagnostic logs mutex")
             .push(line);
     }
 
@@ -9226,12 +9251,11 @@ impl McHandler {
             // A local host predictor can miss module-owned repair decisions. Report
             // every unprobed bust, even when no todo pair was emitted, so a stale
             // permission verdict can never be consumed without an audit signal.
-            eprintln!(
-                "mc-todo-verdict session={} unprobed_bust=1 possible_stale_mint={} decision={} reason={}",
-                parsed.session_id,
-                u8::from(parsed.todo_tool_present == Some(true)),
-                response.decision,
-                response.materialize_reason.as_deref().unwrap_or("unknown")
+            self.log_unprobed_todo_bust(
+                &parsed.session_id,
+                parsed.todo_tool_present == Some(true),
+                &response.decision,
+                response.materialize_reason.as_deref().unwrap_or("unknown"),
             );
         }
         if response.committed {
@@ -33622,6 +33646,86 @@ mod tests {
             .flat_map(|message| message["content"].as_array().into_iter().flatten())
             .all(|block| block["kind"]["name"] != json!("todowrite")));
         assert!(store.load("ses").unwrap().meta.synthetic_todo.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn todo_verdict_diagnostic_captures_bust_fields_and_skips_probed_defer() {
+        let messages = vec![ck("m1", 1, "hello")];
+        let (hard_handler, _store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+
+        let mut hard_request = request(messages.clone());
+        hard_request["todo_verdict_probed"] = json!(false);
+        hard_request["todo_tool_present"] = json!(true);
+        let hard = call_transform_request(&hard_handler, hard_request).await;
+        assert_eq!(hard["decision"], json!("HARD"), "{hard}");
+        let hard_line = hard_handler
+            .todo_verdict_diagnostic_logs
+            .lock()
+            .expect("todo verdict diagnostic logs mutex")[0]
+            .clone();
+
+        let (soft_handler, soft_store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        soft_store
+            .commit_state_import(
+                "ses",
+                "todo-diagnostic-seed",
+                &[stored_comp(1, 1, 1, "m1", "seed")],
+                1,
+            )
+            .unwrap();
+        let mut setup_request = request(messages.clone());
+        setup_request["todo_verdict_probed"] = json!(true);
+        let setup = call_transform_request(&soft_handler, setup_request).await;
+        assert_eq!(setup["decision"], json!("HARD"), "{setup}");
+        assert!(soft_handler
+            .todo_verdict_diagnostic_logs
+            .lock()
+            .expect("todo verdict diagnostic logs mutex")
+            .is_empty());
+
+        let armed = call_dispatch_request(
+            &soft_handler,
+            json!({ "method": "session.flush", "v": 1, "session_id": "ses" }),
+        )
+        .await;
+        assert_eq!(armed, json!({ "ok": true, "armed": true }));
+
+        let mut soft_request = request(messages.clone());
+        soft_request["todo_verdict_probed"] = json!(false);
+        soft_request["todo_tool_present"] = json!(false);
+        let soft = call_transform_request(&soft_handler, soft_request).await;
+        assert_eq!(soft["decision"], json!("SOFT"), "{soft}");
+        let soft_line = soft_handler
+            .todo_verdict_diagnostic_logs
+            .lock()
+            .expect("todo verdict diagnostic logs mutex")[0]
+            .clone();
+
+        assert_eq!(
+            hard_line,
+            "mc-todo-verdict session=ses unprobed_bust=1 possible_stale_mint=1 decision=HARD reason=first_render"
+        );
+        assert_eq!(
+            soft_line,
+            "mc-todo-verdict session=ses unprobed_bust=1 possible_stale_mint=0 decision=SOFT reason=explicit_flush"
+        );
+
+        let mut defer_request = request_with_usage(messages, 1_000, 50_000);
+        defer_request["todo_verdict_probed"] = json!(true);
+        defer_request["todo_tool_present"] = json!(true);
+        let defer = call_transform_request(&soft_handler, defer_request).await;
+        assert_eq!(defer["scheduler_decision"], json!("defer"), "{defer}");
+        assert_eq!(
+            soft_handler
+                .todo_verdict_diagnostic_logs
+                .lock()
+                .expect("todo verdict diagnostic logs mutex")
+                .len(),
+            1,
+            "a probed defer must not emit an unprobed-bust diagnostic"
+        );
     }
 
     #[tokio::test]
