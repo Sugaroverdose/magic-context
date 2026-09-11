@@ -247,13 +247,14 @@ export function scheduleIncrementalIndex(
     messageSource: IncrementalMessageSource,
 ): void {
     const schedulingKey = `${sessionId}\u0000${messageId}`;
-    if (
-        heapHolder.incrementalTimers.has(schedulingKey) ||
-        heapHolder.pendingIncrementalKeys.has(schedulingKey)
-    ) {
-        return;
-    }
+    if (heapHolder.pendingIncrementalKeys.has(schedulingKey)) return;
 
+    const activeTimer = heapHolder.incrementalTimers.get(schedulingKey);
+    if (activeTimer) clearTimeout(activeTimer);
+
+    // Restart the settle window for every update. OpenCode can repeat a terminal
+    // message.updated event as its final parts land; a trailing debounce reads the
+    // authoritative message once after that burst instead of once per timer window.
     const timer = setTimeout(() => {
         heapHolder.incrementalTimers.delete(schedulingKey);
         heapHolder.pendingIncrementalKeys.add(schedulingKey);

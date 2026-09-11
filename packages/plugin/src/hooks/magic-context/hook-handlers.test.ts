@@ -2,6 +2,7 @@
 
 import { describe, expect, mock, spyOn, test } from "bun:test";
 
+import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
@@ -25,6 +26,7 @@ import {
     createToolExecuteAfterHook,
 } from "./hook-handlers";
 import { registerLkgPersistence } from "./lkg-slot";
+import { setRawMessageProvider } from "./read-session-chunk";
 import type { MessageLike } from "./tag-messages";
 import { countRealUserMessages } from "./tail-hygiene-walk";
 
@@ -294,6 +296,71 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
 
             expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
         } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("createEventHook incremental indexing", () => {
+    test("coalesces streaming message.updated events into one settled part read", async () => {
+        __resetMessageIndexAsyncForTests();
+        const db = createTestDb();
+        const sessionId = "ses-streaming-index";
+        let partReads = 0;
+        const rawMessage = {
+            id: "msg-streaming",
+            ordinal: 1,
+            role: "assistant",
+            parts: [{ type: "text", text: "settled response" }],
+            version: 1,
+        };
+        const clearProvider = setRawMessageProvider(sessionId, {
+            readMessages: () => [rawMessage],
+        });
+        const hook = createEventHook({
+            eventHandler: async () => {},
+            contextUsageMap: new Map(),
+            db,
+            liveModelBySession: new Map(),
+            variantBySession: new Map(),
+            agentBySession: new Map(),
+            sessionDirectoryBySession: new Map(),
+            historyRefreshSessions: new Set(),
+            deferredHistoryRefreshSessions: new Set(),
+            systemPromptRefreshSessions: new Set(),
+            pendingMaterializationSessions: new Set(),
+            deferredMaterializationSessions: new Set(),
+            lastHeuristicsTurnId: new Map(),
+            readIncrementalMessage: () => {
+                partReads += 1;
+                return rawMessage;
+            },
+            client: undefined as never,
+        });
+
+        try {
+            for (let index = 0; index < 8; index += 1) {
+                await hook({
+                    event: {
+                        type: "message.updated",
+                        properties: {
+                            info: {
+                                id: rawMessage.id,
+                                role: "assistant",
+                                sessionID: sessionId,
+                                finish: "stop",
+                            },
+                        },
+                    },
+                });
+                await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            await new Promise((resolve) => setTimeout(resolve, 140));
+
+            expect(partReads).toBe(1);
+        } finally {
+            clearProvider();
+            __resetMessageIndexAsyncForTests();
             closeQuietly(db);
         }
     });

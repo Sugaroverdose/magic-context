@@ -5,11 +5,95 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     countRawSessionMessageOrdinalsFromDb,
+    RAW_MESSAGE_PARTS_BY_ID_SQL,
+    readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
     readRawSessionMessagePageFromDb,
     readRawSessionMessagesFromDb,
 } from "./read-session-raw";
+
+describe("raw session point lookup", () => {
+    it("uses the message-id part index with adversarial 100k-part session statistics", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL,
+                    FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE
+                );
+                CREATE INDEX message_session_time_created_id_idx
+                    ON message(session_id, time_created, id);
+                CREATE INDEX part_session_idx ON part(session_id);
+                CREATE INDEX part_message_id_id_idx ON part(message_id, id);
+
+                INSERT INTO message VALUES
+                    ('m-filler', 'session', 1, 1, '{"role":"user"}'),
+                    ('m-target', 'session', 2, 2, '{"role":"assistant","finish":"stop"}');
+                WITH RECURSIVE seq(i) AS (
+                    SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 100000
+                )
+                INSERT INTO part
+                    (id, message_id, session_id, time_created, time_updated, data)
+                SELECT printf('p-%06d', i), 'm-filler', 'session', 1, 1,
+                       '{"type":"text","text":"filler"}'
+                FROM seq;
+                INSERT INTO part VALUES
+                    ('target-1', 'm-target', 'session', 2, 2, '{"type":"text","text":"first"}'),
+                    ('target-2', 'm-target', 'session', 3, 3, '{"type":"text","text":"second"}');
+
+                ANALYZE;
+                UPDATE sqlite_stat1 SET stat = '100002 1' WHERE idx = 'part_session_idx';
+                UPDATE sqlite_stat1 SET stat = '100002 100002 1'
+                    WHERE idx = 'part_message_id_id_idx';
+                ANALYZE sqlite_schema;
+            `);
+
+            const legacySql =
+                "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC";
+            const legacyPlan = (
+                db.prepare(`EXPLAIN QUERY PLAN ${legacySql}`).all("session", "m-target") as Array<{
+                    detail: string;
+                }>
+            ).map((row) => row.detail);
+            expect(legacyPlan.join(" | ")).toContain("part_session_idx");
+
+            const pointPlan = (
+                db
+                    .prepare(`EXPLAIN QUERY PLAN ${RAW_MESSAGE_PARTS_BY_ID_SQL}`)
+                    .all("session", "m-target") as Array<{
+                    detail: string;
+                }>
+            ).map((row) => row.detail);
+            expect(pointPlan.some((detail) => /\bSCAN part\b/i.test(detail))).toBe(false);
+            expect(pointPlan.join(" | ")).toContain("part_message_id_id_idx");
+
+            const scanStartedAt = performance.now();
+            db.prepare(legacySql).all("session", "m-target");
+            const scanMs = performance.now() - scanStartedAt;
+            const pointStartedAt = performance.now();
+            const target = readRawSessionMessageByIdFromDb(db, "session", "m-target");
+            const pointMs = performance.now() - pointStartedAt;
+
+            expect(target?.parts).toHaveLength(2);
+            expect(pointMs).toBeLessThan(scanMs);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
 
 describe("raw session message id ordinals", () => {
     it("matches the full raw reader across ordering, summaries, roles, and tool arcs", () => {
