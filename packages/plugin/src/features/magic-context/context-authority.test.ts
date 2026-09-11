@@ -1247,6 +1247,57 @@ describe("memory authority protocol", () => {
         });
     });
 
+    test("a new module-origin mirror row preserves every timestamp", () => {
+        const database = db();
+        const createdAt = 1_789_164_625_123;
+
+        applyMirrorPage({
+            db: database,
+            page: {
+                domain: "memories",
+                cursor: 0,
+                next_cursor: 1,
+                has_more: false,
+                rows: [
+                    {
+                        feed_seq: 1,
+                        domain: "memories",
+                        op: "insert",
+                        module_row_id: 9400,
+                        full_row_snapshot: completeMemorySnapshot("module-store", 94_000, {
+                            id: 9400,
+                            normalized_hash: "module-origin-timestamps",
+                            first_seen_at: createdAt - 2_000,
+                            created_at: createdAt,
+                            updated_at: createdAt + 1_000,
+                            last_seen_at: createdAt + 2_000,
+                            classified_at: createdAt + 3_000,
+                            verified_at: createdAt + 4_000,
+                        }),
+                        content_hash: "module-origin-timestamps",
+                    },
+                ],
+            },
+        });
+
+        expect(
+            database
+                .prepare(
+                    `SELECT first_seen_at, created_at, updated_at, last_seen_at, classified_at,
+                            verified_at
+                       FROM memories WHERE normalized_hash = 'module-origin-timestamps'`,
+                )
+                .get(),
+        ).toEqual({
+            first_seen_at: createdAt - 2_000,
+            created_at: createdAt,
+            updated_at: createdAt + 1_000,
+            last_seen_at: createdAt + 2_000,
+            classified_at: createdAt + 3_000,
+            verified_at: createdAt + 4_000,
+        });
+    });
+
     test("newer mirror rows apply mutable fields but retain immutable source times", () => {
         const database = db();
         const storeUuid = ensureContextStoreUuid(database);

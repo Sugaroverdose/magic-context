@@ -1570,9 +1570,9 @@ function contextMemoryId(
     row: Record<string, unknown>,
     moduleRowId: number,
     statements?: MirrorPageStatements,
-): number {
+): { contextId: number; inserted: boolean } {
     const mapped = mirrorIdentity(db, domain, moduleProject, moduleRowId, statements);
-    if (mapped) return mapped.context_row_id;
+    if (mapped) return { contextId: mapped.context_row_id, inserted: false };
     const sourceUuid = rowNullableString(row, "context_store_uuid");
     const sourceId = rowNumber(row, "context_row_id", -1);
     const localStoreUuid = statements?.contextStoreUuid ?? getContextStoreUuid(db);
@@ -1585,7 +1585,7 @@ function contextMemoryId(
         ).get(sourceId, moduleProject) as { id?: number } | undefined;
         if (existing?.id !== undefined) {
             rememberIdentity(db, domain, moduleProject, moduleRowId, existing.id, statements, true);
-            return existing.id;
+            return { contextId: existing.id, inserted: false };
         }
     }
     // A legacy facade row may have no source identity even though this project in the
@@ -1602,7 +1602,7 @@ function contextMemoryId(
         ).all(moduleProject, category, normalizedHash) as Array<{ id?: number }>;
         if (candidates.length === 1 && candidates[0]?.id !== undefined) {
             rememberIdentity(db, domain, moduleProject, moduleRowId, candidates[0].id, statements);
-            return candidates[0].id;
+            return { contextId: candidates[0].id, inserted: false };
         }
     }
     const result = (
@@ -1613,7 +1613,7 @@ function contextMemoryId(
     ).run(moduleProject, rowString(row, "category", "CONSTRAINTS"));
     const contextId = Number(result.lastInsertRowid);
     rememberIdentity(db, domain, moduleProject, moduleRowId, contextId, statements);
-    return contextId;
+    return { contextId, inserted: true };
 }
 
 function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPageStatements): void {
@@ -1691,7 +1691,7 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
         (hasSnapshotField(row, "importance") &&
             !(typeof row.importance === "number" && Number.isFinite(row.importance)));
     if (metadataClobberRisk) statements.markRepairPending.run(Date.now());
-    const contextId = contextMemoryId(
+    const { contextId, inserted } = contextMemoryId(
         db,
         feed.domain,
         moduleProject,
@@ -1717,7 +1717,9 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
     const recencyGuard = guardMemorySnapshotByRecency({
         row,
         snapshot: recencySnapshot,
-        existing,
+        // The placeholder was allocated only to obtain a context id. Its zero-valued
+        // immutable fields are not host history and must not override the module snapshot.
+        existing: inserted ? undefined : existing,
     });
     const projectedRow = recencyGuard.effectiveRow;
     const has = (key: string): boolean => hasSnapshotField(row, key);
