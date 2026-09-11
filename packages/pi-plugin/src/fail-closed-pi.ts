@@ -3,7 +3,7 @@
  *
  * Registers the minimum hooks that prevent silent native-compaction fallthrough:
  * - `session_before_compact` always cancels (MC owns compaction when enabled)
- * - `context` throws {@link FailClosedBlockingError} on every primary pass
+ * - `context` aborts every primary pass with a display-only retry entry
  *
  * Periodically re-probes storage; when open succeeds, invokes `onRecovered` so
  * the full runtime can start without a process restart.
@@ -19,6 +19,7 @@ import {
 } from "@magic-context/core/features/magic-context/fail-closed-block";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { log } from "@magic-context/core/shared/logger";
+import { registerPiGuardedContext } from "./pi-context-refusal";
 
 const PREFIX = "[magic-context][pi]";
 
@@ -88,7 +89,7 @@ export function registerPiFailClosedSurface(
 		return { cancel: true };
 	});
 
-	pi.on("context", async (_event, _ctx) => {
+	registerPiGuardedContext(pi, async (_event, _ctx) => {
 		if (recovered) return;
 		try {
 			await controller.enforce({
