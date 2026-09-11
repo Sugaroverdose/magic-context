@@ -85,7 +85,11 @@ import {
     selectPerRunCap,
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
-import { hasRawMessageProvider, readSessionChunk } from "./read-session-chunk";
+import {
+    getRawSessionTagKeysThrough,
+    hasRawMessageProvider,
+    readSessionChunk,
+} from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { buildReferenceBlocks } from "./reference-retrieval";
@@ -694,6 +698,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             rollbackDrainReservation();
             return;
         }
+        const compartmentTagKeys = await getRawSessionTagKeysThrough(
+            sessionId,
+            lastCompartmentEnd,
+            { db },
+        );
         let published = false;
         const transactionStartedAt = performance.now();
         db.exec("BEGIN IMMEDIATE");
@@ -769,7 +778,12 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 }
             }
 
-            queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
+            queueDropsForCompartmentalizedMessages(
+                db,
+                sessionId,
+                lastCompartmentEnd,
+                compartmentTagKeys,
+            );
 
             clearHistorianFailureState(db, sessionId);
             // Healthy historian progress — clear the drain-failure backoff so the

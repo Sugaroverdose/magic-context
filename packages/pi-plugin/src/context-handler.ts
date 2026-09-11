@@ -252,8 +252,10 @@ import { assertPiRawFallbackFits } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import {
+	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
 	findLastModelKeyFromBranch,
+	readPiSessionMessagePage,
 	readPiSessionMessages,
 	resolvePiStableId,
 } from "./read-session-pi";
@@ -2357,6 +2359,24 @@ export function registerPiContextHandler(
 					branchEntries !== null
 						? convertEntriesToRawMessages([...branchEntries])
 						: readPiSessionMessages(ctx),
+				readMessagePage: (
+					afterOrdinal: number,
+					limit: number,
+					finalWatermark: number,
+				) =>
+					branchEntries !== null
+						? convertEntriesToRawMessagePage(
+								branchEntries,
+								afterOrdinal,
+								limit,
+								finalWatermark,
+							)
+						: readPiSessionMessagePage(
+								ctx,
+								afterOrdinal,
+								limit,
+								finalWatermark,
+							),
 				readMessageById: (messageId: string) =>
 					readPiSessionMessageById(ctx, messageId),
 			};
@@ -4329,6 +4349,11 @@ function maybeFireHistorian(args: {
 	// unregisters in finally.
 	const provider = args.rawMessageProvider ?? {
 		readMessages: () => readPiSessionMessages(ctx),
+		readMessagePage: (
+			afterOrdinal: number,
+			limit: number,
+			finalWatermark: number,
+		) => readPiSessionMessagePage(ctx, afterOrdinal, limit, finalWatermark),
 	};
 	const unregister = setRawMessageProvider(sessionId, provider);
 	const modelKey = liveModelBySession.get(sessionId);

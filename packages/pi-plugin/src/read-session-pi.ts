@@ -187,6 +187,32 @@ export function readPiSessionMessages(ctx: ExtensionContext): RawMessage[] {
 	return readPiSessionSnapshot(ctx).rawMessages;
 }
 
+export function readPiSessionMessagePage(
+	ctx: ExtensionContext,
+	afterOrdinal: number,
+	limit: number,
+	finalWatermark: number,
+): RawMessage[] {
+	const sessionManager = ctx.sessionManager;
+	const getBranch = (
+		sessionManager as { getBranch?: (fromId?: string) => unknown[] } | undefined
+	)?.getBranch;
+	if (typeof getBranch !== "function") return [];
+	try {
+		const entries = getBranch.call(sessionManager);
+		return Array.isArray(entries)
+			? convertEntriesToRawMessagePage(
+					entries,
+					afterOrdinal,
+					limit,
+					finalWatermark,
+				)
+			: [];
+	} catch {
+		return [];
+	}
+}
+
 /**
  * Resolve the LAST model the session was using, from the JSONL branch's
  * `model_change` entries (shape: `{type:"model_change", provider, modelId}`).
@@ -259,53 +285,53 @@ function attachPiPartVersion(
 	});
 }
 
-/**
- * Pure conversion exposed for unit testing — call sites in production
- * always go through `readPiSessionMessages`.
- */
-export function convertEntriesToRawMessages(
+function convertEntriesToRawMessageRange(
 	entries: readonly unknown[],
+	afterOrdinal: number,
+	limit: number,
+	finalWatermark: number,
 ): RawMessage[] {
 	const result: RawMessage[] = [];
+	const normalizedAfter = Math.max(0, Math.floor(afterOrdinal));
+	const normalizedLimit = Math.max(1, Math.floor(limit));
+	const normalizedWatermark = Math.max(
+		normalizedAfter,
+		Math.floor(finalWatermark),
+	);
 	let nextOrdinal = 1;
-
-	// Buffer for tool-result runs waiting to fold into the next user
-	// message. Each item is the synthesized "tool" part shape.
 	let pendingToolParts: unknown[] = [];
-	// Track the first real toolResult entry id contributing to the current
-	// pending buffer. When tool-results fold into a synthetic user (the
-	// toolResult→assistant transition pattern, which is the common case
-	// for tool-heavy sessions), we need the synthetic user to carry a
-	// real, lookup-able entry id rather than an empty string.
-	//
-	// Without this, downstream consumers break:
-	//   - `read-session-chunk.ts` puts `messageId: ""` into `chunk.lines`,
-	//     which then propagates into compartment `end_message_id`, leaving
-	//     the magic-context inject path unable to trim the visible message
-	//     tail to the compartment boundary (Bug X2).
-	//   - Pi compaction-marker placement via `findFirstKeptEntryId` lands
-	//     on the synthetic ordinal and either skips (returns null → no
-	//     marker written, JSONL grows unbounded, Bug X1) or returns an
-	//     unusable id.
+	let hasPendingToolParts = false;
 	let pendingFirstRealId = "";
 	let pendingFirstRealVersion: string | number = "";
 
-	for (const entry of entries) {
-		if (!isMessageEntry(entry)) {
-			// Skip non-message entries (thinking_level_change, model_change,
-			// compaction, branch_summary, custom, label, session_info,
-			// custom_message). They don't carry parts the historian needs.
-			continue;
+	const appendMessage = (
+		id: string,
+		role: string,
+		version: string | number,
+		parts: () => unknown[],
+	): boolean => {
+		const ordinal = nextOrdinal++;
+		if (ordinal > normalizedAfter && ordinal <= normalizedWatermark) {
+			result.push({ ordinal, id, role, parts: parts(), version });
 		}
+		return (
+			result.length >= normalizedLimit || nextOrdinal > normalizedWatermark
+		);
+	};
+
+	for (const entry of entries) {
+		if (!isMessageEntry(entry)) continue;
 
 		const msg = entry.message;
 		const role = (msg as { role?: string }).role;
-
 		if (role === "toolResult") {
+			const synthesized = synthesizeToolResultParts(msg);
+			if (synthesized.length === 0) continue;
 			const version = rawEntryVersion(entry);
-			pendingToolParts.push(
-				...attachPiPartVersion(synthesizeToolResultParts(msg), version),
-			);
+			hasPendingToolParts = true;
+			if (nextOrdinal > normalizedAfter && nextOrdinal <= normalizedWatermark) {
+				pendingToolParts.push(...attachPiPartVersion(synthesized, version));
+			}
 			if (pendingFirstRealId === "") {
 				pendingFirstRealId = entry.id;
 				pendingFirstRealVersion = version;
@@ -314,86 +340,102 @@ export function convertEntriesToRawMessages(
 		}
 
 		if (role === "user") {
-			// Fold any pending tool-result parts into THIS user's parts
-			// (they precede the user's own content in real conversation
-			// order, matching OpenCode's flow).
 			const version = rawEntryVersion(entry);
-			const parts: unknown[] = [
-				...pendingToolParts,
+			const bufferedToolParts = pendingToolParts;
+			const done = appendMessage(entry.id, "user", version, () => [
+				...bufferedToolParts,
 				...attachPiPartVersion(synthesizeUserParts(msg), version),
-			];
+			]);
 			pendingToolParts = [];
+			hasPendingToolParts = false;
 			pendingFirstRealId = "";
 			pendingFirstRealVersion = "";
-			result.push({
-				ordinal: nextOrdinal++,
-				id: entry.id,
-				role: "user",
-				parts,
-				version,
-			});
+			if (done) break;
 			continue;
 		}
 
 		if (role === "assistant") {
-			// If there are pending tool-result parts when we hit an
-			// assistant, fold them as a synthetic user turn before
-			// emitting the assistant. This is THE common pattern in
-			// tool-heavy sessions (the agent finishes a tool round and
-			// fires the next assistant turn without a user in between),
-			// so the synthetic user must carry a real entry id — the
-			// first toolResult that was folded in.
-			if (pendingToolParts.length > 0) {
-				result.push({
-					ordinal: nextOrdinal++,
-					id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
-					role: "user",
-					parts: pendingToolParts,
-					version: pendingFirstRealVersion,
-				});
+			if (hasPendingToolParts) {
+				const bufferedToolParts = pendingToolParts;
+				const pendingId = pendingFirstRealId;
+				const pendingVersion = pendingFirstRealVersion;
+				const done = appendMessage(
+					`${SYNTH_USER_ID_PREFIX}${pendingId}`,
+					"user",
+					pendingVersion,
+					() => bufferedToolParts,
+				);
 				pendingToolParts = [];
+				hasPendingToolParts = false;
 				pendingFirstRealId = "";
 				pendingFirstRealVersion = "";
+				if (done) break;
 			}
 
 			const version = rawEntryVersion(entry);
-			result.push({
-				ordinal: nextOrdinal++,
-				id: entry.id,
-				role: "assistant",
-				parts: attachPiPartVersion(synthesizeAssistantParts(msg), version),
-				version,
-			});
+			if (
+				appendMessage(entry.id, "assistant", version, () =>
+					attachPiPartVersion(synthesizeAssistantParts(msg), version),
+				)
+			) {
+				break;
+			}
 			continue;
 		}
 
-		// Unknown role — pass through with raw parts so formatting can
-		// drop them into "noise" lines. Forward compatibility for new
-		// AgentMessage roles Pi may add later.
-		result.push({
-			ordinal: nextOrdinal++,
-			id: entry.id,
-			role: typeof role === "string" ? role : "unknown",
-			parts: [],
-			version: rawEntryVersion(entry),
-		});
+		if (
+			appendMessage(
+				entry.id,
+				typeof role === "string" ? role : "unknown",
+				rawEntryVersion(entry),
+				() => [],
+			)
+		) {
+			break;
+		}
 	}
 
-	// Tail tool-results with no following user message: emit synthetic
-	// user turn so they're still part of the chunked history. As with
-	// the assistant-trigger case above, this synthetic user must carry
-	// a real entry id (the first folded toolResult).
-	if (pendingToolParts.length > 0) {
-		result.push({
-			ordinal: nextOrdinal,
-			id: `${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
-			role: "user",
-			parts: pendingToolParts,
-			version: pendingFirstRealVersion,
-		});
+	if (
+		hasPendingToolParts &&
+		result.length < normalizedLimit &&
+		nextOrdinal <= normalizedWatermark
+	) {
+		appendMessage(
+			`${SYNTH_USER_ID_PREFIX}${pendingFirstRealId}`,
+			"user",
+			pendingFirstRealVersion,
+			() => pendingToolParts,
+		);
 	}
 
 	return result;
+}
+
+/** Pure full conversion exposed for callers that need an entire Pi branch. */
+export function convertEntriesToRawMessages(
+	entries: readonly unknown[],
+): RawMessage[] {
+	return convertEntriesToRawMessageRange(
+		entries,
+		0,
+		Number.MAX_SAFE_INTEGER,
+		Number.MAX_SAFE_INTEGER,
+	);
+}
+
+/** Convert only one raw-message page without hydrating the rest of the Pi branch. */
+export function convertEntriesToRawMessagePage(
+	entries: readonly unknown[],
+	afterOrdinal: number,
+	limit: number,
+	finalWatermark: number,
+): RawMessage[] {
+	return convertEntriesToRawMessageRange(
+		entries,
+		afterOrdinal,
+		limit,
+		finalWatermark,
+	);
 }
 
 interface MessageEntry {

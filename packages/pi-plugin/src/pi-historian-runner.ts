@@ -107,6 +107,7 @@ import {
 	validateBoundarySnapshot,
 } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
 import {
+	getRawSessionTagKeysThrough,
 	type RawMessageProvider,
 	readSessionChunk,
 	withRawMessageProvider,
@@ -1241,6 +1242,11 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				rollbackDrainReservation();
 				return;
 			}
+			const compartmentTagKeys = await getRawSessionTagKeysThrough(
+				sessionId,
+				lastNewEnd,
+				{ db },
+			);
 			let published = false;
 			const transactionStartedAt = performance.now();
 			db.exec("BEGIN IMMEDIATE");
@@ -1297,7 +1303,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					}
 				}
 
-				queueDropsForCompartmentalizedMessages(db, sessionId, lastNewEnd);
+				queueDropsForCompartmentalizedMessages(
+					db,
+					sessionId,
+					lastNewEnd,
+					compartmentTagKeys,
+				);
 
 				clearHistorianFailureState(db, sessionId);
 				// Healthy historian progress clears the drain-failure backoff. Normal

@@ -42,7 +42,10 @@ import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { resolvePiUsableContextLimit } from "../pi-context-limit";
 import { runPiHistorian } from "../pi-historian-runner";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
-import { readPiSessionMessages } from "../read-session-pi";
+import {
+	readPiSessionMessagePage,
+	readPiSessionMessages,
+} from "../read-session-pi";
 import { updateStatusLine } from "../status-line";
 import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
@@ -205,7 +208,14 @@ export async function runPiWrapup(
 		return "## Magic Wrapup — Skipped\n\nA recomp or upgrade is already running for this session. Wait for it to finish, then try `/ctx-wrapup` again.";
 	}
 
-	const provider = { readMessages: () => readPiSessionMessages(ctx) };
+	const provider = {
+		readMessages: () => readPiSessionMessages(ctx),
+		readMessagePage: (
+			afterOrdinal: number,
+			limit: number,
+			finalWatermark: number,
+		) => readPiSessionMessagePage(ctx, afterOrdinal, limit, finalWatermark),
+	};
 	const unregister = setRawMessageProvider(sessionId, provider);
 	let holderId = "";
 	try {

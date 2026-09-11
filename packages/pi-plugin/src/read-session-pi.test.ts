@@ -3,6 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { findFirstKeptEntryId } from "./pi-historian-runner";
 import {
+	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
 	findLastModelKeyFromBranch,
 } from "./read-session-pi";
@@ -374,5 +375,41 @@ describe("findLastModelKeyFromBranch", () => {
 		expect(findLastModelKeyFromBranch([])).toBeUndefined();
 		expect(findLastModelKeyFromBranch(null)).toBeUndefined();
 		expect(findLastModelKeyFromBranch(undefined)).toBeUndefined();
+	});
+});
+
+describe("convertEntriesToRawMessagePage", () => {
+	it("matches full conversion when tool results fold across page boundaries", () => {
+		const entry = (id: string, message: Record<string, unknown>) => ({
+			type: "message",
+			id,
+			message,
+		});
+		const entries = [
+			entry("user-1", { role: "user", content: "start" }),
+			entry("asst-1", {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "read" }],
+			}),
+			entry("result-1", {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "result" }],
+			}),
+			entry("asst-2", {
+				role: "assistant",
+				content: [{ type: "text", text: "continue" }],
+			}),
+			entry("user-2", { role: "user", content: "finish" }),
+		];
+		const full = convertEntriesToRawMessages(entries);
+		const paged = [
+			...convertEntriesToRawMessagePage(entries, 0, 2, full.length),
+			...convertEntriesToRawMessagePage(entries, 2, 2, full.length),
+			...convertEntriesToRawMessagePage(entries, 4, 2, full.length),
+		];
+
+		expect(paged).toEqual(full);
 	});
 });

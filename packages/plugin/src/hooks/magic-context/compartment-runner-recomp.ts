@@ -43,7 +43,11 @@ import {
     createDefaultBoundarySnapshotForTests,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
-import { getRawSessionMessageCount, readSessionChunk } from "./read-session-chunk";
+import {
+    getRawSessionMessageCount,
+    getRawSessionTagKeysThrough,
+    readSessionChunk,
+} from "./read-session-chunk";
 import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 
@@ -254,6 +258,12 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             // Ensure latest candidates are saved to staging before promoting
             saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
+            const lastCompartmentEnd =
+                candidateCompartments[candidateCompartments.length - 1]?.endMessage ?? 0;
+            const compartmentTagKeys =
+                lastCompartmentEnd > 0
+                    ? await getRawSessionTagKeysThrough(sessionId, lastCompartmentEnd, { db })
+                    : null;
 
             const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
             if (!promoted) return null;
@@ -294,10 +304,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
             }
 
-            const lastCompartmentEnd =
-                promoted.compartments[promoted.compartments.length - 1]?.endMessage ?? 0;
-            if (lastCompartmentEnd > 0) {
-                queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
+            if (lastCompartmentEnd > 0 && compartmentTagKeys) {
+                queueDropsForCompartmentalizedMessages(
+                    db,
+                    sessionId,
+                    lastCompartmentEnd,
+                    compartmentTagKeys,
+                );
             }
 
             // Signal LAST relative to the drop queue — after queueDrops so a
@@ -561,6 +574,12 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
         // Final success: promote staging → real tables
         saveRecompStagingPass(db, sessionId, passCount, candidateCompartments, candidateFacts);
+        const lastCompartmentEnd =
+            candidateCompartments[candidateCompartments.length - 1]?.endMessage ?? 0;
+        const compartmentTagKeys =
+            lastCompartmentEnd > 0
+                ? await getRawSessionTagKeysThrough(sessionId, lastCompartmentEnd, { db })
+                : null;
         const promoted = promoteRecompStagingWithM0Mutation(db, sessionId, leaseHolderId);
         if (!promoted) {
             sessionLog(sessionId, "recomp publish skipped: compartment lease no longer held");
@@ -584,9 +603,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // a <facts> block, but recomp discards it for promotion purposes.)
         void finalFacts;
 
-        const lastCompartmentEnd = finalCompartments[finalCompartments.length - 1]?.endMessage ?? 0;
-        if (lastCompartmentEnd > 0) {
-            queueDropsForCompartmentalizedMessages(db, sessionId, lastCompartmentEnd);
+        if (lastCompartmentEnd > 0 && compartmentTagKeys) {
+            queueDropsForCompartmentalizedMessages(
+                db,
+                sessionId,
+                lastCompartmentEnd,
+                compartmentTagKeys,
+            );
         }
 
         // Signal LAST relative to the drop queue (mirrors the incremental +

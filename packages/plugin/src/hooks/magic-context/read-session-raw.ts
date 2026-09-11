@@ -101,18 +101,28 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
         .all(sessionId)
         .filter(isRawMessageRow);
 
-    const partRows = db
-        .prepare(
-            "SELECT message_id, data, time_updated FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC",
-        )
-        .all(sessionId)
-        .filter(isRawPartRow);
-
     const partsByMessageId = new Map<string, unknown[]>();
-    for (const part of partRows) {
-        const list = partsByMessageId.get(part.message_id) ?? [];
-        list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
-        partsByMessageId.set(part.message_id, list);
+    const partMessageBatchSize = 128;
+    for (let offset = 0; offset < messageRows.length; offset += partMessageBatchSize) {
+        const messageIds = messageRows
+            .slice(offset, offset + partMessageBatchSize)
+            .map((row) => row.id);
+        if (messageIds.length === 0) continue;
+        const placeholders = messageIds.map(() => "?").join(", ");
+        const partRows = db
+            .prepare(
+                `SELECT message_id, data, time_updated
+                 FROM part
+                 WHERE session_id = ? AND message_id IN (${placeholders})
+                 ORDER BY message_id ASC, time_created ASC, id ASC`,
+            )
+            .all(sessionId, ...messageIds)
+            .filter(isRawPartRow);
+        for (const part of partRows) {
+            const list = partsByMessageId.get(part.message_id) ?? [];
+            list.push(attachRawPartVersion(parseJsonUnknown(part.data), part.time_updated));
+            partsByMessageId.set(part.message_id, list);
+        }
     }
 
     // Filter out compaction summary messages injected by magic-context.
@@ -190,7 +200,7 @@ export function readRawSessionMessagePageFromDb(
             `SELECT message_id, data, time_updated
              FROM part
              WHERE session_id = ? AND message_id IN (${placeholders})
-             ORDER BY time_created ASC, id ASC`,
+             ORDER BY message_id ASC, time_created ASC, id ASC`,
         )
         .all(sessionId, ...messageRows.map((row) => row.id))
         .filter(isRawPartRow);

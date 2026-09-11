@@ -60,7 +60,7 @@ function makeRawMessages(messages: RawMessage[]) {
 }
 
 describe("queueDropsForCompartmentalizedMessages composite identity", () => {
-    it("does NOT queue a drop for a callId reused outside the compartment", () => {
+    it("does NOT queue a drop for a callId reused outside the compartment", async () => {
         //#given — `read:32` is invoked twice: at message 5 (in
         // compartment), again at message 10 (outside compartment).
         // Both have distinct owner ids. Pre-fix this would queue both
@@ -114,9 +114,9 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
 
         //#when — compartment covers messages 1-7 (so m-asst-5 is in,
         // m-asst-10 is out).
-        withRawMessageProvider("ses-1", makeRawMessages(messages), () => {
-            queueDropsForCompartmentalizedMessages(db, "ses-1", 7);
-        });
+        await withRawMessageProvider("ses-1", makeRawMessages(messages), () =>
+            queueDropsForCompartmentalizedMessages(db, "ses-1", 7),
+        );
 
         //#then — only tag 100 (in-compartment) is queued.
         const ops = getPendingOps(db, "ses-1");
@@ -124,7 +124,7 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         expect(ops[0]?.tagId).toBe(100);
     });
 
-    it("queues both tags when both owners are inside the compartment", () => {
+    it("queues both tags when both owners are inside the compartment", async () => {
         //#given — same callId across two assistant turns, both inside
         // the compartment range.
         useTempDataHome("drop-queue-both-in-");
@@ -165,9 +165,9 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         insertTag(db, "ses-1", "grep:1", "tool", 200, 60, 0, "grep", 20, "m-asst-5");
 
         //#when
-        withRawMessageProvider("ses-1", makeRawMessages(messages), () => {
-            queueDropsForCompartmentalizedMessages(db, "ses-1", 6);
-        });
+        await withRawMessageProvider("ses-1", makeRawMessages(messages), () =>
+            queueDropsForCompartmentalizedMessages(db, "ses-1", 6),
+        );
 
         //#then
         const ops = getPendingOps(db, "ses-1");
@@ -175,7 +175,7 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         expect(queuedTagIds).toEqual([50, 60]);
     });
 
-    it("legacy NULL-owner row falls back to bare-callId match", () => {
+    it("legacy NULL-owner row falls back to bare-callId match", async () => {
         //#given — a NULL-owner tool tag (pre-Layer-B-backfill data).
         // The drop queue must still fire for this tag; lazy adoption
         // will populate the owner on the next tag-messages pass.
@@ -203,9 +203,9 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         insertTag(db, "ses-1", "legacy:1", "tool", 100, 7, 0, null, 0, null);
 
         //#when
-        withRawMessageProvider("ses-1", makeRawMessages(messages), () => {
-            queueDropsForCompartmentalizedMessages(db, "ses-1", 2);
-        });
+        await withRawMessageProvider("ses-1", makeRawMessages(messages), () =>
+            queueDropsForCompartmentalizedMessages(db, "ses-1", 2),
+        );
 
         //#then
         const ops = getPendingOps(db, "ses-1");
@@ -213,7 +213,7 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         expect(ops[0]?.tagId).toBe(7);
     });
 
-    it("skips already-dropped tags", () => {
+    it("skips already-dropped tags", async () => {
         //#given
         useTempDataHome("drop-queue-already-dropped-");
         const db = openDatabase();
@@ -239,9 +239,9 @@ describe("queueDropsForCompartmentalizedMessages composite identity", () => {
         updateTagStatus(db, "ses-1", 1, "dropped");
 
         //#when
-        withRawMessageProvider("ses-1", makeRawMessages(messages), () => {
-            queueDropsForCompartmentalizedMessages(db, "ses-1", 2);
-        });
+        await withRawMessageProvider("ses-1", makeRawMessages(messages), () =>
+            queueDropsForCompartmentalizedMessages(db, "ses-1", 2),
+        );
 
         //#then — no drops queued.
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
