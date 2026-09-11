@@ -443,16 +443,17 @@ function normalizeOpenCodeRows(
 ): RetrospectiveRawMessage[] {
     if (rows.length === 0) return [];
 
-    // Restrict the part read to the capped message ids we actually kept, rather
-    // than every part in the session — a long session has far more parts than
-    // the newest-`capPerSession` messages we render.
+    // Restrict the part read to the capped, globally unique message IDs we kept.
+    // The selectivity hint keeps stale statistics from favoring a session-wide
+    // index walk while retaining compatibility with composite session/id indexes.
     const messageIds = rows.map((row) => row.id);
     const placeholders = messageIds.map(() => "?").join(", ");
     const partRows = db
         .prepare<string[], OpenCodePartRow>(
             `SELECT message_id, data
                FROM part
-              WHERE session_id = ? AND message_id IN (${placeholders})
+              WHERE session_id = ?
+                AND likelihood(message_id IN (${placeholders}), 0.000001)
               ORDER BY time_created ASC, id ASC`,
         )
         .all(sessionId, ...messageIds);

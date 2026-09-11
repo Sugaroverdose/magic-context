@@ -35,6 +35,15 @@ interface RawPartRow {
     time_updated?: number;
 }
 
+/**
+ * OpenCode message IDs are global primary keys and `part.message_id` references
+ * that key. The selectivity hint stops stale statistics from favoring the
+ * session-only part index while retaining `session_id` for schema variants whose
+ * useful index starts with `(session_id, message_id)`.
+ */
+export const RAW_MESSAGE_PARTS_BY_ID_SQL =
+    "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND likelihood(message_id = ?, 0.000001) ORDER BY time_created ASC, id ASC";
+
 interface OrdinalRow {
     ordinal?: number;
 }
@@ -113,7 +122,8 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
             .prepare(
                 `SELECT message_id, data, time_updated
                  FROM part
-                 WHERE session_id = ? AND message_id IN (${placeholders})
+                 WHERE session_id = ?
+                   AND likelihood(message_id IN (${placeholders}), 0.000001)
                  ORDER BY message_id ASC, time_created ASC, id ASC`,
             )
             .all(sessionId, ...messageIds)
@@ -199,7 +209,8 @@ export function readRawSessionMessagePageFromDb(
         .prepare(
             `SELECT message_id, data, time_updated
              FROM part
-             WHERE session_id = ? AND message_id IN (${placeholders})
+             WHERE session_id = ?
+               AND likelihood(message_id IN (${placeholders}), 0.000001)
              ORDER BY message_id ASC, time_created ASC, id ASC`,
         )
         .all(sessionId, ...messageRows.map((row) => row.id))
@@ -405,7 +416,7 @@ export function readRawSessionTailFromDb(
             const placeholders = slice.map(() => "?").join(",");
             const partRows = db
                 .prepare(
-                    `SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id IN (${placeholders}) ORDER BY time_created ASC, id ASC`,
+                    `SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND likelihood(message_id IN (${placeholders}), 0.000001) ORDER BY time_created ASC, id ASC`,
                 )
                 .all(sessionId, ...slice)
                 .filter(isRawPartRow);
@@ -584,9 +595,7 @@ export function readRawSessionMessagePartsByIdFromDb(
     if (!info || isRawCompactionSummaryInfo(info)) return null;
     onQuery?.();
     const partRows = db
-        .prepare(
-            "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
-        )
+        .prepare(RAW_MESSAGE_PARTS_BY_ID_SQL)
         .all(sessionId, messageId)
         .filter(isRawPartRow);
     return {
@@ -676,9 +685,7 @@ export function readRawSessionMessageByIdFromDb(
     }
 
     const partRows = db
-        .prepare(
-            "SELECT message_id, data, time_updated FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
-        )
+        .prepare(RAW_MESSAGE_PARTS_BY_ID_SQL)
         .all(sessionId, messageId)
         .filter(isRawPartRow);
 
@@ -713,7 +720,7 @@ export function readRawSeedTailFromDb(
         SELECT c.id, m.data, c.time_created, m.time_updated, c.ordinal,
                p.data AS part_data, p.time_updated AS part_updated
         FROM canonical c JOIN message m ON m.id = c.id
-        LEFT JOIN part p ON p.session_id = ? AND p.message_id = c.id
+        LEFT JOIN part p ON p.session_id = ? AND likelihood(p.message_id = c.id, 0.000001)
         WHERE ? IS NULL OR c.ordinal >= (SELECT ordinal FROM canonical WHERE id = ?)
         ORDER BY c.ordinal, p.time_created, p.id
     `)

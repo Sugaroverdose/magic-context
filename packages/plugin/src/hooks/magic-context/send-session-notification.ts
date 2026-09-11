@@ -469,9 +469,10 @@ export async function sendIgnoredMessage(
  * A terminal assistant message is not proof that OpenCode's run loop has exited.
  */
 export async function flushIgnoredMessages(sessionId: string): Promise<void> {
-    if (flushingIgnoredNotifications.has(sessionId) || holdDetector(sessionId)) return;
+    if (flushingIgnoredNotifications.has(sessionId)) return;
     const queued = queuedIgnoredNotifications.get(sessionId);
     if (!queued || queued.length === 0) return;
+    if (holdDetector(sessionId)) return;
 
     const epoch = activityEpoch.get(sessionId) ?? 0;
     queuedIgnoredNotifications.delete(sessionId);

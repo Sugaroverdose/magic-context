@@ -336,6 +336,8 @@ export function createEventHook(args: {
     deferredMaterializationSessions: DeferredMaterializationSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
     commitSeenLastPass?: Map<string, boolean>;
+    /** Optional source override for the settled raw-message read. */
+    readIncrementalMessage?: typeof readRawSessionMessageById;
     client: PluginContext["client"];
 }) {
     const latestAssistantMessageIdBySession =
@@ -358,7 +360,7 @@ export function createEventHook(args: {
                         args.db,
                         messageInfo.sessionID,
                         messageInfo.messageID,
-                        readRawSessionMessageById,
+                        args.readIncrementalMessage ?? readRawSessionMessageById,
                     );
                 }
             }

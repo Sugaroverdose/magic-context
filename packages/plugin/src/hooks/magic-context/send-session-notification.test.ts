@@ -15,6 +15,15 @@ describe("sendIgnoredMessage", () => {
         __ignoredNotificationTest.reset();
     });
 
+    it("skips the hold-state probe when no notification is queued", async () => {
+        const holdDetector = mock(() => true);
+        __ignoredNotificationTest.setHoldDetector(holdDetector);
+
+        await flushIgnoredMessages("ses-empty-queue");
+
+        expect(holdDetector).not.toHaveBeenCalled();
+    });
+
     it("returns skipped and does not post when the session never gets a real title", async () => {
         const originalSetTimeout = globalThis.setTimeout;
         globalThis.setTimeout = ((
