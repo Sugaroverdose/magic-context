@@ -223,6 +223,64 @@ describe("native upgrade application", () => {
 		"pi_native_tool_inputs",
 		"pi_native_reasoning_ids",
 	] as const) {
+		it(`preserves both native lanes and continues local cleanup when ${column} is malformed`, async () => {
+			const sessionId = `ses-native-malformed-${column}`;
+			const f = fixture(sessionId);
+			try {
+				await f.seedLegacy();
+				const stored = {
+					pi_native_tool_inputs:
+						column === "pi_native_tool_inputs"
+							? "{"
+							: JSON.stringify({
+									[callId]: JSON.stringify({
+										dropped: "persisted native marker",
+									}),
+								}),
+					pi_native_reasoning_ids:
+						column === "pi_native_reasoning_ids"
+							? "{}"
+							: JSON.stringify(["entry-old"]),
+				};
+				f.db
+					.prepare(
+						"UPDATE session_meta SET pi_native_tool_inputs = ?, pi_native_reasoning_ids = ? WHERE session_id = ?",
+					)
+					.run(
+						stored.pi_native_tool_inputs,
+						stored.pi_native_reasoning_ids,
+						sessionId,
+					);
+				const before = nativeBytes([oldAssistant()]);
+				for (const percent of [0, 90, 0]) {
+					f.restart();
+					const messages = await f.pass(percent);
+					expect(nativeBytes(messages)).toBe(before);
+					expect(messages[1]).toMatchObject({
+						content: [
+							{ type: "thinking", thinking: "", thinkingSignature: undefined },
+							{},
+							{ arguments: { dropped: expect.any(String) } },
+						],
+					});
+				}
+				expect(
+					f.db
+						.prepare(
+							"SELECT pi_native_tool_inputs, pi_native_reasoning_ids FROM session_meta WHERE session_id = ?",
+						)
+						.get(sessionId),
+				).toEqual(stored);
+			} finally {
+				f.close();
+			}
+		});
+	}
+
+	for (const column of [
+		"pi_native_tool_inputs",
+		"pi_native_reasoning_ids",
+	] as const) {
 		it(`does not publish failed ${column} activation or retry it on defer`, async () => {
 			const sessionId = `ses-native-failure-${column}`;
 			const f = fixture(sessionId);
@@ -258,13 +316,16 @@ describe("native upgrade application", () => {
 				};
 				message.content[2].arguments = { dropped: marker };
 				const messages: unknown[] = [message];
-				applyNativeToolInputReplayPi({
-					db,
-					sessionId,
-					messages,
-					canApply,
-					changes: changed ? new Map([[0, new Set([callId])]]) : new Map(),
-				});
+				applyNativeToolInputReplayPi(
+					{
+						db,
+						sessionId,
+						messages,
+						canApply,
+						changes: changed ? new Map([[0, new Set([callId])]]) : new Map(),
+					},
+					getNativeToolInputs(db, sessionId),
+				);
 				return nativeBytes(messages);
 			};
 			const b = run("first marker", true);
@@ -291,18 +352,21 @@ describe("native upgrade application", () => {
 		try {
 			const run = (id: string, canApply: boolean) => {
 				const messages: unknown[] = [oldAssistant()];
-				applyNativeReasoningReplayPi({
-					db,
-					sessionId,
-					messages,
-					stableId: () => id,
-					messageIdToMaxTag: new Map([[id, 1]]),
-					localWatermark: 10,
-					clearReasoningAge: 100,
-					omissionAllowed: true,
-					detectAged: false,
-					canApply,
-				});
+				applyNativeReasoningReplayPi(
+					{
+						db,
+						sessionId,
+						messages,
+						stableId: () => id,
+						messageIdToMaxTag: new Map([[id, 1]]),
+						localWatermark: 10,
+						clearReasoningAge: 100,
+						omissionAllowed: true,
+						detectAged: false,
+						canApply,
+					},
+					getNativeReasoningIds(db, sessionId),
+				);
 				return nativeBytes(messages);
 			};
 			const unresolved = run("pi-msg-0-2-assistant", true);
@@ -327,21 +391,24 @@ describe("native upgrade application", () => {
 			const before = nativeBytes([original]);
 			const run = (canApply: boolean) => {
 				const messages = [original];
-				applyNativeReasoningReplayPi({
-					db,
-					sessionId,
-					messages,
-					messageIdToMaxTag: new Map([
-						["entry-old", 1],
-						["entry-new", 100],
-					]),
-					stableId: () => "entry-old",
-					localWatermark: 0,
-					clearReasoningAge: 10,
-					omissionAllowed: true,
-					detectAged: canApply,
-					canApply,
-				});
+				applyNativeReasoningReplayPi(
+					{
+						db,
+						sessionId,
+						messages,
+						messageIdToMaxTag: new Map([
+							["entry-old", 1],
+							["entry-new", 100],
+						]),
+						stableId: () => "entry-old",
+						localWatermark: 0,
+						clearReasoningAge: 10,
+						omissionAllowed: true,
+						detectAged: canApply,
+						canApply,
+					},
+					getNativeReasoningIds(db, sessionId),
+				);
 				return nativeBytes(messages);
 			};
 			const after = run(true);
@@ -366,13 +433,16 @@ describe("native upgrade application", () => {
 				content: Array<{ arguments?: Record<string, unknown> }>;
 			};
 			toolMessage.content[2].arguments = { dropped: "native tool marker" };
-			applyNativeToolInputReplayPi({
-				db,
-				sessionId,
-				messages: [toolMessage],
-				changes: new Map([[0, new Set([callId])]]),
-				canApply: true,
-			});
+			applyNativeToolInputReplayPi(
+				{
+					db,
+					sessionId,
+					messages: [toolMessage],
+					changes: new Map([[0, new Set([callId])]]),
+					canApply: true,
+				},
+				getNativeToolInputs(db, sessionId),
+			);
 			expect(getNativeToolInputs(db, sessionId).has(callId)).toBe(true);
 			const run = (
 				omissionAllowed: boolean,
@@ -380,21 +450,24 @@ describe("native upgrade application", () => {
 				localWatermark: number,
 			) => {
 				const messages: unknown[] = [oldAssistant()];
-				applyNativeReasoningReplayPi({
-					db,
-					sessionId,
-					messages,
-					messageIdToMaxTag: new Map([
-						["old", 1],
-						["new", 200],
-					]),
-					stableId: () => "old",
-					localWatermark,
-					clearReasoningAge: 10,
-					omissionAllowed,
-					canApply,
-					detectAged: false,
-				});
+				applyNativeReasoningReplayPi(
+					{
+						db,
+						sessionId,
+						messages,
+						messageIdToMaxTag: new Map([
+							["old", 1],
+							["new", 200],
+						]),
+						stableId: () => "old",
+						localWatermark,
+						clearReasoningAge: 10,
+						omissionAllowed,
+						canApply,
+						detectAged: false,
+					},
+					getNativeReasoningIds(db, sessionId),
+				);
 				return nativeBytes(messages);
 			};
 			expect(run(false, true, 10)).toContain(ciphertext);

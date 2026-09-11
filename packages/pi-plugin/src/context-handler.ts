@@ -107,6 +107,10 @@ import {
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import {
+	getNativeReasoningIds,
+	getNativeToolInputs,
+} from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
 	createTagger,
@@ -5831,30 +5835,50 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 
 	// Legacy drop/watermark state does not authorize first native activation.
 	// Use committed canonical inputs, then publish only persisted native decisions.
-	const nativeInputsApplied = applyNativeToolInputReplayPi({
-		db: args.db,
-		sessionId: args.sessionId,
-		messages: args.messages,
-		changes: transcript.getToolInputChanges(),
-		canApply: isCacheBustingPass,
-	});
-	const nativeReasoningApplied = args.reasoningClearing
-		? applyNativeReasoningReplayPi({
+	let nativeInputs: ReadonlyMap<string, string> | undefined;
+	let nativeReasoningIds: ReadonlySet<string> | undefined;
+	try {
+		// Validate both lanes before either can publish replay or activation.
+		nativeInputs = getNativeToolInputs(args.db, args.sessionId);
+		nativeReasoningIds = getNativeReasoningIds(args.db, args.sessionId);
+	} catch (error) {
+		sessionLog(
+			args.sessionId,
+			`native replay state unavailable; retaining native history (continuing): ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (nativeInputs !== undefined && nativeReasoningIds !== undefined) {
+		const nativeInputsApplied = applyNativeToolInputReplayPi(
+			{
 				db: args.db,
 				sessionId: args.sessionId,
 				messages: args.messages,
-				messageIdToMaxTag,
-				stableId: stableIdResolver,
-				localWatermark: args.sessionMeta.clearedReasoningThroughTag ?? 0,
-				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
-				omissionAllowed: args.reasoningClearing.nativeReasoningMayClear,
-				canApply: isCacheBustingPass && !reasoningPersistenceFailed,
-				detectAged: shouldRunHeuristics && routineCleanupApplied,
-			})
-		: 0;
-	if (nativeInputsApplied > 0 || nativeReasoningApplied > 0) {
-		heuristicOrReasoningDidMutate = true;
-		executedWorkThisPass = true;
+				changes: transcript.getToolInputChanges(),
+				canApply: isCacheBustingPass,
+			},
+			nativeInputs,
+		);
+		const nativeReasoningApplied = args.reasoningClearing
+			? applyNativeReasoningReplayPi(
+					{
+						db: args.db,
+						sessionId: args.sessionId,
+						messages: args.messages,
+						messageIdToMaxTag,
+						stableId: stableIdResolver,
+						localWatermark: args.sessionMeta.clearedReasoningThroughTag ?? 0,
+						clearReasoningAge: args.reasoningClearing.clearReasoningAge,
+						omissionAllowed: args.reasoningClearing.nativeReasoningMayClear,
+						canApply: isCacheBustingPass && !reasoningPersistenceFailed,
+						detectAged: shouldRunHeuristics && routineCleanupApplied,
+					},
+					nativeReasoningIds,
+				)
+			: 0;
+		if (nativeInputsApplied > 0 || nativeReasoningApplied > 0) {
+			heuristicOrReasoningDidMutate = true;
+			executedWorkThisPass = true;
+		}
 	}
 	if (toolReclaimApplicationOpportunity) {
 		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);

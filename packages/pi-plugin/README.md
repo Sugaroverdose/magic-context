@@ -80,6 +80,8 @@ OMP can replay Responses/Codex history from `providerPayload` instead of ordinar
 
 Native tool-input values and native reasoning removals have separate persisted replay state. Existing dropped tags and local reasoning watermarks do not activate native changes during upgrade: first application waits for an already-authorized cache-busting pass and is persisted before publication. Deferred passes replay only those saved native decisions.
 
+If either native replay field cannot be read or validated, that pass skips native replay and activation, preserving the incoming native payloads. Ordinary Pi cleanup continues; the stored native decisions are not reset.
+
 Function calls carry the canonical dropped-marker JSON. Custom calls use OMP's existing empty-string fallback, which does not carry that marker or imply the same copied-input rejection behavior.
 
 Display summaries (`summary`) are removed with eligible old encrypted reasoning; they are the source of ordinary Pi `thinking`, not a native preservation requirement. Retaining a native payload does not prevent per-part cleanup of stale non-redacted Pi thinking and its signature.

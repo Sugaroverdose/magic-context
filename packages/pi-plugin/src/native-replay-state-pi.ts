@@ -1,8 +1,6 @@
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	addNativeReasoningIds,
-	getNativeReasoningIds,
-	getNativeToolInputs,
 	saveNativeToolInputs,
 } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { sessionLog } from "@magic-context/core/shared/logger";
@@ -25,8 +23,8 @@ export function applyNativeToolInputReplayPi(
 		changes: ReadonlyMap<number, ReadonlySet<string>>;
 		canApply: boolean;
 	},
+	saved: ReadonlyMap<string, string>,
 ): number {
-	const saved = getNativeToolInputs(args.db, args.sessionId);
 	if (saved.size === 0 && (!args.canApply || args.changes.size === 0)) return 0;
 	const nextInputs = new Map<string, string>();
 	const pending = new Map<number, Record<string, unknown>>();
@@ -110,9 +108,9 @@ export function applyNativeReasoningReplayPi(
 		canApply: boolean;
 		detectAged: boolean;
 	},
+	saved: ReadonlySet<string>,
 ): number {
 	if (!args.omissionAllowed) return 0;
-	const saved = getNativeReasoningIds(args.db, args.sessionId);
 	let maxTag = 0;
 	for (const tag of args.messageIdToMaxTag.values())
 		maxTag = Math.max(maxTag, tag);
