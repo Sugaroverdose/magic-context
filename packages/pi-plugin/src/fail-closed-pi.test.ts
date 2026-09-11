@@ -8,6 +8,7 @@ import {
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
+import { contextHost } from "./pi-context-host.test";
 
 type Handler = (...args: unknown[]) => unknown;
 
@@ -34,6 +35,37 @@ function createFakePi() {
 }
 
 describe("registerPiFailClosedSurface", () => {
+	for (const reason of [
+		{
+			kind: "schema_fence" as const,
+			persistedVersion: 65,
+			supportedVersion: 64,
+		},
+		{ kind: "storage_failure" as const, cause: "storage cannot open" },
+		{
+			kind: "migration_guard" as const,
+			persistedVersion: 65,
+			supportedVersion: 64,
+			blockingProcesses: [{ kind: "Pi" as const, pid: 123 }],
+		},
+	]) {
+		it(`aborts the installed Pi runner for ${reason.kind}`, async () => {
+			const fake = createFakePi();
+			const host = contextHost();
+			Object.assign(fake.pi, host.api);
+			registerPiFailClosedSurface(fake.pi as never, {
+				reason,
+				tryReopen: async () => null,
+				onRecovered: async () => {},
+			});
+			const handler = fake.handlers.get("context")?.[0];
+			expect(handler).toBeDefined();
+			const raw = [{ role: "user", content: "original", timestamp: 1 }];
+			const served = await host.emit(handler as never, raw, {});
+			host.assertRefused(served, raw);
+		});
+	}
+
 	it("cancels session_before_compact and throws fence error from context", async () => {
 		const fake = createFakePi();
 		registerPiFailClosedSurface(fake.pi as never, {

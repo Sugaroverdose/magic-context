@@ -168,14 +168,20 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(first.events.length).toBeGreaterThan(0);
 		expect(first.tools).toContain("ctx_search");
 		expect(first.commands).toContain("ctx-status");
-		expect(first.entryRenderers).toEqual(["ctx-status"]);
+		expect(first.entryRenderers).toEqual([
+			"magic-context-turn-refused",
+			"ctx-status",
+		]);
 
 		const second = createCountingPi();
 		await magicContextPiExtension(second.pi);
 		expect(second.events.length).toBeGreaterThan(0);
 		expect(second.tools).toContain("ctx_search");
 		expect(second.commands).toContain("ctx-status");
-		expect(second.entryRenderers).toEqual(["ctx-status"]);
+		expect(second.entryRenderers).toEqual([
+			"magic-context-turn-refused",
+			"ctx-status",
+		]);
 	}, 15_000);
 
 	it("keeps session B historian and Dreamer live when session A shuts down", async () => {
@@ -611,7 +617,10 @@ describe("Pi in-process child guard (#247)", () => {
 		await magicContextPiExtension(independent.pi);
 		expect(independent.tools).toContain("ctx_search");
 		expect(independent.commands).toContain("ctx-status");
-		expect(independent.entryRenderers).toEqual(["ctx-status"]);
+		expect(independent.entryRenderers).toEqual([
+			"magic-context-turn-refused",
+			"ctx-status",
+		]);
 		expect(__test.claimPiStartupMaintenance()).toBe(false);
 	}, 20_000);
 

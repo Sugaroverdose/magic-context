@@ -237,6 +237,7 @@ import {
 	resolvePiUsableContextLimit,
 	resolvePiWindowGeometry,
 } from "./pi-context-limit";
+import { registerPiGuardedContext } from "./pi-context-refusal";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
 import {
 	clearPiLkgSessionState,
@@ -250,7 +251,7 @@ import {
 	formatPiPressureForLog,
 	resolvePiPressureSnapshot,
 } from "./pi-pressure";
-import { assertPiRawFallbackFits } from "./pi-raw-fallback";
+import { assertPiRawFallbackFits, PiStorageBusyError } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import { applyPiThinkingBindingRecovery } from "./provider-error-recovery-pi";
 import {
@@ -2290,7 +2291,7 @@ export function registerPiContextHandler(
 		sessionLog(sessionId, message);
 	});
 
-	pi.on("context", async (event, ctx) => {
+	registerPiGuardedContext(pi, async (event, ctx) => {
 		const transformStartTime = performance.now();
 		let rawMessageCount = 0;
 		let rawFallbackLimit: number | undefined;
@@ -3666,7 +3667,11 @@ export function registerPiContextHandler(
 		} catch (err) {
 			// Loud fail-closed / emergency aborts must reach the user — do not
 			// swallow into native-compaction fallthrough.
-			if (isFailClosedBlockingError(err) && !baseOptions.compactionOff)
+			if (
+				(isFailClosedBlockingError(err) ||
+					err instanceof EmergencyFailClosedError) &&
+				!baseOptions.compactionOff
+			)
 				throw err;
 			if (
 				!lkgCompactionOff &&
@@ -3691,6 +3696,16 @@ export function registerPiContextHandler(
 				try {
 					const replay = lkgCoordinator.replay(lkgPassSnapshot);
 					if (replay.ok) {
+						// A valid stored prefix does not bound the newly appended raw tail.
+						assertPiRawFallbackFits(
+							replay.messages,
+							rawFallbackLimit,
+							(line) => {
+								if (sessionIdForError)
+									logPiLkgRecovery(sessionIdForError, line);
+							},
+							err,
+						);
 						const reason = piStorageErrorReason(err);
 						logPiLkgRecovery(
 							sessionIdForError,
@@ -3706,6 +3721,7 @@ export function registerPiContextHandler(
 						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
 					);
 				} catch (replayError) {
+					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,
 						`TRANSIENT STORAGE FAILURE ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
