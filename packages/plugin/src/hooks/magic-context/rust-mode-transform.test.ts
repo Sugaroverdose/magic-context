@@ -6557,4 +6557,33 @@ describe("rust-mode wire transport (protected_tokens_effective)", () => {
         expect(wirePayload.protected_tokens_effective).toBe(24_000);
         expect(wirePayload.protected_tags).toBeUndefined();
     });
+
+    it("sends the derived floor when a project-only override tries to lower it", async () => {
+        const sessionId = `rust-derived-floor-wire-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const transformBodies: Array<Record<string, unknown>> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform") {
+                    transformBodies.push(structuredClone(body) as Record<string, unknown>);
+                    return { decision: "PASSTHROUGH", native_messages: [] };
+                }
+                return { ok: true };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.protectedTokenTierOverrides = { project: 4_000 };
+        deps.contextUsageMap.set(sessionId, {
+            usage: { inputTokens: 20_000, percentage: 10 },
+            updatedAt: Date.now(),
+        });
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const input = makeMessages(sessionId);
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+
+        expect(transformBodies).toHaveLength(1);
+        expect(transformBodies[0]?.protected_tokens_effective).toBe(10_240);
+    });
 });

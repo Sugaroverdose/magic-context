@@ -3,6 +3,7 @@ import {
     isDreamerRunnable,
     isHistorianRunnable,
 } from "../../config/agent-disable";
+import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     type DreamerConfig,
@@ -144,6 +145,7 @@ export interface MagicContextDeps {
     liveSessionState?: LiveSessionState;
     config: {
         protected_tokens?: number;
+        protectedTokenTierOverrides?: ProtectedTokensTierOverrides;
         /** User-level setting that lets a session started exactly in the canonical home directory use it as the project. */
         allow_home_project?: boolean;
         language?: string;
@@ -1101,6 +1103,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         channel1StateBySession,
         channel2DirectiveTextBySession,
         protectedTokens: deps.config.protected_tokens,
+        protectedTokenTierOverrides: deps.config.protectedTokenTierOverrides,
         smartDrops: deps.config.smart_drops === true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
         commitClusterTrigger: deps.config.commit_cluster_trigger,

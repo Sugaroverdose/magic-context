@@ -81,6 +81,8 @@ const DEDUP_SAFE_TOOLS = new Set([
 
 export interface PiHeuristicCleanupConfig {
 	protectedTags: number;
+	/** Token-window cutoff; null means no tool-backed protection window exists. */
+	protectedCutoff?: number | null;
 	/** Run age-sensitive cleanup; emergency selection remains independent. */
 	routine?: boolean;
 	/**
@@ -322,7 +324,10 @@ export function applyPiHeuristicCleanup(
 	// regardless of status. `getMaxTagNumberBySession` resolves with a
 	// single backward index seek (O(log N)).
 	const maxTag = getMaxTagNumberBySession(db, sessionId);
-	const protectedCutoff = maxTag - config.protectedTags;
+	const protectedCutoff =
+		config.protectedCutoff === null
+			? maxTag + 1
+			: (config.protectedCutoff ?? maxTag - config.protectedTags);
 	const routine = config.routine !== false;
 	// Stale ctx_reduce removal uses the protected-tail window after first retaining
 	// the newest housekeeping exemplars; only older calls can become stale.

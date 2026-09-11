@@ -20,6 +20,7 @@ const SCHEMA_PATH = resolve(import.meta.dir, "../../../../../assets/magic-contex
 
 interface JsonSchemaNode {
   properties?: Record<string, JsonSchemaNode>;
+  deprecated?: boolean;
 }
 
 function loadSchema(): JsonSchemaNode {
@@ -39,6 +40,15 @@ function schemaLeaves(node: JsonSchemaNode, prefix = ""): string[] {
     else out.push(path);
   }
   return out;
+}
+
+function deprecatedSchemaPaths(node: JsonSchemaNode, prefix = ""): string[] {
+  const props = node.properties;
+  if (!props) return [];
+  return Object.entries(props).flatMap(([key, child]) => {
+    const path = `${prefix}${key}`;
+    return [...(child.deprecated ? [path] : []), ...deprecatedSchemaPaths(child, `${path}.`)];
+  });
 }
 
 const OMITTED_PREFIXES = Object.keys(OMITTED_BY_DESIGN);
@@ -79,6 +89,22 @@ describe("ConfigEditor ⇄ schema parity", () => {
   it("#given the coverage manifest #then no OMITTED entry points at a non-existent schema field", () => {
     const stale = OMITTED_PREFIXES.filter((p) => !leaves.some((l) => isCoveredBy(l, p)));
     expect(stale).toEqual([]);
+  });
+
+  it("#given schema-deprecated ignored keys #then the form renders no control for them", () => {
+    const deprecated = deprecatedSchemaPaths(loadSchema());
+    expect(deprecated).toContain("protected_tags");
+    expect(
+      deprecated.filter((leaf) =>
+        RENDERED_PREFIXES.some((prefix) => isCoveredBy(leaf, prefix) || isCoveredBy(prefix, leaf)),
+      ),
+    ).toEqual([]);
+
+    const source = readFileSync(resolve(import.meta.dir, "./ConfigEditor.tsx"), "utf-8");
+    const renderedDeprecatedControls = deprecated.filter((leaf) =>
+      source.includes(`key: "${leaf}"`),
+    );
+    expect(renderedDeprecatedControls).toEqual([]);
   });
 
   it("#given the graduated features #then they are NOT referenced under the dead experimental.* namespace", () => {

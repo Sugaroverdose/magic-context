@@ -120,10 +120,11 @@ const FIELD_DEFS: FieldDef[] = [
   // cache_ttl and execute_threshold_percentage are rendered as custom PerModelField components
   // Tags & cleanup
   {
-    key: "protected_tags",
-    label: "Protected Tags",
+    key: "protected_tokens",
+    label: "Protected tokens",
     type: "number",
-    description: "Number of recent tags protected from drops.",
+    description:
+      "Absolute token floor protected from automatic reclaim (4,000–1,000,000). Leave blank to derive it from the model's usable context window. User-level only.",
     section: "Tags & Cleanup",
   },
   {
@@ -183,7 +184,12 @@ const FIELD_DEFS: FieldDef[] = [
 // These fields are valid only in trusted user configuration. They remain in the
 // schema coverage manifest because the user form renders them, but project forms
 // must not present controls for settings the runtime strips from repositories.
-const USER_ONLY_FORM_FIELDS = new Set(["language", "allow_home_project", "mural.model"]);
+const USER_ONLY_FORM_FIELDS = new Set([
+  "language",
+  "allow_home_project",
+  "mural.model",
+  "protected_tokens",
+]);
 
 // ── Nested value access helpers ─────────────────────────────
 
@@ -229,7 +235,6 @@ const SECTION_ICONS: Record<string, string> = {
 // Fields that should use range sliders (percentage or threshold values)
 const RANGE_SLIDER_FIELDS = new Set([
   "history_budget_percentage",
-  "protected_tags",
   "clear_reasoning_age",
   "historian_timeout_ms",
   "memory.injection_budget_tokens",
@@ -483,8 +488,6 @@ function ConfigForm(props: {
         return { min: 20, max: 90, step: 1, suffix: "%", defaultValue: 65 };
       case "history_budget_percentage":
         return { min: 0.05, max: 0.5, step: 0.01, suffix: "", defaultValue: 0.15 };
-      case "protected_tags":
-        return { min: 1, max: 100, step: 1, suffix: "", defaultValue: 20 };
       case "clear_reasoning_age":
         return { min: 10, max: 200, step: 5, suffix: "", defaultValue: 50 };
       case "historian_timeout_ms":
@@ -572,8 +575,11 @@ function ConfigForm(props: {
           <input
             class="config-input"
             type="number"
+            min={field.key === "protected_tokens" ? 4000 : undefined}
+            max={field.key === "protected_tokens" ? 1_000_000 : undefined}
+            step={field.key === "protected_tokens" ? 1 : undefined}
             value={value() != null ? String(value()) : ""}
-            placeholder="default"
+            placeholder={field.key === "protected_tokens" ? "derived" : "default"}
             onInput={(e) => {
               const v = e.currentTarget.value;
               handleFieldChange(field.key, v ? Number(v) : undefined);

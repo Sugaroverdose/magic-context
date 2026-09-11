@@ -2057,7 +2057,8 @@
       "maximum": 1000000
     },
     "protected_tags": {
-      "description": "Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead."
+      "description": "Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead.",
+      "deprecated": true
     },
     "clear_reasoning_age": {
       "default": 50,

@@ -30,7 +30,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "execute_threshold_percentage",
   "execute_threshold_tokens",
   // Tags & cleanup
-  "protected_tags",
+  "protected_tokens",
   "clear_reasoning_age",
   // Historian
   "history_budget_percentage",
@@ -91,8 +91,8 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   // prefix match.
   "models.window_overlay_path":
     "user-only Fusiform overlay path; raw JSONC because it is a filesystem location with a computed default (<dataDir>/fusiform/window-overlay.json), not a value worth a form widget",
-  protected_tokens:
-    "replaces protected_tags (deprecated, still rendered); the form widget lands with the release that removes the tag-count knob",
+  protected_tags:
+    "deprecated and ignored by every runtime; retained only so existing files receive a migration warning",
   debug_rpc:
     "developer-only diagnostics toggle (memory/heap endpoints on the local RPC); never a dashboard knob",
 };

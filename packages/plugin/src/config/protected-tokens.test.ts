@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parsePluginConfig, resetProtectedTagsDeprecationWarningForTest } from "./index";
 import { constrainProjectThresholdOverrides } from "./project-security";
 import { deriveDefaultProtectedTokens, MagicContextConfigSchema } from "./schema/magic-context";
@@ -132,39 +134,31 @@ describe("protected_tokens config and derivation", () => {
             expect(warnings.some((w) => w.includes("protected_tokens"))).toBe(true);
         });
 
-        it("mixed scalar/object: project object default >= user scalar stands", () => {
-            const mergedRaw: Record<string, unknown> = { protected_tokens: 20_000 };
+        it("rejects a project object and preserves the trusted user scalar", () => {
+            const mergedRaw: Record<string, unknown> = {
+                protected_tokens: { default: 35_000 },
+            };
             const projectRaw = { protected_tokens: { default: 35_000 } };
             const warnings = constrainProjectThresholdOverrides({
                 mergedRaw,
                 projectRaw,
                 trustedBaseConfig: { protected_tokens: 20_000 },
             });
-            expect(mergedRaw.protected_tokens).toBe(35_000);
-            expect(warnings).toHaveLength(0);
-        });
-
-        it("mixed scalar/object: project object default < user scalar is rejected with warning", () => {
-            const mergedRaw: Record<string, unknown> = { protected_tokens: 30_000 };
-            const projectRaw = { protected_tokens: { default: 15_000 } };
-            const warnings = constrainProjectThresholdOverrides({
-                mergedRaw,
-                projectRaw,
-                trustedBaseConfig: { protected_tokens: 30_000 },
-            });
-            expect(mergedRaw.protected_tokens).toBe(30_000);
+            expect(mergedRaw.protected_tokens).toBe(20_000);
             expect(warnings.some((w) => w.includes("protected_tokens"))).toBe(true);
         });
 
-        it("mixed scalar/object: project scalar < user object default is rejected with warning", () => {
-            const mergedRaw: Record<string, unknown> = { protected_tokens: { default: 28_000 } };
-            const projectRaw = { protected_tokens: 12_000 };
+        it("rejects a project object and falls back to derivation when the user omitted the setting", () => {
+            const mergedRaw: Record<string, unknown> = {
+                protected_tokens: { default: 35_000 },
+            };
+            const projectRaw = { protected_tokens: { default: 35_000 } };
             const warnings = constrainProjectThresholdOverrides({
                 mergedRaw,
                 projectRaw,
-                trustedBaseConfig: { protected_tokens: { default: 28_000 } },
+                trustedBaseConfig: {},
             });
-            expect(mergedRaw.protected_tokens).toBe(28_000);
+            expect(mergedRaw.protected_tokens).toBeUndefined();
             expect(warnings.some((w) => w.includes("protected_tokens"))).toBe(true);
         });
 
@@ -178,6 +172,19 @@ describe("protected_tokens config and derivation", () => {
             });
             expect(mergedRaw.protected_tokens).toBe(32_000);
             expect(warnings).toHaveLength(0);
+        });
+    });
+
+    describe("root configuration reference", () => {
+        const reference = readFileSync(
+            resolve(import.meta.dir, "../../../../CONFIGURATION.md"),
+            "utf8",
+        );
+
+        it("documents protected_tokens as live and protected_tags only as deprecated and ignored", () => {
+            expect(reference).toContain("| `protected_tokens` |");
+            expect(reference).not.toContain("| `protected_tags` |");
+            expect(reference).toContain("`protected_tags` is deprecated and ignored");
         });
     });
 

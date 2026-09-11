@@ -51,7 +51,7 @@ const TOKEN_THRESHOLD_REASON =
 const TOKEN_THRESHOLD_INTRODUCTION_REASON =
     "security: a repository cannot introduce a new execute_threshold_tokens override when the user has no trusted token threshold for that key; that could force earlier historian work or cloned-repo cost escalation.";
 const PROTECTED_TOKENS_REASON =
-    "security: a repository may only raise protected_tokens above the user's effective value; it cannot lower protection below the user's configured floor.";
+    "security: a repository may only raise protected_tokens above the resolved user-or-derived floor; it cannot lower protection.";
 
 interface PercentageThresholdConfig {
     defaultValue: number;
@@ -67,10 +67,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function resolveProtectedTokensScalar(
-    value: unknown,
-    modelKey?: string,
-): number | undefined {
+export function resolveProtectedTokensScalar(value: unknown): number | undefined {
     if (
         typeof value === "number" &&
         Number.isInteger(value) &&
@@ -79,26 +76,55 @@ export function resolveProtectedTokensScalar(
     ) {
         return value;
     }
-    if (isPlainObject(value)) {
-        if (
-            modelKey &&
-            typeof value[modelKey] === "number" &&
-            Number.isInteger(value[modelKey]) &&
-            (value[modelKey] as number) >= 4000 &&
-            (value[modelKey] as number) <= 1_000_000
-        ) {
-            return value[modelKey] as number;
-        }
-        if (
-            typeof value.default === "number" &&
-            Number.isInteger(value.default) &&
-            value.default >= 4000 &&
-            value.default <= 1_000_000
-        ) {
-            return value.default;
-        }
-    }
     return undefined;
+}
+
+export interface ProtectedTokensTierOverrides {
+    readonly user?: number;
+    readonly project?: number;
+}
+
+const PROTECTED_TOKENS_TIER_OVERRIDES = Symbol.for(
+    "@cortexkit/magic-context/protected-tokens-tier-overrides",
+);
+
+type ConfigWithProtectedTokensTiers = {
+    [PROTECTED_TOKENS_TIER_OVERRIDES]?: ProtectedTokensTierOverrides;
+};
+
+/**
+ * Retain trusted user and project values outside the public config schema until
+ * live context geometry is available. The symbol is non-enumerable so runtime
+ * provenance cannot leak into saved JSON or generated schema surfaces.
+ */
+export function attachProtectedTokensTierOverrides<T extends object>(
+    config: T,
+    args: { trustedUser: unknown; project: unknown },
+): T {
+    const user = resolveProtectedTokensScalar(args.trustedUser);
+    const rawProject = resolveProtectedTokensScalar(args.project);
+    const project =
+        rawProject !== undefined && (user === undefined || rawProject >= user)
+            ? rawProject
+            : undefined;
+    if (user === undefined && project === undefined) return config;
+
+    Object.defineProperty(config, PROTECTED_TOKENS_TIER_OVERRIDES, {
+        value: {
+            ...(user !== undefined ? { user } : {}),
+            ...(project !== undefined ? { project } : {}),
+        },
+        configurable: false,
+        enumerable: false,
+        writable: false,
+    });
+    return config;
+}
+
+export function getProtectedTokensTierOverrides(
+    config: object,
+): ProtectedTokensTierOverrides | undefined {
+    return (config as ConfigWithProtectedTokensTiers)[PROTECTED_TOKENS_TIER_OVERRIDES];
 }
 
 function stripListedFields(

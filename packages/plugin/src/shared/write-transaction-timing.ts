@@ -14,9 +14,10 @@ export function logSlowWriteTransaction(
     site: string,
     startedAt: number,
     thresholdMs = SLOW_WRITE_TRANSACTION_THRESHOLD_MS,
+    completedAtMs = performance.now(),
 ): void {
     try {
-        const durationMs = performance.now() - startedAt;
+        const durationMs = completedAtMs - startedAt;
         if (durationMs < thresholdMs) return;
         log(`[magic-context] slow write transaction: site=${site} held=${durationMs.toFixed(1)}ms`);
     } catch {

@@ -1,4 +1,5 @@
 import type { MagicContextPluginConfig } from "../../config";
+import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/magic-context";
 import { createCompactionHandler } from "../../features/magic-context/compaction";
 import { createScheduler } from "../../features/magic-context/scheduler";
@@ -28,6 +29,7 @@ export function buildMagicContextHookConfig(pluginConfig: MagicContextPluginConf
     const hookConfig = {
         ...pluginConfig,
         protected_tokens: pluginConfig.protected_tokens,
+        protectedTokenTierOverrides: getProtectedTokensTierOverrides(pluginConfig),
         execute_threshold_percentage:
             pluginConfig.execute_threshold_percentage ?? DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     };

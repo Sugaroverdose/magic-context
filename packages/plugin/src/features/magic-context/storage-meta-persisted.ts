@@ -1,3 +1,4 @@
+import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import { deriveDefaultProtectedTokens } from "../../config/schema/magic-context";
 import {
     type ContextLimitProvenance,
@@ -3141,9 +3142,12 @@ export function getSessionWorkMetrics(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface EpochFloorResolutionInputs {
+    /** Legacy/direct absolute override. Tier-aware loaders use tierOverrides instead. */
     configuredOverride?: number;
+    tierOverrides?: ProtectedTokensTierOverrides;
     usableSoft: number;
     isCacheBustingPass: boolean;
+    onRejectedProjectOverride?: (warning: string) => void;
 }
 
 export interface EpochFloorResolutionResult {
@@ -3163,6 +3167,7 @@ interface PreSnapshotMemo {
 }
 
 const preSnapshotSessions = new Map<string, PreSnapshotMemo>();
+let warnedProtectedTokenTierOverrides = new WeakSet<ProtectedTokensTierOverrides>();
 
 function isPreSnapshotMemo(value: unknown): value is PreSnapshotMemo {
     if (typeof value !== "object" || value === null) return false;
@@ -3241,6 +3246,7 @@ function preSnapshotResult(
 
 export function resetEpochFloorRegistryForTest(): void {
     preSnapshotSessions.clear();
+    warnedProtectedTokenTierOverrides = new WeakSet<ProtectedTokensTierOverrides>();
 }
 
 /**
@@ -3290,6 +3296,28 @@ export function resolveEpochFloorForPass(
     sessionId: string,
     inputs: EpochFloorResolutionInputs,
 ): EpochFloorResolutionResult {
+    const derived = deriveDefaultProtectedTokens(inputs.usableSoft);
+    let configuredOverride = inputs.configuredOverride;
+    const tierOverrides = inputs.tierOverrides;
+    if (tierOverrides) {
+        const userOrDerived = tierOverrides.user ?? derived;
+        configuredOverride = tierOverrides.user;
+        if (tierOverrides.project !== undefined) {
+            if (tierOverrides.project >= userOrDerived) {
+                configuredOverride = tierOverrides.project;
+            } else if (
+                inputs.onRejectedProjectOverride &&
+                !warnedProtectedTokenTierOverrides.has(tierOverrides)
+            ) {
+                warnedProtectedTokenTierOverrides.add(tierOverrides);
+                inputs.onRejectedProjectOverride(
+                    `Ignoring project protected_tokens=${tierOverrides.project}; it cannot lower resolved user/default floor ${userOrDerived}.`,
+                );
+            }
+        }
+    }
+    const resolvedInputs = { ...inputs, configuredOverride };
+
     // Lifecycle (c) & (d): defer passes read the persisted snapshot verbatim.
     // A cache-busting pass starts the next floor epoch, so it resolves the live
     // override/geometry instead of carrying the prior epoch forward forever.
@@ -3305,14 +3333,12 @@ export function resolveEpochFloorForPass(
 
     // Resolve the candidate floor: absolute override if valid, else derived default
     const hasValidOverride =
-        typeof inputs.configuredOverride === "number" &&
-        Number.isInteger(inputs.configuredOverride) &&
-        inputs.configuredOverride >= 4000 &&
-        inputs.configuredOverride <= 1_000_000;
+        typeof configuredOverride === "number" &&
+        Number.isInteger(configuredOverride) &&
+        configuredOverride >= 4000 &&
+        configuredOverride <= 1_000_000;
     const floor =
-        hasValidOverride && typeof inputs.configuredOverride === "number"
-            ? inputs.configuredOverride
-            : deriveDefaultProtectedTokens(inputs.usableSoft);
+        hasValidOverride && typeof configuredOverride === "number" ? configuredOverride : derived;
     const provenance = hasValidOverride ? "override" : "derived";
 
     // Lifecycle (a): every cache-busting pass starts an epoch with the current
@@ -3336,16 +3362,16 @@ export function resolveEpochFloorForPass(
     const existing = preSnapshotSessions.get(sessionId) ?? readPreSnapshotMemo(db, sessionId);
     if (existing !== null && existing !== undefined) {
         preSnapshotSessions.set(sessionId, existing);
-        return preSnapshotResult(existing, inputs);
+        return preSnapshotResult(existing, resolvedInputs);
     }
 
     const memo: PreSnapshotMemo = {
-        configuredOverride: inputs.configuredOverride,
+        configuredOverride,
         usableSoft: inputs.usableSoft,
         floor,
         provenance,
     };
     const firstObservedMemo = writePreSnapshotMemo(db, sessionId, memo);
     preSnapshotSessions.set(sessionId, firstObservedMemo);
-    return preSnapshotResult(firstObservedMemo, inputs);
+    return preSnapshotResult(firstObservedMemo, resolvedInputs);
 }

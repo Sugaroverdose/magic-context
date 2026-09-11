@@ -177,9 +177,8 @@ describe("write transaction attribution fences", () => {
             const timing = await import(${JSON.stringify(new URL("./write-transaction-timing.ts", import.meta.url).href)});
             const logger = await import(${JSON.stringify(new URL("./logger.ts", import.meta.url).href)});
             for (const site of ${JSON.stringify(newlyCoveredSites)}) {
-                const now = performance.now();
-                timing.logSlowWriteTransaction(site, now - 1100);
-                timing.logSlowWriteTransaction(site, now - 100);
+                timing.logSlowWriteTransaction(site, 1_000, 1_000, 2_100);
+                timing.logSlowWriteTransaction(site, 2_000, 1_000, 2_100);
             }
             logger.flushLogger();
         `;
@@ -225,7 +224,7 @@ describe("write transaction attribution fences", () => {
                 .split("\n")
                 .filter((line) => line.includes(`site=${site}`));
             expect(lines).toHaveLength(1);
-            expect(lines[0]).toContain("held=");
+            expect(lines[0]).toContain("held=1100.0ms");
         });
     }
 });
