@@ -25,9 +25,15 @@ import {
 	recordOverflowDetected,
 	setPendingPiCompactionMarkerState,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
+import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
 import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import type {
+	SubagentRunner,
+	SubagentRunOptions,
+} from "@magic-context/core/shared/subagent-runner";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import {
 	consumeDeferredHistoryRefresh,
@@ -436,6 +442,70 @@ describe("Pi /ctx-wrapup", () => {
 			expect(result).toContain("## Magic Wrapup");
 			expect(consumeDeferredHistoryRefresh(sessionId)).toBe(true);
 			expect(consumeDeferredMaterialization(sessionId)).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("persists tokens when wrapup uses the real Pi historian", async () => {
+		const db = createDb();
+		try {
+			const sessionId = "pi-wrapup-persisted-tokens";
+			const runner = {
+				harness: "pi",
+				run: mock(async (options: SubagentRunOptions) => {
+					const model = options.model?.split("/") ?? [];
+					recordChildInvocation({
+						db,
+						parentSessionId: options.accountingSessionId ?? "",
+						harness: "pi",
+						subagent: options.accountingSubagent ?? "historian",
+						startedAt: Date.now(),
+						status: "completed",
+						tokens: { input: 900, output: 100, cacheRead: 200, cacheWrite: 10 },
+						providerId: model[0] ?? null,
+						modelId: model.slice(1).join("/") || null,
+					});
+					const ranges = [
+						...options.userMessage.matchAll(/Messages (\d+)-(\d+):/g),
+					];
+					const range = ranges.at(-1);
+					if (!range)
+						throw new Error("historian prompt did not include a message range");
+					return {
+						ok: true as const,
+						assistantText: `<compartment start="${range[1]}" end="${range[2]}" title="Pi wrapup"><p1>Summarized the eligible Pi history.</p1></compartment>`,
+						durationMs: 1,
+					};
+				}),
+			} as SubagentRunner;
+
+			const result = await runPiWrapup(
+				pi().api,
+				deps(db, {
+					runner,
+					runPiHistorianForWrapup: undefined,
+					historianChunkTokens: 100_000,
+				}),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+
+			expect(result).toContain("## Magic Wrapup");
+			expect(result).not.toContain("## Magic Wrapup — Partial");
+			const rows = getSubagentInvocations(db, sessionId);
+			expect(rows).toHaveLength(1);
+			expect(rows[0]).toMatchObject({
+				harness: "pi",
+				subagent: "historian",
+				providerId: "test",
+				modelId: "model",
+				inputTokens: 900,
+				outputTokens: 100,
+				cacheReadTokens: 200,
+				cacheWriteTokens: 10,
+			});
 		} finally {
 			closeQuietly(db);
 		}

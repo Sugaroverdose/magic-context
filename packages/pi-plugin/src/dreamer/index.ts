@@ -424,6 +424,9 @@ function createPiDreamerClient(
 			});
 			return { id: sessionId };
 		},
+		// PiSubagentRunner owns accounting because it sees every message_end usage
+		// payload. Keeping this list empty prevents the shared executor from writing
+		// a second, synthetic invocation row for the same task.
 		list: async () => ({ data: [] as Array<{ id: string }> }),
 		prompt: async (args: SessionPromptArgs) => {
 			const sessionId = args.path.id;
@@ -461,6 +464,9 @@ function createPiDreamerClient(
 				// `variant`; the Pi facade translates that same wire field into
 				// `--thinking` without letting a primary level leak to fallbacks.
 				thinkingLevel: extractBodyVariant(args),
+				accountingSessionId: opts.projectIdentity,
+				accountingSubagent: "dreamer",
+				accountingTask: accountingTaskFromTitle(dreamSession.title),
 			});
 			inFlightDreams.set(runPromise, opts.registrationOwner);
 			try {
@@ -525,6 +531,17 @@ function readDirectory(args: { query?: unknown }): string | undefined {
 	return typeof directory === "string" && directory.length > 0
 		? directory
 		: undefined;
+}
+
+function accountingTaskFromTitle(title: string | undefined): string | null {
+	if (!title) return null;
+	if (title.startsWith("magic-context-smart-note-confirm-")) {
+		return "evaluate-smart-notes";
+	}
+	const task = title.slice("magic-context-dream-".length);
+	if (!title.startsWith("magic-context-dream-") || task.length === 0)
+		return null;
+	return task === "classify" ? "classify-memories" : task;
 }
 
 function readSessionTitle(args: { body?: unknown }): string | undefined {
