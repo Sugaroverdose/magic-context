@@ -276,6 +276,7 @@ pub enum HistorianNoFireCause {
     NoModels,
     ModelUnresolvable,
     FailureBackoff,
+    ChainExhausted,
     PendingRewrite,
     StateLoadFailed,
     ContinuedOrdinalOffsetMissing,
@@ -309,6 +310,7 @@ impl HistorianNoFireCause {
             Self::NoModels => "NoModels",
             Self::ModelUnresolvable => "ModelUnresolvable",
             Self::FailureBackoff => "FailureBackoff",
+            Self::ChainExhausted => "ChainExhausted",
             Self::PendingRewrite => "PendingRewrite",
             Self::StateLoadFailed => "StateLoadFailed",
             Self::ContinuedOrdinalOffsetMissing => "ContinuedOrdinalOffsetMissing",
@@ -344,6 +346,7 @@ impl HistorianNoFireCause {
             Self::NoModels => "no_models",
             Self::ModelUnresolvable => "model_unresolvable",
             Self::FailureBackoff => "rate_limit",
+            Self::ChainExhausted => "chain_exhausted",
             Self::PendingRewrite => "pending_rewrite",
             Self::StateLoadFailed => "state_load_failed",
             Self::ContinuedOrdinalOffsetMissing => "state_incomplete",
@@ -1377,6 +1380,37 @@ pub(crate) fn completion_failure_backoff_at_ms(
     completed_at_ms.saturating_add(cooldown_ms)
 }
 
+fn abandon_chain_failure(
+    current: &HistorianDurableState,
+    error: &HistorianProducerError,
+    decision: ProducerFailureDecision,
+    earliest_reset_ms: Option<i64>,
+    detail: Option<String>,
+) -> HistorianDurableState {
+    let mut next = abandon_with_detail(current, decision.failure_backoff_at_ms, detail);
+    let refused = matches!(
+        error.classification().map(|value| value.class),
+        Some(ErrorClass::Transient | ErrorClass::Permanent | ErrorClass::AuthRequired)
+    ) || (!error.has_class_field() && error.is_retryable_model_failure());
+    if !decision.try_next_model && refused {
+        record_chain_outage(&mut next, earliest_reset_ms);
+    }
+    next
+}
+
+fn record_chain_outage(next: &mut HistorianDurableState, earliest_reset_ms: Option<i64>) {
+    let reset = earliest_reset_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|time| time.to_rfc3339())
+        .unwrap_or_else(|| "unknown".into());
+    let outage = format!("chain_exhausted earliest_provider_reset={reset} retry=probe; serving retained context and reductions");
+    next.last_failure = Some(format!(
+        "{}; {outage}",
+        next.last_failure.as_deref().unwrap_or("")
+    ));
+    next.last_no_fire = Some(outage);
+}
+
 fn classified_backoff_at_ms(
     now_ms: i64,
     default_failure_backoff_at_ms: i64,
@@ -1472,9 +1506,17 @@ fn remaining_uncached_models(
 fn abandon_model_unresolvable(
     current: &HistorianDurableState,
     detail: String,
+    earliest_reset_ms: Option<i64>,
 ) -> HistorianDurableState {
     let mut next = abandon_with_detail(current, 0, Some(detail));
-    next.failure_backoff_at_ms = None;
+    next.failure_backoff_at_ms = earliest_reset_ms;
+    if next
+        .last_failure
+        .as_deref()
+        .is_some_and(|detail| detail.contains("chain_exhausted"))
+    {
+        record_chain_outage(&mut next, earliest_reset_ms);
+    }
     next
 }
 
@@ -1573,6 +1615,7 @@ where
 
     let mut auth_blocked_providers = Vec::new();
     let mut all_failures_permanent = true;
+    let mut earliest_provider_reset_ms: Option<i64> = None;
     let mut model_unresolvable_failures = Vec::new();
     let mut prompt = request.prompt.to_string();
 
@@ -1658,6 +1701,7 @@ where
                         abandon_model_unresolvable(
                             &fired,
                             model_unresolvable_detail(&model_unresolvable_failures, exhausted),
+                            earliest_provider_reset_ms,
                         ),
                     )?;
                     producer.close().await;
@@ -1678,7 +1722,7 @@ where
                     model_unresolvable_cache,
                     model_chain_generation,
                 );
-                let decision = decide_producer_failure(
+                let mut decision = decide_producer_failure(
                     &err,
                     model,
                     &remaining,
@@ -1687,12 +1731,25 @@ where
                     completed_at_ms,
                     failure_backoff_at_ms,
                 );
+                if let Some(reset) = err.provider_retry_at_ms(completed_at_ms) {
+                    earliest_provider_reset_ms =
+                        Some(earliest_provider_reset_ms.map_or(reset, |prior| prior.min(reset)));
+                }
+                if !decision.try_next_model {
+                    if let Some(reset) =
+                        earliest_provider_reset_ms.filter(|reset| *reset > completed_at_ms)
+                    {
+                        decision.failure_backoff_at_ms = reset;
+                    }
+                }
                 persist_historian_state(
                     request.store,
                     request.session_id,
-                    abandon_with_detail(
+                    abandon_chain_failure(
                         &fired,
-                        decision.failure_backoff_at_ms,
+                        &err,
+                        decision,
+                        earliest_provider_reset_ms,
                         Some(detail_with_model_unresolvable(
                             &model_unresolvable_failures,
                             decision.detail_prefix,
@@ -1754,7 +1811,7 @@ where
                     model_unresolvable_cache,
                     model_chain_generation,
                 );
-                let decision = decide_producer_failure(
+                let mut decision = decide_producer_failure(
                     &err,
                     model,
                     &remaining,
@@ -1763,12 +1820,25 @@ where
                     completed_at_ms,
                     failure_backoff_at_ms,
                 );
+                if let Some(reset) = err.provider_retry_at_ms(completed_at_ms) {
+                    earliest_provider_reset_ms =
+                        Some(earliest_provider_reset_ms.map_or(reset, |prior| prior.min(reset)));
+                }
+                if !decision.try_next_model {
+                    if let Some(reset) =
+                        earliest_provider_reset_ms.filter(|reset| *reset > completed_at_ms)
+                    {
+                        decision.failure_backoff_at_ms = reset;
+                    }
+                }
                 persist_historian_state(
                     request.store,
                     request.session_id,
-                    abandon_with_detail(
+                    abandon_chain_failure(
                         &awaiting,
-                        decision.failure_backoff_at_ms,
+                        &err,
+                        decision,
+                        earliest_provider_reset_ms,
                         Some(detail_with_model_unresolvable(
                             &model_unresolvable_failures,
                             decision.detail_prefix,
@@ -3326,6 +3396,53 @@ mod tests {
             "all-permanent chain exhaustion must be visible in durable state: {:?}",
             state.last_failure
         );
+    }
+
+    #[tokio::test]
+    async fn exhausted_chain_keeps_earliest_reset_and_tries_third_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let models = vec!["primary/a".into(), "google/b".into(), "third/c".into()];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(HistorianProducerError::tagged_subc(
+                "refused",
+                "unavailable",
+                ErrorClass::Permanent,
+                None,
+            )))
+            .with_start(Err(HistorianProducerError::tagged_subc(
+                "429",
+                r#"{"quotaResetTimeStamp":"2026-09-11T20:34:51Z","quotaResetDelay":"5760s"}"#,
+                ErrorClass::Transient,
+                None,
+            )))
+            .with_start(Err(HistorianProducerError::tagged_subc(
+                "429",
+                r#"{"quotaResetTimeStamp":"2026-09-11T21:34:51Z"}"#,
+                ErrorClass::Transient,
+                None,
+            )));
+        run_historian_firing(
+            &mut producer,
+            fire_request(&store, "prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(producer.observed_starts.len(), 3);
+        let state = store.load("ses").unwrap().meta.historian;
+        let reset = chrono::DateTime::parse_from_rfc3339("2026-09-11T20:34:51Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(state.failure_backoff_at_ms, Some(reset));
+        let detail = state.last_no_fire.unwrap();
+        assert!(detail.contains("chain_exhausted"));
+        assert!(detail.contains("2026-09-11T20:34:51"));
+        assert!(detail.contains("probe"));
+        assert_eq!(state.state, HistorianPhase::Idle);
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
     }
 
     #[tokio::test]

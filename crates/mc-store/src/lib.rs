@@ -3728,6 +3728,17 @@ pub struct CompartmentBoundary {
     pub end_message_id: String,
 }
 
+/// Estimated tiered-drop budget, not a provider-measured post-drop usage sample.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EmergencyDropAssessment {
+    pub fixed_floor_tokens: f64,
+    pub target_tokens: f64,
+    pub required_reclaim_tokens: f64,
+    pub selected_reclaim_tokens: f64,
+    pub candidate_tokens: f64,
+    pub target_unreachable: bool,
+}
+
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
@@ -4004,6 +4015,9 @@ pub struct ModuleMeta {
     /// Whether the emergency idempotence sample is valid.
     #[serde(default)]
     pub has_prior_emergency_drop: bool,
+    /// Last evaluated emergency target and candidate exhaustion, retained through sub-margin dips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emergency_drop_assessment: Option<EmergencyDropAssessment>,
     /// Execute intent recorded when mid-turn tool-use defers a scheduler execute.
     #[serde(default)]
     pub deferred_execute_state: Option<DeferredExecuteState>,

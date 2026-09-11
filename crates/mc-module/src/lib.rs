@@ -5389,11 +5389,27 @@ impl McHandler {
             .failure_backoff_at_ms
             .is_some_and(|backoff_at_ms| now < backoff_at_ms)
         {
+            let failure_detail = last_failure.clone();
             let diagnostics = historian_no_fire_diagnostics(NoFireDiagnosticsInput {
-                no_fire: "backoff".into(),
+                no_fire: if last_failure
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("chain_exhausted"))
+                {
+                    "chain_exhausted"
+                } else {
+                    "backoff"
+                }
+                .into(),
                 detail_kind: "backoff",
-                cause: HistorianNoFireCause::FailureBackoff,
-                extra: None,
+                cause: if last_failure
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("chain_exhausted"))
+                {
+                    HistorianNoFireCause::ChainExhausted
+                } else {
+                    HistorianNoFireCause::FailureBackoff
+                },
+                extra: failure_detail.as_deref(),
                 reason: trigger_reason,
                 state,
                 progress,
@@ -32020,7 +32036,7 @@ mod tests {
         assert_eq!(state.state, HistorianPhase::Idle);
         assert_eq!(
             state.last_no_fire.as_deref(),
-            Some("backoff{raw_cause=FailureBackoff,canonical_cause=rate_limit}")
+            Some("backoff{raw_cause=FailureBackoff,canonical_cause=rate_limit,validate rejected: stale summary}")
         );
         assert!(
             state
@@ -32028,6 +32044,38 @@ mod tests {
                 .is_some_and(|backoff_at_ms| backoff_at_ms > now_ms()),
             "the cooldown remains active until the backoff boundary"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handler_chain_outage_serves_context_and_exposes_reset_until_probe() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let reset_ms = now_ms() + 60_000;
+        let detail = "chain_exhausted earliest_provider_reset=2026-09-11T20:34:51Z retry=probe";
+        seed_abandoned_idle(&store, reset_ms, detail);
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["historian"]["fired"], false);
+        assert_eq!(response["historian"]["canonical_cause"], "chain_exhausted");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        assert!(response["ck_messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()));
+        assert_ne!(response["action"], "RAW");
+        let state = store.load("ses").unwrap().meta.historian;
+        assert_eq!(state.failure_backoff_at_ms, Some(reset_ms));
+        assert!(state.last_no_fire.as_deref().unwrap().contains(detail));
+        assert!(!state
+            .last_no_fire
+            .as_deref()
+            .unwrap()
+            .contains("validate rejected"));
+        let status =
+            call_dispatch_request(&handler, json!({"kind":"status", "session_id":"ses"})).await;
+        assert!(status["historian"]["last_no_fire"]
+            .as_str()
+            .unwrap()
+            .contains(detail));
     }
 
     #[tokio::test(flavor = "current_thread")]

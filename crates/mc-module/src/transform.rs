@@ -4541,14 +4541,24 @@ fn apply_once(
         meta.last_render_config = effective_render_config.clone();
     }
     // One shared opportunity admits all reclaim lanes. A changed usage sample is not
-    // a new episode; only pressure exit rearms it. Independent busts and the 95% arm
+    // a new episode; exit needs five percentage points of headroom below the band,
+    // so a small batch-induced dip cannot rearm it. Independent busts and the 95% arm
     // bypass the latch above without granting subsequent passes another opportunity.
     if force_band_active {
         meta.last_emergency_input_sample = usage_input_tokens;
         meta.has_prior_emergency_drop = true;
-    } else if usage_input_tokens > 0.0 {
+    } else if usage_input_tokens > 0.0
+        && usage_percentage
+            < scheduler::escalation_bands(ctx.execute_threshold_percentage)
+                .force_materialize_percentage
+                - 5.0
+    {
         meta.last_emergency_input_sample = 0.0;
         meta.has_prior_emergency_drop = false;
+        meta.emergency_drop_assessment = None;
+    }
+    if let Some(assessment) = selection_outcome.emergency_drop_assessment {
+        meta.emergency_drop_assessment = Some(assessment);
     }
     let mut commit_expected = loaded.row_version;
     if clear_pending_rewrite_on_present {
@@ -18025,6 +18035,115 @@ pub(crate) mod tests {
             .frozen_units
             .iter()
             .any(|u| u.key == "red:late#0"));
+    }
+
+    #[test]
+    fn force_episode_submargin_dip_does_not_price_second_batch() {
+        for percentages in [
+            vec![
+                85.0964, 81.7246, 82.3389, 82.7754, 82.8856, 82.8856, 83.4737, 84.0778, 84.1683,
+                84.6623, 85.1096,
+            ],
+            vec![85.0425, 83.8479, 84.2479, 84.4868, 84.7048, 85.1850],
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            bootstrap_covering_a(&s);
+            let context = smart_pctx();
+            let mut request = with_usage(
+                req(
+                    "ses",
+                    "cfg0",
+                    vec![
+                        item("a", 1, "raw"),
+                        item("old", 3, &caveman_test_source("old").repeat(16)),
+                        {
+                            let mut early = assistant_tool_call("early", 4, "early");
+                            if let ck_wire::CkKind::ToolCall { name, .. } =
+                                &mut early.ck.content[0].kind
+                            {
+                                *name = "bash".into();
+                            }
+                            early
+                        },
+                        tool_result("early-result", 5, "early", &"e".repeat(20_000)),
+                        item("protected", 6, &"tail content ".repeat(30_000)),
+                        item("newest-1", 7, "tail"),
+                        item("newest-2", 8, "tail"),
+                        {
+                            let mut newest = item("newest-3", 9, "continuation");
+                            newest.ck.role = "assistant".into();
+                            newest
+                        },
+                    ],
+                ),
+                (percentages[0] * 1670.0) as u64,
+                167_000,
+            );
+            request.caveman_enabled = true;
+            request.caveman_min_chars = 1;
+            request.protected_tokens_effective = Some(30_000);
+            request.protected_tags = 0;
+            transform(&s, &request, &context).unwrap();
+            let first = s.load("ses").unwrap();
+            assert!(first.meta.has_prior_emergency_drop);
+            assert!(
+                first
+                    .core
+                    .frozen_units
+                    .iter()
+                    .any(|unit| unit.key == "red:early#0"),
+                "units={:?}, assessment={:?}",
+                first
+                    .core
+                    .frozen_units
+                    .iter()
+                    .map(|unit| &unit.key)
+                    .collect::<Vec<_>>(),
+                first.meta.emergency_drop_assessment
+            );
+            let assessment = first.meta.emergency_drop_assessment.unwrap();
+            assert!(assessment.target_unreachable);
+            for percentage in percentages.iter().copied().skip(1) {
+                request = with_usage(request, (percentage * 1670.0) as u64, 167_000);
+                transform(&s, &request, &context).unwrap();
+                assert!(s.load("ses").unwrap().meta.emergency_drain_active);
+                assert!(
+                    s.load("ses").unwrap().meta.has_prior_emergency_drop,
+                    "episode cleared at {percentage}%"
+                );
+                assert_eq!(
+                    s.load("ses")
+                        .unwrap()
+                        .meta
+                        .emergency_drop_assessment
+                        .as_ref(),
+                    Some(&assessment)
+                );
+            }
+            request
+                .messages
+                .push(assistant_tool_call("late", 10, "late"));
+            request
+                .messages
+                .push(tool_result("late-result", 11, "late", &"x".repeat(8_000)));
+            // The final provider sample includes the newly appended 2k estimated tail.
+            let before = s.load("ses").unwrap().core.frozen_units;
+            transform(&s, &request, &context).unwrap();
+            let after = s.load("ses").unwrap();
+            assert!(after.meta.has_prior_emergency_drop);
+            assert_eq!(
+                after.core.frozen_units.len(),
+                before.len(),
+                "sub-margin dip must not mint another batch"
+            );
+            request = with_usage(request, 133_600, 167_000); // Exactly 80% is still held.
+            transform(&s, &request, &context).unwrap();
+            assert!(s.load("ses").unwrap().meta.has_prior_emergency_drop);
+            request = with_usage(request, 133_599, 167_000);
+            transform(&s, &request, &context).unwrap();
+            assert!(!s.load("ses").unwrap().meta.has_prior_emergency_drop);
+        }
     }
 
     #[test]

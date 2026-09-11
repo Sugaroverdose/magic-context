@@ -119,6 +119,7 @@ pub struct ProducerErrorBody {
     pub message: String,
     classification: Option<ErrorClassification>,
     class_field_present: bool,
+    retry_metadata: Option<Value>,
 }
 
 impl ProducerErrorBody {
@@ -128,6 +129,7 @@ impl ProducerErrorBody {
             message: message.into(),
             classification: None,
             class_field_present: false,
+            retry_metadata: None,
         }
     }
 
@@ -145,6 +147,7 @@ impl ProducerErrorBody {
                 retry_after_secs,
             }),
             class_field_present: true,
+            retry_metadata: None,
         }
     }
 
@@ -173,6 +176,7 @@ impl ProducerErrorBody {
             message,
             classification,
             class_field_present,
+            retry_metadata: Some(value),
         }
     }
 }
@@ -290,6 +294,28 @@ pub enum HistorianProducerError {
 }
 
 impl HistorianProducerError {
+    /// Provider reset metadata is a retry hint, never an error-class override.
+    pub(crate) fn provider_retry_at_ms(&self, now_ms: i64) -> Option<i64> {
+        let (metadata, text) = match self {
+            Self::Subc(body) => (body.retry_metadata.as_ref(), body.message.as_str()),
+            Self::RunFailed { detail, .. } => (None, detail.as_str()),
+            Self::RunPaused { reason, .. } => (None, reason.as_deref().unwrap_or("")),
+            _ => return None,
+        };
+        metadata
+            .and_then(|value| provider_retry_at_ms(value, now_ms, 0))
+            .or_else(|| provider_retry_at_ms(&Value::String(text.to_string()), now_ms, 0))
+            .or_else(|| {
+                let seconds = self.classification()?.retry_after_secs?;
+                let delay_ms = seconds.saturating_mul(1000).min(i64::MAX as u64) as i64;
+                Some(
+                    now_ms.saturating_add(
+                        delay_ms.max(crate::historian::HISTORIAN_FAILURE_BACKOFF_MS),
+                    ),
+                )
+            })
+    }
+
     pub fn retryable_model_failure(message: impl Into<String>) -> Self {
         HistorianProducerError::Subc(ProducerErrorBody::untagged(
             "retryable_model_failure",
@@ -431,6 +457,8 @@ fn retryable_code(s: &str) -> bool {
     s.contains("retry")
         || s.contains("transient")
         || s.contains("rate_limit")
+        || s.contains("quota_exhausted")
+        || s.trim() == "429"
         || s.contains("provider_unavailable")
         || s.contains("overloaded")
 }
@@ -1211,6 +1239,12 @@ fn unit_error_info(unit: &Value) -> UnitErrorInfo {
             .map(ToString::to_string)
             .or_else(|| error.as_str().map(ToString::to_string))
             .or_else(|| Some(error.to_string()));
+        // Keep reset siblings that would otherwise disappear when only message is retained.
+        let detail = if provider_retry_at_ms(error, 0, 0).is_some() {
+            Some(error.to_string())
+        } else {
+            detail
+        };
         return UnitErrorInfo {
             detail,
             classification,
@@ -1247,6 +1281,82 @@ fn error_body(body: &[u8]) -> ProducerErrorBody {
     match serde_json::from_slice::<Value>(body) {
         Ok(value) => ProducerErrorBody::from_value(value),
         Err(e) => ProducerErrorBody::untagged("invalid_error_body", e.to_string()),
+    }
+}
+
+fn retry_delay_seconds(text: &str) -> Option<f64> {
+    if let Ok(seconds) = text.parse::<f64>() {
+        return Some(seconds);
+    }
+    let mut total = 0.0;
+    let mut start = 0;
+    for (index, unit) in text.char_indices() {
+        if unit.is_ascii_digit() || unit == '.' {
+            continue;
+        }
+        let scale = match unit {
+            'h' => 3600.0,
+            'm' => 60.0,
+            's' => 1.0,
+            _ => return None,
+        };
+        total += text[start..index].parse::<f64>().ok()? * scale;
+        start = index + unit.len_utf8();
+    }
+    (start == text.len() && start > 0).then_some(total)
+}
+
+/// Walk only structured retry fields, including JSON carried inside provider messages.
+/// Absolute resets take precedence over relative delays in the same object.
+fn provider_retry_at_ms(value: &Value, now_ms: i64, depth: usize) -> Option<i64> {
+    if depth > 12 {
+        return None;
+    }
+    match value {
+        Value::Object(fields) => {
+            let absolute = ["quotaResetTimeStamp", "quotaResetTimestamp", "retry_at"]
+                .into_iter()
+                .filter_map(|key| fields.get(key).and_then(Value::as_str))
+                .filter_map(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                .map(|time| time.timestamp_millis())
+                .min();
+            if absolute.is_some() {
+                return absolute;
+            }
+            let relative = ["quotaResetDelay", "retryDelay", "retry_after"]
+                .into_iter()
+                .filter_map(|key| fields.get(key))
+                .filter_map(|value| {
+                    let seconds = value
+                        .as_f64()
+                        .or_else(|| value.as_str().and_then(retry_delay_seconds))?;
+                    (seconds.is_finite() && seconds >= 0.0)
+                        .then_some(now_ms.saturating_add((seconds * 1000.0).ceil() as i64))
+                })
+                .min();
+            relative.or_else(|| {
+                fields
+                    .values()
+                    .filter_map(|child| provider_retry_at_ms(child, now_ms, depth + 1))
+                    .min()
+            })
+        }
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|child| provider_retry_at_ms(child, now_ms, depth + 1))
+            .min(),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .or_else(|| {
+                let start = text.find('{')?;
+                let end = text.rfind('}')?;
+                if end < start {
+                    return None;
+                }
+                serde_json::from_str::<Value>(&text[start..=end]).ok()
+            })
+            .and_then(|nested| provider_retry_at_ms(&nested, now_ms, depth + 1)),
+        _ => None,
     }
 }
 
@@ -1298,6 +1408,34 @@ mod tests {
     };
     use tempfile::TempDir;
     use tokio::{net::TcpListener, sync::Mutex};
+
+    #[test]
+    fn provider_reset_metadata_survives_open_and_terminal_errors() {
+        let reset = chrono::DateTime::parse_from_rfc3339("2026-09-11T20:34:51Z")
+            .unwrap()
+            .timestamp_millis();
+        let value = json!({"code":"429", "message":"quota exhausted", "class":"transient", "metadata":{"quotaResetTimeStamp":"2026-09-11T20:34:51Z", "quotaResetDelay":"1h36m"}});
+        let error = HistorianProducerError::Subc(ProducerErrorBody::from_value(value.clone()));
+        assert_eq!(error.provider_retry_at_ms(1000), Some(reset));
+        let info = unit_error_info(&json!({"error":value}));
+        let error = HistorianProducerError::RunFailed {
+            run_id: "r".into(),
+            detail: info.detail.unwrap(),
+            classification: info.classification,
+            class_field_present: info.class_field_present,
+        };
+        assert_eq!(error.provider_retry_at_ms(1000), Some(reset));
+        let delay =
+            HistorianProducerError::retryable_model_failure(r#"{"quotaResetDelay":"1h36m0.5s"}"#);
+        assert_eq!(delay.provider_retry_at_ms(1000), Some(5_761_500));
+        let invalid = HistorianProducerError::retryable_model_failure(
+            r#"{"quotaResetTimeStamp":"invalid","quotaResetDelay":"-1s"}"#,
+        );
+        assert_eq!(invalid.provider_retry_at_ms(1000), None);
+        let quota =
+            HistorianProducerError::Subc(ProducerErrorBody::untagged("429", "QUOTA_EXHAUSTED"));
+        assert!(quota.is_retryable_model_failure());
+    }
 
     #[test]
     fn model_unresolvable_open_literals_match_pinned_broca_contract() {

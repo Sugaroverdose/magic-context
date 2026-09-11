@@ -1168,9 +1168,13 @@ export async function runPostTransformPhase(
         args.fullFeatureMode &&
         executePressureEligible &&
         routinePressureAppliedBySession.get(args.sessionId) === true;
-    // A pressure episode ends below the force band. Clear its emergency edge
-    // latch here so a later re-entry can originate one new batched reclaim.
-    if (!emergencyDropEligible && getEmergencyInputSample(args.db, args.sessionId) > 0) {
+    // Require five points below the force band so a batch-induced dip cannot
+    // immediately rearm another cache rewrite as the tail regrows.
+    if (
+        args.contextUsage.percentage > 0 &&
+        args.contextUsage.percentage < args.forceMaterializationPercentage - 5 &&
+        getEmergencyInputSample(args.db, args.sessionId) > 0
+    ) {
         clearEmergencyDropSample(args.db, args.sessionId);
     }
     const activeCompartmentRun = args.canRunCompartments

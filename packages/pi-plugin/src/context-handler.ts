@@ -2983,11 +2983,11 @@ export function registerPiContextHandler(
 			const forceMaterialization =
 				!options.compactionOff &&
 				usagePercentage >= forceMaterializationPercentage;
-			// Leaving the force band ends the pressure episode. Fresh usage samples
-			// inside the band do not release this latch; only a later re-entry may
-			// originate another emergency batch.
+			// Require five points below the force band so a batch-induced dip cannot
+			// immediately rearm another cache rewrite as the tail regrows.
 			if (
-				!forceMaterialization &&
+				usagePercentage > 0 &&
+				usagePercentage < forceMaterializationPercentage - 5 &&
 				getEmergencyInputSample(options.db, sessionId) > 0
 			) {
 				clearEmergencyDropSample(options.db, sessionId);

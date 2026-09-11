@@ -1061,6 +1061,7 @@ fn select_emergency(
     arcs: &[&ToolArc],
     ctx: &SelectionContext,
     all_active_floor_tokens: f64,
+    assessment: &mut Option<mc_store::EmergencyDropAssessment>,
 ) -> HashSet<String> {
     // Guards mirror the TS planner: unknown ceiling/usage → no-op; idempotence latch.
     if !ctx.ceiling_tokens.is_finite() || ctx.ceiling_tokens <= 0.0 {
@@ -1137,6 +1138,11 @@ fn select_emergency(
         by_tier.entry(tier).or_default().push(arc);
     }
 
+    let candidate_tokens = by_tier
+        .values()
+        .flatten()
+        .map(|arc| bytes_to_tokens(arc.reclaim_bytes()))
+        .sum::<f64>();
     // Walk T3 → T2 → T1, oldest-first within tier, until reclaim met.
     let mut selected: HashSet<String> = HashSet::new();
     let mut reclaimed = 0.0f64;
@@ -1156,12 +1162,21 @@ fn select_emergency(
             }
         }
     }
+    *assessment = Some(mc_store::EmergencyDropAssessment {
+        fixed_floor_tokens: fixed_floor,
+        target_tokens: target,
+        required_reclaim_tokens: reclaim_tokens,
+        selected_reclaim_tokens: reclaimed,
+        candidate_tokens,
+        target_unreachable: reclaimed < reclaim_tokens,
+    });
     selected
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SelectionOutcome {
     pub decisions: Vec<ReductionDecision>,
+    pub emergency_drop_assessment: Option<mc_store::EmergencyDropAssessment>,
     /// The pressure pass was already busting, or was in the force band, so the age
     /// batch had an application opportunity. Empty opportunities still advance the
     /// watermark so future arcs can age into a later batch.
@@ -1275,6 +1290,7 @@ pub(crate) fn select_reductions_with_outcome(
         .collect();
     let two_pass_arc_ids = select_two_pass(&arcs_after_dedup, ctx);
     let mut eligible_supersession_arc_ids = None;
+    let mut emergency_drop_assessment = None;
 
     match ctx.pass_class {
         PassClass::EmergencyForce => {
@@ -1285,7 +1301,12 @@ pub(crate) fn select_reductions_with_outcome(
             // text, media, reasoning, and non-droppable tools; system-prefix and opaque metadata
             // remain outside that population. Only active client tool arcs can be selected below.
             let all_active_floor_tokens = active_floor_tokens(items, frozen_keys);
-            let emergency_arc_ids = select_emergency(&active_arcs, ctx, all_active_floor_tokens);
+            let emergency_arc_ids = select_emergency(
+                &active_arcs,
+                ctx,
+                all_active_floor_tokens,
+                &mut emergency_drop_assessment,
+            );
             if ctx.pass_already_busting
                 || !emergency_arc_ids.is_empty()
                 || !two_pass_arc_ids.is_empty()
@@ -1476,6 +1497,7 @@ pub(crate) fn select_reductions_with_outcome(
     };
     SelectionOutcome {
         decisions,
+        emergency_drop_assessment,
         two_pass_batch_can_apply,
         eligible_supersession_count: eligible_supersession_arc_ids.as_ref().map(HashSet::len),
         supersession_withheld_by_tag_window_count: withheld_count(
@@ -1651,6 +1673,45 @@ mod tests {
             token_count: None,
             arc_id: Some(arc_id.to_string()),
         }
+    }
+
+    #[test]
+    fn emergency_floor_walk_exhausts_candidates_or_reaches_target() {
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 142_021.0;
+        ctx.ceiling_tokens = 116_900.0;
+        let mut items = vec![text_with_id("text", 1, 240_000)];
+        for n in 0..10 {
+            let mid = format!("tool-{n}");
+            items.push(tool_call(&mid, n + 2, "bash", serde_json::json!({}), 0));
+            items.push(tool_result(&mid, n + 2, "bash", 8_000));
+        }
+        let arcs = group_arcs(&items, &HashSet::new());
+        let arcs = arcs.iter().collect::<Vec<_>>();
+        let mut assessment = None;
+        let selected = select_emergency(&arcs, &ctx, 80_000.0, &mut assessment);
+        let report = assessment.as_ref().unwrap();
+        assert_eq!(selected.len(), 10);
+        assert_eq!(report.fixed_floor_tokens, 62_021.0);
+        assert!((report.target_tokens - 78_484.7).abs() < 0.01);
+        assert_eq!(report.required_reclaim_tokens, 63_536.0);
+        assert_eq!(report.selected_reclaim_tokens, 20_000.0);
+        assert!(report.target_unreachable);
+        ctx.tag_window_protected_block_ids
+            .extend((1..10).map(|n| result_block_id(&format!("tool-{n}"))));
+        let selected = select_emergency(&arcs, &ctx, 80_000.0, &mut assessment);
+        let report = assessment.as_ref().unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(report.candidate_tokens, 2_000.0);
+        assert!(report.target_unreachable);
+        ctx.emergency_window_yields = true;
+        ctx.current_total_input_tokens = 20_000.0;
+        ctx.ceiling_tokens = 20_000.0;
+        let selected = select_emergency(&arcs, &ctx, 20_000.0, &mut assessment);
+        let report = assessment.as_ref().unwrap();
+        assert_eq!(selected.len(), 7);
+        assert_eq!(report.selected_reclaim_tokens, 14_000.0);
+        assert!(!report.target_unreachable);
     }
 
     fn base_ctx(pass: PassClass) -> SelectionContext {
