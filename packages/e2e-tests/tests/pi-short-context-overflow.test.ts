@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { PiTestHarness } from "../src/pi-harness";
 import { buildMockHistorianPayload } from "../src/mock-historian";
 
@@ -26,11 +28,11 @@ import { buildMockHistorianPayload } from "../src/mock-historian";
  * What this test verifies:
  *   - Pi survives 30 back-to-back 20KB-reply turns with a slow historian
  *   - Pi telemetry reaches the derived 85% force band while the historian is busy
- *   - The emergency drain latch arms, the scheduler queues drops, and usage falls
+ *   - The scheduler queues force-band drops and usage falls
  *   - No turns error out and every provider request remains below the model window
  *
- * Pi tool-drop materialization is covered by `pi-drops.test.ts` (queue +
- * apply path), Pi historian compartment publication is covered by
+ * Queued drop materialization is covered by `pi-drops.test.ts`; the completed
+ * tool-output force episode is covered separately below. Pi historian publication is covered by
  * `pi-historian-success.test.ts`, and Pi compaction-marker writing (the
  * X1 fix) is covered by `pi-deferred-compaction-marker.test.ts`. The
  * production wire dump from the user's stuck Anthropic Auth session
@@ -123,7 +125,6 @@ describe("pi short context accumulating overflow", () => {
         let sessionId: string | null = null;
         const turnUsage: number[] = [];
         const schedulerUsage: number[] = [];
-        const emergencyLatch: number[] = [];
         const historianInProgress: number[] = [];
         const turnErrors: Array<{ turn: number; error: string }> = [];
         const turns = 30;
@@ -154,18 +155,16 @@ describe("pi short context accumulating overflow", () => {
                 const meta = h
                     .contextDb()
                     .prepare(
-                        "SELECT last_context_percentage, emergency_drain_active, compartment_in_progress FROM session_meta WHERE session_id = ?",
+                        "SELECT last_context_percentage, compartment_in_progress FROM session_meta WHERE session_id = ?",
                     )
                     .get(sessionId) as
                     | {
                           last_context_percentage: number;
-                          emergency_drain_active: number;
                           compartment_in_progress: number;
                       }
                     | undefined;
                 if (!meta) throw new Error(`missing Pi session metadata for ${sessionId}`);
                 schedulerUsage.push(Math.round(meta.last_context_percentage * 10) / 10);
-                emergencyLatch.push(meta.emergency_drain_active);
                 historianInProgress.push(meta.compartment_in_progress);
             }
         }
@@ -177,7 +176,6 @@ describe("pi short context accumulating overflow", () => {
         const historianBusyAtForceBand = schedulerUsage.some(
             (usage, index) => usage >= 85 && historianInProgress[index] === 1,
         );
-        const latchArmed = emergencyLatch.some((latchedAt) => latchedAt > 0);
         const forceDropDecision = h
             .contextDb()
             .prepare(
@@ -185,7 +183,7 @@ describe("pi short context accumulating overflow", () => {
             )
             .get(sessionId!, 128_000 * 0.85);
         console.log(
-            `[PI-OVERFLOW-GUARD] historians=${historianRequests.length} peak=${peakObservedPct}% final=${finalPct}% scheduler_peak=${Math.max(...schedulerUsage)}% force_band=${forceBandSeen} historian_busy=${historianBusyAtForceBand} latch=${latchArmed} force_drop=${Boolean(forceDropDecision)}`,
+            `[PI-OVERFLOW-GUARD] historians=${historianRequests.length} peak=${peakObservedPct}% final=${finalPct}% scheduler_peak=${Math.max(...schedulerUsage)}% force_band=${forceBandSeen} historian_busy=${historianBusyAtForceBand} force_drop=${Boolean(forceDropDecision)}`,
         );
         console.log(`[PI-OVERFLOW-GUARD] per-turn %: ${turnUsage.join(", ")}`);
         if (turnErrors.length > 0) {
@@ -201,7 +199,6 @@ describe("pi short context accumulating overflow", () => {
         h.assertHistorianRequestsUseMock();
         expect(forceBandSeen).toBe(true);
         expect(historianBusyAtForceBand).toBe(true);
-        expect(latchArmed).toBe(true);
         expect(forceDropDecision).toBeTruthy();
         expect(peakObservedPct).toBeLessThan(100);
         expect(finalPct).toBeLessThan(peakObservedPct);
@@ -220,4 +217,142 @@ describe("pi short context accumulating overflow", () => {
         expect(meta?.last_context_percentage).toBeLessThan(100);
         expect(meta?.last_input_tokens).toBeGreaterThan(0);
     }, 240_000);
+
+    it("arms the force episode after reclaiming a completed tool-output batch", async () => {
+        const toolHarness = await PiTestHarness.create({
+            modelContextLimit: 128_000,
+            magicContextConfig: {
+                execute_threshold_percentage: 40,
+                protected_tokens: 4_000,
+                dreamer: { disable: true },
+            },
+        });
+
+        try {
+            const outputPath = join(toolHarness.env.workdir, "force-episode-output.txt");
+            writeFileSync(
+                outputPath,
+                Array.from(
+                    { length: 2_000 },
+                    (_, index) => `force episode tool output line ${index + 1}: ${"x".repeat(80)}`,
+                ).join("\n"),
+            );
+            toolHarness.mock.reset();
+            toolHarness.mock.addMatcher((body) => {
+                if (!isHistorian(body)) return null;
+                return {
+                    text: "<output><compartments></compartments><facts></facts><unprocessed_from>1</unprocessed_from></output>",
+                    usage: {
+                        input_tokens: 500,
+                        output_tokens: 50,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                    },
+                };
+            });
+
+            const callId = "toolu_pi_force_episode_output";
+            let mainStage = 0;
+            toolHarness.mock.addMatcher((body) => {
+                if (isHistorian(body)) return null;
+                if (mainStage === 0) {
+                    if (!JSON.stringify(body.tools ?? []).includes('"name":"read"')) return null;
+                    mainStage = 1;
+                    return {
+                        content: [
+                            {
+                                type: "tool_use",
+                                id: callId,
+                                name: "read",
+                                input: { path: outputPath, offset: 1, limit: 2_000 },
+                            },
+                        ],
+                        stop_reason: "tool_use",
+                        usage: {
+                            input_tokens: 1_000,
+                            output_tokens: 20,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                    };
+                }
+                if (mainStage === 1 && JSON.stringify(body.messages ?? []).includes(callId)) {
+                    mainStage = 2;
+                    return {
+                        text: "completed large tool output",
+                        usage: {
+                            input_tokens: 122_000,
+                            output_tokens: 20,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                    };
+                }
+                return null;
+            });
+            toolHarness.mock.setDefault({
+                text: "after force reclaim",
+                usage: {
+                    input_tokens: 1_000,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+            });
+
+            const first = await toolHarness.sendPrompt("read one large fixture file to completion", {
+                timeoutMs: 120_000,
+            });
+            const sessionId = first.sessionId ?? "";
+            expect(sessionId).toBeTruthy();
+            await toolHarness.waitFor(
+                () => {
+                    const row = toolHarness
+                        .contextDb()
+                        .prepare("SELECT last_input_tokens FROM session_meta WHERE session_id = ?")
+                        .get(sessionId) as { last_input_tokens: number } | null;
+                    return (row?.last_input_tokens ?? 0) >= 122_000 ? true : null;
+                },
+                { timeoutMs: 30_000, label: "completed tool-output usage persisted" },
+            );
+
+            const toolTag = await toolHarness.waitFor(
+                () => {
+                    const row = toolHarness
+                        .contextDb()
+                        .prepare(
+                            "SELECT tag_number FROM tags WHERE session_id = ? AND type = 'tool' ORDER BY tag_number ASC LIMIT 1",
+                        )
+                        .get(sessionId) as { tag_number: number } | null;
+                    return (row?.tag_number ?? 0) > 0 ? row!.tag_number : null;
+                },
+                { timeoutMs: 30_000, label: "completed tool-output tag persisted" },
+            );
+            const requestStart = toolHarness.mock.requests().length;
+            await toolHarness.sendPrompt("force reclaim the completed tool-output batch", {
+                timeoutMs: 120_000,
+                continueSession: true,
+            });
+
+            const meta = toolHarness
+                .contextDb()
+                .prepare("SELECT last_emergency_input_sample FROM session_meta WHERE session_id = ?")
+                .get(sessionId) as { last_emergency_input_sample: number } | null;
+            expect(meta?.last_emergency_input_sample ?? 0).toBeGreaterThan(0);
+            expect(toolHarness.countDroppedTags(sessionId)).toBeGreaterThan(0);
+            const toolStatus = toolHarness
+                .contextDb()
+                .prepare("SELECT status FROM tags WHERE session_id = ? AND tag_number = ?")
+                .get(sessionId, toolTag) as { status: string } | null;
+            expect(toolStatus?.status).toBe("dropped");
+            expect(
+                toolHarness.mock.requests().slice(requestStart).some((request) => {
+                    const body = JSON.stringify(request.body);
+                    return body.includes(callId) && body.includes(`[dropped §${toolTag}§]`);
+                }),
+            ).toBe(true);
+        } finally {
+            await toolHarness.dispose();
+        }
+    }, 180_000);
 });

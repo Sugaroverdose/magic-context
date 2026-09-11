@@ -31,14 +31,14 @@ const HIGH_USAGE: MockUsage = {
 const HISTORIAN_TRIGGER_USAGE: MockUsage = {
     input_tokens: 90_000,
     output_tokens: 20,
-    cache_creation_input_tokens: 90_000,
+    cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
 };
 
 const FORCE_CLEANUP_USAGE: MockUsage = {
     input_tokens: 85_000,
     output_tokens: 20,
-    cache_creation_input_tokens: 85_000,
+    cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
 };
 

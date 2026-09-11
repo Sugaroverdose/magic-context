@@ -80,7 +80,7 @@ describe("pi emergency >=95%", () => {
                 usage: {
                     input_tokens: SPIKE_INPUT_TOKENS,
                     output_tokens: 20,
-                    cache_creation_input_tokens: SPIKE_INPUT_TOKENS,
+                    cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                 },
             });

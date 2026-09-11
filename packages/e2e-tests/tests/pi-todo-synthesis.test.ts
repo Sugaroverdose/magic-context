@@ -56,9 +56,9 @@ const LOW_USAGE: MockUsage = {
 };
 
 const HIGH_USAGE: MockUsage = {
-	input_tokens: 75_000,
+	input_tokens: 95_000,
 	output_tokens: 20,
-	cache_creation_input_tokens: 75_000,
+	cache_creation_input_tokens: 0,
 	cache_read_input_tokens: 0,
 };
 

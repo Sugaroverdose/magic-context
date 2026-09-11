@@ -286,11 +286,11 @@ async function createHarness(): Promise<PiTestHarness> {
 async function sendTurn(
     h: PiTestHarness,
     prompt: string,
-    responseText: string,
+    response: string | unknown[],
     usage: MockUsage = LOW_USAGE,
     timeoutMs = 90_000,
 ): Promise<void> {
-    h.mock.setDefault({ text: responseText, usage });
+    h.mock.setDefault(Array.isArray(response) ? { content: response, usage } : { text: response, usage });
     await h.sendPrompt(prompt, { timeoutMs, continueSession: true });
 }
 
@@ -342,7 +342,16 @@ describe("pi cache invariants — replay class", () => {
             expect(reduceTarget).toBeGreaterThan(0);
 
             emitCtxReduceOnce(h, String(reduceTarget));
-            await sendTurn(h, `pi A3 turn 2: issue ctx_reduce for old tag ${reduceTarget}.`, "pi A3 after ctx_reduce");
+            await sendTurn(
+                h,
+                `pi A3 turn 2: issue ctx_reduce for old tag ${reduceTarget}.`,
+                Array.from({ length: 24 }, (_, index) => ({
+                    type: "text",
+                    text: `pi A3 newer context block ${index + 1}: ${h.ballast(800)}`,
+                })),
+            );
+            // The queued target must age beyond both the token-mass floor and
+            // the structural recency floor before an execute pass can consume it.
             await sendTurn(h, "pi A3 turn 3: pressure so pending drop applies next.", "pi A3 pressure", HIGH_USAGE);
             await sendTurn(h, "pi A3 turn 4: execute pass materializes the dropped placeholder.", "pi A3 materialize");
 
