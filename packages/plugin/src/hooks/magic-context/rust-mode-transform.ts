@@ -75,6 +75,7 @@ import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import {
     captureSlot,
     dropSlot,
+    exactReusablePrefix,
     getSlot,
     incrementalLkgContentDigests,
     LKG_SNAPSHOT_ARRAY,
@@ -85,9 +86,15 @@ import {
     LKG_SNAPSHOT_OBJECT,
     LKG_SNAPSHOT_STRING,
     LKG_SNAPSHOT_UNDEFINED,
-    type LkgContentField,
     type LkgEntryNote,
+    type LkgInputSnapshot,
+    type LkgSlot,
+    type MessageContentSnapshot,
+    messageContentFields,
+    messageContentSnapshot,
     noteEntry,
+    signatureForFields,
+    visitMessageContentFields,
 } from "./lkg-slot";
 import {
     clearCompartmentMirrorCursor,
@@ -252,15 +259,10 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
     ): Promise<ModuleCompartmentMirrorResponse>;
 }
 
-interface MessageContentSnapshot {
-    signature: string;
-    fields: LkgContentField[];
-}
-
 interface RustLkgCapturePlan {
     sessionId: string;
     inputIds: string[];
-    inputSnapshots: readonly MessageContentSnapshot[];
+    inputSnapshots: readonly Pick<MessageContentSnapshot, "fields">[];
     jsonPrefix: string;
     modelKey: string | null;
     providerKey: string | null;
@@ -277,7 +279,7 @@ interface RustWireCache {
     rawLastVisible: boolean;
     /** Content-sensitive per-message snapshots for the whole raw array. Delta passes
      * re-verify every reused message so in-place edits cannot ride a stale prefix. */
-    rawContentSnapshots: MessageContentSnapshot[];
+    rawContentSnapshots: Pick<MessageContentSnapshot, "fields">[];
     ckFingerprint: string;
     ckPrefixFingerprintBeforeLast: string;
     nativeFingerprint: string;
@@ -286,6 +288,53 @@ interface RustWireCache {
     /** Previous acknowledged module output. The array is reused by reference and supplies the
      * prefix for a validated native-output delta; eviction falls back to a full response. */
     nativeOutput?: unknown[];
+}
+
+class MagicContextRustHeapHolder {
+    readonly wireCaches = new Map<string, RustWireCache>();
+}
+
+export interface RustWireCacheHeapStats {
+    snapshots: number;
+    rawContentSnapshots: number;
+    estimatedBytes: number;
+    sessions: Array<{
+        sessionId: string;
+        rawMessages: number;
+        wireMessages: number;
+        rawContentSnapshots: number;
+        estimatedBytes: number;
+    }>;
+}
+
+function rustWireCacheEstimatedBytes(cache: RustWireCache): number {
+    let bytes = 0;
+    for (const value of [
+        cache.rawLastId,
+        cache.rawLastSignature,
+        cache.ckFingerprint,
+        cache.ckPrefixFingerprintBeforeLast,
+        cache.nativeFingerprint,
+        cache.nativePrefixFingerprintBeforeLast,
+        cache.fingerprint,
+    ]) {
+        if (value) bytes += value.length * 2;
+    }
+    for (const snapshot of cache.rawContentSnapshots) {
+        for (const field of snapshot.fields) {
+            if (typeof field === "string") bytes += field.length * 2;
+            else if (typeof field === "number" || typeof field === "boolean") bytes += 8;
+            else bytes += String(field).length * 2;
+        }
+    }
+    if (cache.nativeOutput) {
+        try {
+            bytes += Buffer.byteLength(JSON.stringify(cache.nativeOutput));
+        } catch {
+            // Cyclic host extensions are excluded from the serialized estimate.
+        }
+    }
+    return bytes;
 }
 
 interface RustSessionState extends ModuleStateSyncState {
@@ -328,6 +377,11 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgCaptureSequence: number;
     lkgLastCapturedRowVersion: number;
     lkgSyncCaptureRequired: boolean;
+    lkgAcceptedCapture?: {
+        inputs: readonly LkgInputSnapshot[];
+        captureSequence: number;
+        rowVersion: number;
+    };
     /** A fallback replay is provider-visible output. Keep that exact representation through
      * deferred recovery; healthy-pass and raw-tail limits prevent indefinite stale replay. */
     lkgRepresentationFrozen: boolean;
@@ -366,6 +420,8 @@ export interface RustModeTransformOptions {
     memoryProjectIdentityResolverForTests?: typeof resolveProjectIdentity;
     /** Disable hot-path I/O caches to establish an uncached differential-timing baseline. */
     disableHotPathIoCachesForTests?: boolean;
+    /** Test-only callback after a capture is accepted, reporting the reused digest prefix length. */
+    onLkgCaptureForTests?: (reusedPrefix: number) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -416,117 +472,45 @@ function messageIdOf(message: MessageLike): string | null {
     return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-const FNV1A_32_OFFSET = 0x811c9dc5;
-const FNV1A_32_PRIME = 0x01000193;
-
-function updateFnv1a32(hash: number, value: string): number {
-    let next = hash;
-    for (let index = 0; index < value.length; index += 1) {
-        next ^= value.charCodeAt(index);
-        next = Math.imul(next, FNV1A_32_PRIME) >>> 0;
-    }
-    return next;
+function contentSnapshotsFor(
+    messages: readonly MessageLike[],
+): Pick<MessageContentSnapshot, "fields">[] {
+    // Copy primitive field tokens before the RPC so later host mutations cannot alter
+    // this snapshot. Wire-prefix validation compares the fields directly, without a hash.
+    return messages.map((message) => ({ fields: messageContentFields(message) }));
 }
 
-interface MessageContentFieldVisitor {
-    field(value: LkgContentField): boolean;
-    beginObject(): number | undefined;
-    endObject(token: number, entryCount: number): boolean;
-}
-
-function isSnapshotObjectChild(value: unknown): boolean {
-    return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
-}
-
-function visitMessageContentFields(value: unknown, visitor: MessageContentFieldVisitor): boolean {
-    if (value === null) return visitor.field(LKG_SNAPSHOT_NULL);
-    if (typeof value === "string") {
-        return visitor.field(LKG_SNAPSHOT_STRING) && visitor.field(value);
-    }
-    if (typeof value === "number") {
-        return visitor.field(LKG_SNAPSHOT_NUMBER) && visitor.field(value);
-    }
-    if (typeof value === "boolean") {
-        return visitor.field(LKG_SNAPSHOT_BOOLEAN) && visitor.field(value);
-    }
-    if (value === undefined || typeof value === "function" || typeof value === "symbol") {
-        return visitor.field(LKG_SNAPSHOT_UNDEFINED);
-    }
-    if (Array.isArray(value)) {
-        if (!visitor.field(LKG_SNAPSHOT_ARRAY) || !visitor.field(value.length)) return false;
-        for (const item of value) {
-            if (!visitMessageContentFields(item, visitor)) return false;
-        }
-        return true;
-    }
-    if (typeof value === "object") {
-        if (!visitor.field(LKG_SNAPSHOT_OBJECT)) return false;
-        const objectToken = visitor.beginObject();
-        if (objectToken === undefined) return false;
-        let entryCount = 0;
-        for (const key in value) {
-            if (!Object.hasOwn(value, key)) continue;
-            const child = (value as Record<string, unknown>)[key];
-            if (!isSnapshotObjectChild(child)) continue;
-            entryCount += 1;
-            if (
-                !visitor.field(LKG_SNAPSHOT_KEY) ||
-                !visitor.field(key) ||
-                !visitMessageContentFields(child, visitor)
-            ) {
-                return false;
-            }
-        }
-        return visitor.endObject(objectToken, entryCount);
-    }
-    return visitor.field(LKG_SNAPSHOT_UNDEFINED);
-}
-
-function messageContentFields(message: MessageLike): LkgContentField[] {
-    const fields: LkgContentField[] = [];
-    const complete = visitMessageContentFields(message, {
-        field(value) {
-            fields.push(value);
-            return true;
-        },
-        beginObject() {
-            const countIndex = fields.length;
-            fields.push(0);
-            return countIndex;
-        },
-        endObject(countIndex, entryCount) {
-            fields[countIndex] = entryCount;
-            return true;
-        },
-    });
-    if (!complete) throw new Error("message content snapshot traversal stopped unexpectedly");
-    return fields;
-}
-
-function signatureForFields(fields: readonly LkgContentField[]): string {
-    let hash = FNV1A_32_OFFSET;
-    for (const field of fields) {
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        hash = updateFnv1a32(hash, `${typeof field}:${value.length}:`);
-        hash = updateFnv1a32(hash, value);
-        hash = updateFnv1a32(hash, "\0");
-    }
-    return hash.toString(16).padStart(8, "0");
-}
-
-/** Capture an exact field snapshot plus its compact content-sensitive rolling hash. */
-function messageContentSnapshot(message: MessageLike): MessageContentSnapshot {
-    const fields = messageContentFields(message);
-    return { signature: signatureForFields(fields), fields };
-}
-
-function contentSnapshotsFor(messages: readonly MessageLike[]): MessageContentSnapshot[] {
-    return messages.map(messageContentSnapshot);
+function rustCaptureDigests(
+    inputs: readonly LkgInputSnapshot[],
+    prior: LkgSlot | undefined,
+    acceptedInputs: readonly LkgInputSnapshot[] | null,
+) {
+    const reusablePrefix = prior?.inputContentSignatures
+        ? exactReusablePrefix(inputs, acceptedInputs)
+        : 0;
+    const inputContentSignatures = [
+        ...(prior?.inputContentSignatures?.slice(0, reusablePrefix) ?? []),
+        ...inputs.slice(reusablePrefix).map((input) => signatureForFields(input.fields)),
+    ];
+    const incremental = incrementalLkgContentDigests(
+        inputs.map((input, index) => ({
+            ...input,
+            signature: inputContentSignatures[index] ?? "",
+        })),
+        prior?.inputContentSignatures
+            ? {
+                  ids: prior.inputIdSeq.slice(0, reusablePrefix),
+                  signatures: prior.inputContentSignatures.slice(0, reusablePrefix),
+                  digests: prior.inputContentDigests.slice(0, reusablePrefix),
+              }
+            : undefined,
+    );
+    return { ...incremental, inputContentSignatures };
 }
 
 function messageMatchesContentSnapshot(
     message: MessageLike,
-    snapshot: MessageContentSnapshot,
+    snapshot: Pick<MessageContentSnapshot, "fields">,
 ): boolean {
     let fieldIndex = 0;
     const matched = visitMessageContentFields(message, {
@@ -1594,9 +1578,10 @@ export function createRustModeTransform(
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
+    getHeapStats: () => RustWireCacheHeapStats;
 } {
     const states = new Map<string, RustSessionState>();
-    const wireCaches = new Map<string, RustWireCache>();
+    const heapHolder = new MagicContextRustHeapHolder();
     const promptSurfaceGuidanceEpochs = deps.promptSurfaceRuntime
         ? createPromptSurfaceGuidanceEpochCache(deps.promptSurfaceRuntime)
         : undefined;
@@ -1658,19 +1643,35 @@ export function createRustModeTransform(
 
     const callModule = async (
         args: Parameters<RustModeModuleClient["call"]>[0],
-        attemptTimeoutMs = timeoutMs,
+        attemptTimeoutMs = args.timeoutMs ?? timeoutMs,
     ): Promise<unknown> => {
         const controller = new AbortController();
-        const timer = setTimeout(
-            () => controller.abort(new Error("rust module request timed out")),
-            attemptTimeoutMs,
-        );
+        const body = isRecord(args.body) ? args.body : {};
+        const timeoutError =
+            args.method === "state_sync"
+                ? Object.assign(
+                      new Error(
+                          `state_sync timeout stage=module_ack page=${body.seed_batch_index ?? 0}/${body.seed_batch_total ?? 1} series=${body.seed_id ?? "delta"} budget_ms=${attemptTimeoutMs}`,
+                      ),
+                      {
+                          code: "state_sync_timeout",
+                          stage: "module_ack",
+                          page: body.seed_batch_index ?? 0,
+                          pages: body.seed_batch_total ?? 1,
+                          series: body.seed_id ?? null,
+                      },
+                  )
+                : new Error("rust module request timed out");
+        const timer = setTimeout(() => controller.abort(timeoutError), attemptTimeoutMs);
         try {
             return await options.moduleClient.call({
                 ...args,
                 signal: controller.signal,
                 timeoutMs: attemptTimeoutMs,
             });
+        } catch (error) {
+            if (controller.signal.aborted) throw timeoutError;
+            throw error;
         } finally {
             clearTimeout(timer);
         }
@@ -1703,7 +1704,7 @@ export function createRustModeTransform(
     };
 
     const invalidateWireState = (sessionId: string): void => {
-        wireCaches.delete(sessionId);
+        heapHolder.wireCaches.delete(sessionId);
         const state = states.get(sessionId);
         if (!state) return;
         resetOrdinalMemo(state);
@@ -1719,6 +1720,8 @@ export function createRustModeTransform(
     ): boolean => {
         const slot = getSlot(sessionId);
         if (!slot) {
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, "lkg_miss");
             return false;
         }
@@ -1743,6 +1746,8 @@ export function createRustModeTransform(
         }
         if (!entry) {
             dropSlot(sessionId, "lkg_invalidated_reshape");
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, "lkg_invalidated_reshape");
             return false;
         }
@@ -1755,6 +1760,8 @@ export function createRustModeTransform(
             entry,
         });
         if (!replay.ok) {
+            const state = states.get(sessionId);
+            if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, replay.reason);
             return false;
         }
@@ -1815,7 +1822,7 @@ export function createRustModeTransform(
         sessionId: string,
         inputIds: readonly unknown[],
         inputKeys: ReturnType<typeof resolveLkgModelKeys>,
-        inputSnapshots: readonly MessageContentSnapshot[],
+        inputSnapshots: readonly Pick<MessageContentSnapshot, "fields">[],
         nativeMessages: readonly unknown[],
         responseRowVersion: number,
     ): RustLkgCapturePlan | null => {
@@ -1855,25 +1862,31 @@ export function createRustModeTransform(
         ) {
             return "superseded";
         }
-        // Steady passes append one message onto an unchanged prefix. Reuse the
-        // previous slot's digests for every id+content-signature match and hash
-        // only from the first changed entry so the deferred commit stays off the
-        // event-loop budget.
+        // Reuse requires the exact inputs from a previously accepted capture in this
+        // process; a restarted adapter has no such proof. Compute FNV signatures at
+        // commit, not before the RPC, retaining Pi's input_content_signatures format.
+        // Cache-busting/recovery captures still commit synchronously for durability.
         const prior = getSlot(plan.sessionId);
-        const inputContentSignatures = plan.inputSnapshots.map((snapshot) => snapshot.signature);
-        const { digests: inputContentDigests } = incrementalLkgContentDigests(
-            plan.inputIds.map((id, index) => ({
-                id,
-                signature: inputContentSignatures[index] ?? "",
-                fields: plan.inputSnapshots[index]?.fields ?? [],
-            })),
-            prior?.inputContentSignatures
-                ? {
-                      ids: prior.inputIdSeq,
-                      signatures: prior.inputContentSignatures,
-                      digests: prior.inputContentDigests,
-                  }
+        const inputs = plan.inputIds.map((id, index) => ({
+            id,
+            fields: plan.inputSnapshots[index]?.fields ?? [],
+        }));
+        // A failed durable refresh followed by eviction can hydrate an older slot.
+        // Its digests must not borrow the newer in-memory capture's equality proof.
+        const accepted = state.lkgAcceptedCapture;
+        const {
+            digests: inputContentDigests,
+            inputContentSignatures,
+            reusedPrefix,
+        } = rustCaptureDigests(
+            inputs,
+            prior?.modelKey === plan.modelKey &&
+                prior?.providerKey === plan.providerKey &&
+                prior?.captureSequence === accepted?.captureSequence &&
+                prior?.rowVersion === accepted?.rowVersion
+                ? prior
                 : undefined,
+            accepted?.inputs ?? null,
         );
         const slot = {
             jsonPrefix: plan.jsonPrefix,
@@ -1889,6 +1902,12 @@ export function createRustModeTransform(
         };
         const captured = captureSlot(plan.sessionId, slot);
         if (!captured) throw new Error("LKG slot rejected the prepared snapshot");
+        state.lkgAcceptedCapture = {
+            inputs,
+            captureSequence: plan.captureSequence,
+            rowVersion: plan.rowVersion,
+        };
+        options.onLkgCaptureForTests?.(reusedPrefix);
         // Durability across restarts: store the exact accepted snapshot (the
         // jsonPrefix string is reused as-is, never re-serialized). Best-effort —
         // a write failure leaves the in-memory slot serving this process.
@@ -2398,7 +2417,7 @@ export function createRustModeTransform(
                 detected_context_limit: overflowState.detectedContextLimit,
                 detected_context_limit_model_key: overflowState.detectedContextLimitModelKey,
             };
-            const previousWireCache = wireCaches.get(sessionId);
+            const previousWireCache = heapHolder.wireCaches.get(sessionId);
             let wireDelta:
                 | {
                       rawStart: number;
@@ -3255,6 +3274,7 @@ export function createRustModeTransform(
                 // and its replay still applies durable binding-mismatch strips.
                 if (cacheBustingPass) {
                     dropSlot(sessionId, "lkg_cache_bust_pending_capture");
+                    state.lkgAcceptedCapture = undefined;
                 }
                 // Build the capture from the installed array. A priced replacement commits its
                 // snapshot before this transform can return, so a process death cannot leave the
@@ -3277,6 +3297,7 @@ export function createRustModeTransform(
                         return;
                     }
                     dropSlot(sessionId, `lkg_${mode}_capture_failed`);
+                    state.lkgAcceptedCapture = undefined;
                     state.lkgSyncCaptureRequired = true;
                     sessionLog(
                         sessionId,
@@ -3440,7 +3461,7 @@ export function createRustModeTransform(
                     // Best-effort: a later pass with current recovery evidence retries the clear.
                 }
             }
-            wireCaches.set(sessionId, pendingWireCache);
+            heapHolder.wireCaches.set(sessionId, pendingWireCache);
             appliedAt = performance.now();
             // Stable transform projections cannot have new module-owned mirror rows. A changed
             // row/boundary/manifest marker schedules one ordered background pull; old modules that
@@ -3464,15 +3485,22 @@ export function createRustModeTransform(
                     if (memoryMirrorDue) {
                         const mirrorPullStartedAt = performance.now();
                         try {
-                            const cuePoolVersion = await pullMemoryMirrorOnce({
+                            const mirrorDrain = await pullMemoryMirrorOnce({
                                 db: deps.db,
-                                module: options.moduleClient as AuthorityModuleClient,
+                                module: options.moduleClient,
                             });
-                            if (cuePoolVersion !== state.muralCuePoolVersion) {
-                                state.muralCuePoolVersion = cuePoolVersion;
+                            if (mirrorDrain.cuePoolVersion !== state.muralCuePoolVersion) {
+                                state.muralCuePoolVersion = mirrorDrain.cuePoolVersion;
                                 state.muralCache = null;
                             }
-                            state.memoryMirrorProjectionKey = projectionKey;
+                            if (mirrorDrain.complete) {
+                                state.memoryMirrorProjectionKey = projectionKey;
+                            } else if (mirrorDrain.budgetExhausted) {
+                                sessionLog(
+                                    sessionId,
+                                    `rust memory mirror backlog deferred: rows_applied=${mirrorDrain.rowsApplied} backlog_remaining=true pages=${mirrorDrain.pagesPulled}`,
+                                );
+                            }
                         } catch (error) {
                             sessionLog(
                                 sessionId,
@@ -3585,7 +3613,7 @@ export function createRustModeTransform(
             const clearLocalState = () => {
                 dropSlot(sessionId, "session-deleted");
                 states.delete(sessionId);
-                wireCaches.delete(sessionId);
+                heapHolder.wireCaches.delete(sessionId);
                 promptSurfaceGuidanceEpochs?.clear(sessionId);
                 clearCompartmentMirrorCursor(sessionId);
             };
@@ -3612,6 +3640,24 @@ export function createRustModeTransform(
                 idOrdinalMemo: new Map(ensureState(states, sessionId).idOrdinalMemo),
             };
         },
+        getHeapStats(): RustWireCacheHeapStats {
+            const sessions = [...heapHolder.wireCaches].map(([sessionId, cache]) => ({
+                sessionId,
+                rawMessages: cache.rawCount,
+                wireMessages: cache.wireCount,
+                rawContentSnapshots: cache.rawContentSnapshots.length,
+                estimatedBytes: rustWireCacheEstimatedBytes(cache),
+            }));
+            return {
+                snapshots: heapHolder.wireCaches.size,
+                rawContentSnapshots: sessions.reduce(
+                    (sum, session) => sum + session.rawContentSnapshots,
+                    0,
+                ),
+                estimatedBytes: sessions.reduce((sum, session) => sum + session.estimatedBytes, 0),
+                sessions,
+            };
+        },
     };
 }
 
@@ -3629,6 +3675,7 @@ export const __rustModeTransformTest = {
     applyNativeMessagesVerbatim,
     authoritySeedRows,
     contentSnapshotsFor,
+    rustCaptureDigests,
     snapshotTags: {
         array: LKG_SNAPSHOT_ARRAY,
         object: LKG_SNAPSHOT_OBJECT,

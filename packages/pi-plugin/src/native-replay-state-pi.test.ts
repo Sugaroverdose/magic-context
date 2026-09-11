@@ -258,38 +258,32 @@ describe("native upgrade application", () => {
 		}
 	});
 
-	for (const column of [
-		"pi_native_tool_inputs",
-		"pi_native_reasoning_ids",
-	] as const) {
-		it(`preserves both native lanes and continues local cleanup when ${column} is malformed`, async () => {
-			const sessionId = `ses-native-malformed-${column}`;
+	for (const lane of ["toolInputs", "reasoningIds"] as const) {
+		it(`preserves both native lanes and continues local cleanup when ${lane} is malformed`, async () => {
+			const sessionId = `ses-native-malformed-${lane}`;
 			const f = fixture(sessionId);
 			try {
 				await f.seedLegacy();
-				const stored = {
-					pi_native_tool_inputs:
-						column === "pi_native_tool_inputs"
-							? "{"
-							: JSON.stringify({
-									[callId]: JSON.stringify({
-										dropped: "persisted native marker",
-									}),
-								}),
-					pi_native_reasoning_ids:
-						column === "pi_native_reasoning_ids"
-							? "{}"
-							: JSON.stringify(["entry-old"]),
-				};
+				const stored = JSON.stringify({
+					version: 2,
+					trailingBlank: {},
+					piNative: {
+						toolInputs:
+							lane === "toolInputs"
+								? "{"
+								: {
+										[callId]: JSON.stringify({
+											dropped: "persisted native marker",
+										}),
+									},
+						reasoningIds: lane === "reasoningIds" ? {} : ["entry-old"],
+					},
+				});
 				f.db
 					.prepare(
-						"UPDATE session_meta SET pi_native_tool_inputs = ?, pi_native_reasoning_ids = ? WHERE session_id = ?",
+						"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
 					)
-					.run(
-						stored.pi_native_tool_inputs,
-						stored.pi_native_reasoning_ids,
-						sessionId,
-					);
+					.run(stored, sessionId);
 				const before = nativeBytes([oldAssistant()]);
 				for (const percent of [0, 90, 0]) {
 					f.restart();
@@ -306,31 +300,71 @@ describe("native upgrade application", () => {
 				expect(
 					f.db
 						.prepare(
-							"SELECT pi_native_tool_inputs, pi_native_reasoning_ids FROM session_meta WHERE session_id = ?",
+							"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
 						)
 						.get(sessionId),
-				).toEqual(stored);
+				).toEqual({ trailing_blank_decisions: stored });
 			} finally {
 				f.close();
 			}
 		});
 	}
 
-	for (const column of [
-		"pi_native_tool_inputs",
-		"pi_native_reasoning_ids",
-	] as const) {
-		it(`does not publish failed ${column} activation or retry it on defer`, async () => {
-			const sessionId = `ses-native-failure-${column}`;
+	it("does not overwrite an unsupported document version or abort local cleanup", async () => {
+		const sessionId = "ses-native-future-document";
+		const f = fixture(sessionId);
+		try {
+			await f.seedLegacy();
+			const stored = JSON.stringify({
+				version: 3,
+				trailingBlank: { "entry-old": "strip" },
+				piNative: { toolInputs: {}, reasoningIds: ["entry-old"] },
+			});
+			f.db
+				.prepare(
+					"UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+				)
+				.run(stored, sessionId);
+			const original = nativeBytes([oldAssistant()]);
+			for (const percent of [0, 90, 0]) {
+				f.restart();
+				const messages = await f.pass(percent);
+				expect(nativeBytes(messages)).toBe(original);
+				expect(messages[1]).toMatchObject({
+					content: [
+						{ type: "thinking", thinking: "", thinkingSignature: undefined },
+						{},
+						{ arguments: { dropped: expect.any(String) } },
+					],
+				});
+			}
+			expect(
+				f.db
+					.prepare(
+						"SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
+					)
+					.get(sessionId),
+			).toEqual({ trailing_blank_decisions: stored });
+		} finally {
+			f.close();
+		}
+	});
+
+	for (const lane of ["toolInputs", "reasoningIds"] as const) {
+		it(`does not publish failed ${lane} activation or retry it on defer`, async () => {
+			const sessionId = `ses-native-failure-${lane}`;
 			const f = fixture(sessionId);
 			try {
 				await f.seedLegacy();
+				const empty = lane === "toolInputs" ? "{}" : "[]";
 				f.db.exec(
-					`CREATE TRIGGER fail_native_write BEFORE UPDATE OF ${column} ON session_meta BEGIN SELECT RAISE(FAIL, 'native persistence failure'); END`,
+					`CREATE TRIGGER fail_native_write BEFORE UPDATE OF trailing_blank_decisions ON session_meta
+					 WHEN COALESCE(json_extract(NEW.trailing_blank_decisions, '$.piNative.${lane}'), '${empty}')
+					   != COALESCE(json_extract(NULLIF(OLD.trailing_blank_decisions, ''), '$.piNative.${lane}'), '${empty}')
+					 BEGIN SELECT RAISE(FAIL, 'native persistence failure'); END`,
 				);
 				const failed = nativeBytes(await f.pass(90));
-				const retained =
-					column === "pi_native_tool_inputs" ? staleInput : ciphertext;
+				const retained = lane === "toolInputs" ? staleInput : ciphertext;
 				expect(failed).toContain(retained);
 				f.db.exec("DROP TRIGGER fail_native_write");
 				expect(nativeBytes(await f.pass(0))).toBe(failed);
@@ -372,7 +406,7 @@ describe("native upgrade application", () => {
 			expect(run("different marker", false)).toBe(b);
 			expect(run("different marker", false, false)).toBe(b);
 			db.exec(
-				"CREATE TRIGGER fail_update BEFORE UPDATE OF pi_native_tool_inputs ON session_meta BEGIN SELECT RAISE(FAIL, 'rejected native update'); END",
+				"CREATE TRIGGER fail_update BEFORE UPDATE OF trailing_blank_decisions ON session_meta BEGIN SELECT RAISE(FAIL, 'rejected native update'); END",
 			);
 			expect(run("different marker", true)).toBe(b);
 			db.exec("DROP TRIGGER fail_update");

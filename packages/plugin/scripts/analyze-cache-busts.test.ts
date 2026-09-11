@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { __test } from "./analyze-cache-busts";
+import { describeBodyPair, normalizeRequestBody } from "./cache-bust-body-sources";
 
 type UsageFixture = {
     cache_read_input_tokens?: number;
@@ -102,6 +103,19 @@ function snapshotsFor(dir: string, session: string) {
 }
 
 describe("analyze-cache-bust dump discovery", () => {
+    test("does not forgive consecutive prefix rewrites at the same read floor", () => {
+        const dir = mkdtempSync(join(tmpdir(), "cache-rebust-"));
+        tempDirs.push(dir);
+        const session = "ses_rebust";
+        const readings = [[254592, 1054], [16896, 173076], [16896, 173524], [190336, 493]];
+        readings.forEach(([cacheRead, input], index) => {
+            writeDump(dir, `2026-09-11T07-56-0${index}-000Z-${session}`, `2026-09-11T07:56:0${index}Z`, session,
+                bodyWithBreakpointMessage(String(index)), responseUsage({input_tokens: input!, cache_read_input_tokens: cacheRead!, cache_creation_input_tokens: 0}));
+        });
+        const rows = __test.analyzeSnapshots(snapshotsFor(dir, session));
+        expect(rows.map(row => row.verdict)).toEqual(["BASE", "BUST", "BUST", "STABLE"]);
+        expect(rows[2]!.rewrittenTokens).toBe(173524);
+    });
     test("prints complete UTF-8 body bytes separately from reusable normalized prefix bytes", () => {
         const dir = mkdtempSync(join(tmpdir(), "cache-bust-body-bytes-"));
         tempDirs.push(dir);
@@ -162,12 +176,94 @@ describe("analyze-cache-bust dump discovery", () => {
         );
     });
 
+    test("lists ambiguous cross-provider candidates and selects the newest", () => {
+        const anthropicDir = mkdtempSync(join(tmpdir(), "cache-bust-anthropic-candidate-"));
+        const openaiDir = mkdtempSync(join(tmpdir(), "cache-bust-openai-candidate-"));
+        tempDirs.push(anthropicDir, openaiDir);
+        const oldSession = "ses_ambiguousOld";
+        const newSession = "ses_ambiguousNew";
+        const oldStem = `2026-09-02T08-41-00-000Z-000001-${oldSession}`;
+        const newStem = `2026-09-02T08-42-00-000Z-000001-${newSession}`;
+        writeDump(anthropicDir, oldStem, "2026-09-02T08:41:00Z", oldSession, bodyWithTail("old"));
+        writeDump(openaiDir, newStem, "2026-09-02T08:42:00Z", newSession, {
+            input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "new" }] }],
+        });
+        utimesSync(join(anthropicDir, `${oldStem}.body.json`), new Date(1_000), new Date(1_000));
+        utimesSync(join(openaiDir, `${newStem}.body.json`), new Date(2_000), new Date(2_000));
+
+        const run = Bun.spawnSync(
+            [process.execPath, join(import.meta.dir, "analyze-cache-busts.ts"), "--session", "ses_ambiguous", "--all-rows"],
+            {
+                env: {
+                    ...process.env,
+                    OPENCODE_ANTHROPIC_AUTH_DUMP_DIR: anthropicDir,
+                    OPENCODE_OPENAI_AUTH_DUMP_DIR: openaiDir,
+                },
+            },
+        );
+
+        expect(run.exitCode).toBe(0);
+        const output = run.stdout.toString();
+        expect(output).toContain("Ambiguous session prefix");
+        expect(output).toContain(`${oldSession} provider=anthropic mtime=`);
+        expect(output).toContain(`${newSession} provider=openai mtime=`);
+        expect(output).toContain("size=");
+        expect(output).toContain(`Using newest candidate ${newSession} from ${openaiDir}.`);
+    });
+
     test("resolves relative --since durations", () => {
         expect(__test.resolveTimeBound("30m", 1_800_000)).toBe("1970-01-01T00:00:00.000Z");
         expect(__test.resolveTimeBound("2026-09-02T08:30:00Z", 0)).toBe(
             "2026-09-02T08:30:00.000Z",
         );
     });
+});
+
+describe("analyze-cache-bust normalized provider fixtures", () => {
+    const fixtureRoot = join(import.meta.dir, "test-fixtures", "cache-bust-bodies");
+    const fixtureJson = (source: string, file: string): Record<string, unknown> =>
+        JSON.parse(readFileSync(join(fixtureRoot, source, file), "utf8")) as Record<string, unknown>;
+
+    for (const source of ["anthropic", "openai-auth"] as const) {
+        test(`${source} names the normalized first-diverging message`, () => {
+            const provider = source === "anthropic" ? "anthropic" : "openai";
+            const previous = normalizeRequestBody(fixtureJson(source, "001-request.json"), provider);
+            const current = normalizeRequestBody(fixtureJson(source, "002-request.json"), provider);
+
+            const divergence = describeBodyPair(previous.messages, current.messages);
+
+            expect(divergence?.description).toBe(
+                `message[1] role=user parts=[${provider === "anthropic" ? "text" : "input_text"}(19)] text="cached prefix after"`,
+            );
+        });
+
+        test(`${source} applies its provider meter rule`, () => {
+            const dir = mkdtempSync(join(tmpdir(), `cache-bust-${source}-fixture-`));
+            tempDirs.push(dir);
+            const session = `ses_${source.replace("-", "")}`;
+            for (const [index, timestamp] of [
+                [1, "2026-09-02T08:41:00.000Z"],
+                [2, "2026-09-02T08:42:00.000Z"],
+            ] as const) {
+                writeDump(
+                    dir,
+                    `2026-09-02T08-${index === 1 ? "41" : "42"}-00-000Z-00000${index}-${session}`,
+                    timestamp,
+                    session,
+                    fixtureJson(source, `00${index}-request.json`),
+                    fixtureJson(source, `00${index}-response.json`),
+                );
+            }
+
+            const row = __test.analyzeSnapshots(snapshotsFor(dir, session))[1];
+
+            expect(row.verdict).toBe("BUST");
+            expect(row.current.provider).toBe(source === "anthropic" ? "anthropic" : "openai");
+            expect(row.current.usage?.rule).toContain(
+                source === "anthropic" ? "Anthropic explicit cache" : "OpenAI implicit-prefix cache",
+            );
+        });
+    }
 });
 
 describe("analyze-cache-bust provider meter verdicts", () => {

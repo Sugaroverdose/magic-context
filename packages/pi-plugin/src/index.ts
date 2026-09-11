@@ -302,15 +302,19 @@ export function signalPiDeferredCompactionMarkerDrain(sessionId: string): void {
 }
 
 /**
- * Pi native compaction invalidates MC's cached m[0]/m[1] bytes. In normal mode
- * MC still owns compaction and cancels this event; compaction-off mode clears
- * only that cache and deliberately returns no cancellation result.
+ * Only an allowed native compaction invalidates MC's cached m[0]/m[1].
+ * A cancelled attempt changes no history; clearing its cache would manufacture
+ * a first_render HARD fold on the next context pass.
  */
 export async function handlePiSessionBeforeCompact(args: {
 	db: ContextDatabase;
 	compactionOff: boolean;
 	ctx: { sessionManager?: { getSessionId?: () => string | undefined } };
 }): Promise<{ cancel: true } | undefined> {
+	if (!args.compactionOff) {
+		info("session_before_compact: cancelling — magic-context owns compaction");
+		return { cancel: true };
+	}
 	try {
 		const sessionId = args.ctx.sessionManager?.getSessionId?.();
 		if (typeof sessionId === "string" && sessionId.length > 0) {
@@ -319,14 +323,9 @@ export async function handlePiSessionBeforeCompact(args: {
 	} catch {
 		// Cache invalidation is best-effort; it must not suppress Pi's native path.
 	}
-	if (args.compactionOff) {
-		info(
-			"session_before_compact: native Pi compaction proceeds (compaction-off mode)",
-		);
-		return;
-	}
-	info("session_before_compact: cancelling — magic-context owns compaction");
-	return { cancel: true };
+	info(
+		"session_before_compact: native Pi compaction proceeds (compaction-off mode)",
+	);
 }
 
 export function canonicalPiModelKey(provider: string, model: string): string {
@@ -1893,7 +1892,7 @@ async function startPiMagicContextRuntime(
 						{
 							client: null,
 							db,
-							sendIgnoredMessage: async (_client, _sid, text) => {
+							sendStatusNotification: async (_client, _sid, text) => {
 								ctx.ui.notify(text, "info");
 								return "sent";
 							},
@@ -2265,9 +2264,11 @@ async function startPiMagicContextRuntime(
 		}
 	});
 
-	// In normal mode MC owns compaction and cancels Pi's native hook. In
-	// compaction-off mode the same hook must return nothing: native Pi compaction
-	// is the selected context manager and cancelling it would leave no manager.
+	// In normal mode MC owns compaction and cancels Pi's native hook. Pi's
+	// ExtensionRunner checks session-before handlers in registration order, ignores
+	// undefined, and short-circuits on the first truthy `cancel`; listener order
+	// therefore cannot undo this veto. In compaction-off mode the same hook must
+	// return nothing because native Pi compaction is the selected context manager.
 	pi.on("session_before_compact", async (_event, ctx) =>
 		handlePiSessionBeforeCompact({ db, compactionOff, ctx }),
 	);

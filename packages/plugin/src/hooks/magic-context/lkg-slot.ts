@@ -29,7 +29,11 @@ const LKG_TOTAL_BYTES = 64 * 1024 * 1024;
 const LKG_SINGLE_SLOT_BYTES = 24 * 1024 * 1024;
 const LKG_METADATA_BYTES = 256;
 
-const slots = new Map<string, { slot: LkgSlot; bytes: number }>();
+class MagicContextLkgHeapHolder {
+    readonly entries = new Map<string, { slot: LkgSlot; bytes: number }>();
+}
+
+const lkgHeapHolder = new MagicContextLkgHeapHolder();
 let totalBytes = 0;
 const hydrationPassBySession = new BoundedSessionMap<number>(1_000);
 const hydrationAttemptBySession = new BoundedSessionMap<number>(1_000);
@@ -80,6 +84,118 @@ export const LKG_SNAPSHOT_BOOLEAN = Symbol("boolean");
 export const LKG_SNAPSHOT_NULL = Symbol("null");
 export const LKG_SNAPSHOT_UNDEFINED = Symbol("undefined");
 
+export interface MessageContentSnapshot {
+    signature: string;
+    fields: LkgContentField[];
+}
+
+const FNV1A_32_OFFSET = 0x811c9dc5;
+const FNV1A_32_PRIME = 0x01000193;
+
+function updateFnv1a32(hash: number, value: string): number {
+    let next = hash;
+    for (let index = 0; index < value.length; index += 1) {
+        next ^= value.charCodeAt(index);
+        next = Math.imul(next, FNV1A_32_PRIME) >>> 0;
+    }
+    return next;
+}
+
+interface MessageContentFieldVisitor {
+    field(value: LkgContentField): boolean;
+    beginObject(): number | undefined;
+    endObject(token: number, entryCount: number): boolean;
+}
+
+function isSnapshotObjectChild(value: unknown): boolean {
+    return value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+}
+
+export function visitMessageContentFields(
+    value: unknown,
+    visitor: MessageContentFieldVisitor,
+): boolean {
+    if (value === null) return visitor.field(LKG_SNAPSHOT_NULL);
+    if (typeof value === "string") {
+        return visitor.field(LKG_SNAPSHOT_STRING) && visitor.field(value);
+    }
+    if (typeof value === "number") {
+        return visitor.field(LKG_SNAPSHOT_NUMBER) && visitor.field(value);
+    }
+    if (typeof value === "boolean") {
+        return visitor.field(LKG_SNAPSHOT_BOOLEAN) && visitor.field(value);
+    }
+    if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+        return visitor.field(LKG_SNAPSHOT_UNDEFINED);
+    }
+    if (Array.isArray(value)) {
+        if (!visitor.field(LKG_SNAPSHOT_ARRAY) || !visitor.field(value.length)) return false;
+        for (const item of value) {
+            if (!visitMessageContentFields(item, visitor)) return false;
+        }
+        return true;
+    }
+    if (typeof value === "object") {
+        if (!visitor.field(LKG_SNAPSHOT_OBJECT)) return false;
+        const objectToken = visitor.beginObject();
+        if (objectToken === undefined) return false;
+        let entryCount = 0;
+        for (const key in value) {
+            if (!Object.hasOwn(value, key)) continue;
+            const child = (value as Record<string, unknown>)[key];
+            if (!isSnapshotObjectChild(child)) continue;
+            entryCount += 1;
+            if (
+                !visitor.field(LKG_SNAPSHOT_KEY) ||
+                !visitor.field(key) ||
+                !visitMessageContentFields(child, visitor)
+            ) {
+                return false;
+            }
+        }
+        return visitor.endObject(objectToken, entryCount);
+    }
+    return visitor.field(LKG_SNAPSHOT_UNDEFINED);
+}
+
+export function messageContentFields(message: MessageLike): LkgContentField[] {
+    const fields: LkgContentField[] = [];
+    const complete = visitMessageContentFields(message, {
+        field(value) {
+            fields.push(value);
+            return true;
+        },
+        beginObject() {
+            const countIndex = fields.length;
+            fields.push(0);
+            return countIndex;
+        },
+        endObject(countIndex, entryCount) {
+            fields[countIndex] = entryCount;
+            return true;
+        },
+    });
+    if (!complete) throw new Error("message content snapshot traversal stopped unexpectedly");
+    return fields;
+}
+
+export function signatureForFields(fields: readonly LkgContentField[]): string {
+    let hash = FNV1A_32_OFFSET;
+    for (const field of fields) {
+        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
+        hash = updateFnv1a32(hash, `${typeof field}:${value.length}:`);
+        hash = updateFnv1a32(hash, value);
+        hash = updateFnv1a32(hash, "\0");
+    }
+    return hash.toString(16).padStart(8, "0");
+}
+
+/** Capture an exact field snapshot plus its compact content-sensitive rolling hash. */
+export function messageContentSnapshot(message: MessageLike): MessageContentSnapshot {
+    const fields = messageContentFields(message);
+    return { signature: signatureForFields(fields), fields };
+}
+
 /** Flatten a value into typed tokens while retaining strings without deep copies. */
 export function lkgContentFields(value: unknown): LkgContentField[] | null {
     const fields: LkgContentField[] = [];
@@ -129,6 +245,43 @@ export function lkgContentDigestFromFields(fields: readonly LkgContentField[]): 
             .update("\0");
     }
     return hash.digest("base64url");
+}
+
+export interface LkgInputSnapshot {
+    id: string;
+    fields: readonly LkgContentField[];
+}
+
+function equalContentFields(
+    left: readonly LkgContentField[],
+    right: readonly LkgContentField[],
+): boolean {
+    // OpenCode retains immutable token arrays for the unchanged prefix of a tail-only
+    // request. Reusing the same array needs no element-by-element comparison.
+    if (left === right) return true;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+        if (!Object.is(left[index], right[index])) return false;
+    }
+    return true;
+}
+
+/** Compare captured tokens before reusing digests: a message can change without changing its id. */
+export function exactReusablePrefix(
+    current: readonly LkgInputSnapshot[],
+    prior: readonly LkgInputSnapshot[] | null,
+): number {
+    if (!prior) return 0;
+    let prefix = 0;
+    while (
+        prefix < current.length &&
+        prefix < prior.length &&
+        current[prefix]?.id === prior[prefix]?.id &&
+        equalContentFields(current[prefix]?.fields ?? [], prior[prefix]?.fields ?? [])
+    ) {
+        prefix += 1;
+    }
+    return prefix;
 }
 
 export interface LkgDigestEntry {
@@ -185,8 +338,8 @@ export function lkgContentDigest(message: MessageLike): string | null {
 }
 
 function touch(sessionId: string, entry: { slot: LkgSlot; bytes: number }): void {
-    slots.delete(sessionId);
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.delete(sessionId);
+    lkgHeapHolder.entries.set(sessionId, entry);
 }
 
 export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
@@ -201,7 +354,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
     }
     const bytes = slotBytes(slot);
     if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
-    const prior = slots.get(sessionId);
+    const prior = lkgHeapHolder.entries.get(sessionId);
     if (
         prior?.slot.rowVersion !== undefined &&
         slot.rowVersion !== undefined &&
@@ -212,17 +365,17 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
         return false;
     }
     if (prior) totalBytes -= prior.bytes;
-    slots.delete(sessionId);
+    lkgHeapHolder.entries.delete(sessionId);
     while (totalBytes + bytes > LKG_TOTAL_BYTES) {
-        const oldest = slots.keys().next().value as string | undefined;
+        const oldest = lkgHeapHolder.entries.keys().next().value as string | undefined;
         if (oldest === undefined) break;
-        const evicted = slots.get(oldest);
-        slots.delete(oldest);
+        const evicted = lkgHeapHolder.entries.get(oldest);
+        lkgHeapHolder.entries.delete(oldest);
         if (evicted) totalBytes -= evicted.bytes;
     }
     if (totalBytes + bytes > LKG_TOTAL_BYTES) {
         if (prior) {
-            slots.set(sessionId, prior);
+            lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
         return false;
@@ -238,7 +391,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
         },
         bytes,
     };
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.set(sessionId, entry);
     totalBytes += bytes;
     hydrationAttemptBySession.delete(sessionId);
     return true;
@@ -248,19 +401,19 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
 function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
     const bytes = slotBytes(slot);
     if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
-    const prior = slots.get(sessionId);
+    const prior = lkgHeapHolder.entries.get(sessionId);
     if (prior) totalBytes -= prior.bytes;
-    slots.delete(sessionId);
+    lkgHeapHolder.entries.delete(sessionId);
     while (totalBytes + bytes > LKG_TOTAL_BYTES) {
-        const oldest = slots.keys().next().value as string | undefined;
+        const oldest = lkgHeapHolder.entries.keys().next().value as string | undefined;
         if (oldest === undefined) break;
-        const evicted = slots.get(oldest);
-        slots.delete(oldest);
+        const evicted = lkgHeapHolder.entries.get(oldest);
+        lkgHeapHolder.entries.delete(oldest);
         if (evicted) totalBytes -= evicted.bytes;
     }
     if (totalBytes + bytes > LKG_TOTAL_BYTES) {
         if (prior) {
-            slots.set(sessionId, prior);
+            lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
         return false;
@@ -276,7 +429,7 @@ function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
         },
         bytes,
     };
-    slots.set(sessionId, entry);
+    lkgHeapHolder.entries.set(sessionId, entry);
     totalBytes += bytes;
     return true;
 }
@@ -297,7 +450,7 @@ function hydrateSlotFromPersistence(sessionId: string): LkgSlot | undefined {
     // exactly like stale in-memory bytes.
     if (!installHydratedSlot(sessionId, loaded)) return undefined;
     sessionLog(sessionId, "lkg_hydrated_from_disk");
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     return entry ? copySlotForRead(entry.slot) : undefined;
 }
 
@@ -313,12 +466,12 @@ function copySlotForRead(slot: LkgSlot): LkgSlot {
 }
 
 export function getInMemorySlot(sessionId: string): LkgSlot | undefined {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     return entry ? copySlotForRead(entry.slot) : undefined;
 }
 
 export function getSlot(sessionId: string): LkgSlot | undefined {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     if (!entry) {
         const pass = hydrationPassBySession.peek(sessionId);
         if (pass !== undefined) {
@@ -333,9 +486,9 @@ export function getSlot(sessionId: string): LkgSlot | undefined {
 }
 
 export function dropSlot(sessionId: string, _reason?: string): void {
-    const entry = slots.get(sessionId);
+    const entry = lkgHeapHolder.entries.get(sessionId);
     if (entry) {
-        slots.delete(sessionId);
+        lkgHeapHolder.entries.delete(sessionId);
         totalBytes -= entry.bytes;
     }
     // The durable row must follow the drop: a slot invalidated in memory
@@ -375,15 +528,34 @@ export function noteEntry(sessionId: string, messages: MessageLike[]): LkgEntryN
 }
 
 export function resetLkgSlotsForTest(): void {
-    slots.clear();
+    lkgHeapHolder.entries.clear();
     totalBytes = 0;
     persistenceBackend = undefined;
     hydrationPassBySession.clear();
     hydrationAttemptBySession.clear();
 }
 
+export interface LkgSlotHeapStats {
+    count: number;
+    totalBytes: number;
+    sessions: Array<{ sessionId: string; bytes: number }>;
+}
+
+/** Live process-resident LKG ownership used by the opt-in heap diagnostic RPC. */
+export function getLkgSlotHeapStats(): LkgSlotHeapStats {
+    return {
+        count: lkgHeapHolder.entries.size,
+        totalBytes,
+        sessions: [...lkgHeapHolder.entries].map(([sessionId, entry]) => ({
+            sessionId,
+            bytes: entry.bytes,
+        })),
+    };
+}
+
 export function getLkgSlotStatsForTest(): { totalBytes: number; count: number } {
-    return { totalBytes, count: slots.size };
+    const { totalBytes: bytes, count } = getLkgSlotHeapStats();
+    return { totalBytes: bytes, count };
 }
 
 export const __resetLkgSlotStoreForTest = resetLkgSlotsForTest;

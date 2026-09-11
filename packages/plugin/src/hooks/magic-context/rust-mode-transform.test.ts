@@ -11,6 +11,7 @@ import {
     ensureContextStoreUuid,
     getAuthorityManagedMarker,
     resetAuthorityRoutingObservationsForTest,
+    TRANSFORM_MEMORY_MIRROR_PAGE_BUDGET,
 } from "../../features/magic-context/context-authority";
 import { insertMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
@@ -2081,6 +2082,172 @@ describe("Rust mode authority adapter", () => {
         expect(mirrorCompleted).toBe(true);
     });
 
+    it("drains every memory mirror page before stamping the transform projection", async () => {
+        const sessionId = `rust-memory-mirror-drain-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let memoryPulls = 0;
+        let transform!: ReturnType<typeof createRustModeTransform>;
+        const projectionKeysDuringPull: Array<string | null> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 7,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                projectionKeysDuringPull.push(
+                    transform.getState(sessionId).memoryMirrorProjectionKey,
+                );
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor + 1,
+                        has_more: memoryPulls < 4,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = makeMessages(sessionId);
+
+        await transform.run(
+            sessionId,
+            messages,
+            { messages: [...messages] },
+            makeMeta(db, sessionId),
+        );
+        await Bun.sleep(20);
+
+        expect(memoryPulls).toBe(4);
+        expect(projectionKeysDuringPull).toEqual([null, null, null, null]);
+        expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBe(
+            JSON.stringify([7, null, null, []]),
+        );
+    });
+
+    it("leaves a budget-exhausted memory mirror projection unstamped for the next pass", async () => {
+        const sessionId = `rust-memory-mirror-budget-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const mirrorPageBudget = TRANSFORM_MEMORY_MIRROR_PAGE_BUDGET;
+        let memoryPulls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 8,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor + 1,
+                        has_more: true,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] },
+                makeMeta(db, sessionId),
+            );
+            await Bun.sleep(20);
+        };
+
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            await run();
+            expect(memoryPulls).toBe(mirrorPageBudget);
+            expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBeNull();
+
+            await run();
+            expect(memoryPulls).toBe(mirrorPageBudget * 2);
+            expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBeNull();
+            const backlogLogs = logSpy.mock.calls.filter(
+                ([loggedSession, message]) =>
+                    loggedSession === sessionId &&
+                    message.includes("rows_applied=0 backlog_remaining=true pages=20"),
+            );
+            expect(backlogLogs).toHaveLength(2);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("does not repoll a completely drained memory mirror on stable passes", async () => {
+        const sessionId = `rust-memory-mirror-stable-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let memoryPulls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) =>
+                method === "transform"
+                    ? {
+                          decision: "SOFT+",
+                          row_version: 9,
+                          rendered_memory_ids: [],
+                          native_messages: makeMessages(sessionId),
+                      }
+                    : { ok: true },
+            mirrorPull: async (args) => {
+                memoryPulls += 1;
+                return {
+                    page: {
+                        domain: args.domain,
+                        cursor: args.cursor,
+                        next_cursor: args.cursor,
+                        has_more: false,
+                        rows: [],
+                    },
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const run = async () => {
+            const messages = makeMessages(sessionId);
+            await transform.run(
+                sessionId,
+                messages,
+                { messages: [...messages] },
+                makeMeta(db, sessionId),
+            );
+            await Bun.sleep(20);
+        };
+
+        await run();
+        await run();
+        await run();
+        await run();
+
+        expect(memoryPulls).toBe(1);
+        expect(transform.getState(sessionId).memoryMirrorProjectionKey).toBe(
+            JSON.stringify([9, null, null, []]),
+        );
+    });
+
     it("caches mural bytes and pulls mirrors only when the module projection moves", async () => {
         const sessionId = `rust-mural-mirror-generation-${Date.now()}`;
         sessions.push(sessionId);
@@ -3360,6 +3527,120 @@ describe("Rust mode authority adapter", () => {
         expect(secondOutput.messages).toEqual(secondInput);
         expect(getSlot(sessionId)).toBeUndefined();
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+    });
+
+    it("reuses only the exact accepted prefix after an older stable-id mutation", async () => {
+        const sessionId = `rust-exact-prefix-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = Array.from({ length: 5 }, (_, index) => ({
+            info: { id: `m${index + 1}`, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: `original ${index}` }],
+        })) as MessageLike[];
+        let pass = 0;
+        const reused: number[] = [];
+        const scheduled: Array<() => void> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                return {
+                    decision: ++pass === 1 ? "HARD" : "SOFT+",
+                    row_version: pass,
+                    native_messages: structuredClone(input),
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            scheduleLkgCapture: (capture) => scheduled.push(capture),
+            onLkgCaptureForTests: (prefix) => reused.push(prefix),
+        });
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        expect(reused).toEqual([0]);
+        const firstSlot = getSlot(sessionId);
+        expect(firstSlot).toBeDefined();
+        const mutationIndex = 2;
+        (input[mutationIndex].parts[0] as { text: string }).text = "changed older content";
+        const output = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(scheduled).toHaveLength(1);
+        scheduled.shift()!();
+        const coldDigests = __rustModeTransformTest.rustCaptureDigests(
+            input.map((message) => ({
+                id: message.info.id,
+                fields: __rustModeTransformTest.messageContentSnapshot(message).fields,
+            })),
+            undefined,
+            null,
+        );
+        expect(getSlot(sessionId)?.inputContentDigests).toEqual(coldDigests.digests);
+        expect(reused).toEqual([0, mutationIndex]);
+        expect(JSON.stringify(output.messages)).toBe(JSON.stringify(input));
+        expect(getSlot(sessionId)?.jsonPrefix).toBe(JSON.stringify(output.messages));
+
+        // Model eviction after a failed durable refresh: the adapter remembers the
+        // newer accepted input, but storage can restore only the older slot.
+        resetLkgSlotsForTest();
+        registerLkgPersistence({
+            load: (id) => (id === sessionId ? firstSlot : undefined),
+            clear: () => {},
+        });
+        try {
+            await transform.run(
+                sessionId,
+                input,
+                { messages: [...input] },
+                makeMeta(db, sessionId),
+            );
+            expect(scheduled).toHaveLength(1);
+            scheduled.shift()!();
+            expect(reused).toEqual([0, mutationIndex, 0]);
+            expect(getSlot(sessionId)?.inputContentDigests).toEqual(coldDigests.digests);
+        } finally {
+            registerLkgPersistence(undefined);
+        }
+    });
+
+    it("does not replay captured bytes over a later same-tick nested writer", async () => {
+        const sessionId = `rust-detached-writer-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = makeMessages(sessionId);
+        const scheduled: Array<() => void> = [];
+        let pass = 0;
+        let unavailable = false;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                if (unavailable) throw new Error("module unavailable");
+                return {
+                    decision: ++pass === 1 ? "HARD" : "SOFT+",
+                    row_version: pass,
+                    native_messages: [
+                        {
+                            info: { id: "served", role: "assistant", sessionID: sessionId },
+                            parts: [{ type: "text", text: "captured module output" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+            scheduleLkgCapture: (capture) => scheduled.push(capture),
+        });
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        expect(scheduled).toHaveLength(1);
+        (input[0].parts[0] as { text: string }).text = "later nested writer must survive";
+        scheduled.shift()!();
+        unavailable = true;
+        const output = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(JSON.stringify(output.messages)).toBe(JSON.stringify(input));
+        expect(JSON.stringify(output.messages)).not.toContain("captured module output");
     });
 
     it("refreshes the LKG snapshot after an applied SOFT+ pass", async () => {

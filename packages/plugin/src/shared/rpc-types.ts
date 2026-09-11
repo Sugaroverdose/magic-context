@@ -7,6 +7,7 @@ import type {
     DreamTaskBacklogMap,
     DreamTaskProgress,
 } from "../features/magic-context/dreamer/task-registry";
+import type { SynapseLaneDescriptor } from "../features/magic-context/memory/embedding-synapse";
 import type { ConfigParseFailure } from "./config-diagnostics";
 import type { LoggerDiagnostics } from "./logger";
 
@@ -239,10 +240,125 @@ export interface EmbedDetail {
     enabled: boolean;
     model: string;
     provider: string;
+    synapseDescriptor?: SynapseLaneDescriptor;
     session: { embedded: number; total: number };
     memories: { embedded: number; total: number };
     commits: { embedded: number; total: number; gitEnabled: boolean };
     statusText: string;
+}
+
+export interface DebugProcessMemoryUsage {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external: number;
+    arrayBuffers: number;
+}
+
+export interface DebugSessionHolderCount {
+    sessionId: string;
+    lkgBytes: number;
+    taggerAssignments: number;
+    taggerToolAccounting: number;
+    wireRawMessages: number;
+    wireMessages: number;
+    wireContentSnapshots: number;
+    wireEstimatedBytes: number;
+}
+
+export interface DebugMemoryHolders {
+    lkgSlots: {
+        count: number;
+        totalBytes: number;
+    };
+    taggerCache: {
+        sessionCount: number;
+        assignmentEntries: number;
+        toolAccountingEntries: number;
+        loadSignatureEntries: number;
+    };
+    wireCache: {
+        snapshots: number;
+        rawContentSnapshots: number;
+        estimatedBytes: number;
+    };
+    compartmentMirrors: {
+        entries: number;
+    };
+    messageIndexQueue: {
+        queueLength: number;
+        reconciliationScheduled: number;
+        incrementalTimers: number;
+        pendingIncremental: number;
+        activeSessionLocks: number;
+        completedIncrementalKeys: number;
+        activeBufferMessages: number;
+        activeBufferBytes: number;
+    };
+    sessions: DebugSessionHolderCount[];
+}
+
+export interface DebugSqliteConnectionMemoryStats {
+    sequence: number;
+    filename: string;
+    readonly: boolean;
+    pageSize: number | null;
+    pageCount: number | null;
+    freelistCount: number | null;
+    cacheSize: number | null;
+    cacheSizeUnit: "pages" | "kib" | null;
+    cacheUpperBoundBytes: number | null;
+    mmapSizeBytes: number | null;
+    walFileBytes: number | null;
+    shmFileBytes: number | null;
+    fts5TableCount: number | null;
+    journalMode: string | null;
+}
+
+export interface DebugNativeMemoryUsage {
+    sqlite: {
+        connectionCount: number;
+        cacheUpperBoundBytes: number;
+        mmapUpperBoundBytes: number;
+        walFileBytes: number;
+        shmFileBytes: number;
+        sqliteStatusApi: "unavailable";
+        connections: DebugSqliteConnectionMemoryStats[];
+    };
+    tokenizer: {
+        loaded: boolean;
+        loadAttempted: boolean;
+        tableBytes: number | null;
+        tablePath: string | null;
+    };
+    localEmbedding: {
+        loaded: boolean;
+        providerCount: number;
+        models: string[];
+        runtimes: Array<"native" | "wasm">;
+        modelCacheBytes: number | null;
+        rssDeltaAtLoad: number;
+        externalDeltaAtLoad: number;
+        arrayBuffersDeltaAtLoad: number;
+    };
+    quickJs: {
+        loadAttempted: boolean;
+        loaded: boolean;
+    };
+}
+
+export interface DebugMemoryUsageResponse {
+    pid: number;
+    bunVersion: string;
+    memoryUsage: DebugProcessMemoryUsage;
+    native: DebugNativeMemoryUsage;
+    holders: DebugMemoryHolders;
+}
+
+export interface DebugHeapSnapshotResponse extends DebugMemoryUsageResponse {
+    path: string;
+    format: "jsc" | "v8";
+    snapshotVersion?: number;
 }
 
 export interface RpcNotificationMessage {

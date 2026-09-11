@@ -15,9 +15,8 @@ import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
     applyMirroredNoteCompileFields,
-    applyMirrorPage,
+    drainMirrorPages,
     ensureContextStoreUuid,
-    getMirrorCursor,
     getModuleNoteEvaluationBridge,
     registerModuleNoteEvaluationBridge,
 } from "../../features/magic-context/context-authority";
@@ -125,7 +124,11 @@ import {
     getLiveNotificationParams,
 } from "./hook-handlers";
 import type { LiveSessionState } from "./live-session-state";
-import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
+import {
+    type NotificationParams,
+    sendIgnoredMessage,
+    sendStatusNotification,
+} from "./send-session-notification";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import { maybeSendUpgradeReminder } from "./upgrade-reminder";
 
@@ -484,7 +487,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             agentBySession,
             deps.config.toast_duration_ms,
         );
-        void sendIgnoredMessage(deps.client, sessionId, warning, notificationParams).catch(
+        void sendStatusNotification(deps.client, sessionId, warning, notificationParams).catch(
             (error) => {
                 log(
                     `[magic-context] failed to send project identity warning for ${directory}: ${getErrorMessage(error)}`,
@@ -772,29 +775,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 // "busy"/zero-work each pass, reset its own latch, and re-announced
                 // the same count forever. Retries belong to the passive backfill;
                 // progress lives in /ctx-embed status and the sidebar.
-                const embeddedBefore = coverage.session.embedded;
                 await executeEmbedHistory(sessionId, { silent: true });
                 drainReachedTerminal = true;
-                const completedCoverage = getEmbeddingCoverageStatus(
-                    db,
-                    sessionProjectIdentity,
-                    sessionId,
-                );
-                const embeddedNow = completedCoverage.session.embedded - embeddedBefore;
-                if (embeddedNow > 0 && !isTuiConnected(sessionId)) {
-                    const notifyParams = getLiveNotificationParams(
-                        sessionId,
-                        liveModelBySession,
-                        variantBySession,
-                        agentBySession,
-                    );
-                    await sendIgnoredMessage(
-                        deps.client,
-                        sessionId,
-                        `Embedded ${embeddedNow} compartment${embeddedNow === 1 ? "" : "s"} of history for semantic search.`,
-                        { ...notifyParams },
-                    );
-                }
             } catch (error) {
                 log("[magic-context] auto-embed drain failed:", error);
             } finally {
@@ -876,16 +858,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.config.transform_mode === "rust" ? authorityRecoveryModuleClient : undefined;
     const syncModuleDomain = async (domain: "memories" | "notes"): Promise<void> => {
         if (!rustModeModuleClient?.mirrorPull) return;
-        for (;;) {
-            const cursor = getMirrorCursor(db, domain);
-            const response = await rustModeModuleClient.mirrorPull({
-                domain,
-                cursor,
-                limit: 1000,
-            });
-            const next = applyMirrorPage({ db, page: response.page });
-            if (!response.page.has_more || next === cursor) break;
-        }
+        await drainMirrorPages({
+            db,
+            module: rustModeModuleClient,
+            domain,
+            limit: 1000,
+        });
     };
     const syncModuleNotes = (): Promise<void> => syncModuleDomain("notes");
     const syncModuleMemories = (): Promise<void> => syncModuleDomain("memories");
@@ -1581,7 +1559,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                           {
                               client: deps.client,
                               db,
-                              sendIgnoredMessage,
+                              sendStatusNotification,
                               getNotificationParams: (sid) =>
                                   getLiveNotificationParams(
                                       sid,
@@ -1642,10 +1620,29 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends?: RustToolBackends;
+        getDebugMemoryHolders?: () => {
+            taggerCache: ReturnType<NonNullable<Tagger["getHeapStats"]>>;
+            wireCache: ReturnType<typeof transform.getRustWireCacheHeapStats>;
+        };
     };
-    Object.defineProperty(hooksWithBackends, "rustToolBackends", {
-        value: rustToolBackends,
-        enumerable: false,
+    Object.defineProperties(hooksWithBackends, {
+        rustToolBackends: {
+            value: rustToolBackends,
+            enumerable: false,
+        },
+        getDebugMemoryHolders: {
+            value: () => ({
+                taggerCache: deps.tagger.getHeapStats?.() ?? {
+                    sessionCount: 0,
+                    assignmentEntries: 0,
+                    toolAccountingEntries: 0,
+                    loadSignatureEntries: 0,
+                    sessions: [],
+                },
+                wireCache: transform.getRustWireCacheHeapStats(),
+            }),
+            enumerable: false,
+        },
     });
     return hooksWithBackends;
 }

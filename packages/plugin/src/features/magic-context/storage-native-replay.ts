@@ -1,109 +1,124 @@
 import { isRecord } from "../../shared/record-type-guard";
 import type { Database } from "../../shared/sqlite";
-import { ensureSessionMetaRow } from "./storage-meta-shared";
+import {
+    type ReplayDocument,
+    readReplayDocument,
+    updateReplayDocument,
+} from "./storage-replay-document";
 
-const NATIVE_TOOL_INPUTS_COLUMN = "pi_native_tool_inputs";
-const NATIVE_REASONING_IDS_COLUMN = "pi_native_reasoning_ids";
+const NATIVE_TOOL_INPUTS = "native tool inputs";
+const NATIVE_REASONING_IDS = "native reasoning ids";
 
-function invalidPersistedReplayState(column: string, sessionId: string): Error {
-    return new Error(`invalid persisted ${column} state for session ${sessionId}`);
+export interface NativeReplayState {
+    toolInputs: Map<string, string>;
+    reasoningIds: Set<string>;
+}
+
+function invalidPersistedReplayState(lane: string, sessionId: string): Error {
+    return new Error(`invalid persisted ${lane} state for session ${sessionId}`);
 }
 
 function assertNonEmptyId(
     value: unknown,
-    column: string,
+    lane: string,
     sessionId: string,
 ): asserts value is string {
     if (typeof value !== "string" || value.length === 0) {
-        throw invalidPersistedReplayState(column, sessionId);
+        throw invalidPersistedReplayState(lane, sessionId);
     }
 }
 
 function assertSerializedToolInput(value: unknown, sessionId: string): asserts value is string {
     if (typeof value !== "string") {
-        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS_COLUMN, sessionId);
+        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS, sessionId);
     }
     try {
         if (!isRecord(JSON.parse(value))) {
             throw new SyntaxError("native tool input must be an object");
         }
     } catch {
-        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS_COLUMN, sessionId);
+        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS, sessionId);
     }
 }
 
-function parseNativeToolInputs(raw: unknown, sessionId: string): Map<string, string> {
-    if (raw === null || raw === undefined) return new Map();
-    if (typeof raw !== "string") {
-        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS_COLUMN, sessionId);
-    }
-
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(raw);
-    } catch {
-        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS_COLUMN, sessionId);
-    }
-    if (!isRecord(parsed)) {
-        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS_COLUMN, sessionId);
+function parseNativeToolInputs(value: unknown, sessionId: string): Map<string, string> {
+    if (!isRecord(value)) {
+        throw invalidPersistedReplayState(NATIVE_TOOL_INPUTS, sessionId);
     }
 
     const inputs = new Map<string, string>();
-    for (const [id, input] of Object.entries(parsed)) {
-        assertNonEmptyId(id, NATIVE_TOOL_INPUTS_COLUMN, sessionId);
+    for (const [id, input] of Object.entries(value)) {
+        assertNonEmptyId(id, NATIVE_TOOL_INPUTS, sessionId);
         assertSerializedToolInput(input, sessionId);
         inputs.set(id, input);
     }
     return inputs;
 }
 
-function parseNativeReasoningIds(raw: unknown, sessionId: string): Set<string> {
-    if (raw === null || raw === undefined) return new Set();
-    if (typeof raw !== "string") {
-        throw invalidPersistedReplayState(NATIVE_REASONING_IDS_COLUMN, sessionId);
-    }
-
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(raw);
-    } catch {
-        throw invalidPersistedReplayState(NATIVE_REASONING_IDS_COLUMN, sessionId);
-    }
-    if (!Array.isArray(parsed)) {
-        throw invalidPersistedReplayState(NATIVE_REASONING_IDS_COLUMN, sessionId);
+function parseNativeReasoningIds(value: unknown, sessionId: string): Set<string> {
+    if (!Array.isArray(value)) {
+        throw invalidPersistedReplayState(NATIVE_REASONING_IDS, sessionId);
     }
 
     const ids = new Set<string>();
-    for (const id of parsed) {
-        assertNonEmptyId(id, NATIVE_REASONING_IDS_COLUMN, sessionId);
+    for (const id of value) {
+        assertNonEmptyId(id, NATIVE_REASONING_IDS, sessionId);
         ids.add(id);
     }
     return ids;
 }
 
-function writeNativeReplayState(
-    db: Database,
-    sessionId: string,
-    column: typeof NATIVE_TOOL_INPUTS_COLUMN | typeof NATIVE_REASONING_IDS_COLUMN,
-    serialized: string,
-): void {
-    const result = db
-        .prepare(`UPDATE session_meta SET ${column} = ? WHERE session_id = ?`)
-        .run(serialized, sessionId);
-    if (result.changes !== 1) {
-        throw new Error(`failed to persist ${column} for session ${sessionId}`);
+function parseNativeReplayState(doc: ReplayDocument, sessionId: string): NativeReplayState {
+    const native = doc.piNative;
+    if (native === undefined) {
+        return { toolInputs: new Map(), reasoningIds: new Set() };
     }
+    if (!isRecord(native)) {
+        throw invalidPersistedReplayState("native replay", sessionId);
+    }
+
+    return {
+        toolInputs: parseNativeToolInputs(native.toolInputs, sessionId),
+        reasoningIds: parseNativeReasoningIds(native.reasoningIds, sessionId),
+    };
+}
+
+function replaceNativeReplayState(
+    doc: ReplayDocument,
+    state: NativeReplayState,
+    sessionId: string,
+): void {
+    const prior = doc.piNative;
+    let preserved: Record<string, unknown> = {};
+    if (prior !== undefined) {
+        if (!isRecord(prior)) {
+            throw invalidPersistedReplayState("native replay", sessionId);
+        }
+        preserved = prior;
+    }
+
+    doc.version = 2;
+    doc.piNative = {
+        ...preserved,
+        toolInputs: Object.fromEntries(state.toolInputs),
+        reasoningIds: [...state.reasoningIds],
+    };
+}
+
+/**
+ * Read and validate both native replay lanes from one document snapshot. A
+ * missing v1/native namespace is empty; a present namespace is all-or-nothing.
+ */
+export function getNativeReplayState(db: Database, sessionId: string): NativeReplayState {
+    return parseNativeReplayState(readReplayDocument(db, sessionId), sessionId);
 }
 
 /**
  * Return frozen native tool inputs. Missing legacy state is empty; malformed
- * stored state is rejected so replay never silently authorizes new bytes.
+ * stored native state is rejected so replay never silently authorizes new bytes.
  */
 export function getNativeToolInputs(db: Database, sessionId: string): Map<string, string> {
-    const row = db
-        .prepare(`SELECT ${NATIVE_TOOL_INPUTS_COLUMN} FROM session_meta WHERE session_id = ?`)
-        .get(sessionId) as { pi_native_tool_inputs?: unknown } | undefined;
-    return parseNativeToolInputs(row?.pi_native_tool_inputs, sessionId);
+    return getNativeReplayState(db, sessionId).toolInputs;
 }
 
 /**
@@ -116,40 +131,37 @@ export function saveNativeToolInputs(
     sessionId: string,
     inputs: ReadonlyMap<string, string>,
 ): void {
+    const requested = new Map<string, string>();
     for (const [id, input] of inputs) {
-        assertNonEmptyId(id, NATIVE_TOOL_INPUTS_COLUMN, sessionId);
+        assertNonEmptyId(id, NATIVE_TOOL_INPUTS, sessionId);
         assertSerializedToolInput(input, sessionId);
+        requested.set(id, input);
     }
+    if (requested.size === 0) return;
 
-    db.transaction(() => {
-        ensureSessionMetaRow(db, sessionId);
-        const current = getNativeToolInputs(db, sessionId);
+    const persisted = updateReplayDocument(db, sessionId, (doc) => {
+        const current = parseNativeReplayState(doc, sessionId);
         let changed = false;
-        for (const [id, input] of inputs) {
-            if (current.get(id) === input) continue;
-            current.set(id, input);
+        for (const [id, input] of requested) {
+            if (current.toolInputs.get(id) === input) continue;
+            current.toolInputs.set(id, input);
             changed = true;
         }
-        if (!changed) return;
-
-        writeNativeReplayState(
-            db,
-            sessionId,
-            NATIVE_TOOL_INPUTS_COLUMN,
-            JSON.stringify(Object.fromEntries(current)),
-        );
-    }).immediate();
+        if (!changed) return false;
+        replaceNativeReplayState(doc, current, sessionId);
+        return true;
+    });
+    if (!persisted) {
+        throw new Error(`failed to persist native replay state for session ${sessionId}`);
+    }
 }
 
 /**
  * Return assistant entries whose native reasoning was cleared. Missing legacy
- * state is empty; malformed stored state fails closed.
+ * state is empty; malformed stored native state fails closed.
  */
 export function getNativeReasoningIds(db: Database, sessionId: string): Set<string> {
-    const row = db
-        .prepare(`SELECT ${NATIVE_REASONING_IDS_COLUMN} FROM session_meta WHERE session_id = ?`)
-        .get(sessionId) as { pi_native_reasoning_ids?: unknown } | undefined;
-    return parseNativeReasoningIds(row?.pi_native_reasoning_ids, sessionId);
+    return getNativeReplayState(db, sessionId).reasoningIds;
 }
 
 /** Atomically union newly cleared native-reasoning entry ids into the replay set. */
@@ -160,26 +172,24 @@ export function addNativeReasoningIds(
 ): void {
     const requested = new Set<string>();
     for (const id of ids) {
-        assertNonEmptyId(id, NATIVE_REASONING_IDS_COLUMN, sessionId);
+        assertNonEmptyId(id, NATIVE_REASONING_IDS, sessionId);
         requested.add(id);
     }
+    if (requested.size === 0) return;
 
-    db.transaction(() => {
-        ensureSessionMetaRow(db, sessionId);
-        const current = getNativeReasoningIds(db, sessionId);
+    const persisted = updateReplayDocument(db, sessionId, (doc) => {
+        const current = parseNativeReplayState(doc, sessionId);
         let changed = false;
         for (const id of requested) {
-            if (current.has(id)) continue;
-            current.add(id);
+            if (current.reasoningIds.has(id)) continue;
+            current.reasoningIds.add(id);
             changed = true;
         }
-        if (!changed) return;
-
-        writeNativeReplayState(
-            db,
-            sessionId,
-            NATIVE_REASONING_IDS_COLUMN,
-            JSON.stringify([...current]),
-        );
-    }).immediate();
+        if (!changed) return false;
+        replaceNativeReplayState(doc, current, sessionId);
+        return true;
+    });
+    if (!persisted) {
+        throw new Error(`failed to persist native replay state for session ${sessionId}`);
+    }
 }

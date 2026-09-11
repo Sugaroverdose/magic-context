@@ -6,12 +6,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../src/shared/sqlite";
 import { closeQuietly } from "../src/shared/sqlite-helpers";
+import {
+    parseReplayDocument,
+    serializeReplayDocument,
+} from "../src/features/magic-context/storage-replay-document";
 import { cloneSession, deleteClonedSession } from "./clone-session";
 
 const temporaryDirectories: string[] = [];
 
-function makeFixture(): { opencodePath: string; contextPath: string; sourceSessionId: string } {
+function makeFixture(
+    options: { includeReplayDocument?: boolean } = {},
+): { opencodePath: string; contextPath: string; sourceSessionId: string } {
     const root = mkdtempSync(join(tmpdir(), "clone-session-fixture-"));
+    const replayDocumentColumn =
+        options.includeReplayDocument === false ? "" : "trailing_blank_decisions TEXT DEFAULT '',";
     temporaryDirectories.push(root);
     const opencodePath = join(root, "opencode.db");
     const contextPath = join(root, "context.db");
@@ -253,11 +261,13 @@ function makeFixture(): { opencodePath: string; contextPath: string; sourceSessi
             stripped_placeholder_ids TEXT,
             stale_reduce_stripped_ids TEXT,
             processed_image_stripped_ids TEXT,
+            merged_reasoning_stripped_ids TEXT,
             pending_pi_compaction_marker_state TEXT,
             last_todo_state TEXT,
             todo_synthetic_call_id TEXT,
             todo_synthetic_anchor_message_id TEXT,
             todo_synthetic_state_json TEXT,
+            ${replayDocumentColumn}
             compaction_marker_state TEXT,
             channel2_nudge_state TEXT DEFAULT '',
             channel2_nudge_claimed_at INTEGER DEFAULT 0,
@@ -489,22 +499,52 @@ describe("clone-session", () => {
         mutable.close();
     });
 
-    it("keeps filtered native decisions after the generic metadata copy", () => {
+    it("clones a legacy context database without adding a replay document column", () => {
+        const fixture = makeFixture({ includeReplayDocument: false });
+        const result = cloneSession({
+            sessionId: fixture.sourceSessionId,
+            opencodeDbPath: fixture.opencodePath,
+            contextDbPath: fixture.contextPath,
+        });
+        const context = new Database(fixture.contextPath, { readonly: true });
+        const metaColumnRows = context
+            .prepare("PRAGMA table_info(session_meta)")
+            .all() as Array<{ name: string }>;
+        const metaColumns = metaColumnRows.map((column) => column.name);
+        expect(metaColumns).not.toContain("trailing_blank_decisions");
+        const clonedMeta = context
+            .prepare("SELECT COUNT(*) AS count FROM session_meta WHERE session_id = ?")
+            .get(result.plan.destinationSessionId) as { count: number };
+        expect(clonedMeta.count).toBe(1);
+        context.close();
+    });
+
+    it("keeps the filtered replay document after the generic metadata copy", () => {
         const fixture = makeFixture();
         const frozenInput = '{"path":"msg_source_1","dropped":"marker"}';
+        const sourceReplayDocument = serializeReplayDocument({
+            version: 2,
+            trailingBlank: {
+                "msg_source_2": "strip",
+                "outside-assistant": "keep:2",
+            },
+            piNative: {
+                toolInputs: {
+                    tool_source_1: frozenInput,
+                    outside_call: '{"dropped":"outside"}',
+                },
+                reasoningIds: ["msg_source_2", "outside_assistant"],
+                nativeSibling: { preserved: true },
+            },
+            siblingNamespace: { preserved: ["without", "remapping"] },
+        });
         const source = new Database(fixture.contextPath);
         try {
-            source.exec(`
-                ALTER TABLE session_meta ADD COLUMN pi_native_tool_inputs TEXT;
-                ALTER TABLE session_meta ADD COLUMN pi_native_reasoning_ids TEXT;
-            `);
-            source.prepare(
-                "UPDATE session_meta SET pi_native_tool_inputs = ?, pi_native_reasoning_ids = ? WHERE session_id = ?",
-            ).run(
-                JSON.stringify({ tool_source_1: frozenInput, outside_call: '{"dropped":"outside"}' }),
-                JSON.stringify(["msg_source_2", "outside_assistant"]),
-                fixture.sourceSessionId,
-            );
+            source
+                .prepare(
+                    "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+                )
+                .run(sourceReplayDocument, fixture.sourceSessionId);
         } finally {
             source.close();
         }
@@ -519,10 +559,22 @@ describe("clone-session", () => {
                 "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND type = 'tool'",
             ).get(result.plan.destinationSessionId) as { message_id: string; tool_owner_message_id: string };
             const state = clone.prepare(
-                "SELECT pi_native_tool_inputs, pi_native_reasoning_ids FROM session_meta WHERE session_id = ?",
-            ).get(result.plan.destinationSessionId) as { pi_native_tool_inputs: string; pi_native_reasoning_ids: string };
-            expect(JSON.parse(state.pi_native_tool_inputs)).toEqual({ [tool.message_id]: frozenInput });
-            expect(JSON.parse(state.pi_native_reasoning_ids)).toEqual([tool.tool_owner_message_id]);
+                "SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?",
+            ).get(result.plan.destinationSessionId) as { trailing_blank_decisions: string };
+            const replayDocument = parseReplayDocument(state.trailing_blank_decisions);
+            expect(replayDocument.version).toBe(2);
+            expect(Object.entries(replayDocument.trailingBlank)).toEqual([
+                ["msg_source_2", "strip"],
+                ["outside-assistant", "keep:2"],
+            ]);
+            expect(replayDocument.piNative).toEqual({
+                toolInputs: { [tool.message_id]: frozenInput },
+                reasoningIds: [tool.tool_owner_message_id],
+                nativeSibling: { preserved: true },
+            });
+            expect(replayDocument.siblingNamespace).toEqual({
+                preserved: ["without", "remapping"],
+            });
         } finally {
             clone.close();
         }

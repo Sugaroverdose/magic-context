@@ -42,7 +42,6 @@ import {
 	releaseCompartmentLeaseBestEffort,
 	renewCompartmentLease,
 } from "@magic-context/core/features/magic-context/compartment-lease";
-
 import { isFailClosedBlockingError } from "@magic-context/core/features/magic-context/fail-closed-block";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -50,6 +49,11 @@ import {
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
+import {
+	encodePiContentDecision,
+	freezePiContentDecision,
+	getPiContentDecisions,
+} from "@magic-context/core/features/magic-context/pi-content-decisions";
 import {
 	computeProtectionWindow,
 	readEpochFloorSnapshot,
@@ -107,10 +111,7 @@ import {
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import {
-	getNativeReasoningIds,
-	getNativeToolInputs,
-} from "@magic-context/core/features/magic-context/storage-native-replay";
+import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
 	createTagger,
@@ -170,6 +171,7 @@ import {
 	buildSupersessionReclaimOps,
 	recentSupersessionOwnerMessageIds,
 } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
+import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import {
 	advanceToolReclaimWatermarkToCurrentMax,
@@ -551,6 +553,7 @@ const piTextIdentitySourceCacheBySession = new Map<
 
 interface PiTextIdentityPlan {
 	driftedMessageIds: Set<string>;
+	legacyReminderTagNumbers: Set<number>;
 	reusableMessageIds: Set<string>;
 	sourceCache: Map<number, string>;
 }
@@ -623,6 +626,7 @@ function buildPiTextIdentityPlan(
 	}
 
 	const driftedMessageIds = new Set<string>();
+	const legacyReminderTagNumbers = new Set<number>();
 	for (const [messageId, currentSources] of currentSourcesByMessageId) {
 		const legacyRows = legacyRowsByMessageId.get(messageId) ?? [];
 		if (versionedMessageIds.has(messageId)) {
@@ -633,12 +637,27 @@ function buildPiTextIdentityPlan(
 		legacyRows.sort((left, right) => left.ordinal - right.ordinal);
 		const vectorMatches =
 			legacyRows.length === currentSources.length &&
-			legacyRows.every(
-				(row, index) =>
-					row.ordinal === index &&
-					withoutPiLeadingTemporalMarker(sourceCache.get(row.tagId) ?? "") ===
-						currentSources[index],
-			);
+			legacyRows.every((row, index) => {
+				if (row.ordinal !== index) return false;
+				const stored = withoutPiLeadingTemporalMarker(
+					sourceCache.get(row.tagId) ?? "",
+				);
+				const current = currentSources[index] ?? "";
+				if (stored === current) return true;
+				// Older Pi cleanup persisted the stripped reminder body as source.
+				// Treat that exact projection as the same text identity so deployment
+				// does not retag the message before compatibility replay can restore it.
+				const strippedCurrent = stripSystemInjection(current);
+				const storedLegacyBody = withoutPiLeadingTemporalMarker(
+					`${sourceCache.get(row.tagId) ?? ""}\n`,
+				).trimEnd();
+				const legacyReminderMatches =
+					strippedCurrent !== null &&
+					withoutPiLeadingTemporalMarker(stripTagPrefix(strippedCurrent)) ===
+						storedLegacyBody;
+				if (legacyReminderMatches) legacyReminderTagNumbers.add(row.tagId);
+				return legacyReminderMatches;
+			});
 		if (!vectorMatches) driftedMessageIds.add(messageId);
 	}
 
@@ -646,7 +665,12 @@ function buildPiTextIdentityPlan(
 	for (const messageId of reuseCandidates) {
 		if (!driftedMessageIds.has(messageId)) reusableMessageIds.add(messageId);
 	}
-	return { driftedMessageIds, reusableMessageIds, sourceCache };
+	return {
+		driftedMessageIds,
+		legacyReminderTagNumbers,
+		reusableMessageIds,
+		sourceCache,
+	};
 }
 
 interface PiBranchEntryLookup {
@@ -668,20 +692,27 @@ const piBranchLookupByProjection = new WeakMap<
 	PiBranchEntryLookup
 >();
 
+function logTransformElapsed(
+	sessionId: string,
+	stage: string,
+	elapsedMs: number,
+	extra?: string,
+): void {
+	const suffix = extra ? ` ${extra}` : "";
+	recordPiTransformTiming({ sessionId, stage, elapsedMs, extra });
+	sessionLog(
+		sessionId,
+		`transform stage: stage=${stage} elapsed=${elapsedMs.toFixed(1)}ms${suffix}`,
+	);
+}
+
 function logTransformTiming(
 	sessionId: string,
 	stage: string,
 	start: number,
 	extra?: string,
 ): void {
-	const elapsedMs = performance.now() - start;
-	const elapsed = elapsedMs.toFixed(1);
-	const suffix = extra ? ` ${extra}` : "";
-	recordPiTransformTiming({ sessionId, stage, elapsedMs, extra });
-	sessionLog(
-		sessionId,
-		`transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`,
-	);
+	logTransformElapsed(sessionId, stage, performance.now() - start, extra);
 }
 
 export function piVariantChangeBustsProviderCache(
@@ -2198,7 +2229,17 @@ export function registerPiContextHandler(
 	baseOptions: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
-	const lkgCoordinator = createPiLkgCoordinator(baseOptions.db);
+	const lkgCoordinator = createPiLkgCoordinator(
+		baseOptions.db,
+		undefined,
+		({ sessionId, elapsedMs, reusedPrefix }) =>
+			logTransformElapsed(
+				sessionId,
+				"lkgCapture",
+				elapsedMs,
+				`reusedPrefix=${reusedPrefix}`,
+			),
+	);
 
 	// Pi can switch projects mid-process (`/cd`, multi-root). A scheduler is
 	// pure (config in, decision out — no per-session state), so it's safe to
@@ -5824,6 +5865,67 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 
+	// Caveman renders from pristine source, so frozen reminder cleanup must run
+	// after both its discovery and replay paths, including when cleanup is disabled.
+	const contentDecisions = getPiContentDecisions(args.db, args.sessionId);
+	const undecidedTagNumbers = activeTags
+		.filter(
+			(tag) =>
+				!contentDecisions.has(
+					encodePiContentDecision("reminder-strip", tag.messageId),
+				),
+		)
+		.map((tag) => tag.tagNumber);
+	const legacySources = new Map<number, string>();
+	for (let offset = 0; offset < undecidedTagNumbers.length; offset += 500) {
+		const loaded = getSourceContents(
+			args.db,
+			args.sessionId,
+			undecidedTagNumbers.slice(offset, offset + 500),
+		);
+		for (const [tagNumber, source] of loaded) {
+			legacySources.set(tagNumber, source);
+		}
+	}
+	for (const tag of activeTags) {
+		const target = targets.get(tag.tagNumber);
+		const content = target?.getContent?.();
+		if (!content) continue;
+		const encodedDecision = encodePiContentDecision(
+			"reminder-strip",
+			tag.messageId,
+		);
+		let frozen = contentDecisions.has(encodedDecision);
+		const legacySource = legacySources.get(tag.tagNumber) ?? "";
+		const isLegacyReminderProjection =
+			textIdentityPlan.legacyReminderTagNumbers.has(tag.tagNumber) ||
+			(legacySource.trimStart().startsWith("<!-- +") &&
+				withoutPiLeadingTemporalMarker(`${legacySource}\n`).trim().length ===
+					0);
+		if (
+			!frozen &&
+			isCacheBustingPass &&
+			isLegacyReminderProjection &&
+			freezePiContentDecision(
+				args.db,
+				args.sessionId,
+				"reminder-strip",
+				tag.messageId,
+			)
+		) {
+			contentDecisions.add(encodedDecision);
+			frozen = true;
+		}
+		const stripped = stripSystemInjection(content);
+		if (stripped === null) continue;
+		// Older releases could overwrite source_contents with the stripped body.
+		// Replaying that exact legacy source on defer prevents one unpriced
+		// resurrection; the next reclaim ride freezes the normal decision.
+		const legacyStripped =
+			!frozen && stripTagPrefix(legacySource) === stripTagPrefix(stripped);
+		if (frozen || legacyStripped) target?.setContent(stripped);
+	}
+
 	// 5. Commit tagging mutations back to Pi messages BEFORE injecting
 	// the history block. Otherwise the injection write target is the
 	// pre-tagged content. Pi's transcript adapter writes mutations
@@ -5839,8 +5941,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let nativeReasoningIds: ReadonlySet<string> | undefined;
 	try {
 		// Validate both lanes before either can publish replay or activation.
-		nativeInputs = getNativeToolInputs(args.db, args.sessionId);
-		nativeReasoningIds = getNativeReasoningIds(args.db, args.sessionId);
+		const saved = getNativeReplayState(args.db, args.sessionId);
+		nativeInputs = saved.toolInputs;
+		nativeReasoningIds = saved.reasoningIds;
 	} catch (error) {
 		sessionLog(
 			args.sessionId,
@@ -5988,11 +6091,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// marker-applying pass matches the next pass, where trimming happens first.
 			if (
 				args.temporalAwareness &&
+				isCacheBustingPass &&
 				injectionResult.skippedVisibleMessages > 0
 			) {
 				const firstRetainedMessage =
 					args.messages[injectionResult.syntheticLeadingCount];
-				stripPiLeadingTemporalMarker(firstRetainedMessage);
+				const id =
+					firstRetainedMessage && typeof firstRetainedMessage === "object"
+						? postCommitStableIdByRef.get(firstRetainedMessage)
+						: undefined;
+				if (
+					id &&
+					firstRetainedMessage !== null &&
+					typeof firstRetainedMessage === "object" &&
+					stripPiLeadingTemporalMarker({ ...firstRetainedMessage }) &&
+					freezePiContentDecision(
+						args.db,
+						args.sessionId,
+						"seam-temporal-strip",
+						id,
+					)
+				) {
+					contentDecisions.add(
+						encodePiContentDecision("seam-temporal-strip", id),
+					);
+				}
+			}
+			// A prior trim's marker removal remains authoritative after caveman
+			// restores pre-trim source, even when this pass trims nothing late.
+			for (const message of args.messages) {
+				if (!message || typeof message !== "object") continue;
+				const id = postCommitStableIdByRef.get(message);
+				if (
+					id &&
+					contentDecisions.has(
+						encodePiContentDecision("seam-temporal-strip", id),
+					)
+				) {
+					stripPiLeadingTemporalMarker(message);
+				}
 			}
 			// PEEK-then-drain-on-success (Oracle audit Round 8 #6):
 			// only drain `historyRefreshSessions` if the rebuild
