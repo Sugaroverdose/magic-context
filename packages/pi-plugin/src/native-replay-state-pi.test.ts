@@ -115,9 +115,9 @@ function fixture(sessionId: string) {
 		heuristics: { clearReasoningAge: 100 },
 		scheduler: { executeThresholdPercentage: 80 },
 	};
-	const restart = () => {
+	const restart = (compactionOff = false) => {
 		clearContextHandlerSession(sessionId);
-		registerPiContextHandler(fake.pi as never, options);
+		registerPiContextHandler(fake.pi as never, { ...options, compactionOff });
 	};
 	restart();
 	const pass = async (percent: number) => {
@@ -214,6 +214,45 @@ describe("native upgrade application", () => {
 			expect(nativeBytes(await f.pass(0))).toBe(b);
 			f.restart();
 			expect(nativeBytes(await f.pass(0))).toBe(b);
+		} finally {
+			f.close();
+		}
+	});
+
+	it("suspends saved native decisions in compaction-off mode and resumes them when enabled", async () => {
+		const sessionId = "ses-native-compaction-off";
+		const f = fixture(sessionId);
+		try {
+			await f.seedLegacy();
+			const reduced = nativeBytes(await f.pass(90));
+			expect(reduced).not.toContain(staleInput);
+			expect(reduced).not.toContain(ciphertext);
+			const savedInputs = getNativeToolInputs(f.db, sessionId);
+			const savedReasoning = getNativeReasoningIds(f.db, sessionId);
+			const original = nativeBytes([oldAssistant()]);
+
+			for (const percent of [0, 90, 0]) {
+				f.restart(true);
+				const messages = await f.pass(percent);
+				expect(nativeBytes(messages)).toBe(original);
+				expect(messages[1]).toMatchObject({
+					content: [
+						{
+							type: "thinking",
+							thinking: "old summary",
+							thinkingSignature: "old signature",
+						},
+						{ type: "text", text: "visible answer" },
+						{ arguments: { path: staleInput } },
+					],
+				});
+				expect(getNativeToolInputs(f.db, sessionId)).toEqual(savedInputs);
+				expect(getNativeReasoningIds(f.db, sessionId)).toEqual(savedReasoning);
+			}
+
+			f.restart();
+			expect(nativeBytes(await f.pass(0))).toBe(reduced);
+			expect(nativeBytes(await f.pass(0))).toBe(reduced);
 		} finally {
 			f.close();
 		}

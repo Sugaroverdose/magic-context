@@ -81,6 +81,20 @@ function parseNativeReasoningIds(raw: unknown, sessionId: string): Set<string> {
     return ids;
 }
 
+function writeNativeReplayState(
+    db: Database,
+    sessionId: string,
+    column: typeof NATIVE_TOOL_INPUTS_COLUMN | typeof NATIVE_REASONING_IDS_COLUMN,
+    serialized: string,
+): void {
+    const result = db
+        .prepare(`UPDATE session_meta SET ${column} = ? WHERE session_id = ?`)
+        .run(serialized, sessionId);
+    if (result.changes !== 1) {
+        throw new Error(`failed to persist ${column} for session ${sessionId}`);
+    }
+}
+
 /**
  * Return frozen native tool inputs. Missing legacy state is empty; malformed
  * stored state is rejected so replay never silently authorizes new bytes.
@@ -109,10 +123,7 @@ export function saveNativeToolInputs(
 
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        const row = db
-            .prepare(`SELECT ${NATIVE_TOOL_INPUTS_COLUMN} FROM session_meta WHERE session_id = ?`)
-            .get(sessionId) as { pi_native_tool_inputs?: unknown } | undefined;
-        const current = parseNativeToolInputs(row?.pi_native_tool_inputs, sessionId);
+        const current = getNativeToolInputs(db, sessionId);
         let changed = false;
         for (const [id, input] of inputs) {
             if (current.get(id) === input) continue;
@@ -121,16 +132,12 @@ export function saveNativeToolInputs(
         }
         if (!changed) return;
 
-        const result = db
-            .prepare(
-                `UPDATE session_meta SET ${NATIVE_TOOL_INPUTS_COLUMN} = ? WHERE session_id = ?`,
-            )
-            .run(JSON.stringify(Object.fromEntries(current)), sessionId);
-        if (result.changes !== 1) {
-            throw new Error(
-                `failed to persist ${NATIVE_TOOL_INPUTS_COLUMN} for session ${sessionId}`,
-            );
-        }
+        writeNativeReplayState(
+            db,
+            sessionId,
+            NATIVE_TOOL_INPUTS_COLUMN,
+            JSON.stringify(Object.fromEntries(current)),
+        );
     }).immediate();
 }
 
@@ -159,10 +166,7 @@ export function addNativeReasoningIds(
 
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        const row = db
-            .prepare(`SELECT ${NATIVE_REASONING_IDS_COLUMN} FROM session_meta WHERE session_id = ?`)
-            .get(sessionId) as { pi_native_reasoning_ids?: unknown } | undefined;
-        const current = parseNativeReasoningIds(row?.pi_native_reasoning_ids, sessionId);
+        const current = getNativeReasoningIds(db, sessionId);
         let changed = false;
         for (const id of requested) {
             if (current.has(id)) continue;
@@ -171,15 +175,11 @@ export function addNativeReasoningIds(
         }
         if (!changed) return;
 
-        const result = db
-            .prepare(
-                `UPDATE session_meta SET ${NATIVE_REASONING_IDS_COLUMN} = ? WHERE session_id = ?`,
-            )
-            .run(JSON.stringify([...current]), sessionId);
-        if (result.changes !== 1) {
-            throw new Error(
-                `failed to persist ${NATIVE_REASONING_IDS_COLUMN} for session ${sessionId}`,
-            );
-        }
+        writeNativeReplayState(
+            db,
+            sessionId,
+            NATIVE_REASONING_IDS_COLUMN,
+            JSON.stringify([...current]),
+        );
     }).immediate();
 }
