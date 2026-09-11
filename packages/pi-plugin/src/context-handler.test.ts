@@ -2946,8 +2946,8 @@ describe("registerPiContextHandler", () => {
 			expect(getEmergencyInputSample(db, sessionId)).toBe(85_000);
 
 			for (const percentage of [
-				81.7246, 82.3389, 82.7754, 82.8856, 82.8856, 83.4737, 84.0778,
-				84.1683, 84.6623, 85.1096, 83.8479, 84.2479, 84.4868, 84.7048, 85.1850,
+				81.7246, 82.3389, 82.7754, 82.8856, 82.8856, 83.4737, 84.0778, 84.1683,
+				84.6623, 85.1096, 83.8479, 84.2479, 84.4868, 84.7048, 85.185,
 			]) {
 				await runPass(Math.round(percentage * 1000));
 				expect(getEmergencyInputSample(db, sessionId)).toBe(85_000);
