@@ -495,7 +495,17 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                         setDefer(`B9 reply ${i}`);
                         await h.sendPrompt(sessionId, `B9 turn ${i}: durable content for compartment chunk ${i}. ${h.ballast(3_000)}`);
                     }
-                    h.mock.setDefault({ text: "B9 trigger", usage: HISTORIAN_TRIGGER_USAGE });
+                    // Anthropic usage buckets are disjoint. Reporting 90k in both
+                    // input and cache creation makes the observed total 180k, above
+                    // this model's limit. Limit recovery then changes the history
+                    // budget and legitimately HARD-folds m[0] (render_config), so
+                    // the test would no longer exercise an additive SOFT refresh.
+                    h.mock.setDefault({
+                        text: "B9 trigger",
+                        usage: RUST_MODE
+                            ? HISTORIAN_TRIGGER_USAGE
+                            : { ...HISTORIAN_TRIGGER_USAGE, cache_creation_input_tokens: 0 },
+                    });
                     await h.sendPrompt(sessionId, "B9 turn 12: high-usage historian trigger.");
                     setDefer("B9 post-trigger");
                     await h.sendPrompt(sessionId, "B9 turn 13: follow-up starts + awaits the historian publish.");
@@ -512,16 +522,17 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                             timeoutMs: 60_000,
                             label: "B9 compartment publishes to DB",
                         });
+                        setDefer("B9 surface published compartment");
+                        await h.sendPrompt(sessionId, "B9 turn 14: surface the published compartment.");
                     }
 
                     //#then — TypeScript keeps the additive publication in the m[1]
                     // delta lane. Rust first consumes the pending hard transition for
                     // this newly detected renderer shape, then replays that result.
                     const requests = mainAgentRequests(h.mock.requests());
-                    const surfaceReq = RUST_MODE
-                        ? requests.at(-1)
-                        : requests.find((r) => wireValueText(extractM1(r.body)).includes("<new-compartments>"));
+                    const surfaceReq = requests.at(-1);
                     expect(surfaceReq).toBeDefined();
+                    expect(JSON.stringify(surfaceReq!.body)).toContain("B9 turn 14: surface the published compartment.");
                     const m1 = wireValueText(extractM1(surfaceReq!.body));
                     const m0 = wireValueText(extractM0(surfaceReq!.body));
                     if (RUST_MODE) {
@@ -542,14 +553,12 @@ describe("cache invariants — m[0]/m[1] taxonomy (B class)", () => {
                     setDefer("B9 replay 1");
                     await h.sendPrompt(
                         sessionId,
-                        RUST_MODE
-                            ? "B9 turn 15: defer replay of the surfaced compartment."
-                            : "B9 turn 14: defer replay of the surfaced compartment.",
+                        "B9 turn 15: defer replay of the surfaced compartment.",
                     );
                     setDefer("B9 replay 2");
                     await h.sendPrompt(
                         sessionId,
-                        RUST_MODE ? "B9 turn 16: defer replay again." : "B9 turn 15: defer replay again.",
+                        "B9 turn 16: defer replay again.",
                     );
 
                     // From the surface request through every subsequent defer-only
