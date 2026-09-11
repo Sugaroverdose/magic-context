@@ -261,10 +261,27 @@ export class PiTestHarness {
     }
   }
 
-  /** Restart Pi against the same isolated session, data, and config roots. */
+  /** Restart Pi and explicitly resume the same saved session. */
   async restart(): Promise<void> {
+    const beforeRestart = await this.getState();
     this.closeContextDb();
     await this.rpc.restart();
+
+    if (!beforeRestart.sessionFile) return;
+    const response = await this.rpc.sendCommand<{ cancelled?: boolean }>(
+      "switch_session",
+      { sessionPath: beforeRestart.sessionFile },
+      { timeoutMs: 60_000, label: "resume Pi session after restart" },
+    );
+    const resumed = requireSuccessfulResponse(response);
+    if (resumed.cancelled) throw new Error("Pi session resume was cancelled by an extension");
+
+    const afterRestart = await this.getState();
+    if (beforeRestart.sessionId && afterRestart.sessionId !== beforeRestart.sessionId) {
+      throw new Error(
+        `Pi restart resumed session ${afterRestart.sessionId ?? "missing"}, expected ${beforeRestart.sessionId}`,
+      );
+    }
   }
 
   get lastTurn(): PiRunResult | null {

@@ -84,6 +84,20 @@ describe("pi session lifecycle", () => {
       )
       .get(a, b) as { n: number };
     expect(nonPiTags.n).toBe(0);
+
+    const beforeRestart = await h.getState();
+    expect(beforeRestart.sessionId).toBe(b);
+    expect(beforeRestart.sessionFile).toBeTruthy();
+    await h.restart();
+    const resumed = await h.getState();
+    expect(resumed.sessionId).toBe(b);
+    expect(resumed.sessionFile).toBe(beforeRestart.sessionFile);
+
+    const b2 = await h.sendPrompt("pi session B turn 2 after process restart", {
+      timeoutMs: 60_000,
+      continueSession: true,
+    });
+    expect(b2.sessionId).toBe(b);
   }, 120_000);
 
   it.skip("session deletion clears tags and session_meta (FIXME: Pi exposes no deletion RPC/event)", () => {

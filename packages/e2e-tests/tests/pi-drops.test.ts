@@ -8,18 +8,13 @@ import { openTestDb } from "../src/test-db";
 let h: PiTestHarness;
 
 beforeAll(async () => {
-    // Pi pipeline now gates pending_ops application to execute/force passes
-    // (mirrors OpenCode's transform-postprocess-phase.ts:172-186 gating: only
-    // mutate tag state on execute / flush / force-materialization, never on
-    // plain defer passes — mutation otherwise busts provider prompt cache on
-    // every tool call once we cross threshold).
-    //
-    // To make this test reliably trigger execute on the second turn, shrink
-    // the context window to 200 tokens and lower threshold to 20%. The mock
-    // returns 110 input tokens, so 110/200 = 55% > 20% execute threshold.
+    // Pending operations apply only on execute/force passes. Use a supported
+    // model window and a legitimate uncached-input sample, then put enough real
+    // message blocks after the target for it to leave the protected tail before
+    // the next pass materializes the queued drop.
     h = await PiTestHarness.create({
-        modelContextLimit: 200,
-        magicContextConfig: { protected_tags: 1, execute_threshold_percentage: 20 },
+        modelContextLimit: 20_000,
+        magicContextConfig: { protected_tokens: 4_000, execute_threshold_percentage: 20 },
     });
 });
 
@@ -31,8 +26,11 @@ describe("pi drops", () => {
     it("drains pending_ops when drops are queued", async () => {
         h.mock.reset();
         h.mock.setDefault({
-            text: "first response",
-            usage: { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 100 },
+            content: Array.from({ length: 24 }, (_, index) => ({
+                type: "text",
+                text: `pi drop aging block ${index + 1}: ${h.ballast(200)}`,
+            })),
+            usage: { input_tokens: 14_000, output_tokens: 10, cache_creation_input_tokens: 0 },
         });
 
         const first = await h.sendPrompt("first pi drop target", { timeoutMs: 60_000 });
@@ -53,7 +51,7 @@ describe("pi drops", () => {
         h.mock.reset();
         h.mock.setDefault({
             text: "second response",
-            usage: { input_tokens: 110, output_tokens: 10, cache_creation_input_tokens: 110 },
+            usage: { input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 0 },
         });
         const second = await h.sendPrompt("second pi turn drains pending ops", {
             timeoutMs: 60_000,
