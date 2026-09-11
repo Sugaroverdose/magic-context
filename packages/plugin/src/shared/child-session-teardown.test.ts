@@ -202,7 +202,8 @@ describe("child-session delete source fence", () => {
             }
         }
 
-        expect(sites.map((site) => site.replace(/:\d+$/, ""))).toEqual([
+        // Directory walk order differs between macOS and Linux; the fence is a set.
+        expect(sites.map((site) => site.replace(/:\d+$/, "")).sort()).toEqual([
             "features/magic-context/dreamer/retrospective-orphan-sweep.ts",
             "shared/child-session-teardown.ts",
         ]);
