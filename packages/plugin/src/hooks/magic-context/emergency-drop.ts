@@ -182,7 +182,8 @@ export function planEmergencyDrop(input: {
     // one newly-unprotected tag per execute pass. The caller clears the persisted
     // latch only after pressure exits or when another mutation has already priced
     // the pass, allowing the whole accumulated set to ride that independent bust.
-    if (hasPriorDrop) {
+    const absoluteEmergency = (input.usagePercentage ?? 0) >= 95;
+    if (hasPriorDrop && !absoluteEmergency) {
         return noop(
             `pressure-episode-latched (prior sample ${priorInputSample}; awaiting exit or independent bust)`,
         );
@@ -207,8 +208,6 @@ export function planEmergencyDrop(input: {
     if (reclaimTokens <= EMERGENCY_REARM_MIN_TOKENS) {
         return noop(`reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS})`);
     }
-
-    const absoluteEmergency = (input.usagePercentage ?? 0) >= 95;
 
     // Union projection form: exact tag-number cutoff directly.
     // Coordinate space: tag-number space (number | null).

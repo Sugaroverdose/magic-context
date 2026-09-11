@@ -59,6 +59,7 @@ import {
 	computeProtectionWindow,
 	getProtectionWindowForSession,
 } from "@magic-context/core/features/magic-context/protection-window";
+import { newestCtxReduceTagNumbers } from "@magic-context/core/features/magic-context/reclaim-protection";
 import {
 	createScheduler,
 	parseCacheTtl,
@@ -112,6 +113,7 @@ import {
 	pruneAutoSearchHintDecisions,
 	pruneNoteNudgeAnchors,
 	resolveEpochFloorForPass,
+	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
@@ -5434,7 +5436,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.sessionId,
 				args.db,
 				targets,
-				protectedTagNumbersForPass,
+				args.contextUsage.percentage >= 95
+					? newestCtxReduceTagNumbers(getTagsBySession(args.db, args.sessionId))
+					: protectedTagNumbersForPass,
 				pendingOperationTags,
 				pendingOps,
 			);
@@ -5689,8 +5693,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			// so it does not count as a new change. After the first pass under pressure,
 			// allow routine cleanup again only when new work was applied or a fold ran.
 			routineCleanupApplied =
-				args.sessionMeta.isSubagent ||
-				!routinePressureAlreadyApplied ||
+				(emergencyDropEligible
+					? args.contextUsage.percentage >= 95 ||
+						getEmergencyInputSample(args.db, args.sessionId) === 0
+					: args.sessionMeta.isSubagent || !routinePressureAlreadyApplied) ||
 				hasPendingMaterializeSignal ||
 				deferredMaterialize ||
 				independentMutationBeforeHeuristics;
@@ -5902,6 +5908,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
+	// All applied reclaim lanes consume the same force episode; evaluation alone does not.
+	if (
+		emergencyDropEligible &&
+		(pendingOpsDidMutate || heuristicOrReasoningDidMutate)
+	) {
+		setEmergencyDropSample(
+			args.db,
+			args.sessionId,
+			args.contextUsage.inputTokens,
+		);
+	}
 	const toolReclaimApplicationOpportunity = isCacheBustingPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;

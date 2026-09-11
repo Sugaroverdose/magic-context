@@ -5531,3 +5531,350 @@ describe("emergency-scaled boundary retry derives its band from the execute thre
 		expect(escalationBands(80).forceMaterializationPercentage).toBe(85);
 	});
 });
+
+it("contract Pi consumed episode reaches 95", async () => {
+	const db = createTestDb();
+	const sessionId = "audit-pi-episode-95";
+	try {
+		updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTokens: 12000,
+			heuristics: {},
+			scheduler: { executeThresholdPercentage: 65 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const build = () => {
+			const messages = [userMessage("start", 1)];
+			for (let i = 0; i < 40; i++)
+				messages.push(
+					assistantToolCall(`audit-call-${i}`, "bash", {}, 2 + i * 2),
+					{
+						...toolResultMessage(
+							`audit-call-${i}`,
+							"x".repeat(12000),
+							3 + i * 2,
+						),
+						toolName: "bash",
+					},
+				);
+			messages.push(userMessage("continue", 100));
+			return messages as never[];
+		};
+		const entryIds = Array.from(
+			{ length: build().length },
+			(_, i) => `audit-entry-${i}`,
+		);
+		const pass = (tokens: number) => {
+			const messages = build();
+			return handler({ messages }, {
+				...fakeContext(sessionId, process.cwd(), entryIds, messages),
+				getContextUsage: () => ({
+					tokens,
+					percent: tokens / 1000,
+					contextWindow: 100000,
+				}),
+			} as never);
+		};
+		const count = () =>
+			getTagsBySession(db, sessionId).filter(
+				(t) => t.type === "tool" && t.status === "dropped",
+			).length;
+		await pass(1000);
+		updateSessionMeta(db, sessionId, {
+			lastResponseTime: Date.now(),
+			cacheTtl: "59m",
+			lastContextPercentage: 68,
+			lastInputTokens: 68000,
+		});
+		const first = await pass(85000);
+		const firstCount = count();
+		expect(firstCount).toBeGreaterThan(0);
+		const held = await pass(90000);
+		expect(count()).toBe(firstCount);
+		expect(JSON.stringify(held.messages)).toBe(JSON.stringify(first.messages));
+		const escaped = await pass(96000);
+		console.log(
+			"CONTRACT Pi 85 -> 90 -> 96 dropped",
+			firstCount,
+			count(),
+			"bytesEqualAt95",
+			JSON.stringify(escaped.messages) === JSON.stringify(first.messages),
+			"sample",
+			getEmergencyInputSample(db, sessionId),
+		);
+		const latchedCount = count();
+		const { clearEmergencyDropSample } = await import(
+			"@magic-context/core/features/magic-context/storage-meta-persisted"
+		);
+		clearEmergencyDropSample(db, sessionId);
+		await pass(96001);
+		console.log("CONTRACT Pi cleared-latch at 96 control dropped", count());
+		expect(count()).toBeGreaterThan(firstCount);
+		expect(latchedCount).toBeGreaterThan(firstCount);
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("contract Pi explicit protected drop queues until aged and priced", async () => {
+	const db = createTestDb();
+	const sessionId = "audit-pi-protected-queue";
+	try {
+		updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTokens: 4000,
+			heuristics: {},
+			scheduler: { executeThresholdPercentage: 65 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		let toolCount = 4;
+		const pass = () => {
+			const messages = [userMessage("start", 1)];
+			for (let i = 0; i < toolCount; i++)
+				messages.push(
+					assistantToolCall(`audit-q-${i}`, "bash", {}, 2 + i * 2),
+					{
+						...toolResultMessage(
+							`audit-q-${i}`,
+							"payload ".repeat(1000),
+							3 + i * 2,
+						),
+						toolName: "bash",
+					},
+				);
+			messages.push(userMessage("tail", 100));
+			const ids = messages.map((_, i) =>
+				i === messages.length - 1 ? "tail-entry" : `entry-${i}`,
+			);
+			return handler({ messages: messages as never[] }, {
+				...fakeContext(sessionId, process.cwd(), ids, messages as never[]),
+				getContextUsage: () => ({
+					tokens: 10000,
+					percent: 10,
+					contextWindow: 100000,
+				}),
+			} as never);
+		};
+		await pass();
+		const target = getTagsBySession(db, sessionId).find(
+			(t) => t.type === "tool" && t.messageId === "audit-q-3",
+		);
+		if (!target) throw new Error("missing protected target");
+		queuePendingOp(db, sessionId, target.tagNumber, "drop", 1);
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		console.log(
+			"CONTRACT Pi protected before aging pending",
+			getPendingOps(db, sessionId).length,
+		);
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+		expect(
+			getTagsBySession(db, sessionId).find(
+				(t) => t.tagNumber === target.tagNumber,
+			)?.status,
+		).toBe("active");
+		toolCount = 10;
+		await pass();
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		console.log(
+			"CONTRACT Pi protected after aging pending",
+			getPendingOps(db, sessionId).length,
+		);
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(
+			getTagsBySession(db, sessionId).find(
+				(t) => t.tagNumber === target.tagNumber,
+			)?.status,
+		).toBe("dropped");
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+it("contract Pi explicit protected drop applies at 95 without aging", async () => {
+	const db = createTestDb();
+	const sessionId = "contract-pi-explicit95";
+	try {
+		updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+		const fake = createFakePi();
+		registerPiContextHandler(fake.pi as never, {
+			db,
+			protectedTokens: 4000,
+			heuristics: {},
+			scheduler: { executeThresholdPercentage: 65 },
+		});
+		const handler = fake.handlers.get("context") as (
+			event: { messages: never[] },
+			ctx: never,
+		) => Promise<{ messages: never[] }>;
+		const toolCount = 4;
+		let tokens = 10000;
+		const pass = () => {
+			const messages = [userMessage("start", 1)];
+			for (let i = 0; i < toolCount; i++)
+				messages.push(
+					assistantToolCall(`audit-q-${i}`, "bash", {}, 2 + i * 2),
+					{
+						...toolResultMessage(`audit-q-${i}`, "small output", 3 + i * 2),
+						toolName: "bash",
+					},
+				);
+			messages.push(userMessage("tail", 100));
+			const ids = messages.map((_, i) =>
+				i === messages.length - 1 ? "tail-entry" : `entry-${i}`,
+			);
+			return handler({ messages: messages as never[] }, {
+				...fakeContext(sessionId, process.cwd(), ids, messages as never[]),
+				getContextUsage: () => ({
+					tokens,
+					percent: tokens / 1000,
+					contextWindow: 100000,
+				}),
+			} as never);
+		};
+		await pass();
+		const target = getTagsBySession(db, sessionId).find(
+			(t) => t.type === "tool" && t.messageId === "audit-q-3",
+		);
+		if (!target) throw new Error("missing protected target");
+		queuePendingOp(db, sessionId, target.tagNumber, "drop", 1);
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		console.log(
+			"CONTRACT Pi protected before aging pending",
+			getPendingOps(db, sessionId).length,
+		);
+		expect(getPendingOps(db, sessionId)).toHaveLength(1);
+		expect(
+			getTagsBySession(db, sessionId).find(
+				(t) => t.tagNumber === target.tagNumber,
+			)?.status,
+		).toBe("active");
+		tokens = 96000;
+		await pass();
+		signalPiPendingMaterialization(sessionId);
+		await pass();
+		console.log(
+			"CONTRACT Pi protected after aging pending",
+			getPendingOps(db, sessionId).length,
+		);
+		expect(getPendingOps(db, sessionId)).toHaveLength(0);
+		expect(
+			getTagsBySession(db, sessionId).find(
+				(t) => t.tagNumber === target.tagNumber,
+			)?.status,
+		).toBe("dropped");
+	} finally {
+		clearContextHandlerSession(sessionId);
+		closeQuietly(db);
+	}
+});
+
+for (const withTools of [false, true]) {
+	it(`contract Pi zero yield stays armed and shared reclaim survives a submargin dip (tools=${withTools})`, async () => {
+		const db = createTestDb();
+		const sessionId = "contract-pi-text-only";
+		try {
+			updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTokens: 4000,
+				heuristics: { caveman: { enabled: true, minChars: 100 } },
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			let textCount = 0;
+			const text =
+				"I just really basically wanted to clearly explain the stable cache prefix while pressure remains high. ".repeat(
+					8,
+				);
+			const pass = (tokens: number) => {
+				const messages = [userMessage("start", 1)];
+				if (withTools && textCount > 0) {
+					for (let i = 0; i < 40; i++) {
+						if (i === 20)
+							for (let j = 0; j < textCount; j++)
+								messages.push(userMessage(`${text} item ${j}`, j + 2));
+						messages.push(
+							assistantToolCall(`cross-${i}`, "bash", { i }, 102 + i * 2),
+							{
+								...toolResultMessage(
+									`cross-${i}`,
+									"x".repeat(12000),
+									103 + i * 2,
+								),
+								toolName: "bash",
+							},
+						);
+					}
+				} else {
+					for (let j = 0; j < textCount; j++)
+						messages.push(userMessage(`${text} item ${j}`, j + 2));
+				}
+				const ids = messages.map((_, i) => `entry-${i}`);
+				return handler({ messages: messages as never[] }, {
+					...fakeContext(sessionId, process.cwd(), ids, messages as never[]),
+					getContextUsage: () => ({
+						tokens,
+						percent: tokens / 1000,
+						contextWindow: 100000,
+					}),
+				} as never);
+			};
+			await pass(1000);
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 68,
+				lastInputTokens: 68000,
+			});
+			await pass(90000);
+			expect(getEmergencyInputSample(db, sessionId)).toBe(0);
+			textCount = 40;
+			await pass(90100);
+			expect(
+				getTagsBySession(db, sessionId).some((t) => (t.cavemanDepth ?? 0) > 0),
+			).toBe(true);
+			expect(getEmergencyInputSample(db, sessionId)).toBe(90100);
+			expect(
+				getTagsBySession(db, sessionId).some(
+					(t) => t.type === "tool" && t.status === "dropped",
+				),
+			).toBe(withTools);
+			textCount = 60;
+			// A fresh provider response at the dip keeps the TTL scheduler on defer.
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 82,
+				lastInputTokens: 82000,
+			});
+			const dipped = await pass(82000);
+			const held = await pass(90200);
+			expect(JSON.stringify(held.messages)).toBe(
+				JSON.stringify(dipped.messages),
+			);
+			expect(getEmergencyInputSample(db, sessionId)).toBe(90100);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+}

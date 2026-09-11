@@ -101,7 +101,9 @@ export function registerIssue423Tests(
                 expect(getEmergencyInputSample(db, sessionId)).toBe(0);
                 expect(adapter.cleanup(db, sessionId, growing, 312)).toBeGreaterThan(0);
                 expect(getEmergencyInputSample(db, sessionId)).toBeGreaterThan(0);
-                expect(adapter.cleanup(db, sessionId, issue423Fixture(), 314)).toBe(0);
+                expect(adapter.cleanup(db, sessionId, issue423Fixture(), 90)).toBe(0);
+                // The absolute emergency arm may drain remaining candidates even in a consumed episode.
+                expect(adapter.cleanup(db, sessionId, issue423Fixture(), 314)).toBeGreaterThan(0);
             } finally {
                 closeQuietly(db);
             }

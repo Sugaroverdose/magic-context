@@ -2190,6 +2190,11 @@ describe("issue #386 sustained execute-pressure batching", () => {
         }
         updateSessionMeta(db, sessionId, { cacheTtl: "5m" });
         const lastHeuristicsTurnId = new Map([[sessionId, turnId]]);
+        // Model an applied earlier batch, not merely an earlier zero-yield evaluation.
+        const { setEmergencyDropSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        setEmergencyDropSample(db, sessionId, 90_000);
         const executeThresholdPercentage = 50;
         const contextLimit = 100_000;
         const exactConfig = {
@@ -6128,4 +6133,413 @@ it("force soft-refresh contention serves fresh recovery bytes", () => {
     } finally {
         blocker.mockRestore();
     }
+});
+
+describe("contract adversarial cache sequences", () => {
+    it("contract protected queued drop survives reopen and geometry move until aged", async () => {
+        const { resolveEpochFloorForPass, resetEpochFloorRegistryForTest } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        const dir = mkdtempSync(join(tmpdir(), "audit-floor-"));
+        tempDirs.push(dir);
+        const path = join(dir, "context.db");
+        db = new Database(path);
+        initializeDatabase(db);
+        const sessionId = "audit-protected-queue";
+        const messages: MessageLike[] = [];
+        const targets = new Map<number, TagTarget>();
+        const seed = (n: number) => {
+            const message = makeToolMessage(`audit-tool-${n}`);
+            messages.push(message);
+            targets.set(n, makeDropTarget(message));
+            insertTag(
+                db,
+                sessionId,
+                `call-${n}`,
+                "tool",
+                8000,
+                n,
+                0,
+                "bash",
+                0,
+                message.info.id,
+                null,
+                { tokenCount: 2000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+        };
+        for (let n = 1; n <= 10; n++) seed(n);
+        const firstFloor = resolveEpochFloorForPass(db, sessionId, {
+            usableSoft: 100_000,
+            isCacheBustingPass: false,
+        });
+        expect(firstFloor.floor).toBe(8000);
+        queuePendingOp(db, sessionId, 9, "drop", 1);
+        db.close();
+        resetEpochFloorRegistryForTest();
+        db = new Database(path);
+        initializeDatabase(db);
+        const moved = resolveEpochFloorForPass(db, sessionId, {
+            usableSoft: 200_000,
+            isCacheBustingPass: false,
+        });
+        expect(moved.floor).toBe(8000);
+        expect(moved.preSnapshotInputChanged).toBe(true);
+        const pass = async (decision: "execute" | "defer") => {
+            const window = getProtectionWindowForSession(db, sessionId, moved.floor);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: decision,
+                    targets,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    protectedTagIds: window.protectedTagNumbers,
+                    protectedTagNumbers: window.protectedTagNumbers,
+                    protectedCutoff: window.cutoff,
+                    protectedCount: window.status.protectedCount,
+                }),
+            );
+        };
+        const before = JSON.stringify(messages);
+        await pass("execute");
+        console.log("CONTRACT OC protected execute pending", getPendingOps(db, sessionId).length);
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        expect(JSON.stringify(messages)).toBe(before);
+        for (let n = 11; n <= 14; n++) seed(n);
+        await pass("defer");
+        expect(getPendingOps(db, sessionId)).toHaveLength(1);
+        await pass("execute");
+        expect(getPendingOps(db, sessionId)).toHaveLength(0);
+        expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 9)?.status).toBe(
+            "dropped",
+        );
+        const frozen = resolveEpochFloorForPass(db, sessionId, {
+            usableSoft: 200_000,
+            isCacheBustingPass: true,
+        });
+        expect(frozen.floor).toBe(16000);
+        console.log(
+            "CONTRACT OC floor 8000 -> reopen/geometry DEFER 8000 -> priced 16000; queued drop drains only after aging",
+        );
+    });
+
+    it("contract marker contraction reopen reexpansion keeps frozen visible bytes", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "audit-marker-"));
+        tempDirs.push(dir);
+        const path = join(dir, "context.db");
+        db = new Database(path);
+        initializeDatabase(db);
+        const sessionId = "audit-marker-reopen";
+        const user = (id: string): MessageLike =>
+            ({
+                info: { id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: id }],
+            }) as MessageLike;
+        const assistant = (): MessageLike =>
+            ({
+                info: { id: "seam", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "[dropped §9§]" }],
+            }) as MessageLike;
+        const contracted = [user("before"), user("after")];
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, contracted, {
+                schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
+                resolvedProviderID: "anthropic",
+                hiddenMessagesAtCompactionSeam: [assistant()],
+            }),
+        );
+        expect(getStrippedPlaceholderIds(db, sessionId).has("seam")).toBe(true);
+        const wire = serializeAnthropicVisibleRoleGroups(contracted);
+        db.close();
+        db = new Database(path);
+        initializeDatabase(db);
+        for (const expanded of [false, true, false, true]) {
+            const messages = expanded
+                ? [user("before"), assistant(), user("after")]
+                : [user("before"), user("after")];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    resolvedProviderID: "anthropic",
+                }),
+            );
+            expect(serializeAnthropicVisibleRoleGroups(messages)).toBe(wire);
+        }
+        console.log(
+            "CONTRACT OC marker contracted -> reopen -> expanded -> contracted -> expanded: four DEFER visible-byte comparisons equal",
+        );
+    });
+
+    it("contract force tool batch then submargin dip cannot rearm routine text lane", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "audit-oc-cross-lane";
+        const messages: MessageLike[] = [];
+        const targets = new Map<number, TagTarget>();
+        const messageTagNumbers = new Map<MessageLike, number>();
+        const text =
+            "I just really basically wanted to clearly explain the stable cache prefix while pressure remains high. ".repeat(
+                8,
+            );
+        for (let n = 1; n <= 35; n++) {
+            const message = {
+                info: { id: `text-${n}`, role: n % 2 ? "user" : "assistant" },
+                parts: [{ type: "text", text }],
+            } as MessageLike;
+            messages.push(message);
+            targets.set(n, makeMessageTarget(message));
+            messageTagNumbers.set(message, n);
+            insertTag(db, sessionId, message.info.id, "message", text.length, n);
+            saveSourceContent(db, sessionId, n, text);
+        }
+        for (let n = 36; n <= 45; n++) {
+            const message = makeToolMessage(`tool-${n}`);
+            messages.push(message);
+            targets.set(n, makeDropTarget(message));
+            insertTag(
+                db,
+                sessionId,
+                `call-${n}`,
+                "tool",
+                4000,
+                n,
+                0,
+                "bash",
+                0,
+                message.info.id,
+                null,
+                { tokenCount: 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+        }
+        const turns = new Map<string, string>();
+        const pass = async (percentage: number, decision: "execute" | "defer") => {
+            const window = getProtectionWindowForSession(db, sessionId, 4000);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: decision,
+                    contextUsage: { percentage, inputTokens: percentage * 1000 },
+                    emergencyCeilingTokens: 65000,
+                    targets,
+                    messageTagNumbers,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    currentTurnId: `turn-${percentage}`,
+                    lastHeuristicsTurnId: turns,
+                    cavemanTextCompression: { enabled: true, minChars: 1 },
+                    resolvedProviderID: "anthropic",
+                    protectedTagIds: window.protectedTagNumbers,
+                    protectedTagNumbers: window.protectedTagNumbers,
+                    protectedCutoff: window.cutoff,
+                    protectedCount: window.status.protectedCount,
+                }),
+            );
+        };
+        await pass(90, "execute");
+        const { getEmergencyInputSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        expect(getEmergencyInputSample(db, sessionId)).toBe(90000);
+        for (let n = 46; n <= 65; n++) {
+            const message = {
+                info: { id: `text-${n}`, role: n % 2 ? "user" : "assistant" },
+                parts: [{ type: "text", text }],
+            } as MessageLike;
+            messages.push(message);
+            targets.set(n, makeMessageTarget(message));
+            messageTagNumbers.set(message, n);
+            insertTag(db, sessionId, message.info.id, "message", text.length, n);
+            saveSourceContent(db, sessionId, n, text);
+        }
+        for (let n = 66; n <= 75; n++) {
+            const message = makeToolMessage(`tool-${n}`);
+            messages.push(message);
+            targets.set(n, makeDropTarget(message));
+            insertTag(
+                db,
+                sessionId,
+                `call-${n}`,
+                "tool",
+                4000,
+                n,
+                0,
+                "bash",
+                0,
+                message.info.id,
+                null,
+                { tokenCount: 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+            );
+        }
+        const before = JSON.stringify(messages);
+        const depths = getTagsBySession(db, sessionId).map((t) => t.cavemanDepth);
+        await pass(82, "defer");
+        expect(JSON.stringify(messages)).toBe(before);
+        await pass(90.1, "defer");
+        expect(getEmergencyInputSample(db, sessionId)).toBe(90000);
+        console.log(
+            "CONTRACT OC cross lane emergency latch=90000 stable",
+            JSON.stringify(messages) === before,
+            "depths before/after",
+            depths,
+            getTagsBySession(db, sessionId).map((t) => t.cavemanDepth),
+        );
+        expect(JSON.stringify(messages)).toBe(before);
+    });
+});
+
+it("contract OC 95 backstop bypasses consumed tool latch", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "audit-oc-95";
+    const messages: MessageLike[] = [];
+    const targets = new Map<number, TagTarget>();
+    for (let n = 1; n <= 30; n++) {
+        const message = makeToolMessage(`tool-${n}`);
+        messages.push(message);
+        targets.set(n, makeDropTarget(message));
+        insertTag(
+            db,
+            sessionId,
+            `call-${n}`,
+            "tool",
+            4000,
+            n,
+            0,
+            "bash",
+            0,
+            message.info.id,
+            null,
+            { tokenCount: 1000, inputTokenCount: 0, reasoningTokenCount: 0 },
+        );
+    }
+    const pass = (percentage: number) => {
+        const window = getProtectionWindowForSession(db, sessionId, 12000);
+        return runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                contextUsage: { percentage, inputTokens: percentage * 1000 },
+                emergencyCeilingTokens: 65000,
+                targets,
+                tags: getActiveTagsBySession(db, sessionId),
+                protectedTagIds: window.protectedTagNumbers,
+                protectedTagNumbers: window.protectedTagNumbers,
+                protectedCutoff: window.cutoff,
+                protectedCount: window.status.protectedCount,
+            }),
+        );
+    };
+    const count = () =>
+        getTagsBySession(db, sessionId).filter((t) => t.status === "dropped").length;
+    await pass(90);
+    const first = count();
+    expect(first).toBeGreaterThan(0);
+    const bytes = JSON.stringify(messages);
+    await pass(96);
+    const latched = count();
+    console.log(
+        "CONTRACT OC 90 -> 96 dropped",
+        first,
+        latched,
+        "bytesEqual",
+        JSON.stringify(messages) === bytes,
+    );
+    queuePendingOp(db, sessionId, 19, "drop", 1);
+    await pass(96.1);
+    console.log(
+        "CONTRACT OC protected agent-drop control pending",
+        getPendingOps(db, sessionId).length,
+        "dropped",
+        count(),
+    );
+    const { clearEmergencyDropSample } = await import(
+        "../../features/magic-context/storage-meta-persisted"
+    );
+    clearEmergencyDropSample(db, sessionId);
+    await pass(96.2);
+    console.log("CONTRACT OC cleared-latch 95 control dropped", count());
+    expect(count()).toBeGreaterThan(first);
+    expect(latched).toBeGreaterThan(first);
+});
+
+it("contract OC explicit protected drop applies at 95 without aging", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "contract-oc-explicit95";
+    const message = makeToolMessage("protected-tool");
+    const messages = [message];
+    insertTag(db, sessionId, "protected-call", "tool", 12, 1, 0, "bash", 0, message.info.id, null, {
+        tokenCount: 3,
+        inputTokenCount: 0,
+        reasoningTokenCount: 0,
+    });
+    queuePendingOp(db, sessionId, 1, "drop", 1);
+    const pass = (percentage: number) =>
+        runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                contextUsage: { percentage, inputTokens: percentage * 1000 },
+                targets: new Map([[1, makeDropTarget(message)]]),
+                tags: getActiveTagsBySession(db, sessionId),
+                protectedTagIds: new Set([1]),
+                protectedTagNumbers: new Set([1]),
+                protectedCutoff: 1,
+                protectedCount: 1,
+            }),
+        );
+    await pass(70);
+    expect(getPendingOps(db, sessionId)).toHaveLength(1);
+    await pass(96);
+    expect(getPendingOps(db, sessionId)).toHaveLength(0);
+    expect(getTagsBySession(db, sessionId)[0]?.status).toBe("dropped");
+});
+
+it("contract OC zero yield stays armed and text-only reclaim consumes the shared episode", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "contract-oc-text-only";
+    const messages: MessageLike[] = [];
+    const targets = new Map<number, TagTarget>();
+    const messageTagNumbers = new Map<MessageLike, number>();
+    const { getEmergencyInputSample } = await import(
+        "../../features/magic-context/storage-meta-persisted"
+    );
+    const pass = (percentage: number) =>
+        runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "defer",
+                contextUsage: { percentage, inputTokens: percentage * 1000 },
+                emergencyCeilingTokens: 65000,
+                targets,
+                messageTagNumbers,
+                tags: getActiveTagsBySession(db, sessionId),
+                cavemanTextCompression: { enabled: true, minChars: 1 },
+                resolvedProviderID: "anthropic",
+                protectedTagIds: new Set(),
+                protectedTagNumbers: new Set(),
+                protectedCutoff: null,
+                protectedCount: 0,
+            }),
+        );
+    await pass(90);
+    expect(getEmergencyInputSample(db, sessionId)).toBe(0);
+    const text =
+        "I just really basically wanted to clearly explain the stable cache prefix while pressure remains high. ".repeat(
+            8,
+        );
+    for (let n = 1; n <= 35; n++) {
+        const message = {
+            info: { id: `text-${n}`, role: n % 2 ? "user" : "assistant" },
+            parts: [{ type: "text", text }],
+        } as MessageLike;
+        messages.push(message);
+        targets.set(n, makeMessageTarget(message));
+        messageTagNumbers.set(message, n);
+        insertTag(db, sessionId, message.info.id, "message", text.length, n);
+        saveSourceContent(db, sessionId, n, text);
+    }
+    await pass(90.1);
+    expect(getTagsBySession(db, sessionId).some((t) => (t.cavemanDepth ?? 0) > 0)).toBe(true);
+    expect(getEmergencyInputSample(db, sessionId)).toBe(90100);
+    const bytes = JSON.stringify(messages);
+    await pass(82);
+    await pass(90.2);
+    expect(JSON.stringify(messages)).toBe(bytes);
+    expect(getEmergencyInputSample(db, sessionId)).toBe(90100);
 });

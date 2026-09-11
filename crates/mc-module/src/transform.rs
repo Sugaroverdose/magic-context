@@ -4544,10 +4544,8 @@ fn apply_once(
     // a new episode; exit needs five percentage points of headroom below the band,
     // so a small batch-induced dip cannot rearm it. Independent busts and the 95% arm
     // bypass the latch above without granting subsequent passes another opportunity.
-    if force_band_active {
-        meta.last_emergency_input_sample = usage_input_tokens;
-        meta.has_prior_emergency_drop = true;
-    } else if usage_input_tokens > 0.0
+    if !force_band_active
+        && usage_input_tokens > 0.0
         && usage_percentage
             < scheduler::escalation_bands(ctx.execute_threshold_percentage)
                 .force_materialize_percentage
@@ -5863,6 +5861,25 @@ fn apply_once(
             .map(ServedMessage::canonical_bytes)
             .collect::<Vec<_>>();
         assert_eq!(cached_bytes, fresh_bytes, "serialized output cache drift");
+    }
+    // Consume only applied reclaim, not a zero-yield evaluation or a prefix fold.
+    // Comparing frozen payloads also counts a deeper caveman rewrite of an existing unit.
+    if force_band_active
+        && core.frozen_units.iter().any(|unit| {
+            (unit.key.starts_with("red:")
+                || unit.key.starts_with(CAV_KEY_PREFIX)
+                || (unit.key.starts_with("strip:")
+                    && !unit.kind.ends_with("_keep")
+                    && unit.reset_rule != SYSTEM_STRIP_PENDING))
+                && !loaded.core.frozen_units.iter().any(|old| {
+                    old.key == unit.key
+                        && old.frozen_payload == unit.frozen_payload
+                        && old.reset_rule == unit.reset_rule
+                })
+        })
+    {
+        meta.last_emergency_input_sample = usage_input_tokens;
+        meta.has_prior_emergency_drop = true;
     }
     let BuiltOutput {
         messages: ck_messages,
@@ -18158,6 +18175,421 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn contract_caveman_episode_reopen_then_95() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let mut context = smart_pctx();
+        context.protected_tokens_floor = 0;
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    item("old", 3, &caveman_test_source("old")),
+                    assistant_tool_call("aged", 4, "aged"),
+                    tool_result("aged-result", 5, "aged", &"x".repeat(20_000)),
+                    item("tail", 6, "tail"),
+                ],
+            ),
+            90_000,
+            100_000,
+        );
+        request.caveman_enabled = true;
+        request.caveman_min_chars = 1;
+        request.protected_tokens_effective = Some(0);
+        let first = transform(&s, &request, &context).unwrap();
+        assert!(s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "cav:old#0"));
+        assert!(!s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:aged#0"));
+        let bytes = serde_json::to_vec(&first.ck_messages).unwrap();
+        drop(s);
+        let s = store(dir.path());
+        for usage in [82_000, 85_000, 94_000] {
+            request = with_usage(request, usage, 100_000);
+            let held = transform_with_projection(&s, &request, &context).unwrap();
+            eprintln!(
+                "CONTRACT reopen usage={usage} scheduler={:?} action={} stable={}",
+                held.scheduler_pass,
+                held.response.action,
+                serde_json::to_vec(&held.response.ck_messages).unwrap() == bytes
+            );
+            assert_eq!(
+                serde_json::to_vec(&held.response.ck_messages).unwrap(),
+                bytes
+            );
+            assert!(s.load("ses").unwrap().meta.has_prior_emergency_drop);
+        }
+        request = with_usage(request, 96_000, 100_000);
+        let escaped = transform_with_projection(&s, &request, &context).unwrap();
+        assert!(s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:aged#0"));
+        eprintln!(
+            "CONTRACT reopen escape scheduler={:?} action={} reclaimed=aged",
+            escaped.scheduler_pass, escaped.response.action
+        );
+    }
+
+    #[test]
+    fn contract_zero_reclaim_protected_episode_until_95() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let context = smart_pctx();
+        let mut messages = vec![item("a", 1, "raw")];
+        for n in 0..5 {
+            let mut call =
+                assistant_tool_call(&format!("tool-{n}"), 2 + n * 2, &format!("call-{n}"));
+            if let ck_wire::CkKind::ToolCall { input, .. } = &mut call.ck.content[0].kind {
+                *input = json!({"file_path": format!("unique-{n}.rs")});
+            }
+            messages.push(call);
+            messages.push(tool_result(
+                &format!("result-{n}"),
+                3 + n * 2,
+                &format!("call-{n}"),
+                &"payload information ".repeat(1000),
+            ));
+        }
+        let mut request = with_usage(
+            active_cc_req("ses", "cfg-audit-bootstrap", messages),
+            90_000,
+            100_000,
+        );
+        request.protected_tokens_effective = Some(30_000);
+        let bootstrap = with_usage(request.clone(), 10_000, 100_000);
+        transform(&s, &bootstrap, &context).unwrap();
+        s.seed_tags_for_test(
+            "ses",
+            &(0..5)
+                .map(|n| mc_store::TagMintInput {
+                    block_id: format!("result-{n}#0"),
+                    kind: "tool_result".into(),
+                    token_count: 2001,
+                    source_bytes: "payload information ".repeat(1000).into_bytes(),
+                })
+                .collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
+        eprintln!(
+            "CONTRACT pre-force tags={:?}",
+            s.load_tags_for_session("ses")
+                .unwrap()
+                .iter()
+                .map(|r| (&r.block_id, &r.kind, r.tag_number, r.token_count))
+                .collect::<Vec<_>>()
+        );
+        let first = transform_with_projection(&s, &request, &context).unwrap();
+        eprintln!(
+            "CONTRACT first force scheduler={:?} action={}",
+            first.scheduler_pass, first.response.action
+        );
+        let state = s.load("ses").unwrap();
+        eprintln!(
+            "CONTRACT rows={:?} units={:?} assessment={:?}",
+            s.load_tags_for_session("ses")
+                .unwrap()
+                .iter()
+                .map(|r| (&r.block_id, &r.kind, r.tag_number, r.token_count))
+                .collect::<Vec<_>>(),
+            state
+                .core
+                .frozen_units
+                .iter()
+                .map(|u| &u.key)
+                .collect::<Vec<_>>(),
+            state.meta.emergency_drop_assessment
+        );
+        assert!(!state.meta.has_prior_emergency_drop);
+        assert!(!state
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key.starts_with("red:")));
+        let assessment = state.meta.emergency_drop_assessment.unwrap();
+        assert_eq!(assessment.selected_reclaim_tokens, 0.0);
+        assert!(assessment.target_unreachable);
+        let bytes = serde_json::to_vec(&first.response.ck_messages).unwrap();
+        for usage in [82_000, 85_000, 94_000] {
+            request = with_usage(request, usage, 100_000);
+            let held = transform_with_projection(&s, &request, &context).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&held.response.ck_messages).unwrap(),
+                bytes
+            );
+            assert!(!s.load("ses").unwrap().meta.has_prior_emergency_drop);
+            eprintln!("CONTRACT zero-reclaim usage={usage} scheduler={:?} action={} stable=true latch=true", held.scheduler_pass, held.response.action);
+        }
+        request = with_usage(request, 96_000, 100_000);
+        let escaped = transform_with_projection(&s, &request, &context).unwrap();
+        let count = s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .filter(|u| u.key.starts_with("red:result-"))
+            .count();
+        eprintln!("CONTRACT zero-reclaim escape scheduler={:?} action={} red_units={count} assessment={:?}", escaped.scheduler_pass, escaped.response.action, s.load("ses").unwrap().meta.emergency_drop_assessment);
+        request.render_config = "cfg-95-control".to_string();
+        let control = transform_with_projection(&s, &request, &context).unwrap();
+        let control_count = s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .filter(|u| u.key.starts_with("red:result-"))
+            .count();
+        eprintln!(
+            "CONTRACT zero-reclaim HARD control action={} red_units={control_count}",
+            control.response.action
+        );
+        assert!(control_count > 0);
+        assert!(count > 0, "95 must release protected result rows even after earlier call-only reductions; HARD control result drops={control_count}");
+    }
+
+    #[test]
+    fn contract_agent_drop_queued_inside_protected_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let context = smart_pctx();
+        let mut request = with_usage(
+            active_cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    assistant_tool_call("protected-tool", 2, "protected-call"),
+                    tool_result("protected-result", 3, "protected-call", &"x".repeat(4000)),
+                ],
+            ),
+            10_000,
+            100_000,
+        );
+        request.protected_tokens_effective = Some(4000);
+        transform(&s, &request, &context).unwrap();
+        s.append_pending_agent_drops("ses", &["protected-result#0".to_string()], 1)
+            .unwrap();
+        let queued = transform_with_projection(&s, &request, &context).unwrap();
+        let pending = s.load_pending_agent_drops("ses").unwrap();
+        eprintln!(
+            "CONTRACT protected agent scheduler={:?} action={} pending={}",
+            queued.scheduler_pass,
+            queued.response.action,
+            pending.len()
+        );
+        assert_eq!(pending.len(), 1);
+        assert!(!s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:protected-result#0"));
+        for n in 0..4 {
+            request.messages.push(assistant_tool_call(
+                &format!("new-{n}"),
+                4 + n * 2,
+                &format!("new-call-{n}"),
+            ));
+            request.messages.push(tool_result(
+                &format!("new-result-{n}"),
+                5 + n * 2,
+                &format!("new-call-{n}"),
+                &"y".repeat(8000),
+            ));
+        }
+        let aged = transform_with_projection(&s, &request, &context).unwrap();
+        eprintln!(
+            "CONTRACT aged agent scheduler={:?} action={} pending={}",
+            aged.scheduler_pass,
+            aged.response.action,
+            s.load_pending_agent_drops("ses").unwrap().len()
+        );
+        let aged = transform_with_projection(&s, &request, &context).unwrap();
+        eprintln!(
+            "CONTRACT persisted-aged agent scheduler={:?} action={} pending={}",
+            aged.scheduler_pass,
+            aged.response.action,
+            s.load_pending_agent_drops("ses").unwrap().len()
+        );
+        eprintln!(
+            "CONTRACT aged rows={:?}",
+            s.load_tags_for_session("ses")
+                .unwrap()
+                .iter()
+                .map(|r| (&r.block_id, &r.kind, r.tag_number, r.token_count))
+                .collect::<Vec<_>>()
+        );
+        request.render_config = "cfg-aged".to_string();
+        transform(&s, &request, &context).unwrap();
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+        assert!(s
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:protected-result#0"));
+    }
+
+    #[test]
+    fn contract_boundaryless_zero_reclaim_keeps_episode_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let context = smart_pctx();
+        let mut messages = vec![item("a", 1, "raw")];
+        for n in 0..5 {
+            messages.push(assistant_tool_call(
+                &format!("tool-{n}"),
+                2 + n * 2,
+                &format!("call-{n}"),
+            ));
+            messages.push(tool_result(
+                &format!("result-{n}"),
+                3 + n * 2,
+                &format!("call-{n}"),
+                &"payload information ".repeat(1000),
+            ));
+        }
+        let mut request = with_usage(
+            active_cc_req("audit-boundaryless", "cfg0", messages),
+            10_000,
+            100_000,
+        );
+        request.protected_tokens_effective = Some(30_000);
+        transform(&s, &request, &context).unwrap();
+        let mut bytes = None;
+        for usage in [90_000, 82_000, 85_000, 94_000, 96_000] {
+            request = with_usage(request, usage, 100_000);
+            let response = transform_with_projection(&s, &request, &context).unwrap();
+            let current = serde_json::to_vec(&response.response.ck_messages).unwrap();
+            if let Some(previous) = &bytes {
+                assert_eq!(&current, previous);
+            }
+            bytes = Some(current);
+            let state = s.load("audit-boundaryless").unwrap();
+            assert!(!state.meta.has_prior_emergency_drop);
+            assert!(!state
+                .core
+                .frozen_units
+                .iter()
+                .any(|u| u.key.starts_with("red:")));
+            eprintln!(
+                "CONTRACT boundaryless usage={usage} scheduler={:?} action={} red=0 latch=true",
+                response.scheduler_pass, response.response.action
+            );
+        }
+    }
+
+    #[test]
+    fn contract_explicit_protected_drop_applies_at_95() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let context = smart_pctx();
+        let mut messages = vec![item("a", 1, "raw")];
+        for n in 0..5 {
+            messages.push(assistant_tool_call(
+                &format!("qtool-{n}"),
+                2 + n * 2,
+                &format!("qcall-{n}"),
+            ));
+            messages.push(tool_result(
+                &format!("qresult-{n}"),
+                3 + n * 2,
+                &format!("qcall-{n}"),
+                "small output",
+            ));
+        }
+        let mut request = with_usage(
+            active_cc_req("ses", "cfg-audit-bootstrap", messages),
+            10_000,
+            100_000,
+        );
+        request.protected_tokens_effective = Some(30_000);
+        transform(&s, &request, &context).unwrap();
+        s.seed_tags_for_test(
+            "ses",
+            &(0..5)
+                .map(|n| mc_store::TagMintInput {
+                    block_id: format!("qresult-{n}#0"),
+                    kind: "tool_result".into(),
+                    token_count: 3,
+                    source_bytes: b"small output".to_vec(),
+                })
+                .collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
+        s.append_pending_agent_drops("ses", &["qresult-2#0".to_string()], 1)
+            .unwrap();
+        request = with_usage(request, 70_000, 100_000);
+        transform(&s, &request, &context).unwrap();
+        assert_eq!(s.load_pending_agent_drops("ses").unwrap().len(), 1);
+        request = with_usage(request, 96_000, 100_000);
+        let response = transform_with_projection(&s, &request, &context).unwrap();
+        let state = s.load("ses").unwrap();
+        eprintln!(
+            "CONTRACT explicit95 scheduler={:?} action={} pending={} units={:?}",
+            response.scheduler_pass,
+            response.response.action,
+            s.load_pending_agent_drops("ses").unwrap().len(),
+            state
+                .core
+                .frozen_units
+                .iter()
+                .map(|u| &u.key)
+                .collect::<Vec<_>>()
+        );
+        assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
+        assert!(state
+            .core
+            .frozen_units
+            .iter()
+            .any(|u| u.key == "red:qresult-2#0"));
+    }
+
+    // These episode fixtures need a genuinely aged result, not a call-only reduction
+    // beside a result still protected by the newest-three minimum. Persisted rows
+    // retain chronology even when their messages are outside the current projection.
+    fn age_episode_tools_past_newest_three(s: &McStore) {
+        s.seed_tags_for_test(
+            "ses",
+            &(0..3)
+                .map(|n| mc_store::TagMintInput {
+                    block_id: format!("newer-history-{n}#0"),
+                    kind: "tool_result".into(),
+                    token_count: 20_000,
+                    source_bytes: b"newer".to_vec(),
+                })
+                .collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn force_episode_coalesces_lanes_and_defers_late_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
@@ -18242,6 +18674,7 @@ pub(crate) mod tests {
             .frozen_units
             .iter()
             .any(|u| u.key == "red:late#0"));
+        age_episode_tools_past_newest_three(&s);
         let mut loaded = s.load("ses").unwrap();
         loaded.meta.soft_refresh_pending = true;
         loaded.meta.last_execute_ordinal = 142;
@@ -18417,6 +18850,7 @@ pub(crate) mod tests {
         assert_eq!(assessment.selected_reclaim_tokens, 0.0);
         assert!(assessment.target_unreachable);
 
+        age_episode_tools_past_newest_three(&s);
         let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
         request = with_usage(request, 90_100, 100_000);
         let held = transform(&s, &request, &context).unwrap();
@@ -18497,6 +18931,7 @@ pub(crate) mod tests {
                     .iter()
                     .any(|u| u.key == "red:late#0"));
             }
+            age_episode_tools_past_newest_three(&s);
             let mut loaded = s.load("ses").unwrap();
             loaded.meta.last_execute_ordinal = 5;
             if escape == "refresh" {

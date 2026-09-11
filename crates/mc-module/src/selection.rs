@@ -342,7 +342,8 @@ fn group_arcs(items: &[SelItem], frozen: &HashSet<String>) -> Vec<ToolArc> {
                     .saturating_add(token_count),
             );
         }
-        if frozen.contains(&item.id) {
+        // Legacy call-only reductions must not strand a still-live result.
+        if matches!(item.kind, SelKind::ToolResult { .. }) && frozen.contains(&item.id) {
             entry.reduced = true;
         }
         match &item.kind {
@@ -1474,9 +1475,19 @@ pub(crate) fn select_reductions_with_outcome(
     // guard after their block-granular decisions have been added.
     out.retain(|decision| arc_allows_reduction(&decision.target_id));
 
-    // Protection is block-specific, not an ordinal cutoff: remove protected targets from
-    // both automatic arc decisions and agent-directed decisions before the stable merge.
-    out.retain(|decision| !ctx.block_is_protected(&decision.target_id));
+    // Withhold the whole arc when either half is protected. Freezing only its call
+    // would leave a live result paired with a reduced invocation on later passes.
+    let protected_arcs: HashSet<&str> = items
+        .iter()
+        .filter(|item| ctx.block_is_protected(&item.id))
+        .filter_map(|item| item.arc_id.as_deref())
+        .collect();
+    out.retain(|decision| {
+        !ctx.block_is_protected(&decision.target_id)
+            && !arc_by_block_id
+                .get(decision.target_id.as_str())
+                .is_some_and(|arc_id| protected_arcs.contains(arc_id))
+    });
 
     // Deterministic merge: exactly one decision per target (drop > edit_marker >
     // skeleton), stable output order (by target_id).
@@ -1673,6 +1684,56 @@ mod tests {
             token_count: None,
             arc_id: Some(arc_id.to_string()),
         }
+    }
+
+    #[test]
+    fn contract_consumed_episode_emergency95_parity_golden() {
+        let items = vec![
+            tool_call("protected", 1, "bash", serde_json::json!({}), 100),
+            tool_result("protected", 2, "bash", 20_000),
+        ];
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 90_000.0;
+        ctx.ceiling_tokens = 65_000.0;
+        ctx.has_prior_drop = true;
+        ctx.prior_input_sample = 85_000.0;
+        ctx.tag_window_protected_block_ids
+            .insert(result_block_id("protected"));
+        assert!(
+            select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default())
+                .is_empty()
+        );
+        ctx.current_total_input_tokens = 96_000.0;
+        ctx.emergency_window_yields = true;
+        let decisions =
+            select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        assert_eq!(
+            decisions
+                .iter()
+                .map(|d| d.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["protected#0", "protected#1"]
+        );
+    }
+
+    #[test]
+    fn contract_legacy_call_only_reduction_does_not_strand_result() {
+        let items = vec![
+            tool_call("legacy", 1, "bash", serde_json::json!({}), 100),
+            tool_result("legacy", 2, "bash", 20_000),
+        ];
+        let frozen = HashSet::from([call_block_id("legacy")]);
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 96_000.0;
+        ctx.ceiling_tokens = 65_000.0;
+        ctx.emergency_window_yields = true;
+        let outcome = select_reductions(&items, &frozen, &ctx, &SelectionConfig::default());
+        assert!(outcome
+            .iter()
+            .any(|d| d.target_id == result_block_id("legacy")));
+        assert!(!outcome
+            .iter()
+            .any(|d| d.target_id == call_block_id("legacy")));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-protection";
 import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
@@ -16,6 +17,7 @@ import {
     getPendingOpsCount,
     getPersistedTodoPermissionDenied,
     getPersistedTodoSyntheticAnchor,
+    getTagsBySession,
     type PendingCompactionMarker,
     pruneAutoSearchHintDecisions,
     pruneNoteNudgeAnchors,
@@ -38,6 +40,7 @@ import {
     NEWEST_REASONING_BEARING_ASSISTANT,
     type PersistedCompactionMarkerState,
     type PostprocessReplaySnapshot,
+    setEmergencyDropSample,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -1526,7 +1529,9 @@ export async function runPostTransformPhase(
                 args.sessionId,
                 args.db,
                 args.targets,
-                args.protectedTagIds,
+                args.contextUsage.percentage >= 95
+                    ? newestCtxReduceTagNumbers(getTagsBySession(args.db, args.sessionId))
+                    : args.protectedTagIds,
                 undefined,
                 pendingOps,
             );
@@ -1575,15 +1580,14 @@ export async function runPostTransformPhase(
             ) {
                 clearEmergencyDropSample(args.db, args.sessionId);
             }
-            // Routine age-sensitive rewrites get one originating application per
-            // continuous execute-pressure episode, not one per user turn. Later
-            // force-band passes may run emergency selection, but caveman/reasoning/
-            // dedup first-apply only when another mutation is already priced. The
-            // pressure latch clears on a real defer, so a 50% threshold cannot make
-            // every new turn a fresh rewrite opportunity while usage stays high.
+            // Force-originated tool and text rewrites share the durable episode.
+            // A small pressure dip or a process restart cannot rearm just the text lane.
+            // Independent work and the absolute emergency arm still admit all lanes.
             let routineCleanupApplied =
-                !args.fullFeatureMode ||
-                !routinePressureAlreadyApplied ||
+                (emergencyDropEligible
+                    ? args.contextUsage.percentage >= 95 ||
+                      getEmergencyInputSample(args.db, args.sessionId) === 0
+                    : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
                 materializationRequested ||
                 independentMutationBeforeHeuristics;
             // Pending ops run just before heuristics and can drop active tags.
@@ -1746,6 +1750,10 @@ export async function runPostTransformPhase(
             updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
         }
 
+        // Consume only after the shared tool/text batch actually changed bytes.
+        if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
+            setEmergencyDropSample(args.db, args.sessionId, args.contextUsage.inputTokens);
+        }
         const toolReclaimApplicationOpportunity = isCacheBustingPass;
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
