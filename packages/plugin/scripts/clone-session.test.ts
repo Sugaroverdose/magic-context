@@ -564,8 +564,7 @@ describe("clone-session", () => {
             const replayDocument = parseReplayDocument(state.trailing_blank_decisions);
             expect(replayDocument.version).toBe(2);
             expect(Object.entries(replayDocument.trailingBlank)).toEqual([
-                ["msg_source_2", "strip"],
-                ["outside-assistant", "keep:2"],
+                [tool.tool_owner_message_id, "strip"],
             ]);
             expect(replayDocument.piNative).toEqual({
                 toolInputs: { [tool.message_id]: frozenInput },

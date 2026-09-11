@@ -819,11 +819,31 @@ describe("Pi clone state inheritance", () => {
 			new Set(["clone-assistant-retained"]),
 		);
 		expect(getTrailingBlankDecisions(database, "clone")).toEqual(
+			new Map([["clone-assistant-retained", "strip"]]),
+		);
+	});
+
+	it("filters and remaps legacy flat trailing decisions without adding native state", () => {
+		const database = db();
+		addTrailingBlankDecisions(database, "source", [
+			["assistant-retained", "strip"],
+			["assistant-outside", "keep:2"],
+		]);
+		copySessionStateForClone(database, "source", "clone", {
+			...__test.createCloneFilter([assistant("assistant-retained")]),
+			mapMessageId: (id) => `clone-${id}`,
+		});
+		expect(getTrailingBlankDecisions(database, "clone")).toEqual(
+			new Map([["clone-assistant-retained", "strip"]]),
+		);
+		expect(getTrailingBlankDecisions(database, "source")).toEqual(
 			new Map([
 				["assistant-retained", "strip"],
 				["assistant-outside", "keep:2"],
 			]),
 		);
+		expect(getNativeToolInputs(database, "clone")).toEqual(new Map());
+		expect(getNativeReasoningIds(database, "clone")).toEqual(new Set());
 	});
 
 	it("fails closed and rolls back a clone with malformed native replay", () => {

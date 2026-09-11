@@ -289,6 +289,18 @@ function cloneReplayDocument(
     filter: CloneSessionStateFilter,
 ): ReplayDocument {
     const document = readReplayDocument(db, sourceSessionId);
+    const trailingBlank = new Map<string, ReplayDocument["trailingBlank"][string]>();
+    for (const [sourceId, decision] of Object.entries(document.trailingBlank)) {
+        if (!filter.includeMessageId(sourceId)) continue;
+        const destinationId = mapMessageId(filter, sourceId);
+        if (destinationId === null) continue;
+        const existing = trailingBlank.get(destinationId);
+        if (existing !== undefined && existing !== decision) {
+            throw new Error(`trailing blank clone collision for ${destinationId}`);
+        }
+        trailingBlank.set(destinationId, decision);
+    }
+    document.trailingBlank = Object.fromEntries(trailingBlank);
     if (document.version === 1 || document.piNative === undefined) return document;
 
     const nativeReplay = getNativeReplayState(db, sourceSessionId);
