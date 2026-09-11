@@ -29,6 +29,7 @@ import {
 	__resetSchemaFenceStateForTests,
 	LATEST_SUPPORTED_VERSION,
 } from "@magic-context/core/features/magic-context/storage-db";
+import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-runner";
 
@@ -1260,6 +1261,139 @@ describe("subagent-runner pure helpers", () => {
 });
 
 describe("PiSubagentRunner spawn lifecycle", () => {
+	it("records OMP message_end usage in subagent_invocations", async () => {
+		__setPiHarnessKindForTesting("omp");
+		const child = createMockChild();
+		const { runner } = runnerWith(child, {
+			invocation: { command: "omp", prefixArgs: [], targetHarness: "omp" },
+		});
+		const testDataDir = mkdtempSync(join(tmpdir(), "mc-pi-accounting-"));
+		const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+		const previousXdgDataHome = process.env.XDG_DATA_HOME;
+		process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
+		process.env.XDG_DATA_HOME = testDataDir;
+		closeDatabase();
+		try {
+			const resultPromise = runner.run({
+				...baseOptions,
+				model: "anthropic/claude-sonnet",
+				accountingSessionId: "omp-accounting-session",
+				accountingSubagent: "historian",
+			});
+			child.writeStdoutLine({
+				// Captured OMP 18.1.11 shape: usage lives on each assistant
+				// message_end message, including intermediate tool turns.
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", name: "read", id: "call-1" }],
+					stopReason: "toolUse",
+					usage: {
+						input: 1_200,
+						output: 80,
+						cacheRead: 300,
+						cacheWrite: 20,
+						totalTokens: 1_600,
+						reasoningTokens: 10,
+						cost: { input: 0.01 },
+					},
+				},
+			});
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					stopReason: "stop",
+					usage: {
+						input: 400,
+						output: 30,
+						cacheRead: 100,
+						cacheWrite: 5,
+						totalTokens: 535,
+						reasoningTokens: 4,
+						cost: { output: 0.02 },
+					},
+				},
+			});
+			child.emitClose(0);
+
+			expect(await resultPromise).toMatchObject({
+				ok: true,
+				assistantText: "done",
+			});
+			const db = openDatabase();
+			if (!db) throw new Error("accounting test database did not open");
+			const [row] = getSubagentInvocations(db, "omp-accounting-session");
+			expect(row).toMatchObject({
+				harness: "omp",
+				inputTokens: 1_600,
+				outputTokens: 110,
+				cacheReadTokens: 400,
+				cacheWriteTokens: 25,
+			});
+		} finally {
+			closeDatabase();
+			if (previousTestDataDir === undefined)
+				delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = previousTestDataDir;
+			if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+			else process.env.XDG_DATA_HOME = previousXdgDataHome;
+			rmSync(testDataDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps successful OMP invocation at zero tokens when stream omits usage", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child, {
+			invocation: { command: "omp", prefixArgs: [], targetHarness: "omp" },
+		});
+		const testDataDir = mkdtempSync(join(tmpdir(), "mc-pi-accounting-empty-"));
+		const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+		const previousXdgDataHome = process.env.XDG_DATA_HOME;
+		process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
+		process.env.XDG_DATA_HOME = testDataDir;
+		closeDatabase();
+		try {
+			const resultPromise = runner.run({
+				...baseOptions,
+				accountingSessionId: "omp-accounting-empty",
+				accountingSubagent: "historian",
+			});
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					stopReason: "stop",
+				},
+			});
+			child.emitClose(0);
+
+			expect(await resultPromise).toMatchObject({
+				ok: true,
+				assistantText: "done",
+			});
+			const db = openDatabase();
+			if (!db) throw new Error("accounting test database did not open");
+			const [row] = getSubagentInvocations(db, "omp-accounting-empty");
+			expect(row).toMatchObject({
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
+		} finally {
+			closeDatabase();
+			if (previousTestDataDir === undefined)
+				delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = previousTestDataDir;
+			if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+			else process.env.XDG_DATA_HOME = previousXdgDataHome;
+			rmSync(testDataDir, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses to spawn known zero-tool agents without a system prompt", async () => {
 		const spawnImpl = mock(() => {
 			throw new Error("spawn must not be reached");

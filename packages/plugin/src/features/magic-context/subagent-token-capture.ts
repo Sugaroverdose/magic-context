@@ -49,6 +49,11 @@ function tokenObjectFromMessage(message: Record<string, unknown>): Record<string
     }
     const tokens = message.tokens;
     if (tokens && typeof tokens === "object") return tokens as Record<string, unknown>;
+    // Pi/OMP --mode json puts provider accounting on message.usage rather
+    // than OpenCode's info.tokens. Keep the normalized totals below shared so
+    // both harnesses write the same invocation columns.
+    const usage = message.usage;
+    if (usage && typeof usage === "object") return usage as Record<string, unknown>;
     return null;
 }
 

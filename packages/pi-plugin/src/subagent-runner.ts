@@ -1510,6 +1510,10 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (e.type === "agent_end" && Array.isArray(e.messages)) {
 					sawAgentEnd = true;
 					agentEndMessages = e.messages;
+					// agent_end is authoritative when a Pi-compatible child emits it;
+					// retain its complete assistant-message list so usage is accounted
+					// even when no message_end events were printed.
+					accountingMessages = e.messages;
 					const result = extractFinalAssistant(e.messages);
 					finalAssistantText = result.text;
 					finalStopReason = result.stopReason;
@@ -1533,6 +1537,9 @@ export class PiSubagentRunner implements SubagentRunner {
 				// max-tokens cap mid-response — still terminal, but we
 				// surface it as model_failed so callers can react.
 				if (e.type === "message_end" && e.message) {
+					// Every assistant message_end is retained. recordChildInvocation
+					// sums message.usage here, matching OpenCode's per-assistant
+					// info.tokens accounting rather than using only the final turn.
 					accumulatedMessages.push(e.message);
 					const m = e.message as {
 						role?: string;
