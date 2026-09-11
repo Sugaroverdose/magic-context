@@ -971,7 +971,7 @@ fn select_agent_drops(
     out: &mut Vec<ReductionDecision>,
 ) {
     for id in &ctx.agent_drop_ids {
-        if frozen.contains(id) || !live_ids.contains(id) {
+        if frozen.contains(id) || !live_ids.contains(id) || ctx.block_is_protected(id) {
             continue;
         }
         let first_applied = ctx.first_applied_agent_drop_ids.contains(id);
@@ -989,6 +989,7 @@ fn select_agent_drops(
                         && !ctx.first_applied_agent_drop_ids.contains(other)
                         && live_ids.contains(other)
                         && !frozen.contains(other)
+                        && !ctx.block_is_protected(other)
                         && ctx.agent_drop_command_ids.get(other)
                             != ctx.agent_drop_command_ids.get(id)
                 }));
@@ -1247,19 +1248,9 @@ pub(crate) fn select_reductions_with_outcome(
     };
     // Only agent drops that survive the same arc guards as final emission price
     // automatic cleanup. An open or reasoning-exempt arc cannot supply a ride.
-    let exemplar_arcs = newest_ctx_reduce_arc_ids(&arcs.iter().collect::<Vec<_>>());
-    let agent_live_ids = live_ids
-        .iter()
-        .filter(|id| {
-            arc_allows_reduction(id)
-                && arc_by_block_id
-                    .get(id.as_str())
-                    .is_none_or(|arc| !exemplar_arcs.contains(*arc))
-        })
-        .cloned()
-        .collect();
     let mut agent_decisions = Vec::new();
-    select_agent_drops(ctx, &agent_live_ids, frozen_keys, &mut agent_decisions);
+    select_agent_drops(ctx, &live_ids, frozen_keys, &mut agent_decisions);
+    agent_decisions.retain(|decision| arc_allows_reduction(&decision.target_id));
     let mut ride_context = ctx.clone();
     ride_context.supersession_ride_available |= !agent_decisions.is_empty();
     ride_context.pass_already_busting |= !agent_decisions.is_empty();
@@ -1475,15 +1466,17 @@ pub(crate) fn select_reductions_with_outcome(
         expand_arc(arc, resolved, frozen_keys, &mut out);
     }
 
-    // Token windows and recency reserves govern automatic reclaim, not explicit permission.
-    // Filter automatic decisions before adding agent targets, which retain the arc safety
-    // guards and newest ctx_reduce exemplars even when they bypass automatic protection.
-    out.retain(|decision| {
-        arc_allows_reduction(&decision.target_id) && !ctx.block_is_protected(&decision.target_id)
-    });
-    let mut application_context = ctx.clone();
-    application_context.pass_already_busting |= !out.is_empty();
-    select_agent_drops(&application_context, &agent_live_ids, frozen_keys, &mut out);
+    // ctx_reduce agent drops stay block-granular, but pass-through carriers are absent
+    // from live_ids so Media and Opaque can never become reduction targets.
+    select_agent_drops(ctx, &live_ids, frozen_keys, &mut out);
+
+    // Agent-directed ids can name either half of a tool arc, so apply the same whole-message
+    // guard after their block-granular decisions have been added.
+    out.retain(|decision| arc_allows_reduction(&decision.target_id));
+
+    // Protection is block-specific, not an ordinal cutoff: remove protected targets from
+    // both automatic arc decisions and agent-directed decisions before the stable merge.
+    out.retain(|decision| !ctx.block_is_protected(&decision.target_id));
 
     // Deterministic merge: exactly one decision per target (drop > edit_marker >
     // skeleton), stable output order (by target_id).
@@ -2949,34 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_drops_keep_newest_three_ctx_reduce_exemplars_and_open_arcs() {
-        let mut items = Vec::new();
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.pass_already_busting = true;
-        for n in 1..=5 {
-            let mid = format!("reduce-{n}");
-            items.push(tool_call(&mid, n, "ctx_reduce", serde_json::json!({}), 200));
-            if n < 5 {
-                items.push(tool_result(&mid, n, "ctx_reduce", 200));
-                ctx.agent_drop_ids.push(result_block_id(&mid));
-            }
-            ctx.agent_drop_ids.push(call_block_id(&mid));
-        }
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        // The open fifth invocation also occupies an exemplar slot; the newest three
-        // invocations remain anchors whether or not their result has arrived yet.
-        let targets = out
-            .iter()
-            .map(|decision| decision.target_id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            targets,
-            ["reduce-1#0", "reduce-1#1", "reduce-2#0", "reduce-2#1"]
-        );
-    }
-
-    #[test]
-    fn dynamic_block_protection_filters_only_automatic_drop_decisions() {
+    fn dynamic_block_protection_filters_automatic_and_agent_drop_decisions() {
         let items = vec![
             tool_call("c1", 1, "bash", serde_json::json!({}), 200),
             tool_result("c1", 1, "bash", 200),
@@ -2991,13 +2957,7 @@ mod tests {
         ctx.tag_window_protected_block_ids.insert(protected.clone());
 
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        assert!(out.iter().any(|decision| decision.target_id == protected));
-        ctx.agent_drop_ids.clear();
-        let automatic =
-            select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        assert!(automatic
-            .iter()
-            .all(|decision| decision.target_id != protected));
+        assert!(out.iter().all(|decision| decision.target_id != protected));
         assert!(
             out.iter()
                 .any(|decision| decision.target_id == result_block_id("c2")),

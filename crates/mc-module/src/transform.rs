@@ -17809,10 +17809,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cc_explicit_drop_specimen_drains_all_32_on_bust() {
+    fn cc_explicit_drop_specimen_holds_protected_results_until_aged() {
         use crate::ck_wire::{CkKind, CkOutputKind, CkToolOutput, HarnessMeta, ProviderExtras};
-        let rows: Vec<(i64, String, String, i64)> =
-            serde_json::from_str(include_str!("explicit_drop_specimen.json")).unwrap();
+        let rows: Vec<(i64, String, String, i64)> = serde_json::from_str(include_str!(
+            "../tests/fixtures/explicit_drop_specimen.json"
+        ))
+        .unwrap();
         let mut messages = Vec::new();
         let mut tag_rows = Vec::new();
         for (tag, kind, id, tokens) in &rows {
@@ -17929,40 +17931,101 @@ pub(crate) mod tests {
             tag_window_protected_block_ids: protected,
             exempt_message_protected_block_ids: HashSet::new(),
         };
-        for already_applied in [false, true] {
-            if already_applied {
-                ctx.first_applied_agent_drop_ids
-                    .extend(ctx.agent_drop_ids.iter().cloned());
-                ctx.has_prior_drop = true;
-            }
-            let outcome = select_reductions_with_outcome(
-                &items,
-                &HashSet::new(),
-                &ctx,
-                &SelectionConfig { smart_drops: false },
+        let first = select_reductions_with_outcome(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        let mut applied = first
+            .decisions
+            .iter()
+            .map(|decision| decision.target_id.clone())
+            .collect::<HashSet<_>>();
+        for (tag, kind, id, _) in &rows {
+            let item = items.iter().find(|item| &item.id == id).unwrap();
+            let protected = ctx.tag_window_protected_block_ids.contains(id);
+            eprintln!(
+                "tag={tag} kind={kind} id={id} paired={} protected={protected} applied={}",
+                item.arc_id.is_some(),
+                applied.contains(id)
             );
-            for (tag, kind, id, _) in &rows {
-                let item = items.iter().find(|item| &item.id == id).unwrap();
-                let applied = outcome
-                    .decisions
-                    .iter()
-                    .any(|decision| &decision.target_id == id);
-                eprintln!("tag={tag} kind={kind} id={id} paired={} protected={} applied={applied} prior_command_application={already_applied}", item.arc_id.is_some(), ctx.tag_window_protected_block_ids.contains(id));
-                if kind == "tool_result" {
-                    assert!(item.arc_id.is_some());
-                }
-            }
-            assert_eq!(
-                outcome.decisions.len(),
-                32,
-                "every explicit target must drain, even when emergency selected zero"
-            );
-            if !already_applied {
-                let emergency = outcome.emergency_drop_assessment.unwrap();
-                assert_eq!(emergency.candidate_tokens, 0.0);
-                assert_eq!(emergency.selected_reclaim_tokens, 0.0);
+            if kind == "tool_result" {
+                assert!(
+                    item.arc_id.is_some(),
+                    "result {tag} must pair with its assistant call"
+                );
+                assert!(protected, "result {tag} must be inside the recent window");
+                assert!(
+                    !applied.contains(id),
+                    "result {tag} stays queued while protected"
+                );
+            } else {
+                assert!(applied.contains(id), "unprotected text {tag} applies now");
             }
         }
+        assert_eq!(applied.len(), 3);
+        let emergency = first.emergency_drop_assessment.unwrap();
+        assert_eq!(emergency.candidate_tokens, 0.0);
+        assert_eq!(emergency.selected_reclaim_tokens, 0.0);
+
+        // Partial application consumes only the selected targets. The command-level
+        // first-application marker remains set while its other targets wait to age.
+        ctx.agent_drop_ids.retain(|id| !applied.contains(id));
+        assert_eq!(ctx.agent_drop_ids.len(), 29);
+        ctx.first_applied_agent_drop_ids
+            .extend(ctx.agent_drop_ids.iter().cloned());
+        ctx.has_prior_drop = true;
+        let still_protected = select_reductions_with_outcome(
+            &items,
+            &applied,
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        assert!(still_protected.decisions.is_empty());
+
+        // Three newer persisted tool tags fill the token budget and structural floor,
+        // moving the real protection window entirely past the queued specimen rows.
+        for n in 0..3 {
+            tag_rows.push(mc_store::McTagRow {
+                tag_number: 609 + n,
+                block_id: format!("newer-{n}#0"),
+                kind: "tool_result".into(),
+                token_count: 10_000,
+                created_at_ms: 0,
+                source_bytes: Vec::new(),
+            });
+        }
+        ctx.tag_window_protected_block_ids =
+            ProtectionWindow::from_persisted_rows(&tag_rows, 30_000)
+                .row_identities
+                .block_ids;
+        assert_eq!(ctx.tag_window_protected_block_ids.len(), 3);
+        assert!(ctx
+            .agent_drop_ids
+            .iter()
+            .all(|id| !ctx.tag_window_protected_block_ids.contains(id)));
+        let later = select_reductions_with_outcome(
+            &items,
+            &applied,
+            &ctx,
+            &SelectionConfig { smart_drops: false },
+        );
+        // The later bust may also reclaim unprotected call blocks automatically;
+        // count the explicit queue targets separately from those arc decisions.
+        let applied_remainder = later
+            .decisions
+            .into_iter()
+            .filter(|decision| ctx.agent_drop_ids.contains(&decision.target_id))
+            .collect::<Vec<_>>();
+        assert_eq!(applied_remainder.len(), 29);
+        for decision in applied_remainder {
+            assert_eq!(decision.kind, "drop");
+            applied.insert(decision.target_id);
+        }
+        ctx.agent_drop_ids.retain(|id| !applied.contains(id));
+        assert!(ctx.agent_drop_ids.is_empty());
+        assert_eq!(applied, rows.iter().map(|row| row.2.clone()).collect());
     }
 
     #[test]
@@ -31052,8 +31115,7 @@ pub(crate) mod tests {
         for pass in 0..3 {
             let response = run(
                 &store_after_restart,
-                // Below the execute ceiling: pressure alone must not supply a new ride.
-                &with_usage(stable_request.clone(), 10, 100),
+                &with_usage(stable_request.clone(), 70, 100),
                 &spine(),
             );
             assert_eq!(
@@ -31173,7 +31235,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn persisted_tool_row_protection_does_not_block_explicit_drops_on_hard_bust() {
+    fn persisted_tool_row_set_protects_pending_drops_by_exact_identity() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let payload = "word ".repeat(1_000);
@@ -31210,10 +31272,7 @@ pub(crate) mod tests {
             frozen_red_payload(&loaded.core, "result1#0"),
             Some("[dropped]")
         );
-        assert_eq!(
-            frozen_red_payload(&loaded.core, "result2#0"),
-            Some("[dropped]")
-        );
+        assert_eq!(frozen_red_payload(&loaded.core, "result2#0"), None);
         assert_eq!(
             store
                 .load_pending_agent_drops("protected-row-identities")
@@ -31221,7 +31280,7 @@ pub(crate) mod tests {
                 .into_iter()
                 .map(|row| row.target_id)
                 .collect::<Vec<_>>(),
-            Vec::<String>::new()
+            vec!["result2#0".to_string()]
         );
     }
 
