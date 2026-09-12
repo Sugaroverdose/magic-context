@@ -2,6 +2,12 @@ import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
+import { getNativeReplayState } from "./storage-native-replay";
+import {
+    type ReplayDocument,
+    readReplayDocument,
+    serializeReplayDocument,
+} from "./storage-replay-document";
 
 export interface CloneCompartmentRow {
     sequence: number;
@@ -247,6 +253,70 @@ function filterIdBlob(raw: string | null, filter: CloneSessionStateFilter): stri
     }
 }
 
+function filterNativeToolInputs(
+    inputs: ReadonlyMap<string, string>,
+    copiedToolCallIds: ReadonlySet<string>,
+    filter: CloneSessionStateFilter,
+): Record<string, string> {
+    const filtered = new Map<string, string>();
+    for (const [sourceId, serializedInput] of inputs) {
+        if (!copiedToolCallIds.has(sourceId)) continue;
+        const destinationId = mapMessageId(filter, sourceId);
+        if (destinationId === null) continue;
+        const existing = filtered.get(destinationId);
+        if (existing !== undefined && existing !== serializedInput) {
+            throw new Error(`native tool input clone collision for ${destinationId}`);
+        }
+        filtered.set(destinationId, serializedInput);
+    }
+    return Object.fromEntries(filtered);
+}
+
+function filterNativeReasoningIds(
+    ids: ReadonlySet<string>,
+    filter: CloneSessionStateFilter,
+): string[] {
+    const filtered = new Set<string>();
+    for (const sourceId of ids) {
+        if (!filter.includeMessageId(sourceId)) continue;
+        const destinationId = mapMessageId(filter, sourceId);
+        if (destinationId !== null) filtered.add(destinationId);
+    }
+    return [...filtered];
+}
+
+function cloneReplayDocument(
+    db: Database,
+    sourceSessionId: string,
+    copiedToolCallIds: ReadonlySet<string>,
+    filter: CloneSessionStateFilter,
+): ReplayDocument {
+    const document = readReplayDocument(db, sourceSessionId);
+    const trailingBlank = new Map<string, ReplayDocument["trailingBlank"][string]>();
+    for (const [sourceId, decision] of Object.entries(document.trailingBlank)) {
+        if (!filter.includeMessageId(sourceId)) continue;
+        const destinationId = mapMessageId(filter, sourceId);
+        if (destinationId === null) continue;
+        const existing = trailingBlank.get(destinationId);
+        if (existing !== undefined && existing !== decision) {
+            throw new Error(`trailing blank clone collision for ${destinationId}`);
+        }
+        trailingBlank.set(destinationId, decision);
+    }
+    document.trailingBlank = Object.fromEntries(trailingBlank);
+    if (document.version === 1 || document.piNative === undefined) return document;
+
+    const nativeReplay = getNativeReplayState(db, sourceSessionId);
+    return {
+        ...document,
+        piNative: {
+            ...(document.piNative as Record<string, unknown>),
+            toolInputs: filterNativeToolInputs(nativeReplay.toolInputs, copiedToolCallIds, filter),
+            reasoningIds: filterNativeReasoningIds(nativeReplay.reasoningIds, filter),
+        },
+    };
+}
+
 function clampWatermark(value: number | null, maxCopiedTag: number): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
     return Math.min(Math.floor(value), maxCopiedTag);
@@ -350,6 +420,7 @@ export function copySessionStateForClone(
         );
         const copiedTagNumbers: number[] = [];
         const copiedTagIds = new Map<number, number>();
+        const copiedToolCallIds = new Set<string>();
         for (const row of sourceTags) {
             if (
                 !filter.includeTag({
@@ -390,6 +461,7 @@ export function copySessionStateForClone(
                 : sourceTagId;
             copiedTagIds.set(sourceTagId, destinationTagId);
             copiedTagNumbers.push(row.tag_number);
+            if (row.type === "tool") copiedToolCallIds.add(row.message_id);
         }
 
         if (copiedTagNumbers.length > 0) {
@@ -520,6 +592,23 @@ export function copySessionStateForClone(
             migrateTodo ? (mapMessageId(filter, todoAnchor) ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_state_json ?? "") : "",
         );
+        // Clone owns the whole replay document so its filtered native state
+        // cannot be overwritten by the CLI's later generic metadata copy.
+        const metaColumnRows = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+            name: string;
+        }>;
+        const metaColumns = new Set(metaColumnRows.map((column) => column.name));
+        if (metaColumns.has("trailing_blank_decisions")) {
+            const replayDocument = cloneReplayDocument(
+                db,
+                sourceSessionId,
+                copiedToolCallIds,
+                filter,
+            );
+            db.prepare(
+                "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
+            ).run(serializeReplayDocument(replayDocument), destinationSessionId);
+        }
 
         const pendingOpsRow = db
             .prepare("SELECT COUNT(*) AS count FROM pending_ops WHERE session_id = ?")

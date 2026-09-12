@@ -16,6 +16,17 @@ import {
 } from "./merged-reasoning-decisions";
 import { readEpochFloorSnapshot } from "./protection-window";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
+import {
+    isPersistedTrailingBlankDecision,
+    type PersistedTrailingBlankDecision,
+    parseReplayDocument,
+    ReplayDocumentError,
+    readReplayDocument,
+    updateReplayDocument,
+} from "./storage-replay-document";
+
+export type { PersistedTrailingBlankDecision } from "./storage-replay-document";
+
 import type { ContextUsage } from "./types";
 
 const emergencyRecoveryArmedSessions = new Set<string>();
@@ -2538,33 +2549,14 @@ export function addMergedReasoningStrippedIds(
 
 // ── Trailing assistant blank decisions (frozen replay map) ──
 
-export type PersistedTrailingBlankDecision = "keep" | `keep:${number}` | "strip";
-
-function isPersistedTrailingBlankDecision(value: unknown): value is PersistedTrailingBlankDecision {
-    if (value === "keep" || value === "strip") return true;
-    if (typeof value !== "string" || !value.startsWith("keep:")) return false;
-    const countText = value.slice("keep:".length);
-    if (!/^[1-9]\d*$/.test(countText)) return false;
-    const count = Number(countText);
-    return Number.isSafeInteger(count) && count > 1 && count <= 10_000;
-}
-
 function parseTrailingBlankDecisions(
     raw: string | null | undefined,
 ): Map<string, PersistedTrailingBlankDecision> {
-    if (!raw) return new Map();
     try {
-        const parsed: unknown = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
-        const decisions = new Map<string, PersistedTrailingBlankDecision>();
-        for (const [id, decision] of Object.entries(parsed)) {
-            if (id.length > 0 && isPersistedTrailingBlankDecision(decision)) {
-                decisions.set(id, decision);
-            }
-        }
-        return decisions;
-    } catch {
-        return new Map();
+        return new Map(Object.entries(parseReplayDocument(raw, "read").trailingBlank));
+    } catch (error) {
+        if (error instanceof ReplayDocumentError) return new Map();
+        throw error;
     }
 }
 
@@ -2576,10 +2568,12 @@ export function getTrailingBlankDecisions(
     db: Database,
     sessionId: string,
 ): Map<string, PersistedTrailingBlankDecision> {
-    const row = db
-        .prepare("SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?")
-        .get(sessionId) as { trailing_blank_decisions?: string } | null;
-    return parseTrailingBlankDecisions(row?.trailing_blank_decisions);
+    try {
+        return new Map(Object.entries(readReplayDocument(db, sessionId, "read").trailingBlank));
+    } catch (error) {
+        if (error instanceof ReplayDocumentError) return new Map();
+        throw error;
+    }
 }
 
 /**
@@ -2595,38 +2589,33 @@ export function addTrailingBlankDecisions(
 ): boolean {
     const add = [...additions];
     if (add.length === 0) return true;
-    ensureSessionMetaRow(db, sessionId);
+    for (const [id, decision] of add) {
+        if (id.length === 0 || !isPersistedTrailingBlankDecision(decision)) return false;
+    }
 
-    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
-        const row = db
-            .prepare("SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { trailing_blank_decisions?: string | null } | undefined;
-        const rawStored = row ? (row.trailing_blank_decisions ?? null) : null;
-        const current = parseTrailingBlankDecisions(rawStored);
+    return updateReplayDocument(db, sessionId, (doc) => {
         let changed = false;
         for (const [id, decision] of add) {
-            const currentDecision = current.get(id);
+            const currentDecision = Object.hasOwn(doc.trailingBlank, id)
+                ? doc.trailingBlank[id]
+                : undefined;
             if (
                 currentDecision === undefined ||
                 (id === options?.overwriteMessageId &&
                     currentDecision !== decision &&
                     currentDecision !== "strip")
             ) {
-                current.set(id, decision);
+                Object.defineProperty(doc.trailingBlank, id, {
+                    value: decision,
+                    enumerable: true,
+                    writable: true,
+                    configurable: true,
+                });
                 changed = true;
             }
         }
-        if (!changed) return true;
-        const nextBlob = JSON.stringify(Object.fromEntries(current));
-        const result = db
-            .prepare(
-                "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ? AND trailing_blank_decisions IS ?",
-            )
-            .run(nextBlob, sessionId, rawStored);
-        if (result.changes > 0) return true;
-    }
-    sessionLog(sessionId, `trailing_blank_decisions CAS: ${CAS_RETRY_LIMIT} retries exhausted`);
-    return false;
+        return changed;
+    });
 }
 
 /**
@@ -2639,38 +2628,27 @@ export function demoteTrailingBlankKeepDecisions(
     sessionId: string,
     messageIds: Iterable<string>,
 ): string[] | null {
-    const ids = new Set(messageIds);
+    const ids = new Set<string>();
+    for (const id of messageIds) {
+        if (typeof id === "string" && id.length > 0) ids.add(id);
+    }
     if (ids.size === 0) return [];
-    ensureSessionMetaRow(db, sessionId);
 
-    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
-        const row = db
-            .prepare("SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?")
-            .get(sessionId) as { trailing_blank_decisions?: string | null } | undefined;
-        const rawStored = row ? (row.trailing_blank_decisions ?? null) : null;
-        const current = parseTrailingBlankDecisions(rawStored);
-        const demotedIds: string[] = [];
+    let demotedIds: string[] = [];
+    const persisted = updateReplayDocument(db, sessionId, (doc) => {
+        demotedIds = [];
         for (const id of ids) {
-            const decision = current.get(id);
+            const decision = Object.hasOwn(doc.trailingBlank, id)
+                ? doc.trailingBlank[id]
+                : undefined;
             if (decision === "keep" || decision?.startsWith("keep:") === true) {
-                current.set(id, "strip");
+                doc.trailingBlank[id] = "strip";
                 demotedIds.push(id);
             }
         }
-        if (demotedIds.length === 0) return [];
-        const nextBlob = JSON.stringify(Object.fromEntries(current));
-        const result = db
-            .prepare(
-                "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ? AND trailing_blank_decisions IS ?",
-            )
-            .run(nextBlob, sessionId, rawStored);
-        if (result.changes > 0) return demotedIds;
-    }
-    sessionLog(
-        sessionId,
-        `trailing_blank_decisions demotion CAS: ${CAS_RETRY_LIMIT} retries exhausted`,
-    );
-    return null;
+        return demotedIds.length > 0;
+    });
+    return persisted ? demotedIds : null;
 }
 
 // ── Stale ctx_reduce stripped message IDs (frozen replay watermark) ──
