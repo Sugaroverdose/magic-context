@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ GATEWAY_PRIVATE_EVIDENCE = {
 }
 SOURCE_LABEL = f"VACUUM {DB_SHA256}"
 GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+CANONICAL_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/canonical-json-vectors-v1.json"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
 PREDECESSOR_KEY = "d5-fixture-predecessor"
 ATTEMPT_ID = "d5-fixture-attempt-0001"
@@ -60,6 +62,38 @@ def json_bytes(value: Any) -> bytes:
 
 def compact_json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    if value is None:
+        return b"null"
+    if value is True:
+        return b"true"
+    if value is False:
+        return b"false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False).encode()
+    if isinstance(value, int):
+        return str(value).encode()
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise SystemExit("canonical JSON forbids non-finite floats")
+        rendered = repr(value).lower()
+        if "e" in rendered:
+            mantissa, exponent = rendered.split("e")
+            rendered = f"{mantissa}e{int(exponent)}"
+        return rendered.encode()
+    if isinstance(value, list):
+        return b"[" + b",".join(canonical_json_bytes(item) for item in value) + b"]"
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise SystemExit("canonical JSON object keys must be strings")
+        fields = (
+            canonical_json_bytes(key) + b":" + canonical_json_bytes(value[key])
+            for key in sorted(value)
+        )
+        return b"{" + b",".join(fields) + b"}"
+    raise SystemExit(f"unsupported canonical JSON value {type(value).__name__}")
 
 
 def b64(data: bytes) -> str:
@@ -83,6 +117,129 @@ def source_identity(ordinal: int, block_index: int) -> dict[str, Any]:
     return {"mid": f"ccm-{ordinal}", "index": block_index, "ordinal": ordinal}
 
 
+class JsonNode:
+    def __init__(
+        self,
+        value: Any,
+        start: int,
+        end: int,
+        fields: dict[str, "JsonNode"] | None = None,
+        items: list["JsonNode"] | None = None,
+    ) -> None:
+        self.value = value
+        self.start = start
+        self.end = end
+        self.fields = fields
+        self.items = items
+
+
+class JsonSpanParser:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def skip_whitespace(self, position: int) -> int:
+        while position < len(self.text) and self.text[position] in " \t\r\n":
+            position += 1
+        return position
+
+    def parse_string(self, position: int) -> JsonNode:
+        start = position
+        position += 1
+        while position < len(self.text):
+            character = self.text[position]
+            if character == "\\":
+                position += 2
+            elif character == '"':
+                position += 1
+                token = self.text[start:position]
+                return JsonNode(json.loads(token), start, position)
+            else:
+                position += 1
+        raise SystemExit("unterminated JSON string")
+
+    def parse_value(self, position: int) -> JsonNode:
+        position = self.skip_whitespace(position)
+        start = position
+        if self.text[position] == '"':
+            return self.parse_string(position)
+        if self.text[position] == "{":
+            fields: dict[str, JsonNode] = {}
+            position = self.skip_whitespace(position + 1)
+            if self.text[position] == "}":
+                return JsonNode({}, start, position + 1, fields=fields)
+            while True:
+                key = self.parse_string(position)
+                position = self.skip_whitespace(key.end)
+                if self.text[position] != ":":
+                    raise SystemExit("expected colon in JSON object")
+                child = self.parse_value(position + 1)
+                fields[key.value] = child
+                position = self.skip_whitespace(child.end)
+                if self.text[position] == "}":
+                    position += 1
+                    return JsonNode(
+                        {key: value.value for key, value in fields.items()},
+                        start,
+                        position,
+                        fields=fields,
+                    )
+                if self.text[position] != ",":
+                    raise SystemExit("expected comma in JSON object")
+                position = self.skip_whitespace(position + 1)
+        if self.text[position] == "[":
+            items: list[JsonNode] = []
+            position = self.skip_whitespace(position + 1)
+            if self.text[position] == "]":
+                return JsonNode([], start, position + 1, items=items)
+            while True:
+                child = self.parse_value(position)
+                items.append(child)
+                position = self.skip_whitespace(child.end)
+                if self.text[position] == "]":
+                    position += 1
+                    return JsonNode(
+                        [item.value for item in items], start, position, items=items
+                    )
+                if self.text[position] != ",":
+                    raise SystemExit("expected comma in JSON array")
+                position = self.skip_whitespace(position + 1)
+
+        position += 1
+        while position < len(self.text) and self.text[position] not in " \t\r\n,]}":
+            position += 1
+        token = self.text[start:position]
+        return JsonNode(json.loads(token), start, position)
+
+    def parse(self) -> JsonNode:
+        root = self.parse_value(0)
+        if self.skip_whitespace(root.end) != len(self.text):
+            raise SystemExit("trailing data in capture JSON")
+        return root
+
+
+def capture_provider_block_bytes(capture_bytes: bytes) -> list[list[bytes | None]]:
+    text = capture_bytes.decode()
+    root = JsonSpanParser(text).parse()
+    if root.fields is None or root.fields.get("messages") is None:
+        raise SystemExit("capture JSON has no messages array")
+    messages = root.fields["messages"]
+    if messages.items is None:
+        raise SystemExit("capture messages is not an array")
+
+    output: list[list[bytes | None]] = []
+    for message in messages.items:
+        if message.fields is None or message.fields.get("content") is None:
+            raise SystemExit("capture message has no content")
+        content = message.fields["content"]
+        if content.items is None:
+            output.append([None])
+            continue
+        output.append(
+            [text[item.start : item.end].encode() for item in content.items]
+        )
+    return output
+
+
 def provider_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
     content = message["content"]
     if isinstance(content, str):
@@ -101,36 +258,286 @@ def segment_blocks(ordinal: int, message: dict[str, Any]) -> list[dict[str, Any]
     return blocks
 
 
+KNOWN_PROVIDER_KINDS = {
+    "thinking": "reasoning",
+    "redacted_thinking": "redacted_reasoning",
+    "tool_use": "tool_use",
+    "tool_result": "tool_result",
+    "text": "text",
+    "image": "image",
+    "document": "document",
+}
+
+
 def contract_kind(provider_kind: str) -> str:
-    return {
-        "thinking": "reasoning",
-        "redacted_thinking": "redacted_reasoning",
-        "tool_use": "tool_use",
-        "tool_result": "tool_result",
-        "text": "text",
-        "image": "image",
-        "document": "document",
-    }.get(provider_kind, "other")
+    return KNOWN_PROVIDER_KINDS.get(provider_kind, "opaque")
 
 
 def db_kind(contract_block_kind: str) -> str:
     return "tool_call" if contract_block_kind == "tool_use" else contract_block_kind
 
 
-def normalized_block_bytes(block: dict[str, Any]) -> bytes:
-    # The frozen contract leaves NativeBlock.bytes normalization open. This fixture
-    # uses canonical compact JSON after lifting type and tool-link IDs into fields.
-    payload = {
+def opaque_string_nodes(node: JsonNode) -> list[JsonNode]:
+    if node.fields is not None:
+        return [
+            child
+            for value in node.fields.values()
+            for child in opaque_string_nodes(value)
+        ]
+    if node.items is not None:
+        return [child for value in node.items for child in opaque_string_nodes(value)]
+    return [node] if isinstance(node.value, str) else []
+
+
+def synthetic_ascii_character(
+    character: str,
+    ordinal: int,
+    block_index: int,
+    leaf_index: int,
+    position: int,
+) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    seed = f"d5:{ordinal}:{block_index}:{leaf_index}:{position}".encode()
+    selection = int.from_bytes(hashlib.sha256(seed).digest()[:4], "big") % 26
+    replacement = alphabet[selection]
+    return alphabet[(selection + 1) % 26] if replacement == character else replacement
+
+
+def synthetic_character(
+    character: str,
+    ordinal: int,
+    block_index: int,
+    leaf_index: int,
+    position: int,
+) -> str:
+    codepoint = ord(character)
+    if character in {'"', "\\", "\n", "\r", "\t", "\b", "\f"}:
+        return character
+    if codepoint < 0x20:
+        return "\0"
+    if codepoint < 0x80:
+        return synthetic_ascii_character(
+            character, ordinal, block_index, leaf_index, position
+        )
+    width = len(character.encode())
+    if width == 2:
+        return "é"
+    if width == 3:
+        return "☃"
+    if width == 4:
+        return "😀"
+    raise SystemExit(f"unsupported UTF-8 width at {ordinal}#{block_index}")
+
+
+def sanitize_opaque_string_token(
+    token: str, ordinal: int, block_index: int, leaf_index: int, probe: str | None
+) -> str:
+    decoded = json.loads(token)
+    if probe is not None and probe in decoded:
+        raise SystemExit("approved probes in opaque blocks require a reviewed raw-token mapping")
+
+    output = ['"']
+    position = 0
+    cursor = 1
+    while cursor < len(token) - 1:
+        if token[cursor] != "\\":
+            character = token[cursor]
+            output.append(
+                synthetic_character(
+                    character, ordinal, block_index, leaf_index, position
+                )
+            )
+            cursor += 1
+            position += 1
+            continue
+
+        escape = token[cursor : cursor + 2]
+        if escape != "\\u":
+            output.append(escape)
+            cursor += 2
+            position += 1
+            continue
+
+        escaped = token[cursor : cursor + 6]
+        code_unit = int(escaped[2:], 16)
+        if 0xD800 <= code_unit <= 0xDBFF and token[cursor + 6 : cursor + 8] == "\\u":
+            escaped += token[cursor + 6 : cursor + 12]
+            replacement = "\\ud83d\\ude00"
+            cursor += 12
+        else:
+            character = json.loads(f'"{escaped}"')
+            replacement_character = synthetic_character(
+                character, ordinal, block_index, leaf_index, position
+            )
+            replacement_codepoint = ord(replacement_character)
+            replacement = f"\\u{replacement_codepoint:04x}"
+            cursor += 6
+        output.append(replacement)
+        position += 1
+    output.append('"')
+    sanitized = "".join(output)
+    if len(sanitized.encode()) != len(token.encode()):
+        raise SystemExit(f"opaque string token length drift at {ordinal}#{block_index}")
+    if len(json.loads(sanitized).encode()) != len(decoded.encode()):
+        raise SystemExit(f"opaque decoded string length drift at {ordinal}#{block_index}")
+    return sanitized
+
+
+def decoded_string_byte_lengths(value: Any) -> list[int]:
+    if isinstance(value, dict):
+        return [
+            length
+            for key in sorted(value)
+            for length in decoded_string_byte_lengths(value[key])
+        ]
+    if isinstance(value, list):
+        return [length for item in value for length in decoded_string_byte_lengths(item)]
+    return [len(value.encode())] if isinstance(value, str) else []
+
+
+def sanitize_opaque_block_bytes(
+    raw: bytes, ordinal: int, block_index: int, probe: str | None
+) -> tuple[bytes, int, list[int]]:
+    text = raw.decode()
+    root = JsonSpanParser(text).parse()
+    strings = opaque_string_nodes(root)
+    output: list[str] = []
+    cursor = 0
+    for leaf_index, node in enumerate(strings):
+        output.append(text[cursor : node.start])
+        token = text[node.start : node.end]
+        output.append(
+            sanitize_opaque_string_token(
+                token, ordinal, block_index, leaf_index, probe
+            )
+        )
+        cursor = node.end
+    output.append(text[cursor:])
+    sanitized_text = "".join(output)
+    if len(sanitized_text.encode()) != len(raw):
+        raise SystemExit(f"opaque block byte length drift at {ordinal}#{block_index}")
+    cursor = 0
+    for node in strings:
+        if sanitized_text[cursor : node.start] != text[cursor : node.start]:
+            raise SystemExit(f"opaque non-string bytes drift at {ordinal}#{block_index}")
+        cursor = node.end
+    if sanitized_text[cursor:] != text[cursor:]:
+        raise SystemExit(f"opaque trailing bytes drift at {ordinal}#{block_index}")
+    lengths = decoded_string_byte_lengths(json.loads(sanitized_text))
+    return sanitized_text.encode(), 0, lengths
+
+
+def normalized_block_payload(block: dict[str, Any]) -> dict[str, Any]:
+    if block.get("type") not in KNOWN_PROVIDER_KINDS:
+        return dict(block)
+    return {
         key: value
         for key, value in block.items()
         if key not in {"type", "id", "tool_use_id"}
     }
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
+
+
+def normalized_block_bytes(
+    block: dict[str, Any], raw_provider_bytes: bytes | None = None
+) -> bytes:
+    # Known kinds use canonical JSON after lifting; opaque kinds retain exact raw
+    # provider bytes because their adapter identity is byte-defined.
+    if contract_kind(block.get("type", "")) == "opaque":
+        if raw_provider_bytes is None:
+            raise SystemExit("opaque provider block is missing its raw JSON bytes")
+        return raw_provider_bytes
+    return canonical_json_bytes(normalized_block_payload(block))
+
+
+def synthetic_string_segment(
+    value: str,
+    ordinal: int,
+    block_index: int,
+    leaf_index: int,
+    character_offset: int,
+) -> str:
+    sanitized: list[str] = []
+    for relative_index, character in enumerate(value):
+        position = character_offset + relative_index
+        sanitized.append(
+            synthetic_character(
+                character, ordinal, block_index, leaf_index, position
+            )
+        )
+    result = "".join(sanitized)
+    if len(result.encode()) != len(value.encode()):
+        raise SystemExit(f"string byte length drift at {ordinal}#{block_index}")
+    if len(json.dumps(result, ensure_ascii=False).encode()) != len(
+        json.dumps(value, ensure_ascii=False).encode()
+    ):
+        raise SystemExit(f"string JSON length drift at {ordinal}#{block_index}")
+    return result
+
+
+def sanitized_block_bytes(
+    block: dict[str, Any],
+    raw_provider_bytes: bytes | None,
+    ordinal: int,
+    block_index: int,
+    probe: str | None,
+) -> tuple[bytes, int, list[int]]:
+    if contract_kind(block.get("type", "")) == "opaque":
+        if raw_provider_bytes is None:
+            raise SystemExit("opaque provider block is missing its raw JSON bytes")
+        return sanitize_opaque_block_bytes(
+            raw_provider_bytes, ordinal, block_index, probe
+        )
+
+    leaf_index = 0
+    probe_hits = 0
+    string_byte_lengths: list[int] = []
+
+    def sanitize(value: Any) -> Any:
+        nonlocal leaf_index, probe_hits
+        if isinstance(value, dict):
+            return {key: sanitize(value[key]) for key in sorted(value)}
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if not isinstance(value, str):
+            return value
+
+        current_leaf = leaf_index
+        leaf_index += 1
+        string_byte_lengths.append(len(value.encode()))
+        if probe is not None:
+            occurrences = value.count(probe)
+            if occurrences > 1:
+                raise SystemExit(
+                    f"probe appears more than once at {ordinal}#{block_index} string {current_leaf}"
+                )
+            if occurrences == 1:
+                prefix, suffix = value.split(probe)
+                probe_hits += 1
+                return (
+                    synthetic_string_segment(
+                        prefix, ordinal, block_index, current_leaf, 0
+                    )
+                    + probe
+                    + synthetic_string_segment(
+                        suffix,
+                        ordinal,
+                        block_index,
+                        current_leaf,
+                        len(prefix) + len(probe),
+                    )
+                )
+        return synthetic_string_segment(
+            value, ordinal, block_index, current_leaf, 0
+        )
+
+    raw = normalized_block_bytes(block, raw_provider_bytes)
+    sanitized = canonical_json_bytes(sanitize(normalized_block_payload(block)))
+    if len(sanitized) != len(raw):
+        raise SystemExit(
+            f"provider block byte length drift at {ordinal}#{block_index}: "
+            f"expected {len(raw)}, got {len(sanitized)}"
+        )
+    return sanitized, probe_hits, string_byte_lengths
 
 
 def parse_block_id(block_id: str) -> tuple[int, int]:
@@ -175,7 +582,12 @@ def tool_links(
     uses: dict[str, dict[str, Any]],
     results: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    original = block.get("id") if block.get("type") == "tool_use" else block.get("tool_use_id")
+    if block.get("type") == "tool_use":
+        original = block.get("id")
+    elif block.get("type") == "tool_result":
+        original = block.get("tool_use_id")
+    else:
+        return []
     if not isinstance(original, str):
         return []
     return [
@@ -265,13 +677,17 @@ def validate_db_kinds(state: dict[str, Any], tail: list[dict[str, Any]]) -> None
 
 
 def build_fixture(
-    state: dict[str, Any], capture: dict[str, Any], probes: list[dict[str, Any]]
+    state: dict[str, Any],
+    capture: dict[str, Any],
+    raw_provider_blocks: list[list[bytes | None]],
+    probes: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     messages = capture.get("messages")
     if not isinstance(messages, list) or len(messages) != 205:
         raise SystemExit("capture must contain exactly 205 messages")
     tail = messages[CAPTURE_START_POSITION:]
-    if len(tail) != 141:
+    raw_tail = raw_provider_blocks[CAPTURE_START_POSITION:]
+    if len(tail) != 141 or len(raw_tail) != 141:
         raise SystemExit("capture tail must contain exactly 141 messages")
     roles = {role: sum(message.get("role") == role for message in tail) for role in ("assistant", "user", "system")}
     if roles != {"assistant": 70, "user": 70, "system": 1}:
@@ -289,28 +705,40 @@ def build_fixture(
     manifest_messages: list[dict[str, Any]] = []
     projected_messages: list[str] = []
     member_sources: list[dict[str, Any]] = []
-    for position, ordinal, message in zip(
+    for position, ordinal, message, message_raw_blocks in zip(
         range(CAPTURE_START_POSITION, CAPTURE_START_POSITION + len(tail)),
         range(TAIL_START, TAIL_END + 1),
         tail,
+        raw_tail,
     ):
         native_blocks: list[dict[str, Any]] = []
         manifest_blocks: list[dict[str, Any]] = []
         normalized_blocks: list[dict[str, Any]] = []
-        probe = probe_by_ordinal.get(ordinal)
-        probe_written = False
+        probe_bytes = probe_by_ordinal.get(ordinal)
+        probe = probe_bytes.decode() if probe_bytes is not None else None
+        probe_hits = 0
         source_length = 0
-        for index, block in enumerate(segment_blocks(ordinal, message)):
-            raw = normalized_block_bytes(block)
+        block_byte_lengths: list[int] = []
+        block_string_byte_lengths: list[list[int]] = []
+        block_kinds: list[str] = []
+        blocks = segment_blocks(ordinal, message)
+        raw_blocks = message_raw_blocks[: len(blocks)]
+        if len(raw_blocks) != len(blocks):
+            raise SystemExit(f"raw provider block count mismatch at {ordinal}")
+        for index, (block, raw_provider_bytes) in enumerate(zip(blocks, raw_blocks)):
+            raw = normalized_block_bytes(block, raw_provider_bytes)
             source_length += len(raw)
-            sanitized = stand_in(ordinal, index, len(raw))
-            if probe is not None and probe in raw:
-                if probe_written:
-                    raise SystemExit(f"probe appears in multiple blocks at ordinal {ordinal}")
-                sanitized = probe + stand_in(ordinal, index, len(raw) - len(probe), "probe-tail")
-                probe_written = True
+            block_byte_lengths.append(len(raw))
+            sanitized, block_probe_hits, string_byte_lengths = sanitized_block_bytes(
+                block, raw_provider_bytes, ordinal, index, probe
+            )
+            block_string_byte_lengths.append(string_byte_lengths)
+            probe_hits += block_probe_hits
+            if probe_hits > 1:
+                raise SystemExit(f"probe appears in multiple blocks at ordinal {ordinal}")
             links = tool_links(block, rewritten, uses, results)
             kind = contract_kind(block.get("type", "other"))
+            block_kinds.append(kind)
             native_block = {
                 "index": index,
                 "kind": kind,
@@ -355,7 +783,7 @@ def build_fixture(
                     "tool_links": links,
                 }
             )
-        if probe is not None and not probe_written:
+        if probe is not None and probe_hits != 1:
             raise SystemExit(f"capture member {ordinal} does not contain its approved probe")
 
         source_messages.append(
@@ -392,6 +820,10 @@ def build_fixture(
             {
                 "ordinal": ordinal,
                 "block_count": len(native_blocks),
+                "block_kinds": block_kinds,
+                "block_byte_lengths": block_byte_lengths,
+                "block_string_byte_lengths": block_string_byte_lengths,
+                "block_length_preservation": ["both"] * len(native_blocks),
                 "source_byte_length": source_length,
                 "length_source": "capture_13610",
                 "kinds_source": "db" if ordinal in state["tagged_ordinals"] else "capture_13610",
@@ -481,6 +913,42 @@ def build_applied_state(state: dict[str, Any], probes: dict[int, bytes]) -> dict
     return {"units": units, "tags": tags, "drops": drops, "ledger": ledger}
 
 
+def validate_representation_contract(canonical_vectors: bytes) -> None:
+    document = json.loads(canonical_vectors)
+    for vector in document.get("vectors", []):
+        expected = vector["expected_utf8"].encode()
+        actual = canonical_json_bytes(vector["input"])
+        if actual != expected or sha256(expected) != vector["sha256"]:
+            raise SystemExit(f"canonical JSON vector failed: {vector['name']}")
+
+    extension_block = {
+        "type": "text",
+        "id": "provider-id",
+        "text": "visible",
+        "vendor_extension": {"array": [True, 7, None]},
+    }
+    expected_extension = {
+        "text": "visible",
+        "vendor_extension": {"array": [True, 7, None]},
+    }
+    if normalized_block_payload(extension_block) != expected_extension:
+        raise SystemExit("known provider extension was not preserved")
+
+    opaque_control = document["opaque_control"]
+    opaque_raw = opaque_control["input_json"].encode()
+    opaque = json.loads(opaque_raw)
+    if contract_kind(opaque.get("type", "")) != "opaque":
+        raise SystemExit("unknown provider block did not map to opaque")
+    expected = opaque_control["expected_utf8"].encode()
+    if opaque_raw != expected or sha256(expected) != opaque_control["sha256"]:
+        raise SystemExit("opaque raw-byte identity control failed")
+    sanitized, probe_hits, string_lengths = sanitize_opaque_block_bytes(
+        opaque_raw, 1, 0, None
+    )
+    if len(sanitized) != len(opaque_raw) or probe_hits != 0 or not string_lengths:
+        raise SystemExit("opaque in-place sanitization control failed")
+
+
 def readme_text() -> str:
     return f"""# D5 specimen fixture
 
@@ -492,11 +960,24 @@ Provenance:
 - byte lengths, untagged-member kinds, roles, block geometry, and tool links: capture `13610-req-body`, SHA-256 `{CAPTURE_SHA256}`
 - attribute counts: lengths: 141 from capture; kinds: 83 from db, 58 from capture; tool links: 141 from capture
 
-Sanitization preserves message order, ordinals, roles, normalized source block counts and kinds, per-block UTF-8 byte lengths, reduction lengths, and closed tool-use/result arcs. The recognized compaction instruction at 1939#1 is excluded as a contract provenance addition rather than treated as predecessor source. Only the approved probe string in each of ordinals 1824, 1864, and 1927 remains verbatim; all surrounding payload bytes are deterministic stand-ins. It does **not** preserve token counts, historian quality, semantic content outside those probes, or provider-valid reasoning signatures. Signature bytes are opaque synthetic test data.
+Sanitization preserves message order, ordinals, roles, normalized source block counts and kinds, each provider block's JSON structure, per-block encoded byte lengths, every string leaf's decoded UTF-8 byte length, reduction lengths, and closed tool-use/result arcs. All 188 blocks preserve both length measures; zero are encoded-only or decoded-only, and this capture contains zero opaque blocks. Object keys, nesting, arrays, numbers, booleans, and nulls are real; string leaf values are synthetic equal-length fillers chosen from the source character's JSON escape and UTF-8 width class. The recognized compaction instruction at 1939#1 is excluded as a contract provenance addition rather than treated as predecessor source. Only the approved probe string in each of ordinals 1824, 1864, and 1927 remains verbatim at its original position inside its synthetic string value. It does **not** preserve token counts, historian quality, semantic content outside those probes, or provider-valid reasoning signatures. Reasoning signatures are synthetic.
 
-`NativeBlock.bytes` uses compact, key-sorted JSON of each provider block after `type`, `id`, and `tool_use_id` are lifted into contract fields. Scalar text is normalized as `{{"text": ...}}`. The frozen contract leaves this representation open. Archive `V` entries are base64 compact JSON renderings of `NormalizedMessage` in contract field order; the applied-state payload is a stable JSON scaffold for units, tags, drops, and ledger without token counts or clocks.
+Contract clause 2 (types) pins `NativeBlock.bytes` to this normative canonical JSON algorithm:
 
-`expected-manifest-v1.json` and `expected-archive-v1.json` are scaffolds, not oracles. They are structurally ready but not digest-valid while `digests_pending` is true. Slice 0 must compute every placeholder from an **independent** reference implementation and hand-checked CE1 preimage vectors—not from the codec under test—then freeze the results.
+1. Parse to the JSON semantic value model and emit UTF-8.
+2. Sort object keys lexicographically by Unicode code point, never by key length or source order.
+3. Use `,` and `:` separators with no surrounding whitespace.
+4. Do not ASCII-escape non-ASCII characters. Escape only quote, backslash, and U+0000–U+001F: use `\\n`, `\\r`, `\\t`, `\\b`, and `\\f` short forms, and lowercase `\\uXXXX` for the remaining controls.
+5. Render integers as shortest decimal. Render finite floats with the shortest round-trip representation, preserving `.0` and signed zero and spelling exponents as lowercase `e` with no `+` or leading zeroes.
+6. Emit no trailing newline.
+
+These rules are the definition; `canonical-json-vectors-v1.json` contains independent hand-written conformance checks designed to distinguish wrong ordering, escaping, and number algorithms. Known block kinds lift `type`, `id`, and `tool_use_id` into contract kind/tool-link fields while retaining every other provider field. Scalar text is normalized as `{{"text": ...}}`. Archive `V` entries are base64 compact JSON renderings of `NormalizedMessage` in contract field order; the applied-state payload is a stable JSON scaffold for units, tags, drops, and ledger without token counts or clocks.
+
+## Opaque blocks
+
+An unknown provider block lifts nothing, receives kind `opaque`, and preserves its exact raw provider bytes, including key order, whitespace, and escape and number spelling. Raw preservation keeps content and identity digests over opaque blocks equal across adapters; in this derived fixture only string values are sanitized in place, without re-serializing or changing any non-string byte.
+
+`expected-manifest-v1.json` and `expected-archive-v1.json` remain scaffolds, not oracles, despite the real structure and lengths. Readiness stays `scaffold` until slice 0 fills every pending digest from **independent** reference-implementation preimage vectors and hand-checked CE1 preimage vectors—not from the codec under test—and freezes the results.
 
 Regenerate from the two private inputs:
 
@@ -518,10 +999,14 @@ def write_fixture(
     member_sources: list[dict[str, Any]],
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
+    repository_root = Path(__file__).resolve().parents[3]
+    canonical_vectors = (repository_root / CANONICAL_VECTORS_PATH).read_bytes()
+    validate_representation_contract(canonical_vectors)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
         "expected-manifest-v1.json": json_bytes(manifest),
         "expected-archive-v1.json": json_bytes(archive),
+        "canonical-json-vectors-v1.json": canonical_vectors,
         "README.md": readme_text().encode(),
     }
     for name, data in payloads.items():
@@ -529,10 +1014,22 @@ def write_fixture(
 
     entries = []
     redaction = (
-        "138 members fully replaced with deterministic equal-length stand-ins; "
-        "three probe members retain only their approved probe string and sanitize all remaining payload bytes"
+        "all string leaf values replaced with deterministic equal-length synthetic fillers; "
+        "138 members retain no source text and three probe members retain only their approved probe string"
     )
     for name, data in payloads.items():
+        if name == "canonical-json-vectors-v1.json":
+            entries.append(
+                {
+                    "path": name,
+                    "byte_size": len(data),
+                    "sha256": sha256(data),
+                    "derived": False,
+                    "source": "hand-written independent canonical-form vectors",
+                    "generation_script": GENERATOR_PATH,
+                }
+            )
+            continue
         entries.append(
             {
                 "path": name,
@@ -549,7 +1046,18 @@ def write_fixture(
         )
     index = {
         "schema_version": 1,
+        "fixture_shape_version": 2,
         "readiness": "scaffold",
+        "opaque_blocks": sum(
+            block_kind == "opaque"
+            for item in member_sources
+            for block_kind in item["block_kinds"]
+        ),
+        "length_preservation": {
+            "both": sum(item["block_count"] for item in member_sources),
+            "encoded_only": 0,
+            "decoded_only": 0,
+        },
         "source_db_sha256": DB_SHA256,
         "capture_13610_sha256": CAPTURE_SHA256,
         "gateway_private_evidence": GATEWAY_PRIVATE_EVIDENCE,
@@ -576,7 +1084,10 @@ def main() -> None:
         raise SystemExit("expected exactly three probes beside the source database")
     state = load_source_state(db_path, probes)
     capture = json.loads(capture_bytes)
-    source_segment, manifest, archive, member_sources = build_fixture(state, capture, probes)
+    raw_provider_blocks = capture_provider_block_bytes(capture_bytes)
+    source_segment, manifest, archive, member_sources = build_fixture(
+        state, capture, raw_provider_blocks, probes
+    )
     output = args.output or Path(__file__).resolve().parents[3] / "crates/mc-module/tests/fixtures/d5-specimen"
     write_fixture(output, source_segment, manifest, archive, member_sources)
     print(f"wrote deterministic D5 specimen to {output}")

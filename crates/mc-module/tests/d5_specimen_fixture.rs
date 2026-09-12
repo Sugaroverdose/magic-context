@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "afaa461a4c3b1c0f7b3db00f40a268881ad35670b7c21065ee6c738e7050c461";
+const INDEX_SHA256: &str = "1c97cd7ca976319e86f71c32761353ee260eb6bce35b2c7bc9cf9a582d713b03";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -101,9 +101,192 @@ fn decode_base64(encoded: &str) -> Vec<u8> {
     output
 }
 
-fn stand_in(ordinal: u64, block_index: u64, length: usize, namespace: &str) -> Vec<u8> {
-    let marker = format!("[sanitized:{namespace}:{ordinal}:{block_index}:{length}]").into_bytes();
-    marker.iter().copied().cycle().take(length).collect()
+fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+    fn write(value: &Value, output: &mut Vec<u8>) {
+        match value {
+            Value::Null => output.extend_from_slice(b"null"),
+            Value::Bool(true) => output.extend_from_slice(b"true"),
+            Value::Bool(false) => output.extend_from_slice(b"false"),
+            Value::Number(number) => {
+                let rendered = number.to_string().to_lowercase();
+                if let Some((mantissa, exponent)) = rendered.split_once('e') {
+                    let exponent = exponent.parse::<i32>().expect("JSON exponent");
+                    output.extend_from_slice(format!("{mantissa}e{exponent}").as_bytes());
+                } else {
+                    output.extend_from_slice(rendered.as_bytes());
+                }
+            }
+            Value::String(text) => output.extend_from_slice(
+                &serde_json::to_vec(text).expect("serialize canonical JSON string"),
+            ),
+            Value::Array(items) => {
+                output.push(b'[');
+                for (index, item) in items.iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    write(item, output);
+                }
+                output.push(b']');
+            }
+            Value::Object(fields) => {
+                let mut keys = fields.keys().collect::<Vec<_>>();
+                keys.sort_unstable();
+                output.push(b'{');
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    output.extend_from_slice(
+                        &serde_json::to_vec(key).expect("serialize canonical JSON key"),
+                    );
+                    output.push(b':');
+                    write(&fields[key], output);
+                }
+                output.push(b'}');
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    write(value, &mut output);
+    output
+}
+
+fn assert_synthetic_string_segment(
+    value: &str,
+    ordinal: u64,
+    block_index: u64,
+    leaf_index: usize,
+    character_offset: usize,
+) {
+    const ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
+    for (relative_index, character) in value.chars().enumerate() {
+        let valid = match character {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000c}' | '\0' => true,
+            character if character < '\u{0020}' => false,
+            character if character.is_ascii() => {
+                let position = character_offset + relative_index;
+                let seed = format!("d5:{ordinal}:{block_index}:{leaf_index}:{position}");
+                let digest = Sha256::digest(seed.as_bytes());
+                let selection = u32::from_be_bytes(digest[..4].try_into().expect("SHA prefix"));
+                let selection = selection as usize % 26;
+                character == ALPHABET[selection] as char
+                    || character == ALPHABET[(selection + 1) % 26] as char
+            }
+            character if character.len_utf8() == 2 => character == 'é',
+            character if character.len_utf8() == 3 => character == '☃',
+            character if character.len_utf8() == 4 => character == '😀',
+            _ => unreachable!("valid Unicode has a one-to-four-byte UTF-8 encoding"),
+        };
+        assert!(
+            valid,
+            "unexpected string bytes could expose source text at {ordinal}#{block_index} string {leaf_index}"
+        );
+    }
+}
+
+fn assert_synthetic_string_values(
+    value: &Value,
+    ordinal: u64,
+    block_index: u64,
+    probe: Option<&str>,
+    leaf_index: &mut usize,
+) -> usize {
+    match value {
+        Value::Object(fields) => fields
+            .values()
+            .map(|value| {
+                assert_synthetic_string_values(value, ordinal, block_index, probe, leaf_index)
+            })
+            .sum(),
+        Value::Array(items) => items
+            .iter()
+            .map(|value| {
+                assert_synthetic_string_values(value, ordinal, block_index, probe, leaf_index)
+            })
+            .sum(),
+        Value::String(value) => {
+            let current_leaf = *leaf_index;
+            *leaf_index += 1;
+            let hits = probe.map_or(0, |probe| value.matches(probe).count());
+            assert!(hits <= 1, "duplicate probe at {ordinal}#{block_index}");
+            if hits == 1 {
+                let probe = probe.expect("probe hit");
+                let (prefix, suffix) = value.split_once(probe).expect("split probe string");
+                assert_synthetic_string_segment(prefix, ordinal, block_index, current_leaf, 0);
+                assert_synthetic_string_segment(
+                    suffix,
+                    ordinal,
+                    block_index,
+                    current_leaf,
+                    prefix.chars().count() + probe.chars().count(),
+                );
+            } else {
+                assert_synthetic_string_segment(value, ordinal, block_index, current_leaf, 0);
+            }
+            hits
+        }
+        _ => 0,
+    }
+}
+
+fn string_byte_lengths(value: &Value) -> Vec<u64> {
+    fn collect(value: &Value, lengths: &mut Vec<u64>) {
+        match value {
+            Value::Object(fields) => fields.values().for_each(|value| collect(value, lengths)),
+            Value::Array(items) => items.iter().for_each(|value| collect(value, lengths)),
+            Value::String(value) => lengths.push(value.len() as u64),
+            _ => {}
+        }
+    }
+
+    let mut lengths = Vec::new();
+    collect(value, &mut lengths);
+    lengths
+}
+
+fn assert_recoverable_block_kind(kind: &str, payload: &Map<String, Value>) {
+    match kind {
+        "reasoning" => {
+            assert_eq!(
+                payload.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["signature", "thinking"]
+            );
+            assert!(payload.values().all(Value::is_string));
+        }
+        "text" => {
+            assert_eq!(
+                payload.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["text"]
+            );
+            assert!(payload["text"].is_string());
+        }
+        "tool_use" => {
+            assert!(payload["input"].is_object());
+            assert!(payload["name"].is_string());
+            assert!(payload
+                .keys()
+                .all(|key| matches!(key.as_str(), "cache_control" | "input" | "name")));
+            assert!(payload.len() == 2 || payload.len() == 3);
+        }
+        "opaque" => assert!(!payload.is_empty()),
+        "tool_result" => {
+            assert!(
+                payload["content"].is_string()
+                    || payload["content"].is_array()
+                    || payload["content"].is_object()
+            );
+            assert!(payload
+                .get("is_error")
+                .is_none_or(|value| value.is_boolean()));
+            assert!(payload
+                .keys()
+                .all(|key| matches!(key.as_str(), "content" | "is_error")));
+            assert!(payload.len() == 1 || payload.len() == 2);
+        }
+        other => panic!("unexpected D5 block kind {other}"),
+    }
 }
 
 fn identity_tuple(value: &Value) -> (String, u64, u64) {
@@ -126,7 +309,9 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
     );
     let index: Value = serde_json::from_slice(&index_bytes).expect("parse fixture index");
     let index = object(&index);
+    assert_eq!(number(&index["fixture_shape_version"]), 2);
     assert_eq!(text(&index["readiness"]), "scaffold");
+    assert_eq!(number(&index["opaque_blocks"]), 0);
     assert_eq!(text(&index["source_db_sha256"]), DB_SHA256);
     assert_eq!(text(&index["capture_13610_sha256"]), CAPTURE_SHA256);
     // The gateway owner's private snapshots are pinned per artifact, never as one
@@ -177,16 +362,24 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
             "{name} size"
         );
         assert_eq!(text(&entry["sha256"]), sha256_hex(&bytes), "{name} digest");
-        assert_eq!(entry["derived"], Value::Bool(true));
-        assert_eq!(text(&entry["source"]), format!("VACUUM {DB_SHA256}"));
-        assert_eq!(number(&entry["sanitized_members"]), 138);
-        assert_eq!(
-            array(&entry["verbatim_members"])
-                .iter()
-                .map(number)
-                .collect::<Vec<_>>(),
-            vec![1824, 1864, 1927]
-        );
+        if name == "canonical-json-vectors-v1.json" {
+            assert_eq!(entry["derived"], Value::Bool(false));
+            assert_eq!(
+                text(&entry["source"]),
+                "hand-written independent canonical-form vectors"
+            );
+        } else {
+            assert_eq!(entry["derived"], Value::Bool(true));
+            assert_eq!(text(&entry["source"]), format!("VACUUM {DB_SHA256}"));
+            assert_eq!(number(&entry["sanitized_members"]), 138);
+            assert_eq!(
+                array(&entry["verbatim_members"])
+                    .iter()
+                    .map(number)
+                    .collect::<Vec<_>>(),
+                vec![1824, 1864, 1927]
+            );
+        }
 
         let decoded = String::from_utf8_lossy(&bytes);
         for needle in forbidden {
@@ -197,6 +390,133 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
         }
         assert!(!email.is_match(&decoded), "email-like text in {name}");
     }
+}
+
+#[test]
+fn d5_fixture_canonical_json_matches_independent_vectors() {
+    let vectors = parse_json(&fixture_dir().join("canonical-json-vectors-v1.json"));
+    let vectors = object(&vectors);
+    assert_eq!(number(&vectors["schema_version"]), 1);
+    assert_eq!(
+        text(&vectors["provenance"]),
+        "hand-written independent canonical-form vectors; the numbered algorithm is normative and these vectors are conformance checks"
+    );
+    let rules = array(&vectors["normative_algorithm"]);
+    assert_eq!(rules.len(), 6);
+    for (index, rule) in rules.iter().enumerate() {
+        assert_eq!(number(&object(rule)["rule"]), index as u64 + 1);
+        assert!(!text(&object(rule)["text"]).is_empty());
+    }
+    let vector_values = array(&vectors["vectors"]);
+    assert_eq!(vector_values.len(), 14);
+    for vector in vector_values {
+        let vector = object(vector);
+        let name = text(&vector["name"]);
+        let expected = text(&vector["expected_utf8"]).as_bytes();
+        assert_eq!(
+            sha256_hex(expected),
+            text(&vector["sha256"]),
+            "independent vector digest {name}"
+        );
+        assert_eq!(
+            canonical_json_bytes(&vector["input"]),
+            expected,
+            "canonical JSON vector {name}"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(expected).expect("parse canonical vector"),
+            vector["input"],
+            "canonical JSON round trip {name}"
+        );
+    }
+
+    let opaque = object(&vectors["opaque_control"]);
+    assert_eq!(text(&opaque["expected_kind"]), "opaque");
+    assert_eq!(
+        text(&opaque["note"]),
+        "Opaque raw bytes preserve whitespace, key order, escape spelling, exponent spelling, and every field and value."
+    );
+    let input = text(&opaque["input_json"]).as_bytes();
+    let expected = text(&opaque["expected_utf8"]).as_bytes();
+    assert_eq!(sha256_hex(expected), text(&opaque["sha256"]));
+    let parsed: Value = serde_json::from_slice(input).expect("parse opaque control");
+    assert_eq!(
+        text(&object(&parsed)["type"]),
+        "future_kind",
+        "opaque control kind"
+    );
+    assert_eq!(input, expected, "opaque provider bytes must remain exact");
+}
+
+fn lift_provider_block_for_contract(
+    block: Value,
+) -> (String, Map<String, Value>, Map<String, Value>) {
+    let provider_kind = object(&block)
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let kind = match provider_kind {
+        "thinking" => "reasoning",
+        "redacted_thinking" => "redacted_reasoning",
+        "tool_use" => "tool_use",
+        "tool_result" => "tool_result",
+        "text" => "text",
+        "image" => "image",
+        "document" => "document",
+        _ => return ("opaque".to_owned(), object(&block).clone(), Map::new()),
+    };
+    let mut payload = object(&block).clone();
+    let mut lifted = Map::new();
+    for key in ["type", "id", "tool_use_id"] {
+        if let Some(value) = payload.remove(key) {
+            lifted.insert(key.to_owned(), value);
+        }
+    }
+    (kind.to_owned(), payload, lifted)
+}
+
+#[test]
+fn d5_fixture_lifting_preserves_extensions_and_opaque_blocks() {
+    let provider = serde_json::json!({
+        "type": "text",
+        "id": "provider-id",
+        "text": "visible",
+        "vendor_extension": {"array": [true, 7, null]}
+    });
+    let (kind, payload, lifted) = lift_provider_block_for_contract(provider);
+    assert_eq!(kind, "text");
+    assert_eq!(
+        lifted,
+        serde_json::from_value(serde_json::json!({
+            "id": "provider-id",
+            "type": "text"
+        }))
+        .expect("lifted provider fields")
+    );
+    assert_eq!(
+        payload,
+        serde_json::from_value(serde_json::json!({
+            "text": "visible",
+            "vendor_extension": {"array": [true, 7, null]}
+        }))
+        .expect("known provider payload")
+    );
+    let payload_bytes = canonical_json_bytes(&Value::Object(payload.clone()));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&payload_bytes).expect("known provider round trip"),
+        Value::Object(payload)
+    );
+
+    let opaque = serde_json::json!({
+        "type": "future_provider_block",
+        "id": "opaque-id",
+        "tool_use_id": "opaque-tool-id",
+        "extension": {"nested": ["unchanged"]}
+    });
+    let (kind, payload, lifted) = lift_provider_block_for_contract(opaque.clone());
+    assert_eq!(kind, "opaque");
+    assert!(lifted.is_empty());
+    assert_eq!(Value::Object(payload), opaque);
 }
 
 #[test]
@@ -214,7 +534,12 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
     );
 
     let index = parse_json(&root.join("fixture-index-v1.json"));
-    let members = array(&object(&index)["members"]);
+    let index = object(&index);
+    assert_eq!(
+        index["length_preservation"],
+        serde_json::json!({"both": 188, "decoded_only": 0, "encoded_only": 0})
+    );
+    let members = array(&index["members"]);
     let messages = array(&source["messages"]);
     assert_eq!(messages.len(), 141);
     assert_eq!(members.len(), 141);
@@ -222,6 +547,9 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
     let mut roles = BTreeMap::<&str, usize>::new();
     let mut kinds = BTreeMap::<&str, usize>::new();
     let mut kind_sources = BTreeMap::<&str, usize>::new();
+    let mut tool_result_content_shapes =
+        BTreeMap::from([("array", 0), ("object", 0), ("string", 0)]);
+    let mut block_count = 0;
     for (offset, (message, member)) in messages.iter().zip(members).enumerate() {
         let ordinal = 1799 + offset as u64;
         let position = 64 + offset as u64;
@@ -241,6 +569,18 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
 
         let blocks = array(&message["blocks"]);
         assert_eq!(number(&member["block_count"]) as usize, blocks.len());
+        let block_kinds = array(&member["block_kinds"]);
+        let block_byte_lengths = array(&member["block_byte_lengths"]);
+        let block_string_byte_lengths = array(&member["block_string_byte_lengths"]);
+        let block_length_preservation = array(&member["block_length_preservation"]);
+        assert_eq!(block_kinds.len(), blocks.len());
+        assert_eq!(block_byte_lengths.len(), blocks.len());
+        assert_eq!(block_string_byte_lengths.len(), blocks.len());
+        assert_eq!(block_length_preservation.len(), blocks.len());
+        assert!(block_length_preservation
+            .iter()
+            .all(|value| text(value) == "both"));
+        block_count += blocks.len();
         let mut member_length = 0;
         let probe = PROBES
             .iter()
@@ -250,31 +590,57 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
             let block = object(block);
             let block_index = number(&block["index"]);
             assert_eq!(block_index as usize, expected_index);
-            *kinds.entry(text(&block["kind"])).or_default() += 1;
+            let kind = text(&block["kind"]);
+            assert_eq!(text(&block_kinds[expected_index]), kind);
+            *kinds.entry(kind).or_default() += 1;
             let bytes = decode_base64(text(&block["bytes"]));
+            assert_eq!(
+                bytes.len() as u64,
+                number(&block_byte_lengths[expected_index]),
+                "original block length at {ordinal}#{block_index}"
+            );
             member_length += bytes.len();
-            if let Some((_, probe)) = probe {
-                if bytes.starts_with(probe.as_bytes()) {
-                    probe_hits += 1;
-                    let mut expected = probe.as_bytes().to_vec();
-                    expected.extend(stand_in(
-                        ordinal,
-                        block_index,
-                        bytes.len() - probe.len(),
-                        "probe-tail",
-                    ));
-                    assert_eq!(
-                        bytes, expected,
-                        "unapproved bytes in probe member {ordinal}"
-                    );
-                    continue;
-                }
+
+            let payload: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                panic!("provider block JSON at {ordinal}#{block_index}: {error}")
+            });
+            if kind != "opaque" {
+                assert_eq!(
+                    canonical_json_bytes(&payload),
+                    bytes,
+                    "known provider block must use pinned canonical JSON at {ordinal}#{block_index}"
+                );
             }
             assert_eq!(
-                bytes,
-                stand_in(ordinal, block_index, bytes.len(), "block"),
-                "unexpected bytes could expose a source-text run at {ordinal}#{block_index}"
+                string_byte_lengths(&payload),
+                array(&block_string_byte_lengths[expected_index])
+                    .iter()
+                    .map(number)
+                    .collect::<Vec<_>>(),
+                "decoded string UTF-8 lengths at {ordinal}#{block_index}"
             );
+            let payload = object(&payload);
+            assert_recoverable_block_kind(kind, payload);
+            if kind == "tool_result" {
+                let shape = if payload["content"].is_array() {
+                    "array"
+                } else if payload["content"].is_object() {
+                    "object"
+                } else {
+                    "string"
+                };
+                *tool_result_content_shapes.entry(shape).or_default() += 1;
+            }
+            if kind != "opaque" {
+                let mut leaf_index = 0;
+                probe_hits += assert_synthetic_string_values(
+                    &Value::Object(payload.clone()),
+                    ordinal,
+                    block_index,
+                    probe.map(|(_, probe)| *probe),
+                    &mut leaf_index,
+                );
+            }
         }
         assert_eq!(member_length as u64, number(&member["source_byte_length"]));
         assert_eq!(
@@ -300,6 +666,7 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
         }
     }
 
+    assert_eq!(block_count, 188);
     assert_eq!(
         roles,
         BTreeMap::from([("assistant", 70), ("system", 1), ("user", 70)])
@@ -316,6 +683,10 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
     assert_eq!(
         kind_sources,
         BTreeMap::from([("capture_13610", 58), ("db", 83)])
+    );
+    assert_eq!(
+        tool_result_content_shapes,
+        BTreeMap::from([("array", 31), ("object", 0), ("string", 35)])
     );
 }
 
@@ -396,14 +767,51 @@ fn d5_fixture_private_source_run_rejection_when_available() {
         let ordinal = number(&object(message)["ordinal"]);
         for block in array(&object(message)["blocks"]) {
             let block = object(block);
+            let block_index = number(&block["index"]);
             let bytes = decode_base64(text(&block["bytes"]));
-            assert!(
-                bytes
-                    .windows(20)
-                    .all(|window| !forbidden_windows.contains(window)),
-                "private 20-byte source run survived at {ordinal}#{}",
-                number(&block["index"])
-            );
+            let payload: Value = serde_json::from_slice(&bytes).expect("provider block JSON");
+            fn reject_private_runs(
+                value: &Value,
+                forbidden_windows: &HashSet<Vec<u8>>,
+                ordinal: u64,
+                block_index: u64,
+                probe: Option<&str>,
+            ) {
+                match value {
+                    Value::Object(fields) => fields.values().for_each(|value| {
+                        reject_private_runs(value, forbidden_windows, ordinal, block_index, probe)
+                    }),
+                    Value::Array(items) => items.iter().for_each(|value| {
+                        reject_private_runs(value, forbidden_windows, ordinal, block_index, probe)
+                    }),
+                    Value::String(value) => {
+                        let probe_range = probe.and_then(|probe| {
+                            value.find(probe).map(|start| start..start + probe.len())
+                        });
+                        assert!(
+                            value
+                                .as_bytes()
+                                .windows(20)
+                                .enumerate()
+                                .all(|(offset, window)| {
+                                    let overlaps_probe =
+                                        probe_range.as_ref().is_some_and(|range| {
+                                            offset < range.end
+                                                && offset + window.len() > range.start
+                                        });
+                                    overlaps_probe || !forbidden_windows.contains(window)
+                                }),
+                            "private 20-byte source-text run survived at {ordinal}#{block_index}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            let probe = PROBES
+                .iter()
+                .find(|(probe_ordinal, _)| *probe_ordinal == ordinal)
+                .map(|(_, probe)| *probe);
+            reject_private_runs(&payload, &forbidden_windows, ordinal, block_index, probe);
         }
     }
 }
