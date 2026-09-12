@@ -1623,6 +1623,8 @@ describe("registerPiContextHandler", () => {
 			updateTagDropMode(db, sessionId, editTool.tagNumber, "edit_marker");
 
 			const replayMessages = buildMessages();
+			// A legacy full-drop row may change from skeleton to removal only on a priced pass.
+			signalPiPendingMaterialization(sessionId);
 			const result = await handler(
 				{ messages: replayMessages as never[] },
 				fakeContext(

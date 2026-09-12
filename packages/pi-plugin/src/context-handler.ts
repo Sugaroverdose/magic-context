@@ -4987,7 +4987,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		{
 			preserveReasoningToolArcs:
 				args.reasoningClearing?.preserveReasoningToolArcs,
-			authorizeNativeToolRemoval: (callId) => {
+			// Legacy full drops were skeletons even without a native envelope. The
+			// existing tool-input lane freezes their first priced structural removal.
+			authorizeToolRemoval: (callId) => {
 				if (!nativeRemovalInputs) return false;
 				if (nativeRemovalInputs.get(callId) === NATIVE_TOOL_REMOVAL_MARKER)
 					return true;
@@ -5003,7 +5005,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				} catch (error) {
 					sessionLog(
 						args.sessionId,
-						`native arc removal persistence failed; retaining pair: ${String(error)}`,
+						`tool arc removal persistence failed; retaining pair: ${String(error)}`,
 					);
 					return false;
 				}

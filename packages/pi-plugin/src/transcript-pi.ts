@@ -157,7 +157,8 @@ export function createPiTranscript(
 	entryIds?: readonly (string | undefined)[],
 	options: {
 		preserveReasoningToolArcs?: boolean;
-		authorizeNativeToolRemoval?: (callId: string) => boolean;
+		/** Gate first structural application for every arc, including calls without native envelopes. */
+		authorizeToolRemoval?: (callId: string) => boolean;
 	} = {},
 ): Transcript & {
 	/**
@@ -196,8 +197,8 @@ export function createPiTranscript(
 	const dirtyMessages = new Set<number>();
 	const removals = new Map<number, Set<number>>();
 	toolRemovals.set(working, removals);
-	if (options.authorizeNativeToolRemoval)
-		nativeRemovalAuthorization.set(working, options.authorizeNativeToolRemoval);
+	if (options.authorizeToolRemoval)
+		toolRemovalAuthorization.set(working, options.authorizeToolRemoval);
 	const emptyRemovedMessages = new Set<unknown>();
 	const toolInputChanges = new Map<number, Set<string>>();
 
@@ -811,8 +812,7 @@ function createPiAssistantPart(
 			return (
 				part?.type === "toolCall" &&
 				canRemoveNativeToolCall(message, part.id) &&
-				(!(message as { providerPayload?: unknown }).providerPayload ||
-					nativeRemovalAuthorization.get(working)?.(part.id) !== false)
+				toolRemovalAuthorization.get(working)?.(part.id) !== false
 			);
 		},
 		remove(): boolean {
@@ -1016,7 +1016,7 @@ function extractStableId(
 
 // Part proxies keep positional indices until commit; splicing earlier would retarget later mutations.
 const toolRemovals = new WeakMap<PiAgentMessage[], Map<number, Set<number>>>();
-const nativeRemovalAuthorization = new WeakMap<
+const toolRemovalAuthorization = new WeakMap<
 	PiAgentMessage[],
 	(callId: string) => boolean
 >();
