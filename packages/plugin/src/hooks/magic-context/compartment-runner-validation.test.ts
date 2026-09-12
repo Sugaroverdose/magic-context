@@ -9,29 +9,22 @@ import {
 import { readSessionChunk, setRawMessageProvider } from "./read-session-chunk";
 
 describe("buildHistorianFailureNotice", () => {
-    test("frames a low failure count as transient + reassuring (no alarm, no action ask)", () => {
-        const notice = buildHistorianFailureNotice(1, "Historian returned no assistant output.");
-        expect(notice.toLowerCase()).toContain("transient");
-        expect(notice.toLowerCase()).toContain("retry automatically");
-        // Must NOT alarm the user or ask them to act on a single transient blip.
-        expect(notice).not.toContain("magic-context.jsonc");
-        expect(notice).not.toContain("needs attention");
-        // The raw error is internal noise for the transient case — not surfaced.
-        expect(notice).not.toContain("no assistant output");
+    test("renders the stable historian code without raw transient detail", () => {
+        const raw = "Historian returned no assistant output.";
+        const notice = buildHistorianFailureNotice(1, raw);
+        expect(notice).toContain("History compression could not finish this turn.");
+        expect(notice).toContain("retry automatically");
+        expect(notice).toContain("(MC-H01)");
+        expect(notice).not.toContain(raw);
     });
 
-    test("escalates at the persistent threshold with the actionable next step + last error", () => {
-        const notice = buildHistorianFailureNotice(
-            HISTORIAN_PERSISTENT_FAILURE_THRESHOLD,
-            "ProviderModelNotFoundError: historian-model",
-        );
-        expect(notice).toContain("needs attention");
-        expect(notice).toContain("magic-context.jsonc");
-        expect(notice).toContain(String(HISTORIAN_PERSISTENT_FAILURE_THRESHOLD));
-        // The persistent case surfaces the real error so the user can diagnose.
-        expect(notice).toContain("ProviderModelNotFoundError");
-        // Still reassures that the conversation keeps working.
-        expect(notice.toLowerCase()).toContain("keeps working");
+    test("keeps persistent provider detail behind the same stable reference", () => {
+        const raw = "ProviderModelNotFoundError: historian-model";
+        const notice = buildHistorianFailureNotice(HISTORIAN_PERSISTENT_FAILURE_THRESHOLD, raw);
+        expect(notice).toContain("History compression");
+        expect(notice).toContain("(MC-H01)");
+        expect(notice).not.toContain(raw);
+        expect(notice).not.toContain(String(HISTORIAN_PERSISTENT_FAILURE_THRESHOLD));
     });
 });
 

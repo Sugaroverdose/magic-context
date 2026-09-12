@@ -12,8 +12,10 @@ import {
     isWrapupInProgress,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { PluginContext } from "../../plugin/types";
+import { sessionLog } from "../../shared/logger";
 import type { ModelInput } from "../../shared/model-resolution";
 import type { Database } from "../../shared/sqlite";
+import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import {
     executeContextRecomp,
     executeContextRecompWithResult,
@@ -346,13 +348,14 @@ export async function runManagedRecomp(
         );
         return message;
     } catch (error) {
-        setRecompTerminal(
-            ctx.liveSessionState,
+        const failure = renderUserFacingFailure("recomp_unavailable");
+        sessionLog(
             sessionId,
-            "failed",
-            `Recomp crashed: ${String(error)}`,
+            `recomp failed code=${userFacingFailureCode("recomp_unavailable")}`,
+            error,
         );
-        return `## Magic Recomp — Failed\n\nRecomp crashed: ${String(error)}`;
+        setRecompTerminal(ctx.liveSessionState, sessionId, "failed", failure);
+        return `## Magic Recomp — Failed\n\n${failure}`;
     }
 }
 
@@ -468,13 +471,14 @@ export async function runManagedUpgrade(
             migrationSummary ? `\n${migrationSummary}` : "",
         ].join("\n");
     } catch (error) {
-        setRecompTerminal(
-            ctx.liveSessionState,
+        const failure = renderUserFacingFailure("recomp_unavailable");
+        sessionLog(
             sessionId,
-            "failed",
-            `Upgrade crashed: ${String(error)}`,
+            `session upgrade failed code=${userFacingFailureCode("recomp_unavailable")}`,
+            error,
         );
-        return `## Session Upgrade — Failed\n\nUpgrade crashed: ${String(error)}`;
+        setRecompTerminal(ctx.liveSessionState, sessionId, "failed", failure);
+        return `## Session Upgrade — Failed\n\n${failure}`;
     }
 }
 
@@ -521,6 +525,11 @@ async function runUpgradeMemoryMigration(
         });
         return outcome.summary;
     } catch (error) {
-        return `Memory migration skipped (error): ${String(error)}`;
+        sessionLog(
+            sessionId,
+            `memory migration failed code=${userFacingFailureCode("dream_unknown")}`,
+            error,
+        );
+        return renderUserFacingFailure("dream_unknown");
     }
 }

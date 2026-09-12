@@ -930,7 +930,7 @@ describe("createMagicContextCommandHandler", () => {
             expect(getStatusDetail).not.toHaveBeenCalled();
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-rust-status-unavailable",
-                expect.stringContaining("Rust module status could not be read"),
+                expect.stringContaining("(MC-S01)"),
                 {},
             );
             const text = String(sendNotification.mock.calls[0]?.[1]);

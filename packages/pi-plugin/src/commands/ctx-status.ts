@@ -14,8 +14,9 @@ import { getTagsBySession } from "@magic-context/core/features/magic-context/sto
 import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-status";
 import type { ConfigParseFailure } from "@magic-context/core/shared/config-diagnostics";
 import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
-import { describeError } from "@magic-context/core/shared/error-message";
+import { sessionLog } from '@magic-context/core/shared/logger';
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
+import { renderUserFacingFailure, userFacingFailureCode } from '@magic-context/core/shared/user-facing-codes';
 
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { showStatusDialog } from "../dialogs/status-dialog";
@@ -186,9 +187,14 @@ export function registerCtxStatusCommand(
 					details,
 				);
 			} catch (error) {
+				sessionLog(
+					sessionId,
+					`ctx-status failed code=${userFacingFailureCode("status_unavailable")}`,
+					error,
+				);
 				sendStatus({
 					title: "/ctx-status",
-					text: `## Magic Status — Failed\n\n${describeError(error).brief}`,
+					text: renderUserFacingFailure("status_unavailable"),
 					level: "error",
 				});
 			}

@@ -380,7 +380,7 @@ describe("createDreamTaskExecutor — curate", () => {
         );
 
         expect(result.status).toBe("failed");
-        expect(result.failureDetail).toContain("empty_completion");
+        expect(result.failureDetail).toContain("(MC-D03)");
         const task = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
             failure?: { failure_class?: string };
         };
@@ -653,9 +653,9 @@ describe("createDreamTaskExecutor — structured failure telemetry", () => {
             provider_error: null,
             child_session_id: empty.childId,
         });
-        expect(provider.result.failureDetail).toContain("provider_error");
-        expect(timeout.result.failureDetail).toContain("provider_timeout");
-        expect(empty.result.failureDetail).toContain("empty_completion");
+        expect(provider.result.failureDetail).toContain("(MC-D02)");
+        expect(timeout.result.failureDetail).toContain("(MC-D01)");
+        expect(empty.result.failureDetail).toContain("(MC-D03)");
         expect(empty.task.error).toContain("Dreamer returned no assistant output.");
     });
 });

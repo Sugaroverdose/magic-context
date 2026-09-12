@@ -23,6 +23,7 @@ import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
 } from "../../shared/tail-hygiene-status";
+import { renderUserFacingFailure, userFacingFailureCode } from '../../shared/user-facing-codes';
 import {
     type PartialRecompRange,
     snapRangeToCompartments,
@@ -266,7 +267,7 @@ function formatRustOperationMessage(
                 // with the prescribed continuation, not a terminal failure.
                 return `## Magic Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /ctx-wrapup again to continue.`;
             default:
-                return `## Magic Wrapup — Failed\n\n${summary || "Wrapup failed; try /ctx-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
+                return `## Magic Wrapup — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
         }
     }
     switch (disposition) {
@@ -277,7 +278,7 @@ function formatRustOperationMessage(
         case "nothing_to_do":
             return "## Magic Recomp\n\nNothing to rebuild: this session has no published compartments.";
         default:
-            return `## Magic Recomp — Failed\n\n${summary || "Historian recomp failed; try /ctx-recomp again."}`;
+            return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     }
 }
 
@@ -465,9 +466,21 @@ async function executeDreaming(
         dreamNotificationParams,
     );
 
-    const summary = await deps.dreamer.runManual(task);
-
-    await deps.sendNotification(sessionId, summarizeManualDream(summary), dreamNotificationParams);
+    try {
+        const summary = await deps.dreamer.runManual(task);
+        await deps.sendNotification(sessionId, summarizeManualDream(summary), dreamNotificationParams);
+    } catch (error) {
+        sessionLog(
+            sessionId,
+            `ctx-dream failed code=${userFacingFailureCode("dream_unknown")}`,
+            error,
+        );
+        await deps.sendNotification(
+            sessionId,
+            `## /ctx-dream\n\n${renderUserFacingFailure("dream_unknown")}`,
+            dreamNotificationParams,
+        );
+    }
     throwSentinel("CTX-DREAM");
 }
 
@@ -686,7 +699,12 @@ export function createMagicContextCommandHandler(deps: {
                                 ? "No pending operations to flush."
                                 : "Flushed: Changes take effect on next message.";
                     } catch (error) {
-                        result = `Error: Failed to flush context operations. ${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-flush failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            error,
+                        );
+                        result = `Error: ${renderUserFacingFailure("recomp_unavailable")}`;
                     }
                 } else {
                     result = executeFlush(deps.db, sessionId);
@@ -732,8 +750,7 @@ export function createMagicContextCommandHandler(deps: {
                                   rustStatus as RustSessionStatus | undefined,
                               );
                     if (rustMode && !rustStatus) {
-                        combinedStatus =
-                            "## Magic Status — Unavailable\n\nRust module status could not be read. Canonical session usage, tags, and compartments live in mc-store, so context.db mirror values are intentionally omitted.";
+                        combinedStatus = `## Magic Status — Unavailable\n\n${renderUserFacingFailure("status_unavailable")}`;
                     } else if (detail) {
                         combinedStatus = formatStatusDetailMarkdown(detail);
                     } else {
@@ -801,7 +818,7 @@ export function createMagicContextCommandHandler(deps: {
                         error,
                     );
                     combinedStatus = rustMode
-                        ? "## Magic Status — Unavailable\n\nRust module status failed while formatting. Canonical session usage, tags, and compartments live in mc-store, so context.db mirror values are intentionally omitted."
+                        ? `## Magic Status — Unavailable\n\n${renderUserFacingFailure("status_unavailable")}`
                         : executeStatus(deps.db, sessionId);
                 }
                 result += result ? `\n\n${combinedStatus}` : combinedStatus;
@@ -838,7 +855,12 @@ export function createMagicContextCommandHandler(deps: {
                         );
                         result = formatRustOperationMessage("wrapup", value);
                     } catch (error) {
-                        result = `## Magic Wrapup — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-wrapup failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            error,
+                        );
+                        result = `## Magic Wrapup — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
                     }
                 } else if (!deps.executeWrapup) {
                     result =
@@ -868,7 +890,12 @@ export function createMagicContextCommandHandler(deps: {
                         });
                         result = formatRustOperationMessage("recomp", value);
                     } catch (error) {
-                        result = `## Magic Recomp — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-recomp failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            error,
+                        );
+                        result = `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
                     }
                 } else if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.

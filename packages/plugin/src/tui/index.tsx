@@ -2,6 +2,7 @@
 // @ts-nocheck
 import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
+import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
     createSidebarContentSlot,
     kickRecompProgressRefresh,
@@ -438,7 +439,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             {/* Error (full width, conditional) */}
             {s().lastTransformError && (
                 <box marginTop={1} width="100%">
-                    <text fg={t().error}>⚠ {s().lastTransformError}</text>
+                    <text fg={t().error}>{renderUserFacingFailure("transform_update_failed")}</text>
                 </box>
             )}
 
@@ -451,7 +452,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     fg={(s().loggerDiagnostics?.swallowedWriteCount ?? 0) > 0 ? t().error : t().textMuted}
                 />
                 {s().loggerDiagnostics?.lastErrorMessage && (
-                    <R t={t()} l="Last error" v={s().loggerDiagnostics.lastErrorMessage} fg={t().error} />
+                    <R t={t()} l="Warning" v={renderUserFacingFailure("status_unavailable")} fg={t().error} />
                 )}
                 {s().loggerDiagnostics?.lastErrorTime && (
                     <R t={t()} l="Last error time" v={s().loggerDiagnostics.lastErrorTime} fg={t().textMuted} />
@@ -629,8 +630,11 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
     const result = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
     if (!result.ok) {
+        console.error(
+            `[magic-context] status unavailable code=${userFacingFailureCode("status_unavailable")}: ${result.error}`,
+        )
         showToast(api, {
-            message: `Status unavailable: ${result.error}`,
+            message: renderUserFacingFailure("status_unavailable"),
             variant: "warning",
         })
         return false

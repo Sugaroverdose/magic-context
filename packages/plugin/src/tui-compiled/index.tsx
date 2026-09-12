@@ -9,6 +9,7 @@ import { createComponent as _$createComponent } from "opentui:runtime-module:%40
 /** @jsxImportSource @opentui/solid */
 // @ts-nocheck
 import { createMemo } from "opentui:runtime-module:solid-js";
+import { renderUserFacingFailure, userFacingFailureCode } from "../shared/user-facing-codes";
 import { createSidebarContentSlot, kickRecompProgressRefresh, refreshSidebarSnapshot } from "./slots/sidebar-content";
 import packageJson from "../../package.json";
 import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade } from "./data/context-db";
@@ -935,13 +936,11 @@ const StatusDialog = props => {
       var _c$8 = _$memo(() => !!s().lastTransformError);
       return () => _c$8() && (() => {
         var _el$81 = _$createElement("box"),
-          _el$82 = _$createElement("text"),
-          _el$83 = _$createTextNode(`⚠ `);
+          _el$82 = _$createElement("text");
         _$insertNode(_el$81, _el$82);
         _$setProp(_el$81, "marginTop", 1);
         _$setProp(_el$81, "width", "100%");
-        _$insertNode(_el$82, _el$83);
-        _$insert(_el$82, () => s().lastTransformError, null);
+        _$insert(_el$82, () => renderUserFacingFailure("transform_update_failed"));
         _$effect(_$p => _$setProp(_el$82, "fg", t().error, _$p));
         return _el$81;
       })();
@@ -969,9 +968,9 @@ const StatusDialog = props => {
         get t() {
           return t();
         },
-        l: "Last error",
+        l: "Warning",
         get v() {
-          return s().loggerDiagnostics.lastErrorMessage;
+          return renderUserFacingFailure("status_unavailable");
         },
         get fg() {
           return t().error;
@@ -1158,8 +1157,9 @@ async function showStatusDialog(api, targetSessionId = getSessionId(api)) {
   const result = await loadStatusDetail(sessionId, directory, modelKey);
   if (getSessionId(api) !== sessionId) return false;
   if (!result.ok) {
+    console.error(`[magic-context] status unavailable code=${userFacingFailureCode("status_unavailable")}: ${result.error}`);
     showToast(api, {
-      message: `Status unavailable: ${result.error}`,
+      message: renderUserFacingFailure("status_unavailable"),
       variant: "warning"
     });
     return false;
@@ -1177,31 +1177,31 @@ const EmbedDialog = props => {
   const t = () => theme();
   const lines = () => props.detail.statusText.split("\n");
   return (() => {
-    var _el$84 = _$createElement("box"),
-      _el$85 = _$createElement("box"),
-      _el$86 = _$createElement("text"),
-      _el$87 = _$createElement("b");
+    var _el$83 = _$createElement("box"),
+      _el$84 = _$createElement("box"),
+      _el$85 = _$createElement("text"),
+      _el$86 = _$createElement("b");
+    _$insertNode(_el$83, _el$84);
+    _$setProp(_el$83, "flexDirection", "column");
+    _$setProp(_el$83, "width", "100%");
+    _$setProp(_el$83, "paddingLeft", 2);
+    _$setProp(_el$83, "paddingRight", 2);
+    _$setProp(_el$83, "paddingTop", 1);
+    _$setProp(_el$83, "paddingBottom", 1);
     _$insertNode(_el$84, _el$85);
-    _$setProp(_el$84, "flexDirection", "column");
+    _$setProp(_el$84, "justifyContent", "center");
     _$setProp(_el$84, "width", "100%");
-    _$setProp(_el$84, "paddingLeft", 2);
-    _$setProp(_el$84, "paddingRight", 2);
-    _$setProp(_el$84, "paddingTop", 1);
-    _$setProp(_el$84, "paddingBottom", 1);
+    _$setProp(_el$84, "marginBottom", 1);
     _$insertNode(_el$85, _el$86);
-    _$setProp(_el$85, "justifyContent", "center");
-    _$setProp(_el$85, "width", "100%");
-    _$setProp(_el$85, "marginBottom", 1);
-    _$insertNode(_el$86, _el$87);
-    _$insertNode(_el$87, _$createTextNode(`Embedding`));
-    _$insert(_el$84, () => lines().map(line => (() => {
-      var _el$89 = _$createElement("text");
-      _$insert(_el$89, line);
-      _$effect(_$p => _$setProp(_el$89, "fg", t().text, _$p));
-      return _el$89;
+    _$insertNode(_el$86, _$createTextNode(`Embedding`));
+    _$insert(_el$83, () => lines().map(line => (() => {
+      var _el$88 = _$createElement("text");
+      _$insert(_el$88, line);
+      _$effect(_$p => _$setProp(_el$88, "fg", t().text, _$p));
+      return _el$88;
     })()), null);
-    _$effect(_$p => _$setProp(_el$86, "fg", t().accent, _$p));
-    return _el$84;
+    _$effect(_$p => _$setProp(_el$85, "fg", t().accent, _$p));
+    return _el$83;
   })();
 };
 async function showEmbedDialog(api, targetSessionId = getSessionId(api)) {
@@ -1267,11 +1267,11 @@ function renderTuiProbeCustomArm(api, result) {
     api.ui.dialog.replace(() => {
       try {
         return (() => {
-          var _el$90 = _$createElement("box"),
-            _el$91 = _$createElement("text");
-          _$insertNode(_el$90, _el$91);
-          _$insertNode(_el$91, _$createTextNode(`probe`));
-          return _el$90;
+          var _el$89 = _$createElement("box"),
+            _el$90 = _$createElement("text");
+          _$insertNode(_el$89, _el$90);
+          _$insertNode(_el$90, _$createTextNode(`probe`));
+          return _el$89;
         })();
       } catch (error) {
         result.customThrew = probeErrorMessage(error);
@@ -1344,11 +1344,11 @@ function reportTuiProbe(api, result) {
   if (result.customThrew === null) {
     try {
       api.ui.dialog.replace(() => (() => {
-        var _el$93 = _$createElement("box"),
-          _el$94 = _$createElement("text");
-        _$insertNode(_el$93, _el$94);
-        _$insert(_el$94, summary);
-        return _el$93;
+        var _el$92 = _$createElement("box"),
+          _el$93 = _$createElement("text");
+        _$insertNode(_el$92, _el$93);
+        _$insert(_el$93, summary);
+        return _el$92;
       })());
       return;
     } catch (error) {

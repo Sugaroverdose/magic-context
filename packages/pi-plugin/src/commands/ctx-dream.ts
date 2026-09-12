@@ -8,6 +8,10 @@ import {
 } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import {
+	renderUserFacingFailure,
+	userFacingFailureCode,
+} from "@magic-context/core/shared/user-facing-codes";
 import { runPiDreamForProject } from "../dreamer";
 import { createCtxStatusSender } from "./pi-command-utils";
 
@@ -161,17 +165,15 @@ export function registerCtxDreamCommand(
 					},
 				);
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				sessionLog(project.projectIdentity, `/ctx-dream failed: ${message}`);
+				sessionLog(
+					project.projectIdentity,
+					`/ctx-dream failed code=${userFacingFailureCode("dream_unknown")}`,
+					error,
+				);
 				sendStatus(
 					{
 						title: "/ctx-dream",
-						text: [
-							"## /ctx-dream",
-							"",
-							`Dream run failed: ${message}`,
-							"The registered timer will retry due tasks on its next tick.",
-						].join("\n"),
+						text: renderUserFacingFailure("dream_unknown"),
 						level: "error",
 					},
 					{

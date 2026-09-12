@@ -33,6 +33,7 @@ import type { TailHygieneStatus } from "../../shared/rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "../../shared/rust-mode-status";
 import type { Database } from "../../shared/sqlite";
 import { formatTailHygiene } from "../../shared/tail-hygiene-status";
+import { renderUserFacingFailure, userFacingFailureCode } from '../../shared/user-facing-codes';
 import {
     formatWindowDerivationLine,
     type WindowGeometryResult,
@@ -183,7 +184,11 @@ export function executeStatus(
             `- Total queued: ${pendingOps.length}`,
             "",
             ...(meta.lastTransformError
-                ? ["### Last Transform Error", `- ${meta.lastTransformError}`, ""]
+                ? [
+                      "### Warning",
+                      `- ${renderUserFacingFailure("transform_update_failed")}`,
+                      "",
+                  ]
                 : []),
             "### Cache TTL",
             `- ${formatCacheTtlDisplay(ttlDisplay)}`,
@@ -301,7 +306,10 @@ export function executeStatus(
 
         return lines.join("\n");
     } catch (error) {
-        sessionLog(sessionId, "ctx-status failed:", error);
-        return `Error: Failed to read context status. ${getErrorMessage(error)}`;
+        sessionLog(
+            sessionId,
+            `ctx-status failed code=${userFacingFailureCode("status_unavailable")}: ${getErrorMessage(error)}`,
+        );
+        return `Error: ${renderUserFacingFailure("status_unavailable")}`;
     }
 }

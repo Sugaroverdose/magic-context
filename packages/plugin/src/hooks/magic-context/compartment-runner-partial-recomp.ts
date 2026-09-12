@@ -22,6 +22,7 @@ import {
 import { normalizeSDKResponse } from "../../shared";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
+import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
@@ -399,7 +400,10 @@ export async function executePartialRecompInternal(
 
             const chunkCoverageError = validateChunkCoverage(chunk);
             if (chunkCoverageError) {
-                return `## Magic Recomp — Failed\n\nPartial recomp stopped because the raw chunk could not be represented safely: ${chunkCoverageError}\n\nOriginal state preserved (staging kept for retry).`;
+                log(
+                    `[magic-context] partial recomp failed session=${sessionId} code=${userFacingFailureCode("recomp_unavailable")} reason="${chunkCoverageError}"`,
+                );
+                return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
             }
 
             // v2 bounded reference model: 4 rotating seeds + last-6 recency
@@ -449,10 +453,13 @@ export async function executePartialRecompInternal(
                 language: deps.language,
                 callbacks: {
                     onRepairRetry: async (error) => {
+                        log(
+                            `[magic-context] partial recomp retry session=${sessionId} code=${userFacingFailureCode("recomp_unavailable")} reason="${error}"`,
+                        );
                         await sendStatusNotification(
                             client,
                             sessionId,
-                            `## Magic Recomp — Partial\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a repair retry for messages ${chunk.startIndex}-${chunk.endIndex}.\n\nThe previous output did not validate: ${error}`,
+                            `## Magic Recomp — Partial\n\nHistory compression is retrying this pass. ${renderUserFacingFailure("recomp_unavailable")}`,
                             notifParams(),
                         );
                     },
@@ -471,7 +478,7 @@ export async function executePartialRecompInternal(
                         await sendStatusNotification(
                             client,
                             sessionId,
-                            `## Magic Recomp — Partial\n\nHistorian pass ${passCount + 1}, attempt ${passAttempt} is continuing with a smaller chunk ending at ${smallerChunk.endIndex} because messages ${chunk.startIndex}-${chunk.endIndex} could not be validated.\n\nValidator result: ${validatedPass.error}`,
+                            `## Magic Recomp — Partial\n\nHistory compression is retrying with a smaller set of messages. ${renderUserFacingFailure("recomp_unavailable")}`,
                             notifParams(),
                         );
                         currentTokenBudget = reducedBudget;
@@ -479,7 +486,10 @@ export async function executePartialRecompInternal(
                         continue;
                     }
                 }
-                return `## Magic Recomp — Failed\n\nPartial recomp failed while rebuilding messages ${chunk.startIndex}-${chunk.endIndex}: ${validatedPass.error}\n\nOriginal state preserved (staging kept for retry).`;
+                log(
+                    `[magic-context] partial recomp failed session=${sessionId} code=${userFacingFailureCode("recomp_unavailable")} reason="${validatedPass.error}" messageRange=${chunk.startIndex}-${chunk.endIndex}`,
+                );
+                return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
             }
 
             candidateCompartments = [
@@ -521,7 +531,10 @@ export async function executePartialRecompInternal(
         ].join("\n");
     } catch (error: unknown) {
         const message = getErrorMessage(error);
-        return `## Magic Recomp — Failed\n\nPartial recomp failed unexpectedly: ${message}\n\nStaging preserved for resume on next attempt.`;
+        log(
+            `[magic-context] partial recomp failed session=${sessionId} code=${userFacingFailureCode("recomp_unavailable")} reason="${message}"`,
+        );
+        return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
     } finally {
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         // Best-effort cleanup: if staging is somehow left over without a matching

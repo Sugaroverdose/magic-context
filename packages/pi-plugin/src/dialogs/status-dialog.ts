@@ -52,6 +52,7 @@ import {
 	formatTailHygiene,
 	resolveTailHygieneStatus,
 } from "@magic-context/core/shared/tail-hygiene-status";
+import { renderUserFacingFailure } from '@magic-context/core/shared/user-facing-codes';
 import {
 	formatWindowDerivationLine,
 	type WindowGeometryResult,
@@ -427,9 +428,13 @@ function renderInner(
 	);
 
 	if (s.lastTransformError)
-		lines.push(theme.fg("error", `⚠ ${s.lastTransformError}`));
+		lines.push(
+			theme.fg("error", renderUserFacingFailure("transform_update_failed")),
+		);
 	if (s.historianLastError)
-		lines.push(theme.fg("error", `⚠ ${s.historianLastError}`));
+		lines.push(
+			theme.fg("error", renderUserFacingFailure("historian_unavailable")),
+		);
 
 	lines.push("");
 	lines.push(theme.fg("muted", "Press Escape to close"));

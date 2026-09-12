@@ -9,6 +9,7 @@ import {
 } from "./opencode-db-path";
 import type { StatusDetail } from "./rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "./rust-mode-status";
+import { renderUserFacingFailure } from './user-facing-codes';
 
 function formatCount(value: number): string {
     return Math.round(value).toLocaleString();
@@ -71,7 +72,7 @@ export function formatStatusDetailMarkdown(detail: StatusDetail): string {
         );
     }
     if (detail.lastTransformError) {
-        lines.push(`- **Last transform error:** ${detail.lastTransformError}`);
+        lines.push(`- **Warning:** ${renderUserFacingFailure("transform_update_failed")}`);
     }
 
     return lines.join("\n");

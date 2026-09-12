@@ -348,7 +348,7 @@ describe("executeContextRecomp", () => {
         });
 
         // Only historian requests use prompt now; progress no longer consumes mock calls.
-        expect(result).toContain("historian pass failed");
+        expect(result).toContain("(MC-R01)");
         expect(getCompartments(db, "ses-recomp-fail")).toEqual([
             expect.objectContaining({
                 startMessage: 1,
@@ -455,7 +455,7 @@ describe("executeContextRecomp", () => {
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.",
                 expect.stringContaining(
-                    "Historian pass 1, attempt 1 is continuing with a repair retry for messages 1-4.",
+                    "History compression is retrying this pass. History compression could not be rebuilt. Run /ctx-recomp again. (MC-R01)",
                 ),
             ]),
         );
@@ -568,7 +568,7 @@ describe("executeContextRecomp", () => {
             directory: "/tmp",
         });
 
-        expect(result).toContain("missing the tiered paraphrase structure");
+        expect(result).toContain("(MC-R01)");
         expect(getCompartments(db, sessionId)).toHaveLength(0);
         expect(
             db
@@ -728,7 +728,7 @@ describe("executeContextRecomp", () => {
             promptSyncSpy.mockRestore();
         }
 
-        expect(result).toContain("prompt timed out after 300000ms");
+        expect(result).toContain("(MC-R01)");
         expect(getRpcNotificationTexts(prompt)).toContain(
             "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-4.",
         );
@@ -902,12 +902,12 @@ describe("executeContextRecomp", () => {
         });
 
         // Overlapping compartments are NOT healed by gap healing, so retry/shrink triggers.
-        expect(result).toContain("Recomp failed while rebuilding messages 1-6");
+        expect(result).toContain("(MC-R01)");
         expect(getRpcNotificationTexts(prompt)).toEqual(
             expect.arrayContaining([
                 "## Magic Recomp\n\nHistorian pass 1, attempt 1 started for messages 1-6.",
                 expect.stringContaining(
-                    "Historian pass 1, attempt 1 is continuing with a repair retry for messages 1-6.",
+                    "History compression is retrying this pass. History compression could not be rebuilt. Run /ctx-recomp again. (MC-R01)",
                 ),
             ]),
         );
@@ -2427,7 +2427,7 @@ describe("runCompartmentAgent", () => {
                 drainNotifications(0, "ses-invalid-existing").find((n) => n.type === "toast")
                     ?.payload.message,
             ).toLowerCase(),
-        ).toContain("transient");
+        ).toContain("(mc-h01)");
     });
 
     it("rejects invalid historian output without replacing compartments or facts", async () => {
@@ -2490,7 +2490,7 @@ describe("runCompartmentAgent", () => {
                 drainNotifications(0, "ses-invalid-output").find((n) => n.type === "toast")?.payload
                     .message,
             ).toLowerCase(),
-        ).toContain("transient");
+        ).toContain("(mc-h01)");
     });
 
     it("alerts when historian model execution fails", async () => {
@@ -2540,7 +2540,7 @@ describe("runCompartmentAgent", () => {
                 drainNotifications(0, "ses-model-failure").find((n) => n.type === "toast")?.payload
                     .message,
             ).toLowerCase(),
-        ).toContain("transient");
+        ).toContain("(mc-h01)");
     });
 
     it("escalates the historian alert to an actionable notice after persistent failures", async () => {
@@ -2585,10 +2585,9 @@ describe("runCompartmentAgent", () => {
             drainNotifications(0, "ses-persistent-failure").find((n) => n.type === "toast")?.payload
                 .message,
         );
-        expect(notice).toContain("needs attention");
-        expect(notice).toContain("magic-context.jsonc");
-        // The escalated notice surfaces the real error for diagnosis.
-        expect(notice).toContain("historian model unavailable");
+        expect(notice).toContain("(MC-H01)");
+        expect(notice).not.toContain("magic-context.jsonc");
+        expect(notice).not.toContain("historian model unavailable");
     });
 
     it("re-reads narrative-gap ordinals after validation rejection", async () => {
