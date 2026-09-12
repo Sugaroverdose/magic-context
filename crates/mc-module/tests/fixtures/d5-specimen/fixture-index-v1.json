@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_shape_version": 3,
+  "fixture_shape_version": 4,
   "readiness": "scaffold",
   "opaque_blocks": 0,
   "length_preservation": {
@@ -3778,16 +3778,16 @@
     },
     {
       "path": "canonical-json-vectors-v1.json",
-      "byte_size": 10140,
-      "sha256": "1e1764d28c2ce7fd43245d187f67b39b90b16ad81015397721464f9a24abdaf0",
+      "byte_size": 15186,
+      "sha256": "648e7e996254495a98d5acfb2f42ff76b80196f94c443e68d949671ffd17ac71",
       "derived": false,
       "source": "hand-written independent canonical-form vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
       "path": "README.md",
-      "byte_size": 4862,
-      "sha256": "a91828f147a8586c7a019ce71f7c0804f9c7b507123024db2e0f8c92cef9b8cb",
+      "byte_size": 6633,
+      "sha256": "66f16e9e438a4ecfe433ae7159cba413a9453da0fcc822c2c79dc319628802d4",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",

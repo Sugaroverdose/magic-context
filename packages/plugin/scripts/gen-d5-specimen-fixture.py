@@ -338,6 +338,16 @@ def contract_kind(provider_kind: str) -> str:
     return KNOWN_PROVIDER_KINDS.get(provider_kind, "opaque")
 
 
+def result_content_kind(block: Any) -> str:
+    if (
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    ):
+        return "text"
+    return "opaque"
+
+
 def db_kind(contract_block_kind: str) -> str:
     return "tool_call" if contract_block_kind == "tool_use" else contract_block_kind
 
@@ -461,14 +471,18 @@ def decoded_string_byte_lengths(value: Any) -> list[int]:
 
 
 def sanitize_opaque_block_bytes(
-    raw: bytes, ordinal: int, block_index: int, probe: str | None
+    raw: bytes,
+    ordinal: int,
+    block_index: int,
+    probe: str | None,
+    leaf_index_offset: int = 0,
 ) -> tuple[bytes, int, list[int]]:
     text = raw.decode()
     root = JsonSpanParser(text).parse()
     strings = opaque_string_nodes(root)
     output: list[str] = []
     cursor = 0
-    for leaf_index, node in enumerate(strings):
+    for leaf_index, node in enumerate(strings, start=leaf_index_offset):
         output.append(text[cursor : node.start])
         token = text[node.start : node.end]
         output.append(
@@ -502,15 +516,43 @@ def normalized_block_payload(block: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalized_raw_block_bytes(raw_provider_bytes: bytes) -> bytes:
+    text = raw_provider_bytes.decode()
+    root = JsonSpanParser(text).parse()
+    if root.fields is None:
+        raise SystemExit("provider block must be a JSON object")
+    provider_kind = root.value.get("type", "")
+    if contract_kind(provider_kind) == "opaque":
+        return raw_provider_bytes
+
+    fields: list[bytes] = []
+    for key in sorted(root.fields):
+        if key in {"type", "id", "tool_use_id"}:
+            continue
+        child = root.fields[key]
+        if provider_kind == "tool_result" and key == "content" and child.items is not None:
+            items = []
+            for item in child.items:
+                if result_content_kind(item.value) == "opaque":
+                    items.append(text[item.start : item.end].encode())
+                else:
+                    items.append(canonical_json_bytes(item.value))
+            value_bytes = b"[" + b",".join(items) + b"]"
+        else:
+            value_bytes = canonical_json_bytes(child.value)
+        fields.append(canonical_json_bytes(key) + b":" + value_bytes)
+    return b"{" + b",".join(fields) + b"}"
+
+
 def normalized_block_bytes(
     block: dict[str, Any], raw_provider_bytes: bytes | None = None
 ) -> bytes:
-    # Known kinds use canonical JSON after lifting; opaque kinds retain exact raw
-    # provider bytes because their adapter identity is byte-defined.
+    # Known parents are canonicalized around opaque tool-result children. Top-level
+    # opaque blocks retain exact provider bytes because their identity is byte-defined.
+    if raw_provider_bytes is not None:
+        return normalized_raw_block_bytes(raw_provider_bytes)
     if contract_kind(block.get("type", "")) == "opaque":
-        if raw_provider_bytes is None:
-            raise SystemExit("opaque provider block is missing its raw JSON bytes")
-        return raw_provider_bytes
+        raise SystemExit("opaque provider block is missing its raw JSON bytes")
     return canonical_json_bytes(normalized_block_payload(block))
 
 
@@ -596,7 +638,48 @@ def sanitized_block_bytes(
         )
 
     raw = normalized_block_bytes(block, raw_provider_bytes)
-    sanitized = canonical_json_bytes(sanitize(normalized_block_payload(block)))
+    if raw_provider_bytes is None:
+        sanitized = canonical_json_bytes(sanitize(normalized_block_payload(block)))
+    else:
+        text = raw_provider_bytes.decode()
+        root = JsonSpanParser(text).parse()
+        if root.fields is None:
+            raise SystemExit("provider block must be a JSON object")
+        provider_kind = root.value.get("type", "")
+        fields: list[bytes] = []
+        for key in sorted(root.fields):
+            if key in {"type", "id", "tool_use_id"}:
+                continue
+            child = root.fields[key]
+            if (
+                provider_kind == "tool_result"
+                and key == "content"
+                and child.items is not None
+            ):
+                items = []
+                for item in child.items:
+                    if result_content_kind(item.value) == "opaque":
+                        item_raw = text[item.start : item.end].encode()
+                        item_bytes, item_probe_hits, item_lengths = (
+                            sanitize_opaque_block_bytes(
+                                item_raw,
+                                ordinal,
+                                block_index,
+                                probe,
+                                leaf_index,
+                            )
+                        )
+                        leaf_index += len(item_lengths)
+                        probe_hits += item_probe_hits
+                        string_byte_lengths.extend(item_lengths)
+                        items.append(item_bytes)
+                    else:
+                        items.append(canonical_json_bytes(sanitize(item.value)))
+                value_bytes = b"[" + b",".join(items) + b"]"
+            else:
+                value_bytes = canonical_json_bytes(sanitize(child.value))
+            fields.append(canonical_json_bytes(key) + b":" + value_bytes)
+        sanitized = b"{" + b",".join(fields) + b"}"
     if len(sanitized) != len(raw):
         raise SystemExit(
             f"provider block byte length drift at {ordinal}#{block_index}: "
@@ -981,7 +1064,7 @@ def build_applied_state(state: dict[str, Any], probes: dict[int, bytes]) -> dict
 def validate_representation_contract(canonical_vectors: bytes) -> None:
     document = load_json(canonical_vectors)
     rules = document.get("normative_algorithm", [])
-    if [rule.get("rule") for rule in rules] != list(range(1, 9)):
+    if [rule.get("rule") for rule in rules] != list(range(1, 10)):
         raise SystemExit("canonical JSON normative rules are incomplete")
     if document.get("number_reference", {}).get("engine") != "Node.js v22.23.1":
         raise SystemExit("canonical JSON number reference engine drift")
@@ -1006,6 +1089,24 @@ def validate_representation_contract(canonical_vectors: bytes) -> None:
     }
     if normalized_block_payload(extension_block) != expected_extension:
         raise SystemExit("known provider extension was not preserved")
+
+    block_reference = document.get("block_aware_reference", {})
+    if "decoded-kind intersection" not in block_reference.get("note", ""):
+        raise SystemExit("N4 decoded-kind intersection reference is missing")
+    block_vectors = document.get("block_aware_vectors", [])
+    if len(block_vectors) != 6:
+        raise SystemExit("N4 block-aware vector count drift")
+    for vector in block_vectors:
+        input_raw = vector["input_json"].encode()
+        input_block = load_json(input_raw)
+        expected = vector["expected_utf8"].encode()
+        if contract_kind(input_block.get("type", "")) != vector["expected_kind"]:
+            raise SystemExit(f"N4 top-level kind failed: {vector['name']}")
+        if (
+            normalized_raw_block_bytes(input_raw) != expected
+            or sha256(expected) != vector["sha256"]
+        ):
+            raise SystemExit(f"N4 block-aware vector failed: {vector['name']}")
 
     opaque_control = document["opaque_control"]
     opaque_raw = opaque_control["input_json"].encode()
@@ -1044,13 +1145,18 @@ Contract clause 2 (types) pins `NativeBlock.bytes` to this normative canonical J
 5. N1 — Preserve an integer-syntax number as canonical decimal text: no leading `+` or zeroes, map `-0` to `0`, and never route arbitrary-magnitude integers through binary64.
 6. N2 — Parse a fraction- or exponent-syntax number as finite IEEE-754 binary64 and serialize it with ECMAScript `Number::toString` (ECMA-262 §6.1.6.1.20 / `JSON.stringify`): shortest round-trip digits; plain decimal when 1e-6 ≤ |x| < 1e21, otherwise lowercase exponent notation with `+` retained for positive exponents; omit an integral fraction and map negative zero to `0`.
 7. N3 — Apply N1/N2 independently of language-default number formatters; Python re-lays out `repr`'s shortest digits instead of emitting `repr` directly, and Rust uses an exact ECMAScript formatter rather than `serde_json` Display.
-8. Emit no trailing newline.
+8. N4 — Descend only through known block structure and classify nested `tool_result` children at the decoded `mc_store::ResultBlockKind` boundary (`Text`, `Media`, or `Opaque`), never by a raw `type` allowlist. On the Claude Code lane, nested `tool_result` content is decoded by Broca `decode_result_block` (`79b1272e` `anthropic_decode.rs:648-661`: `text` with a string payload is known; everything else, including malformed text, is raw `Opaque`) and by MC's Anthropic-shaped ingress for that lane. The pinned Claude Code D5 rule therefore canonicalizes exactly `text` with a string `text` field. Unknown, unsupported, or malformed children are opaque, and their raw bytes are spliced unchanged into the canonical parent. `tool_use` input and arguments are ordinary JSON values and are never block-scanned. A top-level unknown block remains wholly opaque.
+9. Emit no trailing newline.
 
 These rules are the definition; `canonical-json-vectors-v1.json` contains independent hand-written conformance checks designed to distinguish wrong ordering, escaping, and number algorithms. Known block kinds lift `type`, `id`, and `tool_use_id` into contract kind/tool-link fields while retaining every other provider field. Scalar text is normalized as `{{"text": ...}}`. Archive `V` entries are base64 compact JSON renderings of `NormalizedMessage` in contract field order; the applied-state payload is a stable JSON scaffold for units, tags, drops, and ledger without token counts or clocks.
 
 ## Opaque blocks
 
 An unknown provider block lifts nothing, receives kind `opaque`, and preserves its exact raw provider bytes, including key order, whitespace, and escape and number spelling. Raw preservation keeps content and identity digests over opaque blocks equal across adapters; in this derived fixture only string values are sanitized in place, without re-serializing or changing any non-string byte.
+
+N4's decoded-kind intersection is the pinned Claude Code D5 rule, not a fixture convenience. On that lane, nested `tool_result` content is decoded by Broca `decode_result_block` (`79b1272e` `anthropic_decode.rs:648-661`: `text` with a string payload is known; everything else, including malformed text, is raw `Opaque`) and by MC's Anthropic-shaped ingress for that lane. The parent object and known text children remain canonical around each raw opaque child. Widening requires a contract and vector revision.
+
+OpenCode and Pi consume different API structures and are not inputs to the Claude Code D5 rule. OpenCode emits decoded `Text` from `output_text` at `opencode.rs:703-707` and separately classifies attachments at `opencode.rs:719-738`; Pi parses its separate harness surface at `pi.rs:845-892`. Their current classification differences belong to a parity follow-up, not this fixture's identity rule.
 
 `expected-manifest-v1.json` and `expected-archive-v1.json` remain scaffolds, not oracles, despite the real structure and lengths. Readiness stays `scaffold` until slice 0 fills every pending digest from **independent** reference-implementation preimage vectors and hand-checked CE1 preimage vectors—not from the codec under test—and freezes the results.
 
@@ -1121,7 +1227,7 @@ def write_fixture(
         )
     index = {
         "schema_version": 1,
-        "fixture_shape_version": 3,
+        "fixture_shape_version": 4,
         "readiness": "scaffold",
         "opaque_blocks": sum(
             block_kind == "opaque"

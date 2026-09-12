@@ -2,14 +2,16 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mc_module::ck_wire::{OpaqueBlock, ResultBlockKind};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "b6582187cc4dad1a97387777cbcbc3764f564f610e9d959a3ab6ab0b2a1b1632";
+const INDEX_SHA256: &str = "1f735283ce4f54514aa118299bda47fe9157990d8904885e7381cd2871b1ad22";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -156,6 +158,104 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
 
     let mut output = Vec::new();
     write(value, &mut output);
+    output
+}
+
+fn result_content_block_kind(block: &Value) -> ResultBlockKind {
+    if let (Some("text"), Some(text)) = (
+        block.get("type").and_then(Value::as_str),
+        block.get("text").and_then(Value::as_str),
+    ) {
+        ResultBlockKind::Text {
+            text: text.to_owned(),
+        }
+    } else {
+        ResultBlockKind::Opaque {
+            opaque: OpaqueBlock {
+                source: serde_json::json!({ "type": "provider", "provider": "anthropic" }),
+                kind: block
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                raw: block.clone(),
+                arc: None,
+            },
+        }
+    }
+}
+
+fn canonical_raw_json_bytes(raw: &RawValue) -> Vec<u8> {
+    let value: Value = serde_json::from_str(raw.get()).expect("parse raw JSON value");
+    canonical_json_bytes(&value)
+}
+
+fn canonical_tool_result_content_bytes(raw: &RawValue) -> Option<Vec<u8>> {
+    let items = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).ok()?;
+    let mut output = Vec::new();
+    output.push(b'[');
+    for (index, item) in items.iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        let value: Value = serde_json::from_str(item.get()).expect("parse result content block");
+        if matches!(
+            result_content_block_kind(&value),
+            ResultBlockKind::Opaque { .. }
+        ) {
+            output.extend_from_slice(item.get().as_bytes());
+        } else {
+            output.extend_from_slice(&canonical_json_bytes(&value));
+        }
+    }
+    output.push(b']');
+    Some(output)
+}
+
+fn canonical_provider_block_bytes(raw: &RawValue) -> Vec<u8> {
+    let block: Value = serde_json::from_str(raw.get()).expect("parse provider block");
+    let provider_kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(
+        provider_kind,
+        "thinking"
+            | "redacted_thinking"
+            | "tool_use"
+            | "tool_result"
+            | "text"
+            | "image"
+            | "document"
+    ) {
+        return raw.get().as_bytes().to_vec();
+    }
+
+    let fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get())
+        .expect("parse provider block fields");
+    let retained = fields
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "type" | "id" | "tool_use_id"))
+        .collect::<Vec<_>>();
+    let mut output = Vec::new();
+    output.push(b'{');
+    for (index, (key, value)) in retained.into_iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        output.extend_from_slice(
+            &serde_json::to_vec(key).expect("serialize canonical provider field name"),
+        );
+        output.push(b':');
+        if provider_kind == "tool_result" && key == "content" {
+            if let Some(content) = canonical_tool_result_content_bytes(value) {
+                output.extend_from_slice(&content);
+                continue;
+            }
+        }
+        output.extend_from_slice(&canonical_raw_json_bytes(value));
+    }
+    output.push(b'}');
     output
 }
 
@@ -315,7 +415,7 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
     );
     let index: Value = serde_json::from_slice(&index_bytes).expect("parse fixture index");
     let index = object(&index);
-    assert_eq!(number(&index["fixture_shape_version"]), 3);
+    assert_eq!(number(&index["fixture_shape_version"]), 4);
     assert_eq!(text(&index["readiness"]), "scaffold");
     assert_eq!(number(&index["opaque_blocks"]), 0);
     assert_eq!(text(&index["source_db_sha256"]), DB_SHA256);
@@ -408,7 +508,7 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
         "hand-written independent canonical-form vectors; the numbered algorithm is normative and these vectors are conformance checks"
     );
     let rules = array(&vectors["normative_algorithm"]);
-    assert_eq!(rules.len(), 8);
+    assert_eq!(rules.len(), 9);
     for (index, rule) in rules.iter().enumerate() {
         assert_eq!(number(&object(rule)["rule"]), index as u64 + 1);
         assert!(!text(&object(rule)["text"]).is_empty());
@@ -439,6 +539,39 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
             canonical_json_bytes(&reparsed),
             expected,
             "canonical JSON vector output is idempotent {name}"
+        );
+    }
+
+    let block_reference = object(&vectors["block_aware_reference"]);
+    assert!(text(&block_reference["note"]).contains("decoded-kind intersection"));
+    assert!(text(&block_reference["note"]).contains("anthropic_decode.rs:648-661"));
+    assert!(text(&block_reference["result_block_kind"]).contains("Text, Media, Opaque"));
+    assert!(text(&block_reference["parity_follow_up"]).contains("opencode.rs:719-738"));
+    assert!(text(&block_reference["parity_follow_up"]).contains("pi.rs:845-892"));
+    let block_vectors = array(&vectors["block_aware_vectors"]);
+    assert_eq!(block_vectors.len(), 6);
+    for vector in block_vectors {
+        let vector = object(vector);
+        let name = text(&vector["name"]);
+        let input = text(&vector["input_json"]);
+        let expected = text(&vector["expected_utf8"]).as_bytes();
+        assert_eq!(
+            sha256_hex(expected),
+            text(&vector["sha256"]),
+            "N4 digest {name}"
+        );
+        let raw = serde_json::from_str::<Box<RawValue>>(input).expect("parse raw N4 vector");
+        assert_eq!(
+            canonical_provider_block_bytes(raw.as_ref()),
+            expected,
+            "N4 block-aware vector {name}"
+        );
+        let parsed: Value = serde_json::from_str(input).expect("parse N4 provider block");
+        let (kind, _, _) = lift_provider_block_for_contract(parsed);
+        assert_eq!(
+            kind,
+            text(&vector["expected_kind"]),
+            "N4 top-level kind {name}"
         );
     }
 
