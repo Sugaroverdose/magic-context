@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "normative_algorithm": [
+    {
+      "rule": 1,
+      "text": "Parse to the JSON semantic value model and emit UTF-8."
+    },
+    {
+      "rule": 2,
+      "text": "Sort object keys lexicographically by Unicode code point, never by key length or source order."
+    },
+    {
+      "rule": 3,
+      "text": "Use comma and colon separators with no surrounding whitespace."
+    },
+    {
+      "rule": 4,
+      "text": "Do not ASCII-escape non-ASCII; escape only quote, backslash, and U+0000-U+001F, using short forms for newline, carriage return, tab, backspace, and form feed and lowercase \\uXXXX for the rest."
+    },
+    {
+      "rule": 5,
+      "text": "Render integers as shortest decimal and finite floats with shortest round-trip representation, preserving .0 and signed zero and spelling exponents with lowercase e, no plus sign, and no leading zeroes."
+    },
+    {
+      "rule": 6,
+      "text": "Emit no trailing newline."
+    }
+  ],
+  "provenance": "hand-written independent canonical-form vectors; the numbered algorithm is normative and these vectors are conformance checks",
+  "vectors": [
+    {
+      "name": "ascii-text",
+      "input": {
+        "text": "hello"
+      },
+      "expected_utf8": "{\"text\":\"hello\"}",
+      "sha256": "cbbbdcd27692344de5dbab3abcaba413fb0f45307267de7081401576df1cb176"
+    },
+    {
+      "name": "non-ascii-unescaped",
+      "input": {
+        "text": "café 雪 😀"
+      },
+      "expected_utf8": "{\"text\":\"café 雪 😀\"}",
+      "sha256": "2872ba0491b644be9f17276865e4543a64291878e600873ab0d9e5a9283d4e11"
+    },
+    {
+      "name": "quotes-and-backslashes",
+      "input": {
+        "text": "say \"hi\" \\ path"
+      },
+      "expected_utf8": "{\"text\":\"say \\\"hi\\\" \\\\ path\"}",
+      "sha256": "bee3c175569959e27f19f9f9a4514b7b63a89a5f2f47899c67272d4c2d59249c"
+    },
+    {
+      "name": "short-control-escapes",
+      "input": {
+        "text": "a\nb\rc\td\be\f"
+      },
+      "expected_utf8": "{\"text\":\"a\\nb\\rc\\td\\be\\f\"}",
+      "sha256": "0c99628888f51eedcbdd9e3ac70704a978820f0fde8c7d88fcbe3fc4a1f682e5"
+    },
+    {
+      "name": "unicode-control-escapes",
+      "input": {
+        "text": "\u0000\u0001\u001f"
+      },
+      "expected_utf8": "{\"text\":\"\\u0000\\u0001\\u001f\"}",
+      "sha256": "9867f9215fa5541c406d80c2296c442dffd7c1d628620c50f9ad02a44de2035c"
+    },
+    {
+      "name": "nested-empty-array",
+      "input": {
+        "z": [
+          3,
+          {
+            "b": true,
+            "a": null,
+            "empty": []
+          }
+        ],
+        "a": []
+      },
+      "expected_utf8": "{\"a\":[],\"z\":[3,{\"a\":null,\"b\":true,\"empty\":[]}]}",
+      "sha256": "068818aeb41372d0670a1aebdfcd36b3e4026cc9f2046f328e45f6fb56211c6f"
+    },
+    {
+      "name": "integer-beyond-2pow53",
+      "input": {
+        "negative": -42,
+        "positive": 9007199254740993,
+        "zero": 0
+      },
+      "expected_utf8": "{\"negative\":-42,\"positive\":9007199254740993,\"zero\":0}",
+      "sha256": "2cb7ce62a05ea60bc4b3b2bb0ea61b9ebf7be7966ef67234694e6e5548c12f84"
+    },
+    {
+      "name": "fractional-floats",
+      "input": {
+        "fraction": 1.5,
+        "negative": -0.25
+      },
+      "expected_utf8": "{\"fraction\":1.5,\"negative\":-0.25}",
+      "sha256": "291cc02e965a1a25a5896f45dbb91a177fda92a20590ef47709b3430a462ffb5"
+    },
+    {
+      "name": "float-exponent-1e-7",
+      "input": {
+        "value": 1e-07
+      },
+      "expected_utf8": "{\"value\":1e-7}",
+      "sha256": "910750038eb30a40d06da88009b6259aabaf3751b3cb212c616d51abb6b008a4"
+    },
+    {
+      "name": "float-whole-negative-zero-and-large-exponent",
+      "input": {
+        "large": 1e+21,
+        "negative_zero": -0.0,
+        "whole": 1.0
+      },
+      "expected_utf8": "{\"large\":1e21,\"negative_zero\":-0.0,\"whole\":1.0}",
+      "sha256": "e592e8b48738595562d1e5e65d4c032ec93b4f4a4fb4bb8cfc67224676ee5b5b"
+    },
+    {
+      "name": "empty-containers",
+      "input": {
+        "array": [],
+        "object": {},
+        "text": ""
+      },
+      "expected_utf8": "{\"array\":[],\"object\":{},\"text\":\"\"}",
+      "sha256": "393fa1f8e0b63625829df4ed36cb09a25ba3e52a2ddd1dcef8e3d0563f6532c1"
+    },
+    {
+      "name": "length-vs-codepoint-key-order",
+      "input": {
+        "z": 1,
+        "aa": 2
+      },
+      "expected_utf8": "{\"aa\":2,\"z\":1}",
+      "sha256": "1901fff7dc19c7530ef0a17f2f20f3b032bbf8b5684efcc537ce1a35e6b468eb"
+    },
+    {
+      "name": "empty-prefix-and-non-ascii-keys",
+      "input": {
+        "é": 1,
+        "": 0,
+        "雪": 2,
+        "a": 3
+      },
+      "expected_utf8": "{\"\":0,\"a\":3,\"é\":1,\"雪\":2}",
+      "sha256": "ac0d1623beedbd3b1bc404120a812c2a7693f6a7d34c9d6981e3de30214b15cf"
+    },
+    {
+      "name": "top-level-array",
+      "input": [
+        "x",
+        {
+          "k": "v"
+        },
+        false,
+        null,
+        0.125
+      ],
+      "expected_utf8": "[\"x\",{\"k\":\"v\"},false,null,0.125]",
+      "sha256": "f50204ae4308a9844f6223f51ede1ba53756a9da2c9f7498ef05f697f297c738"
+    }
+  ],
+  "opaque_control": {
+    "note": "Opaque raw bytes preserve whitespace, key order, escape spelling, exponent spelling, and every field and value.",
+    "input_json": "{  \"z_extension\" : [ 1e+00, true ], \"type\" : \"future_kind\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } }",
+    "expected_kind": "opaque",
+    "expected_utf8": "{  \"z_extension\" : [ 1e+00, true ], \"type\" : \"future_kind\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } }",
+    "sha256": "6e33fb538c06042c64b58f47b8de1c62fe0688a09035b93be7d5b6dc68ad26f4"
+  }
+}

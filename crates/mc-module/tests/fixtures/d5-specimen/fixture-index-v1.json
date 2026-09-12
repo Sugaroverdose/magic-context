@@ -1,6 +1,13 @@
 {
   "schema_version": 1,
+  "fixture_shape_version": 2,
   "readiness": "scaffold",
+  "opaque_blocks": 0,
+  "length_preservation": {
+    "both": 188,
+    "encoded_only": 0,
+    "decoded_only": 0
+  },
   "source_db_sha256": "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
   "capture_13610_sha256": "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
   "gateway_private_evidence": {
@@ -28,6 +35,29 @@
     {
       "ordinal": 1799,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        658,
+        95
+      ],
+      "block_string_byte_lengths": [
+        [
+          628,
+          0
+        ],
+        [
+          12,
+          20,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 753,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -37,6 +67,21 @@
     {
       "ordinal": 1800,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        141
+      ],
+      "block_string_byte_lengths": [
+        [
+          99,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 141,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -46,6 +91,21 @@
     {
       "ordinal": 1801,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        115
+      ],
+      "block_string_byte_lengths": [
+        [
+          50,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 115,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -55,6 +115,20 @@
     {
       "ordinal": 1802,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1893
+      ],
+      "block_string_byte_lengths": [
+        [
+          1794
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1893,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -64,6 +138,29 @@
     {
       "ordinal": 1803,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        113,
+        523
+      ],
+      "block_string_byte_lengths": [
+        [
+          102
+        ],
+        [
+          50,
+          213,
+          158,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 636,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -73,6 +170,20 @@
     {
       "ordinal": 1804,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        172
+      ],
+      "block_string_byte_lengths": [
+        [
+          158
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 172,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -82,6 +193,21 @@
     {
       "ordinal": 1805,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        108
+      ],
+      "block_string_byte_lengths": [
+        [
+          70,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 108,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -91,6 +217,20 @@
     {
       "ordinal": 1806,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        757
+      ],
+      "block_string_byte_lengths": [
+        [
+          717
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 757,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -100,6 +240,28 @@
     {
       "ordinal": 1807,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        2426,
+        112
+      ],
+      "block_string_byte_lengths": [
+        [
+          2396,
+          0
+        ],
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2538,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -109,6 +271,20 @@
     {
       "ordinal": 1808,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1772
+      ],
+      "block_string_byte_lengths": [
+        [
+          1697
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1772,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -118,6 +294,30 @@
     {
       "ordinal": 1809,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        2414,
+        523
+      ],
+      "block_string_byte_lengths": [
+        [
+          2384,
+          0
+        ],
+        [
+          50,
+          158,
+          213,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2937,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -127,6 +327,20 @@
     {
       "ordinal": 1810,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        172
+      ],
+      "block_string_byte_lengths": [
+        [
+          158
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 172,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -136,6 +350,29 @@
     {
       "ordinal": 1811,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1106,
+        97
+      ],
+      "block_string_byte_lengths": [
+        [
+          1076,
+          0
+        ],
+        [
+          12,
+          20,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1203,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -145,6 +382,21 @@
     {
       "ordinal": 1812,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        118
+      ],
+      "block_string_byte_lengths": [
+        [
+          76,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 118,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -154,6 +406,21 @@
     {
       "ordinal": 1813,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        115
+      ],
+      "block_string_byte_lengths": [
+        [
+          50,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 115,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -163,6 +430,20 @@
     {
       "ordinal": 1814,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1007
+      ],
+      "block_string_byte_lengths": [
+        [
+          951
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1007,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -172,6 +453,29 @@
     {
       "ordinal": 1815,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        108,
+        367
+      ],
+      "block_string_byte_lengths": [
+        [
+          97
+        ],
+        [
+          50,
+          146,
+          76,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 475,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -181,6 +485,20 @@
     {
       "ordinal": 1816,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        172
+      ],
+      "block_string_byte_lengths": [
+        [
+          158
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 172,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -190,6 +508,21 @@
     {
       "ordinal": 1817,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        108
+      ],
+      "block_string_byte_lengths": [
+        [
+          70,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 108,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -199,6 +532,20 @@
     {
       "ordinal": 1818,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        2012
+      ],
+      "block_string_byte_lengths": [
+        [
+          1940
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 2012,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -208,6 +555,29 @@
     {
       "ordinal": 1819,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        242,
+        367
+      ],
+      "block_string_byte_lengths": [
+        [
+          229
+        ],
+        [
+          50,
+          76,
+          146,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 609,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -217,6 +587,20 @@
     {
       "ordinal": 1820,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        172
+      ],
+      "block_string_byte_lengths": [
+        [
+          158
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 172,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -226,6 +610,21 @@
     {
       "ordinal": 1821,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        83
+      ],
+      "block_string_byte_lengths": [
+        [
+          45,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 83,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -235,6 +634,20 @@
     {
       "ordinal": 1822,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1545
+      ],
+      "block_string_byte_lengths": [
+        [
+          1496
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1545,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -244,6 +657,20 @@
     {
       "ordinal": 1823,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        2262
+      ],
+      "block_string_byte_lengths": [
+        [
+          2223
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 2262,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -253,6 +680,20 @@
     {
       "ordinal": 1824,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        832
+      ],
+      "block_string_byte_lengths": [
+        [
+          821
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 832,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -262,6 +703,29 @@
     {
       "ordinal": 1825,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        790,
+        159
+      ],
+      "block_string_byte_lengths": [
+        [
+          760,
+          0
+        ],
+        [
+          10,
+          86,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 949,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -271,6 +735,21 @@
     {
       "ordinal": 1826,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        382
+      ],
+      "block_string_byte_lengths": [
+        [
+          333,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 382,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -280,6 +759,21 @@
     {
       "ordinal": 1827,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        266
+      ],
+      "block_string_byte_lengths": [
+        [
+          219,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 266,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -289,6 +783,20 @@
     {
       "ordinal": 1828,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        4836
+      ],
+      "block_string_byte_lengths": [
+        [
+          4756
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 4836,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -298,6 +806,28 @@
     {
       "ordinal": 1829,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        2046,
+        113
+      ],
+      "block_string_byte_lengths": [
+        [
+          2016,
+          0
+        ],
+        [
+          60,
+          21
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2159,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -307,6 +837,21 @@
     {
       "ordinal": 1830,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        400
+      ],
+      "block_string_byte_lengths": [
+        [
+          345,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 400,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -316,6 +861,22 @@
     {
       "ordinal": 1831,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        81
+      ],
+      "block_string_byte_lengths": [
+        [
+          3,
+          15,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 81,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -325,6 +886,21 @@
     {
       "ordinal": 1832,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        470
+      ],
+      "block_string_byte_lengths": [
+        [
+          421,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 470,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -334,6 +910,21 @@
     {
       "ordinal": 1833,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        113
+      ],
+      "block_string_byte_lengths": [
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 113,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -343,6 +934,20 @@
     {
       "ordinal": 1834,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        3098
+      ],
+      "block_string_byte_lengths": [
+        [
+          2945
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 3098,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -352,6 +957,29 @@
     {
       "ordinal": 1835,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        934,
+        141
+      ],
+      "block_string_byte_lengths": [
+        [
+          904,
+          0
+        ],
+        [
+          10,
+          66,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1075,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -361,6 +989,21 @@
     {
       "ordinal": 1836,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        548
+      ],
+      "block_string_byte_lengths": [
+        [
+          499,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 548,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -370,6 +1013,21 @@
     {
       "ordinal": 1837,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        112
+      ],
+      "block_string_byte_lengths": [
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 112,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -379,6 +1037,20 @@
     {
       "ordinal": 1838,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        4185
+      ],
+      "block_string_byte_lengths": [
+        [
+          4004
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 4185,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -388,6 +1060,29 @@
     {
       "ordinal": 1839,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        782,
+        112
+      ],
+      "block_string_byte_lengths": [
+        [
+          752,
+          0
+        ],
+        [
+          10,
+          39,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 894,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -397,6 +1092,21 @@
     {
       "ordinal": 1840,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        400
+      ],
+      "block_string_byte_lengths": [
+        [
+          351,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 400,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -406,6 +1116,29 @@
     {
       "ordinal": 1841,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1094,
+        129
+      ],
+      "block_string_byte_lengths": [
+        [
+          1064,
+          0
+        ],
+        [
+          20,
+          46,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1223,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -415,6 +1148,21 @@
     {
       "ordinal": 1842,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        541
+      ],
+      "block_string_byte_lengths": [
+        [
+          492,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 541,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -424,6 +1172,21 @@
     {
       "ordinal": 1843,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        122
+      ],
+      "block_string_byte_lengths": [
+        [
+          58,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 122,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -433,6 +1196,20 @@
     {
       "ordinal": 1844,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        3000
+      ],
+      "block_string_byte_lengths": [
+        [
+          2835
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 3000,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -442,6 +1219,29 @@
     {
       "ordinal": 1845,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1922,
+        107
+      ],
+      "block_string_byte_lengths": [
+        [
+          1892,
+          0
+        ],
+        [
+          3,
+          41,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2029,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -451,6 +1251,21 @@
     {
       "ordinal": 1846,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        941
+      ],
+      "block_string_byte_lengths": [
+        [
+          864,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 941,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -460,6 +1275,28 @@
     {
       "ordinal": 1847,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        634,
+        178
+      ],
+      "block_string_byte_lengths": [
+        [
+          604,
+          0
+        ],
+        [
+          134,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 812,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -469,6 +1306,20 @@
     {
       "ordinal": 1848,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        501
+      ],
+      "block_string_byte_lengths": [
+        [
+          464
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 501,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -478,6 +1329,29 @@
     {
       "ordinal": 1849,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        890,
+        134
+      ],
+      "block_string_byte_lengths": [
+        [
+          860,
+          0
+        ],
+        [
+          10,
+          61,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1024,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -487,6 +1361,21 @@
     {
       "ordinal": 1850,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        308
+      ],
+      "block_string_byte_lengths": [
+        [
+          257,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 308,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -496,6 +1385,28 @@
     {
       "ordinal": 1851,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        818,
+        113
+      ],
+      "block_string_byte_lengths": [
+        [
+          788,
+          0
+        ],
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 931,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -505,6 +1416,20 @@
     {
       "ordinal": 1852,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        3595
+      ],
+      "block_string_byte_lengths": [
+        [
+          3408
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 3595,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -514,6 +1439,28 @@
     {
       "ordinal": 1853,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1342,
+        113
+      ],
+      "block_string_byte_lengths": [
+        [
+          1312,
+          0
+        ],
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1455,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -523,6 +1470,20 @@
     {
       "ordinal": 1854,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        2760
+      ],
+      "block_string_byte_lengths": [
+        [
+          2611
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 2760,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -532,6 +1493,29 @@
     {
       "ordinal": 1855,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        574,
+        99
+      ],
+      "block_string_byte_lengths": [
+        [
+          544,
+          0
+        ],
+        [
+          10,
+          26,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 673,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -541,6 +1525,21 @@
     {
       "ordinal": 1856,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        176
+      ],
+      "block_string_byte_lengths": [
+        [
+          134,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 176,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -550,6 +1549,28 @@
     {
       "ordinal": 1857,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        698,
+        112
+      ],
+      "block_string_byte_lengths": [
+        [
+          668,
+          0
+        ],
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 810,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -559,6 +1580,20 @@
     {
       "ordinal": 1858,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1414
+      ],
+      "block_string_byte_lengths": [
+        [
+          1341
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1414,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -568,6 +1603,28 @@
     {
       "ordinal": 1859,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        594,
+        112
+      ],
+      "block_string_byte_lengths": [
+        [
+          564,
+          0
+        ],
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 706,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -577,6 +1634,20 @@
     {
       "ordinal": 1860,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1167
+      ],
+      "block_string_byte_lengths": [
+        [
+          1110
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1167,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -586,6 +1657,28 @@
     {
       "ordinal": 1861,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        86,
+        149
+      ],
+      "block_string_byte_lengths": [
+        [
+          75
+        ],
+        [
+          10,
+          76,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 235,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -595,6 +1688,21 @@
     {
       "ordinal": 1862,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        172
+      ],
+      "block_string_byte_lengths": [
+        [
+          130,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 172,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -604,6 +1712,21 @@
     {
       "ordinal": 1863,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        114
+      ],
+      "block_string_byte_lengths": [
+        [
+          48,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 114,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -613,6 +1736,20 @@
     {
       "ordinal": 1864,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        8522
+      ],
+      "block_string_byte_lengths": [
+        [
+          8151
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 8522,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -622,6 +1759,28 @@
     {
       "ordinal": 1865,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        2182,
+        222
+      ],
+      "block_string_byte_lengths": [
+        [
+          2152,
+          0
+        ],
+        [
+          178,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2404,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -631,6 +1790,20 @@
     {
       "ordinal": 1866,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        372
+      ],
+      "block_string_byte_lengths": [
+        [
+          341
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 372,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -640,6 +1813,21 @@
     {
       "ordinal": 1867,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        167
+      ],
+      "block_string_byte_lengths": [
+        [
+          127,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 167,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -649,6 +1837,20 @@
     {
       "ordinal": 1868,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        62
+      ],
+      "block_string_byte_lengths": [
+        [
+          31
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 62,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -658,6 +1860,28 @@
     {
       "ordinal": 1869,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        554,
+        125
+      ],
+      "block_string_byte_lengths": [
+        [
+          524,
+          0
+        ],
+        [
+          85,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 679,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -667,6 +1891,20 @@
     {
       "ordinal": 1870,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        216
+      ],
+      "block_string_byte_lengths": [
+        [
+          174
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 216,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -676,6 +1914,21 @@
     {
       "ordinal": 1871,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        171
+      ],
+      "block_string_byte_lengths": [
+        [
+          129,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 171,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -685,6 +1938,20 @@
     {
       "ordinal": 1872,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        197
+      ],
+      "block_string_byte_lengths": [
+        [
+          165
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 197,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -694,6 +1961,21 @@
     {
       "ordinal": 1873,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        217
+      ],
+      "block_string_byte_lengths": [
+        [
+          175,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 217,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -703,6 +1985,20 @@
     {
       "ordinal": 1874,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        327
+      ],
+      "block_string_byte_lengths": [
+        [
+          293
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 327,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -712,6 +2008,21 @@
     {
       "ordinal": 1875,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        170
+      ],
+      "block_string_byte_lengths": [
+        [
+          106,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 170,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -721,6 +2032,20 @@
     {
       "ordinal": 1876,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        2188
+      ],
+      "block_string_byte_lengths": [
+        [
+          2069
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 2188,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -730,6 +2055,28 @@
     {
       "ordinal": 1877,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1050,
+        170
+      ],
+      "block_string_byte_lengths": [
+        [
+          1020,
+          0
+        ],
+        [
+          106,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1220,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -739,6 +2086,20 @@
     {
       "ordinal": 1878,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        858
+      ],
+      "block_string_byte_lengths": [
+        [
+          801
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 858,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -748,6 +2109,29 @@
     {
       "ordinal": 1879,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        125,
+        3889
+      ],
+      "block_string_byte_lengths": [
+        [
+          114
+        ],
+        [
+          48,
+          2021,
+          1636,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 4014,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -757,6 +2141,20 @@
     {
       "ordinal": 1880,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        170
+      ],
+      "block_string_byte_lengths": [
+        [
+          156
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 170,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -766,6 +2164,29 @@
     {
       "ordinal": 1881,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        31,
+        958
+      ],
+      "block_string_byte_lengths": [
+        [
+          20
+        ],
+        [
+          48,
+          438,
+          356,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 989,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -775,6 +2196,20 @@
     {
       "ordinal": 1882,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        170
+      ],
+      "block_string_byte_lengths": [
+        [
+          156
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 170,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -784,6 +2219,27 @@
     {
       "ordinal": 1883,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        47,
+        155
+      ],
+      "block_string_byte_lengths": [
+        [
+          36
+        ],
+        [
+          117,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 202,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -793,6 +2249,20 @@
     {
       "ordinal": 1884,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        208
+      ],
+      "block_string_byte_lengths": [
+        [
+          173
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 208,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -802,6 +2272,21 @@
     {
       "ordinal": 1885,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        95
+      ],
+      "block_string_byte_lengths": [
+        [
+          57,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 95,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -811,6 +2296,20 @@
     {
       "ordinal": 1886,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1153
+      ],
+      "block_string_byte_lengths": [
+        [
+          1105
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1153,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -820,6 +2319,20 @@
     {
       "ordinal": 1887,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1119
+      ],
+      "block_string_byte_lengths": [
+        [
+          1087
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1119,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -829,6 +2342,28 @@
     {
       "ordinal": 1888,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1214,
+        83
+      ],
+      "block_string_byte_lengths": [
+        [
+          1184,
+          0
+        ],
+        [
+          45,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1297,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -838,6 +2373,20 @@
     {
       "ordinal": 1889,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1123
+      ],
+      "block_string_byte_lengths": [
+        [
+          1079
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1123,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -847,6 +2396,20 @@
     {
       "ordinal": 1890,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1235
+      ],
+      "block_string_byte_lengths": [
+        [
+          1212
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1235,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -856,6 +2419,20 @@
     {
       "ordinal": 1891,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1139
+      ],
+      "block_string_byte_lengths": [
+        [
+          1128
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1139,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -865,6 +2442,28 @@
     {
       "ordinal": 1892,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        466,
+        179
+      ],
+      "block_string_byte_lengths": [
+        [
+          436,
+          0
+        ],
+        [
+          102,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 645,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -874,6 +2473,21 @@
     {
       "ordinal": 1893,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        232
+      ],
+      "block_string_byte_lengths": [
+        [
+          191,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 232,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -883,6 +2497,28 @@
     {
       "ordinal": 1894,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        458,
+        142
+      ],
+      "block_string_byte_lengths": [
+        [
+          428,
+          0
+        ],
+        [
+          65,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 600,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -892,6 +2528,21 @@
     {
       "ordinal": 1895,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        195
+      ],
+      "block_string_byte_lengths": [
+        [
+          154,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 195,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -901,6 +2552,21 @@
     {
       "ordinal": 1896,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        102
+      ],
+      "block_string_byte_lengths": [
+        [
+          25,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 102,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -910,6 +2576,21 @@
     {
       "ordinal": 1897,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        782
+      ],
+      "block_string_byte_lengths": [
+        [
+          733,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 782,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -919,6 +2600,26 @@
     {
       "ordinal": 1898,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        94,
+        80
+      ],
+      "block_string_byte_lengths": [
+        [
+          83
+        ],
+        [
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 174,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -928,6 +2629,21 @@
     {
       "ordinal": 1899,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        5596
+      ],
+      "block_string_byte_lengths": [
+        [
+          5437,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 5596,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -937,6 +2653,28 @@
     {
       "ordinal": 1900,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        522,
+        140
+      ],
+      "block_string_byte_lengths": [
+        [
+          492,
+          0
+        ],
+        [
+          63,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 662,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -946,6 +2684,21 @@
     {
       "ordinal": 1901,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        193
+      ],
+      "block_string_byte_lengths": [
+        [
+          152,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 193,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -955,6 +2708,29 @@
     {
       "ordinal": 1902,
       "block_count": 2,
+      "block_kinds": [
+        "text",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        54,
+        1027
+      ],
+      "block_string_byte_lengths": [
+        [
+          43
+        ],
+        [
+          5,
+          11,
+          910,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1081,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -964,6 +2740,21 @@
     {
       "ordinal": 1903,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        79
+      ],
+      "block_string_byte_lengths": [
+        [
+          40,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 79,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -973,6 +2764,28 @@
     {
       "ordinal": 1904,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        470,
+        152
+      ],
+      "block_string_byte_lengths": [
+        [
+          440,
+          0
+        ],
+        [
+          75,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 622,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -982,6 +2795,21 @@
     {
       "ordinal": 1905,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        205
+      ],
+      "block_string_byte_lengths": [
+        [
+          164,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 205,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -991,6 +2819,30 @@
     {
       "ordinal": 1906,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1634,
+        1032
+      ],
+      "block_string_byte_lengths": [
+        [
+          1604,
+          0
+        ],
+        [
+          5,
+          11,
+          915,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2666,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1000,6 +2852,21 @@
     {
       "ordinal": 1907,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        79
+      ],
+      "block_string_byte_lengths": [
+        [
+          40,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 79,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1009,6 +2876,28 @@
     {
       "ordinal": 1908,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1486,
+        85
+      ],
+      "block_string_byte_lengths": [
+        [
+          1456,
+          0
+        ],
+        [
+          3,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1571,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1018,6 +2907,21 @@
     {
       "ordinal": 1909,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1012
+      ],
+      "block_string_byte_lengths": [
+        [
+          967,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1012,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1027,6 +2931,29 @@
     {
       "ordinal": 1910,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        850,
+        85
+      ],
+      "block_string_byte_lengths": [
+        [
+          820,
+          0
+        ],
+        [
+          4,
+          3,
+          33
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 935,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1036,6 +2963,21 @@
     {
       "ordinal": 1911,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        83
+      ],
+      "block_string_byte_lengths": [
+        [
+          42,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 83,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1045,6 +2987,29 @@
     {
       "ordinal": 1912,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        430,
+        707
+      ],
+      "block_string_byte_lengths": [
+        [
+          400,
+          0
+        ],
+        [
+          5,
+          618,
+          33
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1137,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1054,6 +3019,21 @@
     {
       "ordinal": 1913,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        64
+      ],
+      "block_string_byte_lengths": [
+        [
+          25,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 64,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1063,6 +3043,22 @@
     {
       "ordinal": 1914,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        88
+      ],
+      "block_string_byte_lengths": [
+        [
+          4,
+          6,
+          33
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 88,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1072,6 +3068,21 @@
     {
       "ordinal": 1915,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        763
+      ],
+      "block_string_byte_lengths": [
+        [
+          713,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 763,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1081,6 +3092,28 @@
     {
       "ordinal": 1916,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        2594,
+        73
+      ],
+      "block_string_byte_lengths": [
+        [
+          2564,
+          0
+        ],
+        [
+          7,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2667,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1090,6 +3123,21 @@
     {
       "ordinal": 1917,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        69
+      ],
+      "block_string_byte_lengths": [
+        [
+          30,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 69,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1099,6 +3147,20 @@
     {
       "ordinal": 1918,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1869
+      ],
+      "block_string_byte_lengths": [
+        [
+          1842
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1869,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1108,6 +3170,20 @@
     {
       "ordinal": 1919,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1006
+      ],
+      "block_string_byte_lengths": [
+        [
+          995
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1006,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1117,6 +3193,21 @@
     {
       "ordinal": 1920,
       "block_count": 1,
+      "block_kinds": [
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        91
+      ],
+      "block_string_byte_lengths": [
+        [
+          3,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 91,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1126,6 +3217,21 @@
     {
       "ordinal": 1921,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1984
+      ],
+      "block_string_byte_lengths": [
+        [
+          1931,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1984,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1135,6 +3241,29 @@
     {
       "ordinal": 1922,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        798,
+        1224
+      ],
+      "block_string_byte_lengths": [
+        [
+          768,
+          0
+        ],
+        [
+          5,
+          1093,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 2022,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1144,6 +3273,21 @@
     {
       "ordinal": 1923,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        146
+      ],
+      "block_string_byte_lengths": [
+        [
+          107,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 146,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1153,6 +3297,28 @@
     {
       "ordinal": 1924,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        554,
+        97
+      ],
+      "block_string_byte_lengths": [
+        [
+          524,
+          0
+        ],
+        [
+          3,
+          35
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 651,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1162,6 +3328,21 @@
     {
       "ordinal": 1925,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        3143
+      ],
+      "block_string_byte_lengths": [
+        [
+          3082,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 3143,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1171,6 +3352,20 @@
     {
       "ordinal": 1926,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1040
+      ],
+      "block_string_byte_lengths": [
+        [
+          1015
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1040,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1180,6 +3375,20 @@
     {
       "ordinal": 1927,
       "block_count": 1,
+      "block_kinds": [
+        "text"
+      ],
+      "block_byte_lengths": [
+        1007
+      ],
+      "block_string_byte_lengths": [
+        [
+          996
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1007,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1189,6 +3398,29 @@
     {
       "ordinal": 1928,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        514,
+        145
+      ],
+      "block_string_byte_lengths": [
+        [
+          484,
+          0
+        ],
+        [
+          3,
+          72,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 659,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1198,6 +3430,21 @@
     {
       "ordinal": 1929,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        141
+      ],
+      "block_string_byte_lengths": [
+        [
+          97,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 141,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1207,6 +3454,28 @@
     {
       "ordinal": 1930,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        842,
+        115
+      ],
+      "block_string_byte_lengths": [
+        [
+          812,
+          0
+        ],
+        [
+          50,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 957,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1216,6 +3485,20 @@
     {
       "ordinal": 1931,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        2265
+      ],
+      "block_string_byte_lengths": [
+        [
+          2134
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 2265,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1225,6 +3508,29 @@
     {
       "ordinal": 1932,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        1166,
+        128
+      ],
+      "block_string_byte_lengths": [
+        [
+          1136,
+          0
+        ],
+        [
+          3,
+          52,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1294,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1234,6 +3540,21 @@
     {
       "ordinal": 1933,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        317
+      ],
+      "block_string_byte_lengths": [
+        [
+          259,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 317,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1243,6 +3564,28 @@
     {
       "ordinal": 1934,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        638,
+        120
+      ],
+      "block_string_byte_lengths": [
+        [
+          608,
+          0
+        ],
+        [
+          56,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 758,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1252,6 +3595,20 @@
     {
       "ordinal": 1935,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        1630
+      ],
+      "block_string_byte_lengths": [
+        [
+          1489
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 1630,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1261,6 +3618,29 @@
     {
       "ordinal": 1936,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        970,
+        122
+      ],
+      "block_string_byte_lengths": [
+        [
+          940,
+          0
+        ],
+        [
+          3,
+          56,
+          19
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 1092,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1270,6 +3650,21 @@
     {
       "ordinal": 1937,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        609
+      ],
+      "block_string_byte_lengths": [
+        [
+          555,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 609,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1279,6 +3674,29 @@
     {
       "ordinal": 1938,
       "block_count": 2,
+      "block_kinds": [
+        "reasoning",
+        "tool_use"
+      ],
+      "block_byte_lengths": [
+        434,
+        152
+      ],
+      "block_string_byte_lengths": [
+        [
+          404,
+          0
+        ],
+        [
+          9,
+          50,
+          4
+        ]
+      ],
+      "block_length_preservation": [
+        "both",
+        "both"
+      ],
       "source_byte_length": 586,
       "length_source": "capture_13610",
       "kinds_source": "capture_13610",
@@ -1288,6 +3706,20 @@
     {
       "ordinal": 1939,
       "block_count": 1,
+      "block_kinds": [
+        "tool_result"
+      ],
+      "block_byte_lengths": [
+        741
+      ],
+      "block_string_byte_lengths": [
+        [
+          684
+        ]
+      ],
+      "block_length_preservation": [
+        "both"
+      ],
       "source_byte_length": 741,
       "length_source": "capture_13610",
       "kinds_source": "db",
@@ -1299,7 +3731,7 @@
     {
       "path": "source-segment-v1.json",
       "byte_size": 297346,
-      "sha256": "25f4c33556eaa8f4a27327db0926d4ddf493c92f6c287eb30b27c7a9662f9940",
+      "sha256": "25f8d16852703115b3d4b3d35517c79b07b1d7d0360e0c8c013a97dd53e55969",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
@@ -1309,7 +3741,7 @@
         1864,
         1927
       ],
-      "redaction_method": "138 members fully replaced with deterministic equal-length stand-ins; three probe members retain only their approved probe string and sanitize all remaining payload bytes",
+      "redaction_method": "all string leaf values replaced with deterministic equal-length synthetic fillers; 138 members retain no source text and three probe members retain only their approved probe string",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
@@ -1325,13 +3757,13 @@
         1864,
         1927
       ],
-      "redaction_method": "138 members fully replaced with deterministic equal-length stand-ins; three probe members retain only their approved probe string and sanitize all remaining payload bytes",
+      "redaction_method": "all string leaf values replaced with deterministic equal-length synthetic fillers; 138 members retain no source text and three probe members retain only their approved probe string",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
       "path": "expected-archive-v1.json",
       "byte_size": 695469,
-      "sha256": "736f60deb4a0b85d5eb97c046d099ea17c9196afe64239f218b861e8db05f4da",
+      "sha256": "7759de3b0169a80cc1be4697474a4fdb5c2c073871eb0857c182f1c6b372eb8e",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
@@ -1341,13 +3773,21 @@
         1864,
         1927
       ],
-      "redaction_method": "138 members fully replaced with deterministic equal-length stand-ins; three probe members retain only their approved probe string and sanitize all remaining payload bytes",
+      "redaction_method": "all string leaf values replaced with deterministic equal-length synthetic fillers; 138 members retain no source text and three probe members retain only their approved probe string",
+      "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    },
+    {
+      "path": "canonical-json-vectors-v1.json",
+      "byte_size": 5633,
+      "sha256": "b8b7d0a78c1e55d5cbc4c0b7d7cdaf1a11f47e9d4dd571f3212c307f0526750d",
+      "derived": false,
+      "source": "hand-written independent canonical-form vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
       "path": "README.md",
-      "byte_size": 2522,
-      "sha256": "a9eded5e2b802ac98a2f713d2fb115355dec02d2fb1eef7bd708c7548be14e18",
+      "byte_size": 4214,
+      "sha256": "0cedc69a0b0bcd366643b4fd67118e1d165534fe7d34abac8e3f74eea4b56c03",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
@@ -1357,7 +3797,7 @@
         1864,
         1927
       ],
-      "redaction_method": "138 members fully replaced with deterministic equal-length stand-ins; three probe members retain only their approved probe string and sanitize all remaining payload bytes",
+      "redaction_method": "all string leaf values replaced with deterministic equal-length synthetic fillers; 138 members retain no source text and three probe members retain only their approved probe string",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     }
   ]
