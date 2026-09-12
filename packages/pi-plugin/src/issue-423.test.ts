@@ -1,3 +1,4 @@
+import { setEmergencyDropSample } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { registerIssue423Tests } from "@magic-context/core/hooks/magic-context/issue-423-test-support.test";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
@@ -29,6 +30,11 @@ registerIssue423Tests("pi", {
 			},
 		);
 		transcript.commit();
+		// This selector-only adapter owns the caller's finalization step. The real
+		// context handler waits for every lane, including native activation.
+		if (result.emergencyDroppedTools > 0) {
+			setEmergencyDropSample(db, sessionId, percentage * 2040);
+		}
 		return result.emergencyDroppedTools;
 	},
 	anthropicMessages: (fixture) =>

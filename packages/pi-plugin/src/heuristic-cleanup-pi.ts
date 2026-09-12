@@ -40,10 +40,7 @@ import {
 	updateTagDropMode,
 	updateTagStatus,
 } from "@magic-context/core/features/magic-context/storage";
-import {
-	getEmergencyInputSample,
-	setEmergencyDropSample,
-} from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { getEmergencyInputSample } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "@magic-context/core/features/magic-context/types";
 import {
 	applyCavemanCleanup,
@@ -342,8 +339,8 @@ export function applyPiHeuristicCleanup(
 	// ── Pass 1: tiered target-headroom emergency drop ─────────────────
 	// Replaces the old need-blind aged-drop + dropAllTools nuke. Runs only when
 	// the caller supplies `emergency` (derived force-band cache-busting pass). Selection is
-	// pure (`planEmergencyDrop`); we apply it and advance the persisted watermark
-	// so each tag drops once. Mirrors OpenCode `applyHeuristicCleanup`.
+	// pure (`planEmergencyDrop`); we persist the tag mutations and return their count.
+	// The context handler consumes the shared episode after all reclaim lanes finish.
 	if (config.emergency) {
 		const emergency = config.emergency;
 		const priorInputSample = getEmergencyInputSample(db, sessionId);
@@ -414,10 +411,6 @@ export function applyPiHeuristicCleanup(
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {
 			sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
-		}
-		// A no-op spent no cache rewrite and must not consume the episode's batch.
-		if (emergencyDroppedTools > 0) {
-			setEmergencyDropSample(db, sessionId, emergency.currentTotalInputTokens);
 		}
 	}
 
