@@ -753,7 +753,7 @@ mod tests {
             .insert_memory(insert_input(project, "CONSTRAINTS", "private rule", 1))
             .unwrap();
         store
-            .update_memory_content(project, memory, "changed private rule", 2)
+            .update_memory_content(project, memory, "changed private rule", None, 2)
             .unwrap();
         let foreign_memory = store
             .insert_memory(insert_input(
@@ -764,7 +764,7 @@ mod tests {
             ))
             .unwrap();
         store
-            .update_memory_content(foreign, foreign_memory, "changed shared rule", 4)
+            .update_memory_content(foreign, foreign_memory, "changed shared rule", None, 4)
             .unwrap();
         let after_memory =
             m1_revision_signal_parts_for_pass(store, project, project, "ses", 0, false, 0).unwrap();
@@ -808,7 +808,7 @@ mod tests {
             .max_memory_mutation_id(&[project.to_string()])
             .unwrap();
         store
-            .update_memory_content(project, baseline, "corrected private rule", 2)
+            .update_memory_content(project, baseline, "corrected private rule", None, 2)
             .unwrap();
         store
             .insert_memory(insert_input(project, "ARCHITECTURE", "new private rule", 3))
@@ -943,7 +943,7 @@ mod tests {
         let project = "git:proj";
         let initial_ids = [
             store
-                .insert_memory(insert_input(project, "CONSTRAINTS", "original alpha", 1))
+                .insert_memory(insert_input(project, "CONFIG_VALUES", "original alpha", 1))
                 .unwrap(),
             store
                 .insert_memory(insert_input(project, "CONSTRAINTS", "archive beta", 1))
@@ -995,7 +995,13 @@ mod tests {
         );
 
         store
-            .update_memory_content(project, initial_ids[0], "updated <alpha> & stable", 10)
+            .update_memory_content(
+                project,
+                initial_ids[0],
+                "updated <alpha> & stable",
+                Some("CONSTRAINTS"),
+                10,
+            )
             .unwrap();
         store
             .archive_memory(project, initial_ids[1], None, 11)
@@ -1144,7 +1150,7 @@ mod tests {
             match case {
                 "update" => {
                     store
-                        .update_memory_content(project, target, "corrected", 2)
+                        .update_memory_content(project, target, "corrected", None, 2)
                         .unwrap();
                 }
                 "archive" => {

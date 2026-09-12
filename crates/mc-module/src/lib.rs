@@ -11623,6 +11623,11 @@ impl McHandler {
                 )
             }
             "update" => {
+                let category =
+                    match memory_tool::validate_update_category(string_arg(args, "category")) {
+                        Ok(category) => category,
+                        Err(error) => return tool_error_result(format!("Error: {error}.")),
+                    };
                 let Some(id) = single_memory_id(args, "update") else {
                     return tool_error_result(
                         "Error: provide exactly one memory id when action is 'update'.",
@@ -11644,7 +11649,13 @@ impl McHandler {
                         command_id.as_deref(),
                         |tx| {
                             let memory = tx
-                                .update_memory_content(memory_project, id, content, now_ms())
+                                .update_memory_content(
+                                    memory_project,
+                                    id,
+                                    content,
+                                    category,
+                                    now_ms(),
+                                )
                                 .map_err(|error| error.to_string())?
                                 .ok_or_else(|| format!("memory {id} was not found"))?;
                             facade_text_response(
@@ -16255,7 +16266,7 @@ fn ctx_memory_schema() -> Value {
             },
             "category": {
                 "type": "string",
-                "description": "Memory category for a new memory: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING. Required for write."
+                "description": "Memory category: one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, or NAMING. Required for write; optional on update to recategorize, and omission keeps the current category."
             },
             "content": {
                 "type": "string",
@@ -26242,6 +26253,102 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn memory_facade_update_honors_category_and_rejects_invalid_or_duplicate_targets() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        handler.bind_route(7, binding("/repo", "token"));
+        let recategorized = insert_memory(&store, "/repo", "CONFIG_VALUES", "old config", 1);
+        let omitted = insert_memory(&store, "/repo", "NAMING", "old name", 1);
+        let duplicate = insert_memory(&store, "/repo", "CONSTRAINTS", "same value", 1);
+        let duplicate_target = insert_memory(&store, "/repo", "ARCHITECTURE", "different value", 1);
+
+        let updated = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update",
+                "id": recategorized,
+                "category": "CONSTRAINTS",
+                "content": "new constraint"
+            }),
+        )
+        .await;
+        assert!(!tool_is_error(updated.clone()));
+        assert_eq!(
+            tool_text(updated),
+            format!("Updated memory [ID: {recategorized}] in CONSTRAINTS.")
+        );
+        let updated_row = store.get_memory_full(recategorized).unwrap().unwrap();
+        assert_eq!(updated_row.category, "CONSTRAINTS");
+        assert_eq!(updated_row.content, "new constraint");
+        let mutation = store
+            .memory_mutations_for_render(&["/repo".to_string()], 0, &[recategorized])
+            .unwrap();
+        assert_eq!(
+            mutation.last().unwrap().category.as_deref(),
+            Some("CONSTRAINTS")
+        );
+
+        let preserved = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({ "action": "update", "id": omitted, "content": "new name" }),
+        )
+        .await;
+        assert!(!tool_is_error(preserved));
+        assert_eq!(
+            store.get_memory_full(omitted).unwrap().unwrap().category,
+            "NAMING"
+        );
+
+        let invalid = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update",
+                "id": omitted,
+                "category": "NOT_A_CATEGORY",
+                "content": "invalid update"
+            }),
+        )
+        .await;
+        assert!(tool_is_error(invalid.clone()));
+        assert_eq!(
+            tool_text(invalid),
+            "Error: category must be one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING."
+        );
+        assert_eq!(
+            store.get_memory_full(omitted).unwrap().unwrap().content,
+            "new name"
+        );
+
+        let duplicate_error = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({
+                "action": "update",
+                "id": duplicate_target,
+                "category": "CONSTRAINTS",
+                "content": "same value"
+            }),
+        )
+        .await;
+        assert!(tool_is_error(duplicate_error.clone()));
+        let duplicate_text = tool_text(duplicate_error);
+        assert!(
+            duplicate_text.contains(&format!("memory content already exists as ID {duplicate}")),
+            "{duplicate_text}"
+        );
+        assert!(!duplicate_text.contains("UNIQUE constraint failed"));
+        let duplicate_target = store.get_memory_full(duplicate_target).unwrap().unwrap();
+        assert_eq!(duplicate_target.category, "ARCHITECTURE");
+        assert_eq!(duplicate_target.content, "different value");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn facade_mutation_commands_replay_each_memory_and_note_action_without_advancing_state() {
         let producer = Arc::new(ProducerState::default());
         let resolver =
@@ -27516,7 +27623,7 @@ mod tests {
         store
             .replace_compartments(scope, &[stored_comp(1, 1, 10, "m10", "SUMMARY")])
             .unwrap();
-        let memory_id = insert_memory(&store, project_root, "CONSTRAINTS", "original rule", 1);
+        let memory_id = insert_memory(&store, project_root, "CONFIG_VALUES", "original rule", 1);
 
         let mut boot_req = request(vec![ck("m10", 10, "raw covered")]);
         boot_req["session_id"] = json!(scope);
@@ -27531,7 +27638,12 @@ mod tests {
             call_facade(
                 &handler,
                 "ctx_memory",
-                json!({ "action": "update", "id": memory_id, "content": "updated rule" }),
+                json!({
+                    "action": "update",
+                    "id": memory_id,
+                    "category": "CONSTRAINTS",
+                    "content": "updated rule"
+                }),
             )
             .await
         ));
@@ -27546,7 +27658,9 @@ mod tests {
         let update_delta = call_transform_request_on_channel(&handler, 8, boot_req.clone()).await;
         assert_eq!(update_delta["action"], "SOFT");
         assert!(synthetic_text(&update_delta, 1).contains("<memory-updates>"));
-        assert!(synthetic_text(&update_delta, 1).contains("updated rule"));
+        assert!(synthetic_text(&update_delta, 1).contains(&format!(
+            "<updated id=\"{memory_id}\" category=\"CONSTRAINTS\">updated rule</updated>"
+        )));
 
         handler.bind_route(9, binding(additive_project_root, additive_scope));
         store

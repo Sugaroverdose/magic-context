@@ -5777,6 +5777,7 @@ impl<'a> FacadeMutationTxn<'a> {
         project_path: &str,
         id: i64,
         content: &str,
+        category: Option<&str>,
         now_ms: i64,
     ) -> Result<Option<StoredMemoryFull>, String> {
         let Some(memory) = load_memory_full_tx(self.tx, id).map_err(|error| error.to_string())?
@@ -5789,6 +5790,7 @@ impl<'a> FacadeMutationTxn<'a> {
         {
             return Ok(None);
         }
+        let target_category = category.unwrap_or(&memory.category);
         let normalized_hash = compute_normalized_memory_hash(content);
         let duplicate_id = self
             .tx
@@ -5796,7 +5798,7 @@ impl<'a> FacadeMutationTxn<'a> {
                 "SELECT id FROM mc_memories
                   WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
                   LIMIT 1",
-                params![project_path, memory.category, normalized_hash],
+                params![project_path, target_category, normalized_hash],
                 |row| row.get::<_, i64>(0),
             )
             .optional()
@@ -5810,16 +5812,17 @@ impl<'a> FacadeMutationTxn<'a> {
             .execute(
                 "UPDATE mc_memories
                     SET content = ?1,
-                        normalized_hash = ?2,
-                        updated_at = ?3,
+                        category = ?2,
+                        normalized_hash = ?3,
+                        updated_at = ?4,
                         shareable = 0,
                         classified_at = NULL,
                         mural_cue = NULL,
                         mural_cue_hash = NULL,
                         mural_cue_at = NULL,
                         mural_cue_rejection_count = 0
-                  WHERE id = ?4",
-                params![content, normalized_hash, now_ms, id],
+                  WHERE id = ?5",
+                params![content, target_category, normalized_hash, now_ms, id],
             )
             .map_err(|error| error.to_string())?;
         append_memory_mutation_tx(
@@ -5829,7 +5832,7 @@ impl<'a> FacadeMutationTxn<'a> {
                 mutation_type: "update",
                 target_memory_id: id,
                 superseded_by_id: None,
-                category: Some(&memory.category),
+                category: Some(target_category),
                 new_content: Some(content),
                 queued_at: now_ms,
             },
@@ -11894,14 +11897,16 @@ impl McStore {
         Ok(memory_id)
     }
 
-    /// Replace an owned primary memory's content and append its cache-visible mutation in
-    /// the same fenced transaction. Shared workspace visibility is read-only for primary
-    /// agents, so project ownership and lifecycle are rechecked after the transaction begins.
+    /// Replace an owned primary memory's content/category and append its cache-visible mutation
+    /// in the same fenced transaction. Shared workspace visibility is read-only for primary
+    /// agents, so project ownership, lifecycle, and target-category duplication are rechecked
+    /// after the transaction begins.
     pub fn update_memory_content(
         &self,
         project_path: &str,
         id: i64,
         content: &str,
+        category: Option<&str>,
         now_ms: i64,
     ) -> Result<Option<StoredMemoryFull>, McStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
@@ -11914,13 +11919,14 @@ impl McStore {
             {
                 return Ok(MemoryMutationOutcome::NotFound);
             }
+            let target_category = category.unwrap_or(&memory.category);
             let normalized_hash = compute_normalized_memory_hash(content);
             let duplicate_id = tx
                 .query_row(
                     "SELECT id FROM mc_memories
                       WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
                       LIMIT 1",
-                    params![project_path, memory.category, normalized_hash],
+                    params![project_path, target_category, normalized_hash],
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
@@ -11930,16 +11936,17 @@ impl McStore {
             tx.execute(
                 "UPDATE mc_memories
                     SET content = ?1,
-                        normalized_hash = ?2,
-                        updated_at = ?3,
+                        category = ?2,
+                        normalized_hash = ?3,
+                        updated_at = ?4,
                         shareable = 0,
                         classified_at = NULL,
                         mural_cue = NULL,
                         mural_cue_hash = NULL,
                         mural_cue_at = NULL,
                         mural_cue_rejection_count = 0
-                  WHERE id = ?4",
-                params![content, normalized_hash, now_ms, id],
+                  WHERE id = ?5",
+                params![content, target_category, normalized_hash, now_ms, id],
             )?;
             append_memory_mutation_tx(
                 tx,
@@ -11948,7 +11955,7 @@ impl McStore {
                     mutation_type: "update",
                     target_memory_id: id,
                     superseded_by_id: None,
-                    category: Some(&memory.category),
+                    category: Some(target_category),
                     new_content: Some(content),
                     queued_at: now_ms,
                 },
@@ -22763,7 +22770,7 @@ mod tests {
     }
 
     #[test]
-    fn update_memory_content_advances_mutation_log_with_row() {
+    fn update_memory_content_recategorizes_row_and_mutation_log_together() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open(&descriptor(dir.path())).unwrap();
         let project = "git:proj";
@@ -22775,9 +22782,10 @@ mod tests {
             .unwrap();
 
         let updated = store
-            .update_memory_content(project, id, "new", 2)
+            .update_memory_content(project, id, "new", Some("CONSTRAINTS"), 2)
             .unwrap()
             .unwrap();
+        assert_eq!(updated.category, "CONSTRAINTS");
         assert_eq!(updated.content, "new");
         let after = store
             .max_memory_mutation_id(&[project.to_string()])
@@ -22789,7 +22797,51 @@ mod tests {
         assert_eq!(mutations.len(), 1);
         assert_eq!(mutations[0].target_memory_id, id);
         assert_eq!(mutations[0].mutation_type, "update");
+        assert_eq!(mutations[0].category.as_deref(), Some("CONSTRAINTS"));
         assert_eq!(mutations[0].new_content.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn update_memory_content_omitted_category_preserves_current_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let project = "git:proj";
+        let id = store
+            .insert_memory(insert_input(project, "ARCHITECTURE", "old", 1))
+            .unwrap();
+
+        let updated = store
+            .update_memory_content(project, id, "new", None, 2)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.category, "ARCHITECTURE");
+        assert_eq!(updated.content, "new");
+    }
+
+    #[test]
+    fn update_memory_content_detects_duplicate_in_target_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let project = "git:proj";
+        let duplicate = store
+            .insert_memory(insert_input(project, "CONSTRAINTS", "same", 1))
+            .unwrap();
+        let target = store
+            .insert_memory(insert_input(project, "ARCHITECTURE", "different", 1))
+            .unwrap();
+
+        let error = store
+            .update_memory_content(project, target, "same", Some("CONSTRAINTS"), 2)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            McStoreError::MemoryDuplicateContent { id } if id == duplicate
+        ));
+        let target = store.get_memory_full(target).unwrap().unwrap();
+        assert_eq!(target.category, "ARCHITECTURE");
+        assert_eq!(target.content, "different");
     }
 
     #[test]
@@ -27316,7 +27368,7 @@ mod shadow_tests {
             .unwrap();
 
         store
-            .update_memory_content(project, memory_id, "new content", 10)
+            .update_memory_content(project, memory_id, "new content", None, 10)
             .unwrap()
             .unwrap();
         let cues = store

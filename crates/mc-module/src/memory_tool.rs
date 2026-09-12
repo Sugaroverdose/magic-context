@@ -12,12 +12,17 @@ use mc_store::{
     StoredNoteSearchRow,
 };
 
+use crate::memory_render::MEMORY_CATEGORY_ORDER;
+
 pub use mc_store::FOREIGN_VISIBLE_SQL;
 
 #[derive(Debug)]
 pub enum MemoryToolError {
     Store(McStoreError),
     EmptyContent,
+    InvalidCategory {
+        category: String,
+    },
     EmptyMerge,
     DuplicateSourceId {
         id: i64,
@@ -53,6 +58,11 @@ impl std::fmt::Display for MemoryToolError {
         match self {
             MemoryToolError::Store(e) => write!(f, "store: {e}"),
             MemoryToolError::EmptyContent => write!(f, "memory content is required"),
+            MemoryToolError::InvalidCategory { .. } => write!(
+                f,
+                "category must be one of {}",
+                MEMORY_CATEGORY_ORDER.join(", ")
+            ),
             MemoryToolError::EmptyMerge => write!(f, "merge requires at least one source memory"),
             MemoryToolError::DuplicateSourceId { id } => {
                 write!(f, "duplicate source memory id {id}")
@@ -153,22 +163,38 @@ pub struct MemoryIdSearchOutcome {
     pub diagnostics: MemorySearchDiagnostics,
 }
 
+pub(crate) fn validate_update_category(
+    category: Option<&str>,
+) -> Result<Option<&str>, MemoryToolError> {
+    let Some(category) = category.map(str::trim) else {
+        return Ok(None);
+    };
+    if !MEMORY_CATEGORY_ORDER.contains(&category) {
+        return Err(MemoryToolError::InvalidCategory {
+            category: category.to_string(),
+        });
+    }
+    Ok(Some(category))
+}
+
 /// Update an owned, primary (active/permanent and not superseded) memory.
 pub fn update_memory(
     store: &McStore,
     project_path: &str,
     id: i64,
     content: &str,
+    category: Option<&str>,
     now_ms: i64,
 ) -> Result<StoredMemoryFull, MemoryToolError> {
     let content = content.trim();
     if content.is_empty() {
         return Err(MemoryToolError::EmptyContent);
     }
+    let category = validate_update_category(category)?;
     let memory = load_owned_memory(store, project_path, id)?;
     ensure_primary_mutable(&memory)?;
     store
-        .update_memory_content(project_path, id, content, now_ms)?
+        .update_memory_content(project_path, id, content, category, now_ms)?
         .ok_or(MemoryToolError::NotFound { id })
 }
 
@@ -889,6 +915,79 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn update_recategorizes_and_omitted_category_preserves_current_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:proj";
+        let recategorized = insert(&store, project, "CONFIG_VALUES", "old config", 1);
+        let unchanged = insert(&store, project, "NAMING", "old name", 1);
+
+        let updated = update_memory(
+            &store,
+            project,
+            recategorized,
+            "new constraint",
+            Some("CONSTRAINTS"),
+            2,
+        )
+        .unwrap();
+        let preserved = update_memory(&store, project, unchanged, "new name", None, 3).unwrap();
+
+        assert_eq!(updated.category, "CONSTRAINTS");
+        assert_eq!(updated.content, "new constraint");
+        assert_eq!(preserved.category, "NAMING");
+        assert_eq!(preserved.content, "new name");
+    }
+
+    #[test]
+    fn update_rejects_invalid_category_with_typescript_error_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:proj";
+        let id = insert(&store, project, "CONFIG_VALUES", "old config", 1);
+
+        let error = update_memory(&store, project, id, "new config", Some("NOT_A_CATEGORY"), 2)
+            .unwrap_err();
+
+        assert!(matches!(error, MemoryToolError::InvalidCategory { .. }));
+        assert_eq!(
+            error.to_string(),
+            "category must be one of PROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING"
+        );
+        assert_eq!(
+            store.get_memory_full(id).unwrap().unwrap().content,
+            "old config"
+        );
+    }
+
+    #[test]
+    fn update_recategorize_duplicate_returns_typed_error_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:proj";
+        let duplicate = insert(&store, project, "CONSTRAINTS", "timeout=5s", 1);
+        let target = insert(&store, project, "CONFIG_VALUES", "cache ttl", 1);
+
+        let error = update_memory(
+            &store,
+            project,
+            target,
+            "timeout=5s",
+            Some("CONSTRAINTS"),
+            2,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MemoryToolError::Store(McStoreError::MemoryDuplicateContent { id }) if id == duplicate
+        ));
+        let target = store.get_memory_full(target).unwrap().unwrap();
+        assert_eq!(target.category, "CONFIG_VALUES");
+        assert_eq!(target.content, "cache ttl");
+    }
+
     fn comp(seq: i64, title: &str, content: &str, p2: Option<&str>) -> StoredCompartment {
         StoredCompartment {
             sequence: seq,
@@ -916,7 +1015,7 @@ mod tests {
         let own_private = insert(&store, own, "PREFERENCES", "own fact", 1);
 
         assert!(matches!(
-            update_memory(&store, own, foreign_private, "edited", 2),
+            update_memory(&store, own, foreign_private, "edited", None, 2),
             Err(MemoryToolError::NotFound { id }) if id == foreign_private
         ));
         assert!(matches!(
@@ -942,7 +1041,7 @@ mod tests {
         let source = insert(&store, foreign, "CONSTRAINTS", "shared source", 1);
 
         assert!(matches!(
-            update_memory(&store, own, updatable, "shared edited", 2),
+            update_memory(&store, own, updatable, "shared edited", None, 2),
             Err(MemoryToolError::NotFound { id }) if id == updatable
         ));
         assert!(matches!(
@@ -1027,7 +1126,7 @@ mod tests {
         merge_memories(&store, project, target, &[source], "merged", 2).unwrap();
 
         assert!(matches!(
-            update_memory(&store, project, source, "edit", 3),
+            update_memory(&store, project, source, "edit", None, 3),
             Err(MemoryToolError::Superseded { id, superseded_by })
                 if id == source && superseded_by == target
         ));

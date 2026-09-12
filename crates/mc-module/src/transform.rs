@@ -19626,7 +19626,7 @@ pub(crate) mod tests {
         let execute_req = with_usage(req("ses", "cfg0", vec![item("a", 1, "raw")]), 70, 100);
         let boot = run(&s, &execute_req, &spine());
         assert_eq!(boot.action, "HARD");
-        s.update_memory_content("git:proj", memory_id, "pending rule", 1)
+        s.update_memory_content("git:proj", memory_id, "pending rule", None, 1)
             .unwrap();
 
         let consumed =
@@ -26659,7 +26659,7 @@ pub(crate) mod tests {
         );
         assert_eq!(before.action, "HARD");
 
-        s.update_memory_content("git:proj", memory_id, "corrected", 1)
+        s.update_memory_content("git:proj", memory_id, "corrected", None, 1)
             .unwrap();
         s.arm_soft_refresh("ses").unwrap();
         let soft = run(
@@ -28199,6 +28199,7 @@ pub(crate) mod tests {
                 "git:proj",
                 *memory_id,
                 &format!("updated rule {revision}"),
+                None,
                 revision as i64 + 1,
             )
             .unwrap();
