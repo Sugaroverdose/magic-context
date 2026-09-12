@@ -21,13 +21,13 @@ import type { MuralWireOptions } from "../../features/magic-context/mural/resolv
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
-    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
     getMaxMemoryMutationIdForProjects,
     getMemoryMutationsForRender,
     getMemoryMutationsForRenderByProjects,
     getProjectState,
+    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     persistCachedM0,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
