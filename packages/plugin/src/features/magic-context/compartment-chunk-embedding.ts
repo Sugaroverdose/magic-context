@@ -419,6 +419,19 @@ function parseCanonicalLineRange(line: string): { start: number; end: number } |
     return { start, end };
 }
 
+function assertOrdinalRangeWithinCompartment(
+    rangeStart: number,
+    rangeEnd: number,
+    compartmentStart: number,
+    compartmentEnd: number,
+): void {
+    if (rangeStart < compartmentStart || rangeEnd > compartmentEnd || rangeEnd < rangeStart) {
+        throw new RangeError(
+            `Canonical chunk range ${rangeStart}-${rangeEnd} lies outside compartment ${compartmentStart}-${compartmentEnd}`,
+        );
+    }
+}
+
 function hashChunkText(text: string): string {
     return createHash("sha256").update(text).digest("hex");
 }
@@ -560,6 +573,17 @@ export function canonicalizeInMemoryChunkTextForEmbedding(
             continue;
         }
 
+        const clipsRequestedRange =
+            (startOrdinal != null && lineStart < startOrdinal) ||
+            (endOrdinal != null && lineEnd > endOrdinal);
+        if (clipsRequestedRange) {
+            // Merged historian blocks can include filtered ordinals, while a single
+            // message can itself contain " / ". Without one part per ordinal there
+            // is no faithful way to clip the text. Reject the in-memory chunk so the
+            // publish path reconstructs this compartment's exact span from FTS.
+            return "";
+        }
+
         const parts = rawParts.filter((part) => !part.startsWith("TC:"));
         if (parts.length === 0) continue;
         lines.push(`${match[1]} ${parts.join(" / ")}`);
@@ -578,6 +602,13 @@ export function chunkCanonicalText(
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
     if (lines.length === 0 || endOrdinal < startOrdinal) return [];
+
+    for (const line of lines) {
+        const range = parseCanonicalLineRange(line);
+        if (range) {
+            assertOrdinalRangeWithinCompartment(range.start, range.end, startOrdinal, endOrdinal);
+        }
+    }
 
     const normalizedMax = normalizeCompartmentChunkMaxInputTokens(maxInputTokens);
     // Window against a safety-margined budget, not the raw ceiling, so estimator
@@ -605,8 +636,9 @@ export function chunkCanonicalText(
     const flush = (): void => {
         if (currentLines.length === 0 || currentStart === null || currentEnd === null) return;
         const text = currentLines.join("\n");
+        assertOrdinalRangeWithinCompartment(currentStart, currentEnd, startOrdinal, endOrdinal);
         windows.push({
-            windowIndex: windows.length + 1,
+            windowIndex: windows.length,
             startOrdinal: currentStart,
             endOrdinal: currentEnd,
             text,
@@ -634,8 +666,9 @@ export function chunkCanonicalText(
         if (lineTokens > effectiveMax) {
             flush();
             for (const slice of splitOversizedLine(line, effectiveMax)) {
+                assertOrdinalRangeWithinCompartment(lineStart, lineEnd, startOrdinal, endOrdinal);
                 windows.push({
-                    windowIndex: windows.length + 1,
+                    windowIndex: windows.length,
                     startOrdinal: lineStart,
                     endOrdinal: lineEnd,
                     text: slice,
@@ -657,10 +690,6 @@ export function chunkCanonicalText(
     }
     flush();
 
-    // windowIndex is assigned contiguously as 1-based at push time (both the
-    // flush path and the oversized-line split use `windows.length + 1`), so it is
-    // already gap-free and stable — preserve it (chunk identity = compartmentId +
-    // windowIndex + hash; renumbering would orphan every stored chunk row).
     return windows;
 }
 
@@ -1013,6 +1042,10 @@ function classifyChunkCoverageDefect(
     );
     const existing = getExistingChunkHashes(db, candidate.id, modelId, projectPath);
 
+    const expectedWindowIndexes = new Set(windows.map((window) => window.windowIndex));
+    if ([...existing.keys()].some((windowIndex) => !expectedWindowIndexes.has(windowIndex))) {
+        return "stale";
+    }
     if (windows.some((window) => !existing.has(window.windowIndex))) return "missing";
     if (
         existing.size !== windows.length ||
