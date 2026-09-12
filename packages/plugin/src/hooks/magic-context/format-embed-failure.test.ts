@@ -51,39 +51,46 @@ const failures: EmbeddingFailure[] = [
 ];
 
 describe("formatEmbedFailureSummary", () => {
-    test.each(failures)("surfaces $class without a misleading retry instruction", (failure) => {
+    test.each(failures)("maps $class to a stable code without provider detail", (failure) => {
         const summary = formatEmbedFailureSummary(0, 193, failure);
-        expect(summary).toContain(failure.reason);
-        if (failure.retryable) {
-            expect(summary).toContain("Run /ctx-embed start again to retry them.");
-        } else {
-            expect(summary).not.toContain("Run /ctx-embed start again to retry them.");
-        }
+        expect(summary).toMatch(/\(MC-E\d{2}\)$/);
+        expect(summary).toContain("Indexed 0 history blocks; 193 remain.");
+        expect(summary).not.toContain(failure.reason);
     });
 
-    test("renders Intel native-binding guidance without claiming force reinstall repairs it", () => {
+    test("keeps local runtime details out of the user-facing result", () => {
+        const raw =
+            "onnxruntime-node has no darwin/x64 native binding and the WASM fallback could not complete";
         const summary = formatEmbedFailureSummary(0, 7, {
             class: "local_binding_missing",
-            reason: "onnxruntime-node has no darwin/x64 native binding and the WASM fallback could not complete",
+            reason: raw,
             retryable: false,
         });
 
-        expect(summary).toContain("darwin/x64");
-        expect(summary).toContain("onnxruntime-node@1.23.0");
-        expect(summary).not.toContain("provider returned no result");
-        expect(summary).not.toContain("doctor --force");
+        expect(summary).toContain("Local search indexing is unavailable on this system.");
+        expect(summary).toContain("Run `npx @cortexkit/magic-context doctor`, then retry.");
+        expect(summary).toContain("(MC-E08)");
+        expect(summary).not.toContain(raw);
+
+        const plain = formatEmbedFailureSummary(
+            0,
+            7,
+            { class: "local_binding_missing", reason: raw, retryable: false },
+            "plain",
+        );
+        expect(plain).toContain("Run npx @cortexkit/magic-context doctor, then retry.");
+        expect(plain).not.toContain("`");
     });
 
-    test("renders certification refusals with the cause and recovery instead of the generic stall message", () => {
+    test("uses the structured certification class rather than its provider text", () => {
+        const raw = "SYNAPSE certification refused embedding: not_certified";
         const summary = formatEmbedFailureSummary(0, 193, {
             class: "certification_refusal",
-            reason: "SYNAPSE certification refused embedding: not_certified",
+            reason: raw,
             retryable: false,
         });
 
-        expect(summary).toContain("not_certified");
-        expect(summary).toContain("recertify SYNAPSE");
-        expect(summary).toContain("embedding.fallback_provider");
-        expect(summary).not.toContain("provider returned no result");
+        expect(summary).toContain("(MC-E06)");
+        expect(summary).not.toContain(raw);
     });
 });

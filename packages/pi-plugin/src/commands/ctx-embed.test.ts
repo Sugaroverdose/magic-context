@@ -161,9 +161,7 @@ describe("Pi /ctx-embed progress", () => {
 				retryable: false,
 			} satisfies EmbeddingFailure,
 		},
-	])("surfaces $failure.class in the /ctx-embed summary", async ({
-		failure,
-	}) => {
+	])("maps $failure.class to a stable /ctx-embed code", async ({ failure }) => {
 		_setTestProviderFactoryForProject(
 			() => new FailingEmbeddingProvider(failure),
 		);
@@ -177,16 +175,8 @@ describe("Pi /ctx-embed progress", () => {
 			const terminal = await runEmbedDrain(db, project, sessionId, {
 				batchSize: 1,
 			});
-			expect(terminal.text).toContain(failure.reason);
-			if (failure.retryable) {
-				expect(terminal.text).toContain(
-					"Run /ctx-embed start again to retry them.",
-				);
-			} else {
-				expect(terminal.text).not.toContain(
-					"Run /ctx-embed start again to retry them.",
-				);
-			}
+			expect(terminal.text).toMatch(/\(MC-E\d{2}\)$/);
+			expect(terminal.text).not.toContain(failure.reason);
 		} finally {
 			closeQuietly(db);
 		}

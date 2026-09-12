@@ -1,4 +1,5 @@
 import { withContentLanguageDirective } from "../../agents/language-directive";
+import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import { parseCompartmentOutput } from "./compartment-parser";
 import { mapParsedCompartmentsToChunk } from "./compartment-runner-mapping";
 import type {
@@ -207,23 +208,12 @@ export const HISTORIAN_PERSISTENT_FAILURE_THRESHOLD = 3;
  * Shared by both harnesses so the wording (and the transient/persistent contract)
  * never drifts between OpenCode and Pi.
  */
-export function buildHistorianFailureNotice(failureCount: number, lastError: string): string {
-    if (failureCount >= HISTORIAN_PERSISTENT_FAILURE_THRESHOLD) {
-        return [
-            "## Magic Context — history comparting needs attention",
-            "",
-            `Magic Context has been unable to compart this session's history ${failureCount} times in a row. This usually means the configured historian model is misconfigured or unreachable (Magic Context already retried every fallback model automatically).`,
-            "",
-            `Last error: ${lastError}`,
-            "",
-            "Check your historian model in magic-context.jsonc, then restart. Your conversation keeps working normally in the meantime — this only affects how older history is summarized.",
-        ].join("\n");
-    }
-    return [
-        "## Magic Context",
-        "",
-        "Hit a transient issue comparting history this turn — Magic Context will retry automatically on the next turn. Nothing is lost and your conversation continues normally. You'll only be alerted again if this keeps happening.",
-    ].join("\n");
+export function buildHistorianFailureNotice(failureCount: number, _lastError: string): string {
+    const heading =
+        failureCount >= HISTORIAN_PERSISTENT_FAILURE_THRESHOLD
+            ? "## Magic Context — History compression"
+            : "## Magic Context";
+    return [heading, "", renderUserFacingFailure("historian_unavailable")].join("\n");
 }
 
 export function buildHistorianRepairPrompt(

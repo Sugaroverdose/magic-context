@@ -15,7 +15,13 @@ import {
 	createTestDb,
 	fakeContext,
 } from "../test-utils.test";
-import { buildPiStatusDetail, showStatusDialog } from "./status-dialog";
+import {
+	buildPiStatusDetail,
+	formatPiStatusDiagnostics,
+	formatPiStatusSummary,
+	type StatusDialogDetail,
+	showStatusDialog,
+} from "./status-dialog";
 
 describe("Pi status dialog", () => {
 	it("displays usage against the output-reserved safe window", () => {
@@ -108,6 +114,89 @@ describe("Pi status dialog", () => {
 		}
 	});
 
+	it("renders the plain-text Pi summary golden without internal vocabulary", () => {
+		const db = createTestDb();
+		try {
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				{
+					...fakeContext("ses-status-summary"),
+					getContextUsage: () => ({
+						tokens: 1_000,
+						percent: 1,
+						contextWindow: 100_000,
+					}),
+				} as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+				},
+				"ses-status-summary",
+			);
+			const statusFixture = {
+				...detail,
+				sessionId: "session-secret",
+				cacheTtl: "1h",
+				cacheTtlSource: "config",
+				cacheTtlModelKey: "anthropic/claude-opus-5",
+				executeThreshold: 65,
+				compactionEnabled: true,
+				tailHygiene: {
+					u: 14_400,
+					t: 48_000,
+					severity: 0.3,
+					evaluable: true,
+					generationInvalidated: false,
+					baselineGeneration: 3,
+					computedAt: 1_730_000_000_000,
+					reclaimableToolOutputCount: 3,
+				},
+				historianLastError:
+					"MODULE facade drain failed in mc-store /tmp/private",
+				lastTransformError: "MODULE facade drain failed",
+				historianFailureCount: 1,
+			} satisfies StatusDialogDetail;
+			const summary = formatPiStatusSummary(statusFixture);
+			const diagnostics = formatPiStatusDiagnostics(statusFixture);
+			expect(summary).toBe(`Magic Context Status
+Context: 1.0% of usable context (1,000 / 100,000 tokens)
+Cache lifetime: 1h (config for anthropic/claude-opus-5)
+Automatic compression: at 65.0% of usable context
+History compression: Waiting for enough conversation history
+Reclaimable: 3 spent tool outputs (~14k tokens)
+Memory: 0 memories · 0 notes
+Search indexing: Off
+Warning: The last context update did not finish. Send another message to retry. (MC-S02)
+Warning: History compression could not finish this turn. It will retry automatically. (MC-H01)`);
+			for (const value of [
+				"1.0%",
+				"65.0%",
+				"1h (config for anthropic/claude-opus-5)",
+			]) {
+				expect(summary).toContain(value);
+				expect(diagnostics).toContain(value);
+			}
+			for (const forbidden of [
+				"session-secret",
+				"/tmp/",
+				"tag counter",
+				"protection",
+				"formula",
+				"MODULE",
+				"mc-store",
+				"harness",
+				"compartment",
+				"facade",
+				"changefeed",
+				"drain",
+			]) {
+				expect(summary.toLowerCase()).not.toContain(forbidden.toLowerCase());
+			}
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("matches the persisted scheduler percentage when command context omits maxTokens", async () => {
 		const db = createTestDb();
 		try {
@@ -177,6 +266,60 @@ describe("Pi status dialog", () => {
 		}
 	});
 
+	it("toggles from the summary to diagnostics with D", async () => {
+		const db = createTestDb();
+		try {
+			const rendered: string[][] = [];
+			const ctx = {
+				...fakeContext("ses-status-toggle"),
+				hasUI: true,
+				ui: {
+					async custom(
+						factory: (
+							tui: unknown,
+							theme: unknown,
+							done: () => void,
+						) => unknown,
+					) {
+						const component = factory(
+							{ requestRender() {} },
+							{
+								fg: (_name: string, text: string) => text,
+								bold: (text: string) => text,
+							},
+							() => {},
+						) as {
+							render(width: number): string[];
+							handleInput(data: string): void;
+							dispose?(): void;
+						};
+						rendered.push(component.render(90));
+						component.handleInput("d");
+						rendered.push(component.render(90));
+						component.dispose?.();
+					},
+				},
+				getContextUsage: () => ({
+					tokens: 10_000,
+					percent: 10,
+					contextWindow: 100_000,
+				}),
+			};
+			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
+				db,
+				projectIdentity: resolveProjectIdentity(process.cwd()),
+			});
+			const before = rendered[0]?.join("\n") ?? "";
+			const after = rendered[1]?.join("\n") ?? "";
+			expect(before).toContain("Diagnostics: off");
+			expect(before).not.toContain("Protected tokens");
+			expect(after).toContain("Diagnostics: on");
+			expect(after).toContain("Protected tokens");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("renders the same persisted hygiene ratio used by nudges", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-status-hygiene";
@@ -225,10 +368,15 @@ describe("Pi status dialog", () => {
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-				db,
-				projectIdentity: resolveProjectIdentity(process.cwd()),
-			});
+			await showStatusDialog(
+				{ getAllTools: () => [] } as never,
+				ctx as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+				},
+				true,
+			);
 
 			const text = rendered.flat().join("\n");
 			expect(text).toContain("Hygiene 65.1% · 65,100 / 100,000 tok");
@@ -274,10 +422,15 @@ describe("Pi status dialog", () => {
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-				db,
-				projectIdentity: resolveProjectIdentity(process.cwd()),
-			});
+			await showStatusDialog(
+				{ getAllTools: () => [] } as never,
+				ctx as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+				},
+				true,
+			);
 
 			const text = rendered.flat().join("\n");
 			expect(text).toContain("Work tokens 1.2K new · 9.8K total input");
@@ -489,11 +642,16 @@ describe("Pi status dialog", () => {
 				getSystemPrompt: () => "system prompt",
 			};
 
-			await showStatusDialog({ getAllTools: () => [] } as never, ctx as never, {
-				db,
-				projectIdentity: resolveProjectIdentity(process.cwd()),
-				floor: 16_000,
-			});
+			await showStatusDialog(
+				{ getAllTools: () => [] } as never,
+				ctx as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+					floor: 16_000,
+				},
+				true,
+			);
 
 			const text = rendered.flat().join("\n");
 			expect(text).toContain("Protected tokens");

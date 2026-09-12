@@ -691,6 +691,7 @@ export function buildStatusDetail(
         lastResponseTime: 0,
         lastNudgeTokens: 0,
         lastTransformError: null,
+        historianFailureCount: 0,
         isSubagent: false,
         pendingOps: [],
         contextLimit: 0,
@@ -752,6 +753,7 @@ export function buildStatusDetail(
             detail.lastTransformError = meta.last_transform_error
                 ? String(meta.last_transform_error)
                 : null;
+            detail.historianFailureCount = Number(meta.historian_failure_count ?? 0);
             detail.isSubagent = Boolean(meta.is_subagent);
             persistedCacheTtl =
                 typeof meta.cache_ttl === "string" && meta.cache_ttl.length > 0
@@ -905,6 +907,30 @@ export function buildStatusDetail(
             } else {
                 detail.cacheRemainingMs = Math.max(0, detail.cacheTtlMs - elapsed);
                 detail.cacheExpired = detail.cacheRemainingMs === 0;
+            }
+        }
+
+        if (base.projectIdentity) {
+            try {
+                const coverage = getEmbeddingCoverageStatus(db, base.projectIdentity, sessionId);
+                const runState = getEmbedDrainUiStatus(
+                    sessionId,
+                    base.recompProgress ?? undefined,
+                ).status;
+                detail.embedding = {
+                    state: !coverage.enabled
+                        ? "off"
+                        : runState !== "idle"
+                          ? runState
+                          : coverage.session.total > 0 &&
+                              coverage.session.embedded >= coverage.session.total
+                            ? "ready"
+                            : "waiting",
+                    indexed: coverage.session.embedded,
+                    total: coverage.session.total,
+                };
+            } catch {
+                detail.embedding = { state: "waiting", indexed: 0, total: 0 };
             }
         }
 

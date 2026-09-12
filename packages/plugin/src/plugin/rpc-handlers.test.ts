@@ -331,6 +331,7 @@ describe("buildSidebarSnapshot — persisted tail hygiene", () => {
                 generationInvalidated: false,
                 baselineGeneration: 0,
                 computedAt: 0,
+                reclaimableToolOutputCount: 0,
             });
         } finally {
             closeQuietly(db);
@@ -368,6 +369,7 @@ describe("buildSidebarSnapshot — persisted tail hygiene", () => {
                 generationInvalidated: false,
                 baselineGeneration: 7,
                 computedAt: 123,
+                reclaimableToolOutputCount: 0,
             });
         } finally {
             closeQuietly(db);

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { formatOpenCodeDbMissingStatusLine, resolveOpenCodeDbPath } from "./opencode-db-path";
 import type { StatusDetail } from "./rpc-types";
-import { formatStatusDetailMarkdown } from "./status-detail-text";
+import { formatStatusDetailMarkdown, formatStatusDiagnosticsMarkdown } from "./status-detail-text";
 
 const STATUS_FIXTURE: StatusDetail = {
     sessionId: "ses_status",
@@ -18,9 +17,11 @@ const STATUS_FIXTURE: StatusDetail = {
     compartmentInProgress: true,
     sessionNoteCount: 1,
     readySmartNoteCount: 2,
-    cacheTtl: "5m",
-    cacheTtlSource: "session",
+    cacheTtl: "1h",
+    cacheTtlSource: "config",
+    cacheTtlModelKey: "anthropic/claude-opus-5",
     lastTransformError: null,
+    historianFailureCount: 0,
     lastDreamerRunAt: null,
     projectIdentity: "/repo",
     compartmentTokens: 22_000,
@@ -62,38 +63,106 @@ const STATUS_FIXTURE: StatusDetail = {
         lastErrorMessage: null,
         lastErrorTime: null,
     },
+    tailHygiene: {
+        u: 14_400,
+        t: 48_000,
+        severity: 0.3,
+        evaluable: true,
+        generationInvalidated: false,
+        baselineGeneration: 3,
+        computedAt: 1_730_000_000_000,
+        reclaimableToolOutputCount: 3,
+    },
+    embedding: {
+        state: "running",
+        indexed: 9,
+        total: 12,
+    },
     storage_versions: {
         context_db_schema_version: 79,
         plugin_supported_version: 79,
     },
 };
 
-describe("formatStatusDetailMarkdown", () => {
-    test("renders a missing-store condition before the fixed TUI status payload", () => {
-        expect(formatStatusDetailMarkdown(STATUS_FIXTURE)).toBe(
-            `${formatOpenCodeDbMissingStatusLine(resolveOpenCodeDbPath())}\n\n## Magic Context Status
+describe("status detail text", () => {
+    test("renders the OpenCode summary golden", () => {
+        expect(formatStatusDetailMarkdown(STATUS_FIXTURE)).toBe(`## Magic Context Status
 
-- **Mode:** Magic Context compaction
-- **Active profile:** work
-- **Usage:** 75.0% (96,000 / 128,000 usable tokens)
-- **Cache TTL: 5m (session)**; live (42s remaining); TTL 5m
-- **Historian:** running; boundary present; coverage 12
-- **Memory:** 8 active; 3 injected
-- **Tags:** 4 active, 1 dropped; 2 pending drops
-- **Execute threshold:** 65.0%`,
-        );
+- **Context:** 75.0% of usable context (96,000 / 128,000 tokens)
+- **Cache lifetime:** 1h (config for anthropic/claude-opus-5)
+- **Automatic compression:** at 65.0% of usable context
+- **History compression:** Compressing history · 12 history blocks
+- **Reclaimable:** 3 spent tool outputs (~14k tokens)
+- **Memory:** 8 memories · 3 notes
+- **Search indexing:** Running · 9 / 12 history blocks indexed`);
     });
 
-    test("shows module-routed host paths only in Rust-mode chat fallback", () => {
+    test("renders disabled automatic compression and an empty reclaimable set without a gauge", () => {
+        const rendered = formatStatusDetailMarkdown({
+            ...STATUS_FIXTURE,
+            compaction_enabled: false,
+            tailHygiene: {
+                ...STATUS_FIXTURE.tailHygiene!,
+                u: 0,
+                reclaimableToolOutputCount: 0,
+            },
+        });
+        expect(rendered).toContain("- **Automatic compression:** Off");
+        expect(rendered).toContain("- **Reclaimable:** none");
+        expect(rendered).not.toContain("Reclaimable: 0");
+    });
+
+    test("renders summary and diagnostics from one snapshot with matching status values", () => {
+        const summary = formatStatusDetailMarkdown(STATUS_FIXTURE);
+        const diagnostics = formatStatusDiagnosticsMarkdown(STATUS_FIXTURE);
+        for (const value of ["75.0%", "65.0%", "1h (config for anthropic/claude-opus-5)"]) {
+            expect(summary).toContain(value);
+            expect(diagnostics).toContain(value);
+        }
+    });
+
+    test("keeps the previous OpenCode detail behind diagnostics", () => {
+        const diagnostics = formatStatusDiagnosticsMarkdown(STATUS_FIXTURE);
+        expect(diagnostics).toContain("- **Active profile:** work");
+        expect(diagnostics).toContain("- **Tags:** 4 active, 1 dropped; 2 pending drops");
+        expect(diagnostics).toContain("- **Execute threshold:** 65.0%");
+    });
+
+    test("keeps internal vocabulary and identifiers out of the summary", () => {
+        const summary = formatStatusDetailMarkdown({
+            ...STATUS_FIXTURE,
+            sessionId: "session-secret",
+            projectIdentity: "/Users/example/secret-project",
+            hostBackendsModuleSide: true,
+            lastTransformError: "facade MODULE drain failed in mc-store /tmp/private",
+            historianFailureCount: 2,
+        });
+        for (const forbidden of [
+            "session-secret",
+            "/Users/",
+            "tag counter",
+            "protection",
+            "formula",
+            "MODULE",
+            "mc-store",
+            "harness",
+            "compartment",
+            "facade",
+            "changefeed",
+            "drain",
+        ]) {
+            expect(summary.toLowerCase()).not.toContain(forbidden.toLowerCase());
+        }
+        expect(summary).toContain("(MC-S02)");
+        expect(summary).toContain("(MC-H01)");
+    });
+
+    test("does not expose module routing in the summary", () => {
         const rustStatus = formatStatusDetailMarkdown({
             ...STATUS_FIXTURE,
             hostBackendsModuleSide: true,
         });
-        const tsStatus = formatStatusDetailMarkdown(STATUS_FIXTURE);
-
-        expect(rustStatus).toContain(
-            "Host backends → MODULE: ctx_memory, ctx_note; historian: module-side",
-        );
-        expect(tsStatus).not.toContain("Host backends → MODULE");
+        expect(rustStatus).not.toContain("MODULE");
+        expect(rustStatus).not.toContain("mc-store");
     });
 });

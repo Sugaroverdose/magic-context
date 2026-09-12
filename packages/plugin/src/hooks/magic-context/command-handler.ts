@@ -18,11 +18,20 @@ import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import type { StatusDetail } from "../../shared/rpc-types";
 import type { Database } from "../../shared/sqlite";
-import { formatStatusDetailMarkdown } from "../../shared/status-detail-text";
+import {
+    formatStatusDetailMarkdown,
+    formatStatusDiagnosticsMarkdown,
+} from "../../shared/status-detail-text";
 import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
 } from "../../shared/tail-hygiene-status";
+import {
+    capabilityRefusalCode,
+    renderCapabilityRefusal,
+    renderUserFacingFailure,
+    userFacingFailureCode,
+} from "../../shared/user-facing-codes";
 import {
     type PartialRecompRange,
     snapRangeToCompartments,
@@ -135,7 +144,10 @@ export function parseWrapupArgs(
 
 const commandArgumentValidators: Record<MagicContextBuiltinCommandName, (raw: string) => boolean> =
     {
-        "ctx-status": (raw) => raw.trim() === "",
+        "ctx-status": (raw) => {
+            const mode = raw.trim().toLowerCase();
+            return mode === "" || mode === "diagnostics";
+        },
         "ctx-recomp": (raw) => parseRecompArgs(raw).kind !== "error",
         "ctx-wrapup": (raw) => parseWrapupArgs(raw).ok,
         "ctx-session-upgrade": (raw) => raw.trim() === "",
@@ -264,20 +276,20 @@ function formatRustOperationMessage(
                 // drain stopped short of the keep watermark for a retryable reason.
                 // The TypeScript orchestrator presents the same shape as a Partial
                 // with the prescribed continuation, not a terminal failure.
-                return `## Magic Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /ctx-wrapup again to continue.`;
+                return `## Magic Wrapup — Partial\n\n${renderCapabilityRefusal("history_compression")}`;
             default:
-                return `## Magic Wrapup — Failed\n\n${summary || "Wrapup failed; try /ctx-wrapup again."}${rounds > 0 ? ` (${rounds} round${rounds === 1 ? "" : "s"})` : ""}`;
+                return `## Magic Wrapup — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
         }
     }
     switch (disposition) {
         case "started":
             return "## Magic Recomp\n\nRecomp started. Rebuilding the compressed history from raw session history now; saved memories are kept as they are.";
         case "already_in_progress":
-            return "## Magic Recomp — Skipped\n\nHistorian recomp is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
+            return "## Magic Recomp — Skipped\n\nHistory compression is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
         case "nothing_to_do":
             return "## Magic Recomp\n\nNothing to rebuild: this session has no published compartments.";
         default:
-            return `## Magic Recomp — Failed\n\n${summary || "Historian recomp failed; try /ctx-recomp again."}`;
+            return `## Magic Recomp — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
     }
 }
 
@@ -465,9 +477,25 @@ async function executeDreaming(
         dreamNotificationParams,
     );
 
-    const summary = await deps.dreamer.runManual(task);
-
-    await deps.sendNotification(sessionId, summarizeManualDream(summary), dreamNotificationParams);
+    try {
+        const summary = await deps.dreamer.runManual(task);
+        await deps.sendNotification(
+            sessionId,
+            summarizeManualDream(summary),
+            dreamNotificationParams,
+        );
+    } catch (error) {
+        sessionLog(
+            sessionId,
+            `ctx-dream failed code=${userFacingFailureCode("dream_unknown")}`,
+            error,
+        );
+        await deps.sendNotification(
+            sessionId,
+            `## /ctx-dream\n\n${renderUserFacingFailure("dream_unknown")}`,
+            dreamNotificationParams,
+        );
+    }
     throwSentinel("CTX-DREAM");
 }
 
@@ -686,7 +714,12 @@ export function createMagicContextCommandHandler(deps: {
                                 ? "No pending operations to flush."
                                 : "Flushed: Changes take effect on next message.";
                     } catch (error) {
-                        result = `Error: Failed to flush context operations. ${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-flush failed code=${capabilityRefusalCode("context_cleanup")}`,
+                            error,
+                        );
+                        result = renderCapabilityRefusal("context_cleanup");
                     }
                 } else {
                     result = executeFlush(deps.db, sessionId);
@@ -704,6 +737,7 @@ export function createMagicContextCommandHandler(deps: {
             }
 
             if (isStatus) {
+                const statusDiagnostics = input.arguments.trim().toLowerCase() === "diagnostics";
                 let rustStatus: Record<string, unknown> | undefined;
                 if (rustMode) {
                     try {
@@ -718,7 +752,11 @@ export function createMagicContextCommandHandler(deps: {
                 }
                 if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a native dialog
-                    pushNotification("action", { action: "show-status-dialog" }, sessionId);
+                    pushNotification(
+                        "action",
+                        { action: "show-status-dialog", diagnostics: statusDiagnostics },
+                        sessionId,
+                    );
                     sessionLog(sessionId, "command ctx-status: pushed show-status-dialog to TUI");
                     throwSentinel(input.command);
                 }
@@ -732,10 +770,11 @@ export function createMagicContextCommandHandler(deps: {
                                   rustStatus as RustSessionStatus | undefined,
                               );
                     if (rustMode && !rustStatus) {
-                        combinedStatus =
-                            "## Magic Status — Unavailable\n\nRust module status could not be read. Canonical session usage, tags, and compartments live in mc-store, so context.db mirror values are intentionally omitted.";
+                        combinedStatus = `## Magic Status — Unavailable\n\n${renderUserFacingFailure("status_unavailable")}`;
                     } else if (detail) {
-                        combinedStatus = formatStatusDetailMarkdown(detail);
+                        combinedStatus = statusDiagnostics
+                            ? formatStatusDiagnosticsMarkdown(detail)
+                            : formatStatusDetailMarkdown(detail);
                     } else {
                         // Compatibility for isolated handler consumers that have not yet
                         // supplied the shared TUI status builder.
@@ -784,14 +823,18 @@ export function createMagicContextCommandHandler(deps: {
                                 cacheTtlConfig: deps.cacheTtlConfig ?? "5m",
                                 cacheTtlConfigured: deps.cacheTtlConfigured === true,
                                 configParseFailures: deps.configParseFailures ?? [],
+                                diagnostics: statusDiagnostics,
+                                compactionEnabled: !deps.compactionOff,
                             },
                         );
-                        const moduleStatus = rustStatus
-                            ? `\n\n${formatRustStatusText(rustStatus)}`
-                            : "";
-                        const modeStatus = deps.compactionOff
-                            ? `**Compaction:** disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.\n\n`
-                            : "";
+                        const moduleStatus =
+                            rustStatus && statusDiagnostics
+                                ? `\n\n${formatRustStatusText(rustStatus)}`
+                                : "";
+                        const modeStatus =
+                            deps.compactionOff && statusDiagnostics
+                                ? `**Compaction:** disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.\n\n`
+                                : "";
                         combinedStatus = `${modeStatus}${statusOutput}${moduleStatus}`;
                     }
                 } catch (error) {
@@ -801,7 +844,7 @@ export function createMagicContextCommandHandler(deps: {
                         error,
                     );
                     combinedStatus = rustMode
-                        ? "## Magic Status — Unavailable\n\nRust module status failed while formatting. Canonical session usage, tags, and compartments live in mc-store, so context.db mirror values are intentionally omitted."
+                        ? `## Magic Status — Unavailable\n\n${renderUserFacingFailure("status_unavailable")}`
                         : executeStatus(deps.db, sessionId);
                 }
                 result += result ? `\n\n${combinedStatus}` : combinedStatus;
@@ -838,7 +881,12 @@ export function createMagicContextCommandHandler(deps: {
                         );
                         result = formatRustOperationMessage("wrapup", value);
                     } catch (error) {
-                        result = `## Magic Wrapup — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-wrapup failed code=${capabilityRefusalCode("history_compression")}`,
+                            error,
+                        );
+                        result = `## Magic Wrapup — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
                     }
                 } else if (!deps.executeWrapup) {
                     result =
@@ -868,7 +916,12 @@ export function createMagicContextCommandHandler(deps: {
                         });
                         result = formatRustOperationMessage("recomp", value);
                     } catch (error) {
-                        result = `## Magic Recomp — Failed\n\n${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(
+                            sessionId,
+                            `ctx-recomp failed code=${capabilityRefusalCode("history_compression")}`,
+                            error,
+                        );
+                        result = `## Magic Recomp — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
                     }
                 } else if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.

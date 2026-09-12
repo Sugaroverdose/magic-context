@@ -240,7 +240,8 @@ describe("Pi Magic Context commands", () => {
 
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.customType).toBe("ctx-status");
-		expect(sent[0]?.data.text).toContain("## Magic Status");
+		expect(sent[0]?.data.text).toContain("Magic Context Status");
+		expect(sent[0]?.data.text).not.toContain("##");
 	});
 
 	it("surfaces the active profile in /ctx-status text and dialog data", async () => {
@@ -252,7 +253,7 @@ describe("Pi Magic Context commands", () => {
 			activeProfile: "work",
 		});
 
-		await handlers.get("ctx-status")?.("", createCtx());
+		await handlers.get("ctx-status")?.("diagnostics", createCtx());
 
 		expect(sent[0]?.data.text).toContain("Active profile: work");
 		expect(sent[0]?.data.details).toMatchObject({ activeProfile: "work" });
@@ -331,8 +332,9 @@ describe("Pi Magic Context commands", () => {
 			}),
 		});
 
-		expect(sent[0]?.data.text).toContain("Last percentage: 61.1%");
-		expect(sent[0]?.data.text).toContain("Resolved context limit: 173,375");
+		expect(sent[0]?.data.text).toContain(
+			"Context: 61.1% of usable context (105,932 / 173,375 tokens)",
+		);
 	});
 
 	it("refuses every context-management command in compaction-off mode without mutations", async () => {

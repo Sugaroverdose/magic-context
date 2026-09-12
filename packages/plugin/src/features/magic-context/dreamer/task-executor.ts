@@ -20,6 +20,7 @@ import { isRecord } from "../../../shared/record-type-guard";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
 import { modelBodyField } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
+import { dreamFailureCode } from "../../../shared/user-facing-codes";
 import { getCompartmentEvents } from "../compartment-events";
 import {
     getMemoriesByProject,
@@ -795,7 +796,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             const { transient, brief } = classifyFailure(error);
             const failure = dreamRunFailureDetail(error);
             recordRun("failed", brief, { failure });
-            log(`[dreamer] task ${config.task} failed (transient=${transient}): ${brief}`);
+            log(
+                `[dreamer] task ${config.task} failed code=${dreamFailureCode(failure.failure_class)} (transient=${transient}): ${brief}`,
+            );
             return {
                 status: "failed",
                 transient,

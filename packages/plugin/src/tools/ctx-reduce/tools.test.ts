@@ -372,7 +372,7 @@ describe("createCtxReduceTools", () => {
             expect(calls[2]?.commandId).not.toBe(calls[0]?.commandId);
         });
 
-        it("returns the existing failure wording when the rust module rejects a drop", async () => {
+        it("returns capability copy when the engine rejects a drop", async () => {
             const tools = createCtxReduceTools({
                 db,
                 protectedSet: new Set(),
@@ -384,7 +384,7 @@ describe("createCtxReduceTools", () => {
             });
 
             await expect(tools.ctx_reduce.execute({ drop: "3-5" }, toolContext())).resolves.toBe(
-                "Error: Failed to queue ctx_reduce operations. module unavailable",
+                "Context cleanup is paused while the engine syncs. Retry in a moment. (MC-C05)",
             );
         });
 

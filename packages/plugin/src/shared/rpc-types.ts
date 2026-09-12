@@ -14,6 +14,8 @@ import type { LoggerDiagnostics } from "./logger";
 export interface TailHygieneStatus {
     /** Tokens in active, non-protected tail content that the agent can reclaim. */
     u: number;
+    /** Spent tool outputs contributing positive tokens to U in this baseline. */
+    reclaimableToolOutputCount?: number;
     /** Tokens in rendered-tail content eligible for hygiene accounting in the same scan. */
     t: number;
     /** Reclaimable-to-eligible token ratio, clamped to 0–1 and shared by both nudge mechanisms. */
@@ -55,6 +57,8 @@ export interface SidebarSnapshot {
     cacheTtl: string;
     /** Persistent runtime failure shown directly in the sidebar when non-null. */
     lastTransformError: string | null;
+    /** Durable history-compression failure count used to select the stable summary warning. */
+    historianFailureCount?: number;
     lastDreamerRunAt: number | null;
     projectIdentity: string | null;
     compartmentTokens: number;
@@ -224,6 +228,12 @@ export interface StatusDetail extends SidebarSnapshot {
      * (the plugin owns it), so this surface supplies the live DB value; the module
      * surface supplies the module-store value instead.
      */
+    /** Search-indexing coverage and current command state for the default status summary. */
+    embedding?: {
+        state: "off" | "running" | "paused" | "stopped" | "ready" | "waiting";
+        indexed: number;
+        total: number;
+    };
     storage_versions: {
         /**
          * Persisted schema version of context.db (MAX of schema_migrations).

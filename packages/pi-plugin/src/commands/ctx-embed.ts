@@ -135,6 +135,7 @@ export async function runEmbedDrain(
 					outcome.embedded,
 					outcome.remaining,
 					outcome.failure,
+					"plain",
 				)}`,
 				level: "info",
 			};

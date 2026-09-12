@@ -25,7 +25,9 @@ import {
     isRustAuthorityDrainingError,
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
+import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
 import type { CtxNoteArgs, CtxNoteReadFilter } from "./types";
@@ -179,12 +181,9 @@ function buildReadSections(args: {
     return sections;
 }
 
-function noteAuthorityRefusal(args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
-    const readiness = "Rust notes authority is not ready.";
-    if ((action === "write" || action === "update") && typeof args.content === "string") {
-        return `Error: ${readiness} Write REFUSED and NOT saved; RESEND after authority is ready.\nContent to resend:\n${args.content}`;
-    }
-    return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
+function noteAuthorityRefusal(_args: CtxNoteArgs, action: RustNoteToolRequest["action"]): string {
+    const isMutation = action === "write" || action === "update" || action === "dismiss";
+    return renderCapabilityRefusal(isMutation ? "note_change" : "note_access");
 }
 
 function moduleNoteText(
@@ -352,21 +351,22 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     });
                 } catch (error) {
                     if (marker) {
-                        return `Error: Rust notes authority is unavailable. ${error instanceof Error ? error.message : String(error)}`;
+                        sessionLog(sessionId, "ctx_note capability refusal", error);
+                        return noteAuthorityRefusal(args, action);
                     }
                 }
             }
             if (notesAuthority === "MODULE") {
                 const rustNote = deps.rustToolBackends?.note;
                 if (!rustNote || !projectIdentity) {
-                    return "Error: Rust notes authority is active, but this module transport does not support ctx_note.";
+                    return noteAuthorityRefusal(args, action);
                 }
                 let compilation: Awaited<ReturnType<typeof compileSurfaceCondition>> | undefined;
                 if ((action === "write" || action === "update") && surfaceCondition) {
                     if (
                         deps.rustToolBackends?.noteEvaluationAvailable?.(projectIdentity) !== true
                     ) {
-                        return "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.";
+                        return renderCapabilityRefusal("smart_note_condition");
                     }
                     compilation = await compileSurfaceCondition(surfaceCondition, {
                         projectPath: toolContext.directory,
@@ -392,7 +392,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 try {
                     const text = moduleNoteText(await rustNote(request), args, action);
                     if (text === null) {
-                        return "Error: Rust module returned an invalid ctx_note response.";
+                        return noteAuthorityRefusal(args, action);
                     }
                     if (text.startsWith("Error:")) return text;
                     if (wakePlaneActive) {
@@ -404,7 +404,8 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     if (isRustAuthorityDrainingError(error)) {
                         return noteAuthorityRefusal(args, action);
                     }
-                    return `Error: Rust module ctx_note failed. ${error instanceof Error ? error.message : String(error)}`;
+                    sessionLog(sessionId, "ctx_note capability refusal", error);
+                    return noteAuthorityRefusal(args, action);
                 }
             }
             if (marker || notesAuthority === "PREPARING" || notesAuthority === "DRAINING") {

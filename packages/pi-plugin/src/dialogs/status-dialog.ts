@@ -12,7 +12,11 @@ import {
 } from "@earendil-works/pi-tui";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import { getMostRecentTaskRunAt } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
+import { CANONICAL_DREAM_TASKS } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { getEmbeddingCoverageStatus } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import {
 	getProtectionWindowForSession,
 	type ProtectionWindowStatus,
@@ -27,6 +31,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
+import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/embed-session-state";
 import {
 	MAX_EXECUTE_THRESHOLD,
 	resolveExecuteThresholdDetail,
@@ -48,10 +53,13 @@ import {
 	formatThresholdPercent,
 } from "@magic-context/core/shared/format-threshold";
 import type { TailHygieneStatus } from "@magic-context/core/shared/rpc-types";
+import type { UserStatusSummary } from "@magic-context/core/shared/status-summary";
+import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
 	formatTailHygiene,
 	resolveTailHygieneStatus,
 } from "@magic-context/core/shared/tail-hygiene-status";
+import { renderUserFacingFailure } from "@magic-context/core/shared/user-facing-codes";
 import {
 	formatWindowDerivationLine,
 	type WindowGeometryResult,
@@ -92,6 +100,7 @@ export interface StatusDialogDeps {
 	injectionBudgetTokens?: number;
 	/** User-owned profile selected for the project, after config resolution. */
 	activeProfile?: string;
+	dreamer?: { runnable?: boolean; scheduleSummary?: string };
 	executeThresholdTokens?: {
 		default?: number;
 		[modelKey: string]: number | undefined;
@@ -100,21 +109,24 @@ export interface StatusDialogDeps {
 	cacheTtlConfigured?: boolean;
 	configParseFailures?: ConfigParseFailure[];
 	hasDeprecatedProtectedTags?: boolean;
+	compactionEnabled?: boolean;
 }
 
-interface StatusDialogDetail {
+export interface StatusDialogDetail {
 	sessionId: string;
 	activeProfile: string | null;
 	usagePercentage: number;
 	inputTokens: number;
 	systemPromptTokens: number;
 	compartmentCount: number;
+	lastCompartmentRange: string | null;
 	memoryCount: number;
 	memoryBlockCount: number;
 	sessionNoteCount: number;
 	readySmartNoteCount: number;
 	pendingOpsCount: number;
 	historianRunning: boolean;
+	timesExecuteThresholdReached: number;
 	historianFailureCount: number;
 	historianLastFailureAt: number | null;
 	historianLastError: string | null;
@@ -162,12 +174,25 @@ interface StatusDialogDetail {
 	/** A detached /ctx-recomp or /ctx-session-upgrade is running in background. */
 	recompInFlight: boolean;
 	hasDeprecatedProtectedTags: boolean;
+	compactionEnabled: boolean;
+	dreamer: {
+		enabled: boolean;
+		scheduleSummary: string | null;
+		lastRunAt: number | null;
+		backlog: ReturnType<typeof getDreamTaskBacklogs>;
+	};
+	embedding: {
+		state: "off" | "running" | "paused" | "stopped" | "ready" | "waiting";
+		indexed: number;
+		total: number;
+	};
 }
 
 export async function showStatusDialog(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	deps: StatusDialogDeps,
+	initialDiagnostics = false,
 ): Promise<void> {
 	const sessionId = resolveSessionId(ctx);
 	if (!sessionId) throw new Error("No active Pi session is available.");
@@ -182,6 +207,7 @@ export async function showStatusDialog(
 				theme,
 				tui,
 				done,
+				initialDiagnostics,
 			}),
 		{
 			overlay: true,
@@ -198,6 +224,7 @@ interface StatusDialogProps {
 	theme: Theme;
 	tui: TUI;
 	done: (value: undefined) => void;
+	initialDiagnostics: boolean;
 }
 
 /**
@@ -212,9 +239,11 @@ class StatusDialogComponent implements Component {
 	private detail: StatusDialogDetail;
 	private refreshTimer: ReturnType<typeof setInterval> | null = null;
 	private closed = false;
+	private diagnostics: boolean;
 
 	constructor(props: StatusDialogProps) {
 		this.props = props;
+		this.diagnostics = props.initialDiagnostics;
 		this.detail = buildPiStatusDetail(
 			props.pi,
 			props.ctx,
@@ -238,6 +267,11 @@ class StatusDialogComponent implements Component {
 	}
 
 	handleInput(data: string): void {
+		if (matchesKey(data, "d")) {
+			this.diagnostics = !this.diagnostics;
+			this.props.tui.requestRender();
+			return;
+		}
 		if (
 			matchesKey(data, "escape") ||
 			matchesKey(data, "ctrl+c") ||
@@ -267,7 +301,12 @@ class StatusDialogComponent implements Component {
 		// renderInner so the segmented bar can fill the available row width
 		// instead of being capped at a hardcoded 56 chars.
 		const innerWidth = Math.max(20, width - 4);
-		const inner = renderInner(this.detail, this.props.theme, innerWidth);
+		const inner = renderInner(
+			this.detail,
+			this.props.theme,
+			innerWidth,
+			this.diagnostics,
+		);
 		return drawBorder(inner, width, this.props.theme);
 	}
 
@@ -279,10 +318,74 @@ class StatusDialogComponent implements Component {
 	}
 }
 
+export function formatPiStatusSummary(s: StatusDialogDetail): string {
+	const warnings: UserStatusSummary["warnings"] = [];
+	if (s.lastTransformError) warnings.push("transform_update_failed");
+	if (s.historianFailureCount > 0) warnings.push("historian_unavailable");
+	if (s.configParseFailures.length > 0 || s.hasDeprecatedProtectedTags) {
+		warnings.push("configuration_warning");
+	}
+	if (s.embedding.state === "stopped") warnings.push("embedding_unavailable");
+	return renderUserStatusSummary(
+		{
+			inputTokens: s.inputTokens,
+			usableContextTokens: s.contextLimit,
+			usagePercentage: s.usagePercentage,
+			cacheLifetime: formatCacheTtlDisplay({
+				value: s.cacheTtl,
+				source: s.cacheTtlSource,
+				modelKey: s.cacheTtlModelKey,
+			}).replace(/^Cache TTL:\s*/, ""),
+			automaticCompressionThreshold: s.compactionEnabled
+				? s.executeThreshold
+				: null,
+			compression: {
+				state: s.historianRunning
+					? "compressing"
+					: s.compartmentCount > 0
+						? "ready"
+						: "waiting",
+				historyBlockCount: s.compartmentCount,
+			},
+			reclaimable: {
+				toolOutputCount: s.tailHygiene?.reclaimableToolOutputCount ?? 0,
+				tokens: s.tailHygiene?.u ?? 0,
+			},
+			memoryCount: s.memoryCount,
+			noteCount: s.sessionNoteCount + s.readySmartNoteCount,
+			embedding: s.embedding,
+			warnings,
+		},
+		"plain",
+	);
+}
+
+export function formatPiStatusDiagnostics(s: StatusDialogDetail): string {
+	const summary = formatPiStatusSummary(s).replace(
+		"Magic Context Status",
+		"Magic Context Diagnostics",
+	);
+	return [
+		summary,
+		"",
+		`Session: ${s.sessionId}`,
+		`Active profile: ${s.activeProfile ?? "none"}`,
+		`Work tokens: ${fmt(s.newWorkTokens)} new · ${fmt(s.totalInputTokens)} total input`,
+		...(s.tailHygiene ? [`Hygiene: ${formatTailHygiene(s.tailHygiene)}`] : []),
+		`Tags: ${s.activeTags} active · ${s.droppedTags} dropped · ${s.totalTags} total`,
+		`Pending drops: ${s.pendingOpsCount}`,
+		`Protected tokens: ${fmt(s.protectedTokens.protectedMass)} (${s.protectedTokens.protectedCount} tags / floor ${fmt(s.protectedTokens.floor)})`,
+		`History block tokens: ${fmt(s.historyBlockTokens)}`,
+		`Compression budget: ${s.compressionBudget ? `${fmt(s.compressionBudget)} (${s.compressionUsage} used)` : "unavailable"}`,
+		`Subagent: ${s.isSubagent ? "yes" : "no"}`,
+	].join("\n");
+}
+
 function renderInner(
 	s: StatusDialogDetail,
 	theme: Theme,
 	innerWidth: number,
+	diagnostics: boolean,
 ): string[] {
 	const pctColor =
 		s.usagePercentage >= 80
@@ -299,6 +402,17 @@ function renderInner(
 			`v${packageJson.version}`,
 		)}`,
 	);
+	lines.push(
+		theme.fg("muted", `[D] Diagnostics: ${diagnostics ? "on" : "off"}`),
+	);
+	if (!diagnostics) {
+		lines.push("", ...formatPiStatusSummary(s).split("\n").slice(1));
+		lines.push(
+			"",
+			theme.fg("muted", "Press D for diagnostics · Escape to close"),
+		);
+		return lines;
+	}
 	lines.push("");
 	for (const failure of s.configParseFailures) {
 		lines.push(theme.fg("error", formatConfigParseStatusLine(failure)));
@@ -427,9 +541,13 @@ function renderInner(
 	);
 
 	if (s.lastTransformError)
-		lines.push(theme.fg("error", `⚠ ${s.lastTransformError}`));
+		lines.push(
+			theme.fg("error", renderUserFacingFailure("transform_update_failed")),
+		);
 	if (s.historianLastError)
-		lines.push(theme.fg("error", `⚠ ${s.historianLastError}`));
+		lines.push(
+			theme.fg("error", renderUserFacingFailure("historian_unavailable")),
+		);
 
 	lines.push("");
 	lines.push(theme.fg("muted", "Press Escape to close"));
@@ -642,6 +760,27 @@ export function buildPiStatusDetail(
 			: cacheTtlMs;
 	const cacheExpired = meta.lastResponseTime > 0 && cacheRemainingMs === 0;
 	const historyBlockTokens = compartmentTokens + factTokens;
+	const embeddingCoverage = safeRead(
+		() => getEmbeddingCoverageStatus(deps.db, deps.projectIdentity, sessionId),
+		{
+			enabled: false,
+			model: "off",
+			provider: "off",
+			session: { embedded: 0, total: 0 },
+			memories: { embedded: 0, total: 0 },
+			commits: { embedded: 0, total: 0, gitEnabled: false },
+			shadowBackfillStalls: [],
+		},
+	);
+	const embeddingRunState = getEmbedDrainUiStatus(sessionId, undefined).status;
+	const embeddingState = !embeddingCoverage.enabled
+		? "off"
+		: embeddingRunState !== "idle"
+			? embeddingRunState
+			: embeddingCoverage.session.total > 0 &&
+					embeddingCoverage.session.embedded >= embeddingCoverage.session.total
+				? "ready"
+				: "waiting";
 	const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
 	const compressionBudget =
 		contextLimit > 0
@@ -659,6 +798,10 @@ export function buildPiStatusDetail(
 		inputTokens,
 		systemPromptTokens,
 		compartmentCount: compartments.length,
+		lastCompartmentRange: (() => {
+			const last = compartments.at(-1);
+			return last ? `${last.startMessage}-${last.endMessage}` : null;
+		})(),
 		memoryCount: safeRead(
 			() => getMemoryCount(deps.db, deps.projectIdentity),
 			0,
@@ -684,6 +827,7 @@ export function buildPiStatusDetail(
 		),
 		pendingOpsCount: pendingOps,
 		historianRunning: meta.compartmentInProgress,
+		timesExecuteThresholdReached: meta.timesExecuteThresholdReached,
 		historianFailureCount: Number(metaRow?.historian_failure_count ?? 0),
 		historianLastFailureAt:
 			typeof metaRow?.historian_last_failure_at === "number"
@@ -745,6 +889,29 @@ export function buildPiStatusDetail(
 		),
 		recompInFlight: isPiRecompInFlight(sessionId),
 		hasDeprecatedProtectedTags: deps.hasDeprecatedProtectedTags ?? false,
+		compactionEnabled: deps.compactionEnabled ?? true,
+		dreamer: {
+			enabled: deps.dreamer?.runnable === true,
+			scheduleSummary: deps.dreamer?.scheduleSummary ?? null,
+			lastRunAt: safeRead(
+				() => getMostRecentTaskRunAt(deps.db, deps.projectIdentity),
+				null,
+			),
+			backlog: safeRead(
+				() =>
+					getDreamTaskBacklogs(
+						deps.db,
+						deps.projectIdentity,
+						CANONICAL_DREAM_TASKS,
+					),
+				{},
+			),
+		},
+		embedding: {
+			state: embeddingState,
+			indexed: embeddingCoverage.session.embedded,
+			total: embeddingCoverage.session.total,
+		},
 	};
 }
 

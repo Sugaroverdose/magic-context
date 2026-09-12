@@ -1,4 +1,5 @@
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
+import { renderDreamFailure } from "../../../shared/user-facing-codes";
 import type { DreamTaskRunBacklog } from "./task-registry";
 
 export type DreamRunFailureClass =
@@ -36,11 +37,7 @@ export interface DreamRunTaskSummary {
 }
 
 export function formatDreamRunFailure(failure: DreamRunFailureDetail): string {
-    const parts: string[] = [failure.failure_class];
-    if (failure.model_attempted) parts.push(`model: ${failure.model_attempted}`);
-    if (failure.provider_error) parts.push(failure.provider_error.split(/\r?\n/, 1)[0].trim());
-    else if (failure.timeout_ms !== null) parts.push(`timeout: ${failure.timeout_ms}ms`);
-    return parts.join(" · ");
+    return renderDreamFailure(failure.failure_class);
 }
 
 export interface DreamRunMemoryChanges {

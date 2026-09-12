@@ -742,7 +742,7 @@ describe("runPiHistorian", () => {
 		}
 	});
 
-	it("notifies failed historian runs once with the transient failure framing", async () => {
+	it("notifies failed historian runs once with a stable reference code", async () => {
 		clearPiHistorianAlertState("ses-historian");
 		const notices: string[] = [];
 		const notifyIssue = mock((text: string) => {
@@ -751,8 +751,10 @@ describe("runPiHistorian", () => {
 		const first = await runHistorianWith({ outputs: [""], notifyIssue });
 		try {
 			expect(notifyIssue).toHaveBeenCalledTimes(1);
-			expect(notices[0]).toContain("Hit a transient issue comparting history");
-			expect(notices[0]).toContain("only be alerted again");
+			expect(notices[0]).toContain(
+				"History compression could not finish this turn. It will retry automatically. (MC-H01)",
+			);
+			expect(notices[0]).not.toContain("Historian returned empty output");
 		} finally {
 			closeQuietly(first.db);
 		}
