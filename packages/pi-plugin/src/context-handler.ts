@@ -5921,17 +5921,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	// All applied reclaim lanes consume the same force episode; evaluation alone does not.
-	if (
-		emergencyDropEligible &&
-		(pendingOpsDidMutate || heuristicOrReasoningDidMutate)
-	) {
-		setEmergencyDropSample(
-			args.db,
-			args.sessionId,
-			args.contextUsage.inputTokens,
-		);
-	}
 	const toolReclaimApplicationOpportunity = isCacheBustingPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
@@ -6156,6 +6145,21 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			heuristicOrReasoningDidMutate = true;
 			executedWorkThisPass = true;
 		}
+	}
+	// Finalize the shared episode after all reclaim producers, including processed
+	// images and native replay activation. Failed persistence and replay-only work
+	// contribute no mutation, so an empty batch leaves the episode available.
+	if (
+		emergencyDropEligible &&
+		(pendingOpsDidMutate ||
+			heuristicOrReasoningDidMutate ||
+			autoReclaimDidMutate)
+	) {
+		setEmergencyDropSample(
+			args.db,
+			args.sessionId,
+			args.contextUsage.inputTokens,
+		);
 	}
 	if (toolReclaimApplicationOpportunity) {
 		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
