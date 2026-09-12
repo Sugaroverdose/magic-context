@@ -28,6 +28,8 @@
  * OpenCode's `resolveContextLimit()` path.
  */
 
+import { MIN_PLAUSIBLE_CONTEXT_LIMIT } from "@magic-context/core/shared/window-geometry";
+
 export interface PiAssistantUsage {
 	input?: number;
 	output?: number;
@@ -157,8 +159,7 @@ export function resolvePiPressureSnapshot(
 	const contextLimit =
 		typeof args.usableContextLimit === "number" &&
 		Number.isFinite(args.usableContextLimit) &&
-		args.usableContextLimit >= 16_000 &&
-		args.usableContextLimit <= 10_000_000
+		args.usableContextLimit >= MIN_PLAUSIBLE_CONTEXT_LIMIT
 			? args.usableContextLimit
 			: undefined;
 
@@ -178,8 +179,7 @@ export function resolvePiPressureSnapshot(
 	const inferredLimit = persistedInputTokens / (args.persistedPercentage / 100);
 	const validInferredLimit =
 		Number.isFinite(inferredLimit) &&
-		inferredLimit >= 16_000 &&
-		inferredLimit <= 10_000_000;
+		inferredLimit >= MIN_PLAUSIBLE_CONTEXT_LIMIT;
 	return {
 		inputTokens,
 		percentage: validInferredLimit ? (inputTokens / inferredLimit) * 100 : 0,

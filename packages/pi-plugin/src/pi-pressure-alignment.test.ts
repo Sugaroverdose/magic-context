@@ -154,3 +154,26 @@ it("preserves the scheduler emergency pressure floor for historian admission", (
 	};
 	expect(resolvePiPressureSnapshot(args).percentage).toBe(95);
 });
+
+it("keeps small real windows as valid denominators (only placeholder limits are rejected)", () => {
+	// A 15k-token window is a real configuration (hermetic fixtures, small local
+	// models); rejecting it read every pass as 0% and froze queued drops (v0.42.0 r5).
+	expect(
+		resolvePiPressureSnapshot({
+			persistedPercentage: 93.46,
+			persistedInputTokens: 14_019,
+			usableContextLimit: 15_000,
+		}),
+	).toEqual({
+		inputTokens: 14_019,
+		percentage: (14_019 / 15_000) * 100,
+		contextLimit: 15_000,
+	});
+	expect(
+		resolvePiPressureSnapshot({
+			persistedPercentage: 50,
+			persistedInputTokens: 1_024,
+			usableContextLimit: 2_048,
+		}).percentage,
+	).toBe(50);
+});

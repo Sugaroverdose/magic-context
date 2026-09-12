@@ -10,7 +10,12 @@ export const PROMPT_WALL_MARGIN = 4_096;
 export const PI_OUTPUT_FLOOR = 4_096;
 export const OPENCODE_OUTPUT_CAP = 32_000;
 
-const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
+/**
+ * Smallest context window any served model can plausibly have. Reported or
+ * inferred limits below this are placeholders (0, 1) or corrupt state, never a
+ * real window, so every denominator check shares this one floor.
+ */
+export const MIN_PLAUSIBLE_CONTEXT_LIMIT = 1_024;
 const OUTPUT_RESERVE_CAP_RATIO = 0.25;
 
 export type WindowGeometry = "shared_upfront" | "shared_truncating" | "separate";
