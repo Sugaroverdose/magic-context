@@ -2666,6 +2666,7 @@ async function embedCompartmentChunkBatch(
         snapshot.chunkModelId,
         batchSize,
         getProjectEmbeddingMaxInputTokens(projectIdentity),
+        true,
     );
     if (candidates.length === 0) return 0;
     // Passive sweep ignores `failed`/`noWork` — it's bounded per tick and re-runs
@@ -2999,7 +3000,6 @@ export async function embedSessionCompartmentChunks(
         snapshot.chunkModelId,
         maxInputTokens,
     );
-    if (total === 0) return { status: "nothing", embedded: 0, total: 0 };
 
     const holderId = `session-embed-${randomUUID()}`;
     const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
@@ -3060,6 +3060,7 @@ export async function embedSessionCompartmentChunks(
                 batchSize,
                 [...skipIds, ...failedIds],
                 maxInputTokens,
+                true,
             );
             if (candidates.length === 0) break;
             const {
@@ -3120,6 +3121,7 @@ export async function embedSessionCompartmentChunks(
             log("[magic-context] embed drain: lease release failed (will TTL-expire):", error);
         }
     }
+    if (total === 0) return { status: "nothing", embedded: 0, total: 0 };
     if (aborted) return { status: "aborted", embedded, total, failed: failedIds.length };
     // Either the provider went down (circuit broke) or some compartments failed
     // their retries but the rest drained. Count what's genuinely still embeddable

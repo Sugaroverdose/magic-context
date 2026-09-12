@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { estimateTokens, formatBlock } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -70,8 +73,8 @@ class CapturingEmbeddingProvider implements EmbeddingProvider {
     }
 }
 
-function createDb(): Database {
-    const db = new Database(":memory:");
+function createDb(filename = ":memory:"): Database {
+    const db = new Database(filename);
     initializeDatabase(db);
     runMigrations(db);
     backfillMessageFtsRowidMapBatch(db);
@@ -293,11 +296,14 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("classification renumbers matching one-based multi-window rows without embedding", async () => {
-        const db = createDb();
+    test("coverage stays read-only before the drain renumbers matching one-based rows", async () => {
+        const tempDirectory = mkdtempSync(join(tmpdir(), "chunk-window-renumber-"));
+        const databasePath = join(tempDirectory, "store.db");
+        const db = createDb(databasePath);
         const embeddedTexts: string[] = [];
         const sessionId = "ses-shifted-window";
         const projectPath = "/repo/shifted-window";
+        let observer: Database | null = null;
         try {
             _setTestProviderFactoryForProject(() => new CapturingEmbeddingProvider(embeddedTexts));
             registerProjectEmbedding(
@@ -348,6 +354,18 @@ describe("compartment chunk embedding core", () => {
                 })),
             );
 
+            observer = new Database(databasePath);
+            const beforeDataVersion = (
+                observer.prepare("PRAGMA data_version").get() as { data_version: number }
+            ).data_version;
+            expect(
+                countSessionCompartmentEmbedCoverage(db, projectPath, sessionId, modelId, 64),
+            ).toEqual({ embedded: 1, total: 1 });
+            const afterDataVersion = (
+                observer.prepare("PRAGMA data_version").get() as { data_version: number }
+            ).data_version;
+            expect(afterDataVersion).toBe(beforeDataVersion);
+
             expect(await embedSessionCompartmentChunks(db, projectPath, sessionId)).toEqual({
                 status: "nothing",
                 embedded: 0,
@@ -371,7 +389,9 @@ describe("compartment chunk embedding core", () => {
             );
         } finally {
             _resetProjectEmbeddingRegistryForTests();
+            if (observer) closeQuietly(observer);
             closeQuietly(db);
+            rmSync(tempDirectory, { recursive: true, force: true });
         }
     });
 

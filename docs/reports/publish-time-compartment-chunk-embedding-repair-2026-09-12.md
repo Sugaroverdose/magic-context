@@ -4,4 +4,4 @@ Publish-time embedding now rejects an in-memory historian block when its ordinal
 
 ## Existing stores
 
-No migration is needed. The chunk coverage selector reconstructs each compartment from FTS and recognizes an exact one-based key shift when every hash still matches. It renumbers those rows transactionally in place, preserving vectors, hashes, and ordinal ranges without a provider call. A genuine hash or window mismatch remains `stale`, so the ordinary embedding drain re-embeds that compartment and atomically replaces its stored chunk rows.
+No migration is needed. Pure coverage checks reconstruct each compartment from FTS, recognize an exact one-based key shift when every hash still matches, and count that set as embedded without writing. Once a backfill drain holds the project's write lease, its selector renumbers those rows transactionally in place, preserving vectors, hashes, and ordinal ranges without a provider call. A genuine hash or window mismatch remains `stale`, so the ordinary embedding drain re-embeds that compartment and atomically replaces its stored chunk rows.

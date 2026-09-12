@@ -984,20 +984,24 @@ export function loadUnembeddedShadowChunkCandidates(
     );
 }
 
-/** Auto-drain selector that gives the host a turn after every mapped span read. */
+/**
+ * Auto-drain selector that gives the host a turn after every mapped span read.
+ * `leaseHeldRenumber` is reserved for callers holding the project's write lease.
+ */
 export async function loadUnembeddedCompartmentChunkCandidatesPolite(
     db: Database,
     projectPath: string,
     modelId: string,
     limit: number,
     maxInputTokens = DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS,
+    leaseHeldRenumber = false,
 ): Promise<CompartmentChunkBackfillCandidate[]> {
     const rows = getBackfillCandidateStatement(db).all(projectPath) as unknown[];
     const candidates = mapBackfillCandidateRows(rows);
     const missing: CompartmentChunkBackfillCandidate[] = [];
     const stale: CompartmentChunkBackfillCandidate[] = [];
     for (const candidate of candidates) {
-        const defect = classifyChunkCoverageDefect(
+        const { defect, windows } = classifyChunkCoverageDefect(
             db,
             projectPath,
             modelId,
@@ -1006,6 +1010,9 @@ export async function loadUnembeddedCompartmentChunkCandidatesPolite(
         );
         if (defect === "missing") missing.push(candidate);
         else if (defect === "stale") stale.push(candidate);
+        else if (defect === "renumber" && leaseHeldRenumber) {
+            renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        }
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
     return [...missing, ...stale].slice(0, Math.max(1, limit));
@@ -1033,7 +1040,12 @@ function mapBackfillCandidateRows(rows: unknown[]): CompartmentChunkBackfillCand
         }));
 }
 
-type ChunkCoverageDefect = "missing" | "stale" | "deferred" | null;
+type ChunkCoverageDefect = "missing" | "stale" | "renumber" | "deferred" | null;
+
+interface ChunkCoverageClassification {
+    defect: ChunkCoverageDefect;
+    windows: CompartmentChunkWindow[];
+}
 
 function renumberOneBasedChunkWindows(
     db: Database,
@@ -1077,14 +1089,14 @@ function classifyChunkCoverageDefect(
     modelId: string,
     candidate: CompartmentChunkBackfillCandidate,
     maxInputTokens: number,
-): ChunkCoverageDefect {
+): ChunkCoverageClassification {
     const mappedText = buildCanonicalChunkTextFromFts(
         db,
         candidate.sessionId,
         candidate.startMessage,
         candidate.endMessage,
     );
-    if (mappedText === null) return "deferred";
+    if (mappedText === null) return { defect: "deferred", windows: [] };
     const canonicalText = mappedText || buildCompartmentSummaryFallbackText(db, candidate.id);
     const windows = chunkCanonicalText(
         canonicalText,
@@ -1098,23 +1110,22 @@ function classifyChunkCoverageDefect(
         windows.length > 0 &&
         existing.size === windows.length &&
         windows.every((window) => existing.get(window.windowIndex + 1) === window.chunkHash);
-    if (isMatchingOneBasedSet) {
-        renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
-        return null;
-    }
+    if (isMatchingOneBasedSet) return { defect: "renumber", windows };
 
     const expectedWindowIndexes = new Set(windows.map((window) => window.windowIndex));
     if ([...existing.keys()].some((windowIndex) => !expectedWindowIndexes.has(windowIndex))) {
-        return "stale";
+        return { defect: "stale", windows };
     }
-    if (windows.some((window) => !existing.has(window.windowIndex))) return "missing";
+    if (windows.some((window) => !existing.has(window.windowIndex))) {
+        return { defect: "missing", windows };
+    }
     if (
         existing.size !== windows.length ||
         windows.some((window) => existing.get(window.windowIndex) !== window.chunkHash)
     ) {
-        return "stale";
+        return { defect: "stale", windows };
     }
-    return null;
+    return { defect: null, windows };
 }
 
 /**
@@ -1129,11 +1140,12 @@ function selectHashIncompleteChunkCandidates(
     candidates: readonly CompartmentChunkBackfillCandidate[],
     limit: number,
     maxInputTokens: number,
+    leaseHeldRenumber = false,
 ): CompartmentChunkBackfillCandidate[] {
     const missing: CompartmentChunkBackfillCandidate[] = [];
     const stale: CompartmentChunkBackfillCandidate[] = [];
     for (const candidate of candidates) {
-        const defect = classifyChunkCoverageDefect(
+        const { defect, windows } = classifyChunkCoverageDefect(
             db,
             projectPath,
             modelId,
@@ -1142,6 +1154,9 @@ function selectHashIncompleteChunkCandidates(
         );
         if (defect === "missing") missing.push(candidate);
         else if (defect === "stale") stale.push(candidate);
+        else if (defect === "renumber" && leaseHeldRenumber) {
+            renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        }
     }
     return [...missing, ...stale].slice(0, limit);
 }
@@ -1154,7 +1169,8 @@ const sessionBackfillCandidateStatements = new WeakMap<Database, PreparedStateme
  *  each defect class remains oldest-first so progress is deterministic.
  *
  *  `excludeIds` lets the drain loop advance past compartments that produced no
- *  embeddable work or provider failures this run. */
+ *  embeddable work or provider failures this run. `leaseHeldRenumber` is reserved
+ *  for callers holding the project's write lease. */
 export function loadUnembeddedSessionChunkCandidates(
     db: Database,
     projectPath: string,
@@ -1163,6 +1179,7 @@ export function loadUnembeddedSessionChunkCandidates(
     limit: number,
     excludeIds?: readonly number[],
     maxInputTokens = DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS,
+    leaseHeldRenumber = false,
 ): CompartmentChunkBackfillCandidate[] {
     const exclusions = excludeIds && excludeIds.length > 0 ? excludeIds : [];
     const exclusionSql =
@@ -1217,6 +1234,7 @@ export function loadUnembeddedSessionChunkCandidates(
         mapBackfillCandidateRows(rows),
         Math.max(1, limit),
         maxInputTokens,
+        leaseHeldRenumber,
     );
 }
 
@@ -1271,12 +1289,14 @@ export function countSessionCompartmentEmbedCoverage(
     const candidates = mapBackfillCandidateRows(rows);
     let embedded = 0;
     for (const candidate of candidates) {
-        if (
-            classifyChunkCoverageDefect(db, projectPath, modelId, candidate, maxInputTokens) ===
-            null
-        ) {
-            embedded += 1;
-        }
+        const { defect } = classifyChunkCoverageDefect(
+            db,
+            projectPath,
+            modelId,
+            candidate,
+            maxInputTokens,
+        );
+        if (defect === null || defect === "renumber") embedded += 1;
     }
     return { embedded, total: candidates.length };
 }
