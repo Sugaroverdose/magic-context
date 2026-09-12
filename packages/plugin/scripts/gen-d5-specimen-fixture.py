@@ -13,6 +13,32 @@ from typing import Any
 
 DB_SHA256 = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0"
 CAPTURE_SHA256 = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b"
+
+# The gateway owner (Thalamus) holds its own private view of the same defect:
+# JSON snapshots of its store and the successor wire, not the VACUUM binary.
+# Their hashes are recorded per artifact so both sides can tie this derived
+# fixture to their sources without either publishing raw data.
+GATEWAY_PRIVATE_EVIDENCE = {
+    "root": "thalamus evidence reduction-descent-1789166531 (private, not in git or CI)",
+    "note": "JSON snapshots of the gateway view at the defect; not the VACUUM binary.",
+    "13610-req-body": {
+        "bytes": 485039,
+        "sha256": "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
+    },
+    "mc_cache_state.json": {
+        "bytes": 637068,
+        "sha256": "e2efac16ec893d514c710cf59d797e5fa4c407e493108669e72f49c6d04f3b92",
+    },
+    "mc_compartments.json": {
+        "bytes": 68983,
+        "sha256": "bb2a96eb577c4993490c9b3cfb592d7e2e6f2cabbd62cb1620d21feb500d3912",
+    },
+    "mc_tags.json": {
+        "bytes": 2075576,
+        "sha256": "a157ee2ec343dbc6faa6e2464e9eaa42fd1b765eaf23318be186d00118515872",
+    },
+    "gateway_evidence_index_sha256": "825ccbee84a3d21886ace1097c22eb4f62b5b8afee5ae6e0115df4c8727abaae",
+}
 SOURCE_LABEL = f"VACUUM {DB_SHA256}"
 GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
@@ -526,6 +552,7 @@ def write_fixture(
         "readiness": "scaffold",
         "source_db_sha256": DB_SHA256,
         "capture_13610_sha256": CAPTURE_SHA256,
+        "gateway_private_evidence": GATEWAY_PRIVATE_EVIDENCE,
         "members": member_sources,
         "files": entries,
     }

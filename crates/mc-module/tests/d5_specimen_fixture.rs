@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "14e13e5dddc717d3692ea425e7d8b22216b973523e7f81711f2aec9e2ecf187c";
+const INDEX_SHA256: &str = "afaa461a4c3b1c0f7b3db00f40a268881ad35670b7c21065ee6c738e7050c461";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -129,6 +129,24 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
     assert_eq!(text(&index["readiness"]), "scaffold");
     assert_eq!(text(&index["source_db_sha256"]), DB_SHA256);
     assert_eq!(text(&index["capture_13610_sha256"]), CAPTURE_SHA256);
+    // The gateway owner's private snapshots are pinned per artifact, never as one
+    // ambiguous "snapshot" hash; the capture hash must agree with ours.
+    let gateway = object(&index["gateway_private_evidence"]);
+    assert_eq!(
+        text(&object(&gateway["13610-req-body"])["sha256"]),
+        CAPTURE_SHA256
+    );
+    for artifact in [
+        "mc_cache_state.json",
+        "mc_compartments.json",
+        "mc_tags.json",
+    ] {
+        assert_eq!(
+            text(&object(&gateway[artifact])["sha256"]).len(),
+            64,
+            "{artifact}"
+        );
+    }
 
     let indexed_names = array(&index["files"])
         .iter()
