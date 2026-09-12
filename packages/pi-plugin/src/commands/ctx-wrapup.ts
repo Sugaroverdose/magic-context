@@ -383,9 +383,14 @@ export async function runPiWrapup(
 					failure = `${ownershipLostReason}; wrapped up through message ${lastEnd}. Run /ctx-wrapup again to continue.`;
 					break;
 				}
+				// Boundary diagnostics belong in the log; the chat line stays a plain progress sentence.
+				sessionLog(
+					sessionId,
+					`wrapup chunk ${chunkIndex}: ${describeBoundaryDiagnostics(plan.snapshot)}`,
+				);
 				sendStatus({
 					title: "/ctx-wrapup",
-					text: `## Magic Wrapup\n\nChunk ${chunkIndex}: wrapping messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1} (~${plan.snapshot.trueRawEligibleTokens.toLocaleString()} eligible tokens remain). ${describeBoundaryDiagnostics(plan.snapshot)}`,
+					text: `## Magic Wrapup\n\nChunk ${chunkIndex}: wrapping messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1} (~${plan.snapshot.trueRawEligibleTokens.toLocaleString()} eligible tokens remain).`,
 					level: "info",
 				});
 

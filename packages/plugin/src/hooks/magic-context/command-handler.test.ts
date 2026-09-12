@@ -821,7 +821,7 @@ describe("createMagicContextCommandHandler", () => {
             expect(sendNotification).toHaveBeenNthCalledWith(
                 1,
                 "ses-recomp",
-                expect.stringContaining("Historian recomp started"),
+                expect.stringContaining("Recomp started"),
                 {},
             );
             expect(sendNotification).toHaveBeenNthCalledWith(
@@ -1305,7 +1305,7 @@ describe("createMagicContextCommandHandler", () => {
             );
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-rust-ops",
-                expect.stringContaining("Historian recomp started"),
+                expect.stringContaining("Recomp started"),
                 {},
             );
         });

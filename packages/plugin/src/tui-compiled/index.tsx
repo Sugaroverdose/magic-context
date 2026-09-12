@@ -1070,7 +1070,7 @@ async function showRecompDialog(api, targetSessionId = getSessionId(api)) {
   api.ui.dialog.replace(() => _$createComponent(api.ui.DialogConfirm, {
     title: "\u26A0\uFE0F Recomp Confirmation",
     get message() {
-      return [count === 0 ? "This session has no compartments yet — recomp will build them from raw history." : `You have ${count} compartments.`, "", "Recomp will regenerate all compartments and facts from raw history.", "This may take a long time and consume significant tokens.", "", "Proceed?"].join("\n");
+      return [count === 0 ? "This session has no compartments yet — recomp will build them from raw history." : `You have ${count} compartments.`, "", "Recomp will rebuild the compressed history from raw history. Saved memories are not changed.", "This may take a long time and consume significant tokens.", "", "Proceed?"].join("\n");
     },
     onConfirm: async () => {
       const requested = await requestRecomp(sessionId);

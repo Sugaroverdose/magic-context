@@ -433,6 +433,11 @@ export async function runManagedWrapup(
                 if (lastEnd + 1 >= plan.targetEligibleEndOrdinal) break;
 
                 chunkIndex += 1;
+                // Boundary diagnostics belong in the log; the progress note stays a plain sentence.
+                sessionLog(
+                    sessionId,
+                    `wrapup chunk ${chunkIndex}: ${describeBoundaryDiagnostics(plan.snapshot)}`,
+                );
                 emitWrapupProgress(ctx, sessionId, {
                     processedMessages: Math.max(0, lastEnd),
                     totalMessages: Math.max(0, plan.targetEligibleEndOrdinal - 1),
@@ -441,7 +446,7 @@ export async function runManagedWrapup(
                         0,
                         getCompartments(ctx.db, sessionId).length - startCompartmentCount,
                     ),
-                    note: `Chunk ${chunkIndex}/${expectedChunks}: messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1}… ${describeBoundaryDiagnostics(plan.snapshot)}`,
+                    note: `Chunk ${chunkIndex}/${expectedChunks}: messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1}…`,
                 });
                 if (
                     !renewWrapupMarker({

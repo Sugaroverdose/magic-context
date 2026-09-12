@@ -515,7 +515,7 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
                     ? "This session has no compartments yet — recomp will build them from raw history."
                     : `You have ${count} compartments.`,
                 "",
-                "Recomp will regenerate all compartments and facts from raw history.",
+                "Recomp will rebuild the compressed history from raw history. Saved memories are not changed.",
                 "This may take a long time and consume significant tokens.",
                 "",
                 "Proceed?",

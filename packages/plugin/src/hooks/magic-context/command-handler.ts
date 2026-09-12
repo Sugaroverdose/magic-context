@@ -271,7 +271,7 @@ function formatRustOperationMessage(
     }
     switch (disposition) {
         case "started":
-            return "## Magic Recomp\n\nHistorian recomp started. Rebuilding compartments from raw session history now.";
+            return "## Magic Recomp\n\nRecomp started. Rebuilding the compressed history from raw session history now; saved memories are kept as they are.";
         case "already_in_progress":
             return "## Magic Recomp — Skipped\n\nHistorian recomp is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
         case "nothing_to_do":
@@ -908,7 +908,7 @@ export function createMagicContextCommandHandler(deps: {
                         } else {
                             await deps.sendNotification(
                                 sessionId,
-                                "## Magic Recomp\n\nHistorian recomp started. Rebuilding compartments and facts from raw session history now.",
+                                "## Magic Recomp\n\nRecomp started. Rebuilding the compressed history from raw session history now; saved memories are kept as they are.",
                                 {},
                             );
                             result = await deps.executeRecomp(sessionId);
@@ -957,7 +957,7 @@ export function createMagicContextCommandHandler(deps: {
                                 "## ⚠️ Recomp Confirmation Required",
                                 "",
                                 `You currently have **${compartmentCount}** compartments.`,
-                                "Running /ctx-recomp will **regenerate all compartments and facts** from raw session history.",
+                                "Running /ctx-recomp will **rebuild the compressed history** from raw session history. Saved memories are not changed.",
                                 "",
                                 "This operation:",
                                 "- May take a long time (minutes to hours for long sessions)",
