@@ -15,6 +15,18 @@
             ]
         },
         {
+            "path": "tests/dropped-input-guard.test.ts",
+            "tier": "both-modes",
+            "invocation": {
+                "ts": true,
+                "rust": true
+            },
+            "rationale": "the dropped-input guard must be reachable through the plugin entry OpenCode loads; shipped unreachable in v0.42.0 because the entry wrapper did not delegate tool.execute.before",
+            "contract_refs": [
+                "S2-MIGRATION"
+            ]
+        },
+        {
             "path": "tests/cache-stability.test.ts",
             "tier": "both-modes",
             "invocation": {

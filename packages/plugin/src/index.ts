@@ -869,6 +869,9 @@ const server: Plugin = async (ctx) => {
                 typedOutput.parameters,
             );
         },
+        "tool.execute.before": async (input, output) => {
+            await magicContextRuntime.magicContext?.["tool.execute.before"]?.(input, output);
+        },
         "tool.execute.after": async (input, output) => {
             await magicContextRuntime.magicContext?.["tool.execute.after"]?.(input, output);
         },
