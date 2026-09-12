@@ -15,7 +15,9 @@ import {
 import { getInertWhitespaceAssistantTags } from "../../features/magic-context/storage-tags";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
+import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
 import type { CtxReduceArgs } from "./types";
@@ -129,7 +131,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                             (typeof record?.message === "string" && record.message.trim()
                                 ? record.message
                                 : "module rejected agent_drops.append");
-                        return `Error: Failed to queue ctx_reduce operations. ${message}`;
+                        sessionLog(sessionId, "ctx_reduce capability refusal", message);
+                        return renderCapabilityRefusal("context_cleanup");
                     }
                     const queued = typeof record.queued === "number" ? record.queued : 0;
                     if (queued <= 0) {
@@ -140,7 +143,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     // parsing in the OpenCode tool.
                     return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
                 } catch (error) {
-                    return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
+                    sessionLog(sessionId, "ctx_reduce capability refusal", error);
+                    return renderCapabilityRefusal("context_cleanup");
                 }
             }
 

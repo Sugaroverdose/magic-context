@@ -1087,8 +1087,12 @@ describe("createMagicContextCommandHandler", () => {
             const text = (sendNotification.mock.calls as unknown as Array<[string, string]>)
                 .map(([, notification]) => notification)
                 .join("\n");
-            expect(text).toContain("module supports only a full-session recomp");
-            expect(text).toContain("switch authority through the documented drain flow");
+            expect(text).toContain("(MC-C06)");
+            expect(text).toContain("Run /ctx-recomp instead. (MC-C07)");
+            expect(text).not.toContain("standard mode");
+            for (const forbidden of ["authority", "MODULE", "drain", "facade", "changefeed"]) {
+                expect(text).not.toContain(forbidden);
+            }
         });
 
         it("maps every shared wrapup state cell to the TypeScript outcome contract", async () => {
@@ -1153,13 +1157,13 @@ describe("createMagicContextCommandHandler", () => {
                     .map(([, notification]) => notification)
                     .join("\n");
                 expect(text, row.cell).toContain(row.expectedHeading);
-                if (row.disposition !== "already_in_progress") {
+                if (row.disposition !== "already_in_progress" && row.disposition !== "retryable") {
                     expect(text, row.cell).toContain(`matrix:${row.cell}`);
                 }
                 if (row.forbiddenHeading)
                     expect(text, row.cell).not.toContain(row.forbiddenHeading);
                 if (row.disposition === "retryable") {
-                    expect(text, row.cell).toContain("Run /ctx-wrapup again to continue.");
+                    expect(text, row.cell).toContain("Retry in a moment. (MC-C09)");
                     expect(text, row.cell).not.toContain("— Failed");
                 }
             }
@@ -1195,7 +1199,7 @@ describe("createMagicContextCommandHandler", () => {
                 .map(([, text]) => text)
                 .join("\n");
             expect(texts).toContain("## Magic Wrapup — Partial");
-            expect(texts).toContain("Run /ctx-wrapup again to continue.");
+            expect(texts).toContain("Retry in a moment. (MC-C09)");
             expect(texts).not.toContain("— Failed");
         });
 

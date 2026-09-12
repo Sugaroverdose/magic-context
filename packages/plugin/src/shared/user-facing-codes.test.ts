@@ -4,8 +4,10 @@ import { resolve } from "node:path";
 import type { DreamRunFailureClass } from "../features/magic-context/dreamer/storage-dream-runs";
 import type { EmbeddingFailureClass } from "../features/magic-context/memory/embedding-failure";
 import {
+    type CapabilityRefusal,
     dreamFailureCode,
     embeddingFailureCode,
+    renderCapabilityRefusal,
     renderDreamFailure,
     renderEmbeddingFailure,
     renderUserFacingFailure,
@@ -41,7 +43,7 @@ describe("user-facing failure codes", () => {
         const entries = Object.values(USER_FACING_FAILURES);
         expect(new Set(entries.map((entry) => entry.code)).size).toBe(entries.length);
         for (const [key, entry] of Object.entries(USER_FACING_FAILURES)) {
-            expect(entry.code).toMatch(/^MC-[HDERS]\d{2}$/);
+            expect(entry.code).toMatch(/^MC-[CHDERS]\d{2}$/);
             expect(entry.sentence).toEndWith(".");
             expect(entry.action).toEndWith(".");
             expect(renderUserFacingFailure(key as keyof typeof USER_FACING_FAILURES)).toBe(
@@ -64,16 +66,43 @@ describe("user-facing failure codes", () => {
         expect(renderUserFacingFailure("configuration_warning")).toContain(
             "Fix the configuration warning shown in /ctx-status diagnostics, then restart. (MC-S03)",
         );
+        expect(renderUserFacingFailure("session_upgrade_unavailable")).toContain(
+            "Run /ctx-recomp instead. (MC-C07)",
+        );
     });
 
     test("maps every structured dream and embedding failure class", () => {
         for (const failureClass of DREAM_CLASSES) {
-            expect(renderDreamFailure(failureClass)).toEndWith(`(${dreamFailureCode(failureClass)})`);
+            expect(renderDreamFailure(failureClass)).toEndWith(
+                `(${dreamFailureCode(failureClass)})`,
+            );
         }
         for (const failureClass of EMBEDDING_CLASSES) {
             expect(renderEmbeddingFailure(failureClass)).toEndWith(
                 `(${embeddingFailureCode(failureClass)})`,
             );
+        }
+    });
+
+    test("renders every capability refusal without internal vocabulary", () => {
+        const capabilities: CapabilityRefusal[] = [
+            "memory_write",
+            "memory_access",
+            "note_change",
+            "note_access",
+            "context_cleanup",
+            "partial_history",
+            "session_upgrade",
+            "smart_note_condition",
+            "history_compression",
+            "context_service",
+        ];
+        for (const capability of capabilities) {
+            const rendered = renderCapabilityRefusal(capability);
+            expect(rendered).toMatch(/\(MC-C\d{2}\)$/);
+            for (const forbidden of ["authority", "MODULE", "drain", "facade", "changefeed"]) {
+                expect(rendered).not.toContain(forbidden);
+            }
         }
     });
 
@@ -89,16 +118,17 @@ describe("user-facing failure codes", () => {
             "../../pi-plugin/src/commands/ctx-dream.ts",
             "../../pi-plugin/src/commands/ctx-status.ts",
         ];
-        const allowedLogFragments = [
-            "command notification delivery failed",
-            "/ctx-dream failed",
-        ];
+        const allowedLogFragments = ["command notification delivery failed", "/ctx-dream failed"];
         const violations: string[] = [];
         for (const relativePath of builders) {
             const path = resolve(import.meta.dir, "..", relativePath);
             const lines = readFileSync(path, "utf8").split("\n");
             lines.forEach((line, index) => {
-                if (!/(error\.message|String\((?:err|error)\)|describeError\([^)]*\)\.brief)/.test(line)) {
+                if (
+                    !/(error\.message|String\((?:err|error)\)|describeError\([^)]*\)\.brief)/.test(
+                        line,
+                    )
+                ) {
                     return;
                 }
                 if (allowedLogFragments.some((fragment) => line.includes(fragment))) return;

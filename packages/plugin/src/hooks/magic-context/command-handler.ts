@@ -26,7 +26,12 @@ import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
 } from "../../shared/tail-hygiene-status";
-import { renderUserFacingFailure, userFacingFailureCode } from "../../shared/user-facing-codes";
+import {
+    capabilityRefusalCode,
+    renderCapabilityRefusal,
+    renderUserFacingFailure,
+    userFacingFailureCode,
+} from "../../shared/user-facing-codes";
 import {
     type PartialRecompRange,
     snapRangeToCompartments,
@@ -271,20 +276,20 @@ function formatRustOperationMessage(
                 // drain stopped short of the keep watermark for a retryable reason.
                 // The TypeScript orchestrator presents the same shape as a Partial
                 // with the prescribed continuation, not a terminal failure.
-                return `## Magic Wrapup — Partial\n\n${summary || "Wrapup made progress but stopped before the keep watermark."} Run /ctx-wrapup again to continue.`;
+                return `## Magic Wrapup — Partial\n\n${renderCapabilityRefusal("history_compression")}`;
             default:
-                return `## Magic Wrapup — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
+                return `## Magic Wrapup — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
         }
     }
     switch (disposition) {
         case "started":
             return "## Magic Recomp\n\nRecomp started. Rebuilding the compressed history from raw session history now; saved memories are kept as they are.";
         case "already_in_progress":
-            return "## Magic Recomp — Skipped\n\nHistorian recomp is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
+            return "## Magic Recomp — Skipped\n\nHistory compression is already running for this session. Wait for it to finish, then try /ctx-recomp again.";
         case "nothing_to_do":
             return "## Magic Recomp\n\nNothing to rebuild: this session has no published compartments.";
         default:
-            return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
+            return `## Magic Recomp — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
     }
 }
 
@@ -711,10 +716,10 @@ export function createMagicContextCommandHandler(deps: {
                     } catch (error) {
                         sessionLog(
                             sessionId,
-                            `ctx-flush failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            `ctx-flush failed code=${capabilityRefusalCode("context_cleanup")}`,
                             error,
                         );
-                        result = `Error: ${renderUserFacingFailure("recomp_unavailable")}`;
+                        result = renderCapabilityRefusal("context_cleanup");
                     }
                 } else {
                     result = executeFlush(deps.db, sessionId);
@@ -878,10 +883,10 @@ export function createMagicContextCommandHandler(deps: {
                     } catch (error) {
                         sessionLog(
                             sessionId,
-                            `ctx-wrapup failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            `ctx-wrapup failed code=${capabilityRefusalCode("history_compression")}`,
                             error,
                         );
-                        result = `## Magic Wrapup — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
+                        result = `## Magic Wrapup — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
                     }
                 } else if (!deps.executeWrapup) {
                     result =
@@ -913,10 +918,10 @@ export function createMagicContextCommandHandler(deps: {
                     } catch (error) {
                         sessionLog(
                             sessionId,
-                            `ctx-recomp failed code=${userFacingFailureCode("recomp_unavailable")}`,
+                            `ctx-recomp failed code=${capabilityRefusalCode("history_compression")}`,
                             error,
                         );
-                        result = `## Magic Recomp — Failed\n\n${renderUserFacingFailure("recomp_unavailable")}`;
+                        result = `## Magic Recomp — Failed\n\n${renderCapabilityRefusal("history_compression")}`;
                     }
                 } else if (isTuiConnected(sessionId)) {
                     // In TUI, push an RPC action so the TUI poller shows a confirmation dialog.

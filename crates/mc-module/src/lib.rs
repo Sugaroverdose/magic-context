@@ -11284,9 +11284,14 @@ impl McHandler {
         };
         let authority = store
             .facade_authority_for_project(requested_project, authority_domain)
-            .map_err(|error| HandlerOutcome::Error {
-                code: "authority_route_lookup_failed".to_string(),
-                message: error.to_string(),
+            .map_err(|error| {
+                eprintln!(
+                    "mc-module: {authority_domain} route lookup failed code=authority_route_lookup_failed: {error}"
+                );
+                HandlerOutcome::Error {
+                    code: "authority_route_lookup_failed".to_string(),
+                    message: capability_refusal_message(authority_domain).to_string(),
+                }
             })?;
         if let Some((context_store_uuid, project, state)) = authority {
             if state != "MODULE" {
@@ -11294,9 +11299,14 @@ impl McHandler {
             }
             store
                 .bind_authority_route(&context_store_uuid, &project, &route_project_root)
-                .map_err(|error| HandlerOutcome::Error {
-                    code: "authority_route_bind_failed".to_string(),
-                    message: error.to_string(),
+                .map_err(|error| {
+                    eprintln!(
+                        "mc-module: {authority_domain} route bind failed code=authority_route_bind_failed: {error}"
+                    );
+                    HandlerOutcome::Error {
+                        code: "authority_route_bind_failed".to_string(),
+                        message: capability_refusal_message(authority_domain).to_string(),
+                    }
                 })?;
         }
         Ok(())
@@ -11362,12 +11372,13 @@ impl McHandler {
             {
                 Ok(Some((authority_project, authority_state))) => {
                     if requested_project.is_some_and(|requested| requested != authority_project) {
+                        eprintln!(
+                            "mc-module: {authority_domain} route {route_project_root} project mismatch: expected {authority_project}, received {}",
+                            requested_project.unwrap_or_default()
+                        );
                         return Err(HandlerOutcome::Error {
                             code: "facade_project_vocabulary_mismatch".to_string(),
-                            message: format!(
-                                "{authority_domain} facade route {route_project_root} is authority-managed as {authority_project}, but the request supplied {}",
-                                requested_project.unwrap_or_default()
-                            ),
+                            message: capability_refusal_message(authority_domain).to_string(),
                         });
                     }
                     if bind_authority_for_write && authority_state != "MODULE" {
@@ -11381,9 +11392,12 @@ impl McHandler {
                 // retryable errors: silently using the route could read or write the wrong owner.
                 Ok(None) => route_project_root.clone(),
                 Err(error) => {
+                    eprintln!(
+                        "mc-module: {authority_domain} project resolution failed code=authority_project_resolution_failed: {error}"
+                    );
                     return Err(HandlerOutcome::Error {
                         code: "authority_project_resolution_failed".to_string(),
-                        message: error.to_string(),
+                        message: capability_refusal_message(authority_domain).to_string(),
                     });
                 }
             },
@@ -12247,7 +12261,7 @@ impl McHandler {
                     && !self.note_evaluation_capability(Path::new(&facade_scope.route_project_root))
                 {
                     return tool_error_result(
-                        "Error: Smart-note evaluation is unavailable for this Rust-authority project; the note was not written.",
+                        "Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)",
                     );
                 }
                 if let Some(condition) = condition {
@@ -14276,10 +14290,20 @@ fn session_unresolved_error() -> HandlerOutcome {
     }
 }
 
+fn capability_refusal_message(domain: &str) -> &'static str {
+    match domain {
+        "memories" => {
+            "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)"
+        }
+        "notes" => "Note changes are paused while the engine syncs. Retry in a moment. (MC-C03)",
+        _ => "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)",
+    }
+}
+
 fn authority_draining_error(domain: &str) -> HandlerOutcome {
     HandlerOutcome::Error {
         code: "authority_draining".to_string(),
-        message: format!("{domain} authority is draining; retry after the ownership transition"),
+        message: capability_refusal_message(domain).to_string(),
     }
 }
 
@@ -14307,7 +14331,8 @@ fn invalid_params_error(message: impl Into<String>) -> HandlerOutcome {
 fn store_unavailable_error() -> HandlerOutcome {
     HandlerOutcome::Error {
         code: "store_unavailable".to_string(),
-        message: "store not opened (no HELLO_ACK storage seam yet)".to_string(),
+        message: "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)"
+            .to_string(),
     }
 }
 
@@ -24220,7 +24245,10 @@ mod tests {
         )
         .await;
         let refused_text = tool_text(refused);
-        assert!(refused_text.contains("Smart-note evaluation is unavailable"));
+        assert_eq!(
+            refused_text,
+            "Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)"
+        );
 
         let plain = call_facade(
             &handler,
@@ -25759,6 +25787,46 @@ mod tests {
     fn ctx_reduce_held_copy_has_no_totals_or_countdown() {
         assert_eq!(ctx_reduce_held_reply(&[7]), "Held: §7§ is inside the protected working set; it applies once newer work displaces it.");
         assert_eq!(ctx_reduce_held_reply(&[7, 8]), "Held: §7§, §8§ are inside the protected working set; they apply once newer work displaces them.");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn facade_tools_hide_engine_internals_when_storage_is_unavailable() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let handler = McHandler::with_producer_factory_config_resolver(
+            Arc::new(TestProducerFactory { state: producer }),
+            default_test_config(),
+            resolver,
+        );
+        handler.bind_route(8, binding("/path/that/does/not/exist", "ses"));
+
+        let requests = [
+            ("ctx_reduce", json!({ "drop": "1" })),
+            ("ctx_memory", json!({ "action": "get", "ids": [1] })),
+            ("ctx_search", json!({ "query": "architecture" })),
+            ("ctx_expand", json!({ "message": 0 })),
+            ("ctx_note", json!({ "action": "read" })),
+        ];
+        for (name, arguments) in requests {
+            let (_, message) =
+                error_frame(call_facade_on_channel(&handler, 8, name, arguments).await);
+            assert_eq!(
+                message, "Magic Context is temporarily unavailable. Retry in a moment. (MC-C10)",
+                "{name}"
+            );
+            let lowered = message.to_ascii_lowercase();
+            for forbidden in [
+                "authority",
+                "module",
+                "drain",
+                "facade",
+                "changefeed",
+                "mc-store",
+                "harness",
+            ] {
+                assert!(!lowered.contains(forbidden), "{name}: {message}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27317,8 +27385,12 @@ mod tests {
             .await,
         );
         assert_eq!(code, "facade_project_vocabulary_mismatch");
-        assert!(message.contains("git:identity"));
-        assert!(message.contains(route_project_root));
+        assert_eq!(
+            message,
+            "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)"
+        );
+        assert!(!message.contains("git:identity"));
+        assert!(!message.contains(route_project_root));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -451,13 +451,13 @@ describe("createCtxMemoryTools", () => {
                 { action: "write", category: "CONSTRAINTS", content: "retry me" },
                 toolContext(),
             );
-            expect(result).toContain("Write REFUSED and NOT saved");
-            expect(result).toContain("RESEND");
-            expect(result).toContain("Content to resend:\nretry me");
+            expect(result).toBe(
+                "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)",
+            );
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
-        it("echoes content when the authority-state probe fails", async () => {
+        it("keeps authority-state probe details in logs and returns capability copy", async () => {
             db.prepare(
                 "INSERT INTO authority_managed(project_path, context_store_uuid, marked_at) VALUES (?, ?, ?)",
             ).run("/repo/project", "store-1", Date.now());
@@ -480,17 +480,15 @@ describe("createCtxMemoryTools", () => {
                 toolContext(),
             );
 
-            expect(result).toContain(
-                `Error: Rust memory authority is unavailable. ${authorityError}`,
+            expect(result).toBe(
+                "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)",
             );
-            expect(result).toContain("Write REFUSED and NOT saved");
-            expect(result).toContain("RESEND the same call");
-            expect(result).toContain("typically recovers in seconds-to-minutes");
-            expect(result).toContain(`Content to resend:\n${content}`);
+            expect(result).not.toContain(authorityError);
+            expect(result).not.toContain(content);
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
-        it("echoes content when the module call fails outside a drain", async () => {
+        it("keeps module call details in logs and returns capability copy", async () => {
             const content = "module failure must preserve this content";
             const moduleError = "supervisor state: MODULE call failed";
             const moduleTools = createCtxMemoryTools({
@@ -511,10 +509,11 @@ describe("createCtxMemoryTools", () => {
                 toolContext(),
             );
 
-            expect(result).toContain(`Error: Rust module ctx_memory failed. ${moduleError}`);
-            expect(result).toContain("Write REFUSED and NOT saved");
-            expect(result).toContain("RESEND the same call");
-            expect(result).toContain(`Content to resend:\n${content}`);
+            expect(result).toBe(
+                "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)",
+            );
+            expect(result).not.toContain(moduleError);
+            expect(result).not.toContain(content);
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
@@ -535,8 +534,9 @@ describe("createCtxMemoryTools", () => {
                 { action: "get", ids: [1], content: "read-only content must not echo" },
                 toolContext(),
             );
-            expect(result).toContain("REFUSED and NOT applied");
-            expect(result).toContain("RESEND");
+            expect(result).toBe(
+                "Memory access is temporarily unavailable. Retry in a moment. (MC-C02)",
+            );
             expect(result).not.toContain("read-only content must not echo");
         });
 
@@ -550,7 +550,9 @@ describe("createCtxMemoryTools", () => {
                 { action: "write", category: "CONSTRAINTS", content: "must not fall back" },
                 toolContext(),
             );
-            expect(result).toContain("does not support ctx_memory");
+            expect(result).toBe(
+                "Memory writes are paused while the engine syncs. Retry in a moment. (MC-C01)",
+            );
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 

@@ -120,9 +120,9 @@ describe("createCtxNoteTools", () => {
             { action: "write", content: "retry me" },
             toolContext(),
         );
-        expect(result).toContain("Write REFUSED and NOT saved");
-        expect(result).toContain("RESEND");
-        expect(result).toContain("Content to resend:\nretry me");
+        expect(result).toBe(
+            "Note changes are paused while the engine syncs. Retry in a moment. (MC-C03)",
+        );
         expect(db.prepare("SELECT COUNT(*) AS count FROM notes").get()).toEqual({ count: 0 });
     });
 
@@ -141,9 +141,27 @@ describe("createCtxNoteTools", () => {
             { action: "read", content: "read-only content must not echo" },
             toolContext(),
         );
-        expect(result).toContain("REFUSED and NOT applied");
-        expect(result).toContain("RESEND");
+        expect(result).toBe("Notes are temporarily unavailable. Retry in a moment. (MC-C04)");
         expect(result).not.toContain("read-only content must not echo");
+    });
+
+    it("offers a regular note when conditional notes are unavailable", async () => {
+        tools = createCtxNoteTools({
+            db,
+            resolveProjectPath: () => "git:project-a",
+            rustToolBackends: {
+                authorityState: async () => "MODULE",
+                note: async () => "unexpected",
+                noteEvaluationAvailable: () => false,
+            },
+        });
+        const result = await tools.ctx_note.execute(
+            { action: "write", content: "Remember this", surface_condition: "tomorrow" },
+            toolContext(),
+        );
+        expect(result).toBe(
+            "Conditional notes are not available in the current mode. Save a regular note without a condition. (MC-C08)",
+        );
     });
 
     it("keeps TS note handling when the notes domain reports TS authority", async () => {
@@ -385,7 +403,8 @@ describe("createCtxNoteTools", () => {
             },
             toolContext(),
         );
-        expect(result).toContain("evaluation is unavailable");
+        expect(result).toContain("(MC-C08)");
+        expect(result).toContain("Save a regular note without a condition.");
         expect(db.prepare("SELECT COUNT(*) AS count FROM notes").get()).toEqual({ count: 0 });
     });
 

@@ -17,6 +17,7 @@ import type { ModelInput } from "../../../shared/model-resolution";
 import { hasShareabilitySensitiveText } from "../../../shared/redaction";
 import { modelBodyField, toModelEntry } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
+import { renderCapabilityRefusal } from "../../../shared/user-facing-codes";
 import {
     getMemoriesByProject,
     getUnclassifiedMemoryIds,
@@ -551,12 +552,12 @@ async function runClassifyThroughModule(
         });
     } catch (error) {
         if (isRustAuthorityDrainingError(error)) {
-            throw new Error("Rust memory authority is not ready; TypeScript fallback is disabled.");
+            throw new Error(renderCapabilityRefusal("memory_write"));
         }
         throw error;
     }
     if (isRustAuthorityDrainingError(applied)) {
-        throw new Error("Rust memory authority is not ready; TypeScript fallback is disabled.");
+        throw new Error(renderCapabilityRefusal("memory_write"));
     }
     const applyResult = (applied as { result?: unknown } | null)?.result ?? applied;
     if (!applyResult || typeof applyResult !== "object") {

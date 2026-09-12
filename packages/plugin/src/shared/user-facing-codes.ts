@@ -120,12 +120,62 @@ export const USER_FACING_FAILURES = {
     configuration_warning: {
         code: "MC-S03",
         sentence: "Some configuration settings could not be applied.",
-        action: "Fix the configuration warning shown in /ctx-status diagnostics, then restart."
+        action: "Fix the configuration warning shown in /ctx-status diagnostics, then restart.",
     },
     status_log_unavailable: {
         code: "MC-S04",
         sentence: "Some diagnostic details could not be saved.",
         action: "Retry /ctx-status in a moment.",
+    },
+    memory_writes_paused: {
+        code: "MC-C01",
+        sentence: "Memory writes are paused while the engine syncs.",
+        action: "Retry in a moment.",
+    },
+    memory_access_unavailable: {
+        code: "MC-C02",
+        sentence: "Memory access is temporarily unavailable.",
+        action: "Retry in a moment.",
+    },
+    note_changes_paused: {
+        code: "MC-C03",
+        sentence: "Note changes are paused while the engine syncs.",
+        action: "Retry in a moment.",
+    },
+    note_access_unavailable: {
+        code: "MC-C04",
+        sentence: "Notes are temporarily unavailable.",
+        action: "Retry in a moment.",
+    },
+    context_cleanup_paused: {
+        code: "MC-C05",
+        sentence: "Context cleanup is paused while the engine syncs.",
+        action: "Retry in a moment.",
+    },
+    partial_history_unavailable: {
+        code: "MC-C06",
+        sentence: "Partial history compression is not available in the current mode.",
+        action: "Run /ctx-recomp without a range.",
+    },
+    session_upgrade_unavailable: {
+        code: "MC-C07",
+        sentence: "Session upgrade is not available in the current mode.",
+        action: "Run /ctx-recomp instead.",
+    },
+    smart_note_conditions_unavailable: {
+        code: "MC-C08",
+        sentence: "Conditional notes are not available in the current mode.",
+        action: "Save a regular note without a condition.",
+    },
+    history_compression_paused: {
+        code: "MC-C09",
+        sentence: "History compression is paused while the engine syncs.",
+        action: "Retry in a moment.",
+    },
+    context_service_unavailable: {
+        code: "MC-C10",
+        sentence: "Magic Context is temporarily unavailable.",
+        action: "Retry in a moment.",
     },
 } as const;
 
@@ -144,6 +194,39 @@ export function renderUserFacingFailure(
 
 export function userFacingFailureCode(key: UserFacingFailureKey): string {
     return USER_FACING_FAILURES[key].code;
+}
+
+export type CapabilityRefusal =
+    | "memory_write"
+    | "memory_access"
+    | "note_change"
+    | "note_access"
+    | "context_cleanup"
+    | "partial_history"
+    | "session_upgrade"
+    | "smart_note_condition"
+    | "history_compression"
+    | "context_service";
+
+const CAPABILITY_FAILURES: Record<CapabilityRefusal, UserFacingFailureKey> = {
+    memory_write: "memory_writes_paused",
+    memory_access: "memory_access_unavailable",
+    note_change: "note_changes_paused",
+    note_access: "note_access_unavailable",
+    context_cleanup: "context_cleanup_paused",
+    partial_history: "partial_history_unavailable",
+    session_upgrade: "session_upgrade_unavailable",
+    smart_note_condition: "smart_note_conditions_unavailable",
+    history_compression: "history_compression_paused",
+    context_service: "context_service_unavailable",
+};
+
+export function renderCapabilityRefusal(capability: CapabilityRefusal): string {
+    return renderUserFacingFailure(CAPABILITY_FAILURES[capability]);
+}
+
+export function capabilityRefusalCode(capability: CapabilityRefusal): string {
+    return userFacingFailureCode(CAPABILITY_FAILURES[capability]);
 }
 
 const DREAM_FAILURE_KEYS = {

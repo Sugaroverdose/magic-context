@@ -50,6 +50,7 @@ import {
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
 import { sessionLog } from "../../shared/logger";
+import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
@@ -95,14 +96,10 @@ function normalizeCategory(category?: string): string | undefined {
     return trimmed ? trimmed : undefined;
 }
 
-function memoryAuthorityRefusal(args: CtxMemoryArgs, cause?: string): string {
-    const readiness = "Rust memory authority is not ready.";
-    const refusal =
-        (args.action === "write" || args.action === "update" || args.action === "merge") &&
-        typeof args.content === "string"
-            ? `Error: ${readiness} Write REFUSED and NOT saved; RESEND the same call after authority is ready; the Rust module typically recovers in seconds-to-minutes.\nContent to resend:\n${args.content}`
-            : `Error: ${readiness} Request REFUSED and NOT applied; RESEND the same call after authority is ready; the Rust module typically recovers in seconds-to-minutes.`;
-    return cause ? `${cause}\n${refusal}` : refusal;
+function memoryAuthorityRefusal(args: CtxMemoryArgs): string {
+    const isMutation =
+        args.action !== undefined && ["write", "update", "archive", "merge"].includes(args.action);
+    return renderCapabilityRefusal(isMutation ? "memory_write" : "memory_access");
 }
 
 function moduleMemoryText(response: unknown, args: CtxMemoryArgs): string | null {
@@ -526,17 +523,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         })) ?? null;
                 } catch (error) {
                     if (marker) {
-                        const detail = error instanceof Error ? error.message : String(error);
-                        return memoryAuthorityRefusal(
-                            args,
-                            `Error: Rust memory authority is unavailable. ${detail}`,
-                        );
+                        sessionLog(toolContext.sessionID, "ctx_memory capability refusal", error);
+                        return memoryAuthorityRefusal(args);
                     }
                 }
                 if (authorityState === "MODULE") {
                     const memoryBackend = deps.rustToolBackends?.memory;
                     if (!memoryBackend) {
-                        return "Error: Rust memory authority is active, but this module transport does not support ctx_memory.";
+                        return memoryAuthorityRefusal(args);
                     }
                     try {
                         const commandId = toolCallIdFromContext(toolContext);
@@ -574,18 +568,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                             }),
                             moduleArgs,
                         );
-                        return (
-                            text ?? "Error: Rust module returned an invalid ctx_memory response."
-                        );
+                        return text ?? memoryAuthorityRefusal(args);
                     } catch (error) {
                         if (isRustAuthorityDrainingError(error)) {
                             return memoryAuthorityRefusal(args);
                         }
-                        const detail = error instanceof Error ? error.message : String(error);
-                        return memoryAuthorityRefusal(
-                            args,
-                            `Error: Rust module ctx_memory failed. ${detail}`,
-                        );
+                        sessionLog(toolContext.sessionID, "ctx_memory capability refusal", error);
+                        return memoryAuthorityRefusal(args);
                     }
                 }
                 if (marker || authorityState === "PREPARING" || authorityState === "DRAINING") {
