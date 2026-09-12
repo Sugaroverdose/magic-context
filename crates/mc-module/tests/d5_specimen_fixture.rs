@@ -79,7 +79,7 @@ fn decode_base64(encoded: &str) -> Vec<u8> {
         "base64 length must be divisible by four"
     );
     let mut output = Vec::with_capacity(input.len() / 4 * 3);
-    for chunk in input.chunks_exact(4) {
+    for chunk in input.as_chunks::<4>().0 {
         let a = sextet(chunk[0]).expect("base64 character");
         let b = sextet(chunk[1]).expect("base64 character");
         let c = if chunk[2] == b'=' {
