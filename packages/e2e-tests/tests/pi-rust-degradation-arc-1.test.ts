@@ -136,7 +136,7 @@ describe("FM-PI-1: external module loss at the Pi JSONL seam", () => {
 			trace,
 			"PI-RUST-FAILURE-FAIL-CLOSED",
 			"packages/pi-plugin/src/context-handler.ts",
-			"if (isFailClosedBlockingError(err) && !baseOptions.compactionOff)",
+			"isFailClosedBlockingError(err)",
 		);
 		expect(trace.trace_conclusion).toContain("Pi coverage is required");
 

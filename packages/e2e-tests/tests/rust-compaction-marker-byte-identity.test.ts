@@ -43,6 +43,10 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
         async () => {
             const sessionId = await h.createSession();
             const opencodeDb = new Database(join(h.env.dataDir, "opencode", "opencode.db"));
+            // The harness's OpenCode server writes this database concurrently; bun:sqlite
+            // defaults to no busy wait, so the marker deletes below would fail on the
+            // first overlapping host write (seen as SQLITE_BUSY in release run r2).
+            opencodeDb.exec("PRAGMA busy_timeout = 30000");
 
             for (let turn = 1; turn <= 20; turn += 1) {
                 h.mock.setDefault({
