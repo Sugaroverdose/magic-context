@@ -558,19 +558,19 @@ function getPiMessageModel(message: unknown): {
 	};
 }
 
-const piUsageRefusalLogSeen = new Set<string>();
+const piUsageBoundLogSeen = new Set<string>();
 
-function logPiUsageRefusalOnce(
+function logPiUsageBoundOnce(
 	sessionId: string,
 	reading: number,
 	absoluteWall: number,
 	reason: "current reading" | "persisted floor",
 ): void {
 	const key = `${sessionId}|${reason}`;
-	if (piUsageRefusalLogSeen.has(key)) return;
-	piUsageRefusalLogSeen.add(key);
+	if (piUsageBoundLogSeen.has(key)) return;
+	piUsageBoundLogSeen.add(key);
 	info(
-		`message_end: session=${sessionId} refused ${reason} ${reading} above trusted absolute wall ${absoluteWall}; accounting sample ignored`,
+		`message_end: session=${sessionId} bounded ${reason} ${reading} at trusted absolute wall ${absoluteWall}; pressure_proof_not_capacity`,
 	);
 }
 
@@ -647,7 +647,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 		trustedAbsoluteWall !== undefined &&
 		unboundedPressure.inputTokens > trustedAbsoluteWall
 	) {
-		logPiUsageRefusalOnce(
+		logPiUsageBoundOnce(
 			args.sessionId,
 			unboundedPressure.inputTokens,
 			trustedAbsoluteWall,
@@ -662,7 +662,14 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const messageHadOverflowError =
 		typeof msg?.errorMessage === "string" &&
 		detectOverflow(msg.errorMessage).isOverflow;
-	const requestSucceeded = !messageHadOverflowError;
+	// A bounded provider sample proves pressure, not that the impossible request fit.
+	const requestSucceeded =
+		!messageHadOverflowError &&
+		!(
+			unboundedPressure &&
+			trustedAbsoluteWall !== undefined &&
+			unboundedPressure.inputTokens > trustedAbsoluteWall
+		);
 	if (requestSucceeded && rawPressure) {
 		const rawOverflow = getOverflowState(args.db, args.sessionId);
 		const detectedLimitMatchesModel =
@@ -696,7 +703,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 		trustedAbsoluteWall !== undefined &&
 		observedSafeInputTokens > trustedAbsoluteWall
 	) {
-		logPiUsageRefusalOnce(
+		logPiUsageBoundOnce(
 			args.sessionId,
 			observedSafeInputTokens,
 			trustedAbsoluteWall,
@@ -707,8 +714,11 @@ export async function persistPiPressureFromMessageEnd(args: {
 		updates.cacheAlertSent = false;
 		updates.lastUsageContextLimit = reportedGeometry?.usableSoft ?? 0;
 		if (meta.lastInputTokens > trustedAbsoluteWall) {
-			updates.lastInputTokens = 0;
-			updates.lastContextPercentage = 0;
+			updates.lastInputTokens = trustedAbsoluteWall;
+			updates.lastContextPercentage =
+				reportedGeometry && reportedGeometry.usableSoft > 0
+					? (trustedAbsoluteWall / reportedGeometry.usableSoft) * 100
+					: 0;
 		}
 	}
 

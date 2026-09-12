@@ -189,3 +189,36 @@ export function clearNativeReasoning(
 	envelope.message.providerPayload = { ...envelope.payload, items };
 	return "cleared";
 }
+
+/** Remove the captured invocation alongside its normalized toolCall, never unrelated native items. */
+export function removeNativeToolCall(
+	message: unknown,
+	toolCallId: string,
+): void {
+	const envelope = getNativeEnvelope(message);
+	const identity = parseToolCallId(toolCallId);
+	if (!envelope || !identity) return;
+	const match = findNativeToolCall(envelope.items, identity);
+	if (!match) return;
+	envelope.message.providerPayload = {
+		...envelope.payload,
+		items: envelope.items.filter((_, index) => index !== match.index),
+	};
+}
+
+export function canRemoveNativeToolCall(
+	message: unknown,
+	toolCallId: string,
+): boolean {
+	const envelope = getNativeEnvelope(message);
+	if (!envelope) return !isRecord(message) || message.providerPayload == null;
+	const identity = parseToolCallId(toolCallId);
+	return (
+		identity !== undefined &&
+		findNativeToolCall(envelope.items, identity) !== undefined
+	);
+}
+
+/** Durable input-lane decision: this complete arc was authorized for removal on a busting pass. */
+export const NATIVE_TOOL_REMOVAL_MARKER =
+	'{"__magic_context_remove_tool_arc__":true}';

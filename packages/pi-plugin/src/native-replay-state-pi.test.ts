@@ -206,7 +206,7 @@ describe("native upgrade application", () => {
 			expect(b).not.toContain(ciphertext);
 			expect(b).toContain("visible answer");
 			expect(b).toContain("image_generation_call");
-			expect(b).toContain("call-old");
+			expect(b).not.toContain("call-old");
 			expect(getNativeToolInputs(f.db, sessionId).has(callId)).toBe(true);
 			expect(getNativeReasoningIds(f.db, sessionId).has("entry-old")).toBe(
 				true,

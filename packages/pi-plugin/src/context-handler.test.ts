@@ -1623,6 +1623,8 @@ describe("registerPiContextHandler", () => {
 			updateTagDropMode(db, sessionId, editTool.tagNumber, "edit_marker");
 
 			const replayMessages = buildMessages();
+			// A legacy full-drop row may change from skeleton to removal only on a priced pass.
+			signalPiPendingMaterialization(sessionId);
 			const result = await handler(
 				{ messages: replayMessages as never[] },
 				fakeContext(
@@ -1635,7 +1637,6 @@ describe("registerPiContextHandler", () => {
 			const output = result.messages as unknown as ReturnType<
 				typeof buildMessages
 			>;
-			const fullSentinel = `[dropped §${fullTool.tagNumber}§]`;
 			const truncatedSentinel = `[dropped §${truncatedTool.tagNumber}§]`;
 			const editSentinel = `[dropped §${editTool.tagNumber}§]`;
 			const toolArguments = (index: number): Record<string, unknown> => {
@@ -1652,14 +1653,13 @@ describe("registerPiContextHandler", () => {
 			};
 
 			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
-			expect(toolArguments(1)).toEqual({ dropped: fullSentinel });
-			expect(textOf(output[2])).toBe(fullSentinel);
-			expect(toolArguments(3)).toEqual({ dropped: truncatedSentinel });
-			expect(textOf(output[4])).toBe(truncatedSentinel);
-			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
-			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
-			expect(textOf(output[6])).toBe(editSentinel);
-			expect(textOf(output[7])).toBe(
+			expect(output).toHaveLength(6);
+			expect(toolArguments(1)).toEqual({ dropped: truncatedSentinel });
+			expect(textOf(output[2])).toBe(truncatedSentinel);
+			expect(toolArguments(3).filePath).toBe("/tmp/edit.ts");
+			expect(String(toolArguments(3).oldString)).toEndWith("...[truncated]");
+			expect(textOf(output[4])).toBe(editSentinel);
+			expect(textOf(output[5])).toBe(
 				`§${activeText.tagNumber}§ keep this active`,
 			);
 		} finally {
@@ -2417,8 +2417,8 @@ describe("registerPiContextHandler", () => {
 			const meta = getOrCreateSessionMeta(db, sessionId);
 			expect(meta.observedSafeInputTokens).toBe(0);
 			expect(meta.lastUsageContextLimit).toBe(204_000);
-			expect(meta.lastInputTokens).toBe(0);
-			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.lastInputTokens).toBe(272_000);
+			expect(meta.lastContextPercentage).toBeCloseTo(133.3333);
 			expect(meta.cacheAlertSent).toBe(false);
 		} finally {
 			closeQuietly(db);
@@ -2898,7 +2898,14 @@ describe("registerPiContextHandler", () => {
 
 				return {
 					reduceStatus,
-					replayedToolResult: textOf(replay.messages[2] as never),
+					replayedToolResult: replay.messages
+						.filter(
+							(m) =>
+								m.role === "toolResult" &&
+								(m as { toolCallId?: string }).toolCallId === "reduce-1",
+						)
+						.map((m) => textOf(m as never))
+						.join(""),
 				};
 			} finally {
 				clearContextHandlerSession(`ses-stale-reduce-${provider}`);
@@ -2912,7 +2919,7 @@ describe("registerPiContextHandler", () => {
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
-			replayedToolResult: "[dropped §3§]",
+			replayedToolResult: "",
 		});
 	});
 

@@ -27,6 +27,8 @@ import {
 	getChannel2NudgeClaim,
 	getChannel2NudgeState,
 	getLastNudgeUndropped,
+	getPendingOps,
+	getTagsByNumbers,
 	markChannel1PostReduceGracePending,
 	setChannel1NudgeState,
 	setLastNudgeUndropped,
@@ -184,7 +186,7 @@ export function maybeChannel1ReminderForToolResult(args: {
 			decision.level,
 			decision.undroppedTokens,
 			reclaimableToolOutputCount(state.baselineParts),
-			state.oldestReclaimableToolTags,
+			currentReclaimHints(db, sessionId, state.oldestReclaimableToolTags),
 			decision.sticky,
 		),
 	};
@@ -285,7 +287,7 @@ export function maybeDeliverChannel2Pi(
 			content: buildChannel2Reminder(
 				undropped,
 				reclaimableToolOutputCount(baseline.baselineParts),
-				baseline.oldestReclaimableToolTags,
+				currentReclaimHints(db, sessionId, baseline.oldestReclaimableToolTags),
 			),
 			display: false,
 			details: { kind: "channel-2-ceiling-nudge" },
@@ -362,4 +364,30 @@ export function maybeDeliverChannel2Pi(
 		);
 		return false;
 	}
+}
+
+// Delivery can follow a sibling emergency drop or an agent queue operation after the baseline was saved.
+function currentReclaimHints(
+	db: Database,
+	sessionId: string,
+	hints: SharedChannel1State["oldestReclaimableToolTags"],
+): NonNullable<SharedChannel1State["oldestReclaimableToolTags"]> {
+	if (!hints?.length) return [];
+	const active = new Set(
+		getTagsByNumbers(
+			db,
+			sessionId,
+			hints.map((tag) => tag.tagNumber),
+		)
+			.filter((tag) => tag.status === "active")
+			.map((tag) => tag.tagNumber),
+	);
+	const queued = new Set(
+		getPendingOps(db, sessionId)
+			.filter((op) => op.operation === "drop")
+			.map((op) => op.tagId),
+	);
+	return hints.filter(
+		(tag) => active.has(tag.tagNumber) && !queued.has(tag.tagNumber),
+	);
 }

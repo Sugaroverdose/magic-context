@@ -95,6 +95,17 @@ describe("maybeChannel1ReminderForToolResult", () => {
 				tagNumber: tag_number,
 				toolName: tool_name,
 			}));
+			for (const hint of hints)
+				insertTag(
+					db,
+					sessionId,
+					`hint-${hint.tagNumber}`,
+					"tool",
+					9000,
+					hint.tagNumber,
+					0,
+					hint.toolName,
+				);
 			if (reminder.channel === "channel1") {
 				const [baselineU, baselineT] =
 					reminder.level === "gentle"
@@ -213,6 +224,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 
 	it("includes oldest reclaimable hints from the baseline", () => {
 		const db = createTestDb();
+		insertTag(db, SESSION, "hint-123", "tool", 9000, 123, 0, "read");
 		setPiChannel1Baseline(SESSION, {
 			...channel2BaselineFields(90_000, 120_000),
 			reducedSinceRefresh: false,
@@ -745,6 +757,7 @@ describe("maybeDeliverChannel2Pi", () => {
 
 	it("delivers the model-visible ceiling nudge as a hidden steer", () => {
 		const db = createTestDb();
+		insertTag(db, SESSION, "hint-9", "tool", 9000, 9, 0, "bash");
 		setChannel2NudgeState(db, SESSION, "pending");
 		armStrongBaseline(SESSION);
 		let capturedContent = "";
@@ -1066,3 +1079,54 @@ describe("Channel 2 delivery wiring (regression)", () => {
 		);
 	});
 });
+
+for (const channel of [1, 2]) {
+	it(`Channel ${channel} excludes tags dropped or queued after its baseline`, async () => {
+		const { queuePendingOp, updateTagStatus } = await import(
+			"@magic-context/core/features/magic-context/storage"
+		);
+		const db = createTestDb();
+		const sessionId = `stale-hints-${channel}`;
+		try {
+			for (const n of [1, 2, 3])
+				insertTag(db, sessionId, `call-${n}`, "tool", 9000, n, 0, "read");
+			setPiChannel1Baseline(sessionId, {
+				...channel2BaselineFields(90000, 100000),
+				reducedSinceRefresh: false,
+				oldestReclaimableToolTags: [1, 2, 3].map((tagNumber) => ({
+					tagNumber,
+					toolName: "read",
+				})),
+			});
+			updateTagStatus(db, sessionId, 1, "dropped");
+			queuePendingOp(db, sessionId, 2, "drop", Date.now());
+			let text = "";
+			if (channel === 1)
+				text =
+					maybeChannel1ReminderForToolResult({
+						db,
+						sessionId,
+						toolName: "bash",
+						content: [{ type: "text", text: "result" }],
+					})?.text ?? "";
+			else {
+				setChannel2NudgeState(db, sessionId, "pending");
+				maybeDeliverChannel2Pi(
+					{
+						sendMessage: (message) => {
+							text = message.content;
+						},
+					},
+					db,
+					sessionId,
+				);
+			}
+			expect(text).toContain("§3§ read");
+			expect(text).not.toContain("§1§");
+			expect(text).not.toContain("§2§");
+		} finally {
+			clearPiChannel1State(sessionId);
+			db.close();
+		}
+	});
+}

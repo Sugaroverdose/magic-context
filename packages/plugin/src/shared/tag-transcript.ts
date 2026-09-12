@@ -248,7 +248,8 @@ export function tagTranscript(
         let toolResultOrdinal = 0;
         const parts = message.parts;
         const messageHasNativeReasoning =
-            message.info.role === "assistant" && parts.some((part) => part.kind === "thinking");
+            message.requiresToolArcSkeleton ??
+            (message.info.role === "assistant" && parts.some((part) => part.kind === "thinking"));
         const contentDerivedTextIds =
             messageId !== undefined && options.textIdentityDriftMessageIds?.has(messageId) === true
                 ? buildContentDerivedTextIds(messageId, parts)
@@ -1057,8 +1058,20 @@ function buildAggregateTarget(
             }
             return occurrences[0]?.part.getText() ?? null;
         },
-        drop(): "removed" | "absent" {
-            // Replace BOTH halves with the dropped sentinel.
+        drop(): "removed" | "absent" | "incomplete" {
+            const complete =
+                occurrences.some((occ) => occ.kind === "tool_use") &&
+                occurrences.some((occ) => occ.kind === "tool_result");
+            if (!complete) return "incomplete";
+            if (
+                !requiresToolArcSkeleton &&
+                occurrences.every((occ) => occ.part.remove && occ.part.canRemove?.() !== false)
+            ) {
+                let removed = false;
+                for (const occ of occurrences) removed = occ.part.remove?.() || removed;
+                return removed ? "removed" : "absent";
+            }
+            // Adapters without structural removal retain paired sentinels.
             const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
             let any = false;
             for (const occ of occurrences) {
@@ -1102,12 +1115,12 @@ function buildAggregateTarget(
             }
             return any ? "truncated" : "absent";
         },
-        // Non-mutating reclaim predicate (Pi parity with OpenCode's canDrop).
-        // Pi sentinelizes BOTH halves, so unlike OpenCode there's no
-        // result-part requirement — a target reclaims as long as it still has
-        // at least one live occurrence to sentinelize.
+        // Open invocations still belong to the current turn; only complete arcs reclaim.
         canDrop(): boolean {
-            return occurrences.length > 0;
+            return (
+                occurrences.some((occ) => occ.kind === "tool_use") &&
+                occurrences.some((occ) => occ.kind === "tool_result")
+            );
         },
         requiresToolArcSkeleton,
         // Non-mutating read of the invocation input (the tool_use occurrence
