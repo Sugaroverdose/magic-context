@@ -336,7 +336,7 @@ Example: ctx_note(action="write", content="Re-run the perf benchmark once the bo
 }
 ```
 
-### ctx_memory — description ~234 tokens, params ~201 tokens (total ~435)
+### ctx_memory — description ~234 tokens, params ~216 tokens (total ~450)
 
 **Description:**
 
@@ -376,7 +376,7 @@ Example: ctx_memory(action="write", category="CONSTRAINTS", content="Pi stores s
     "type": "string"
   },
   "category": {
-    "description": "What kind of fact this is (required for write; optional merge override)",
+    "description": "What kind of fact this is (required for write; optional on update to recategorize, omitted keeps the current category; optional merge override)",
     "type": "string",
     "enum": [
       "PROJECT_RULES",
