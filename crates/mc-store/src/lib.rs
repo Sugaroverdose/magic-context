@@ -11759,7 +11759,7 @@ impl McStore {
     ) -> Result<Vec<PromotedRef>, McStoreError> {
         let promoted = self
             .inner
-            .with_conn_fenced(|tx| promote_facts_tx(tx, project_path, facts))?;
+            .with_conn_fenced(|tx| promote_facts_tx(tx, project_path, facts, current_time_ms()))?;
         Ok(promoted)
     }
 
@@ -12495,7 +12495,14 @@ impl McStore {
                 )?;
             }
             let promoted_refs = if request.promote_facts {
-                promote_facts_tx(tx, request.project_path, request.facts)?
+                // Compartments and facts belong to one historian publication. Reuse the
+                // compartment stamp when available so every row shares that event time.
+                let published_at_ms = request
+                    .compartments
+                    .iter()
+                    .find_map(|compartment| (compartment.created_at > 0).then_some(compartment.created_at))
+                    .unwrap_or_else(current_time_ms);
+                promote_facts_tx(tx, request.project_path, request.facts, published_at_ms)?
             } else {
                 Vec::new()
             };
@@ -14565,14 +14572,15 @@ impl McStore {
                 "INSERT INTO mc_memories (id, project_path, category, content, normalized_hash,
                                           importance, status, first_seen_at, created_at,
                                           updated_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, 0, 0, 0)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7, ?7, ?7)",
                 params![
                     id,
                     project_path,
                     category,
                     content,
                     format!("h{id}"),
-                    importance
+                    importance,
+                    current_time_ms(),
                 ],
             )?;
             Ok(())
@@ -14616,7 +14624,7 @@ impl McStore {
                 "INSERT INTO mc_memories (id, project_path, category, content, normalized_hash,
                                           importance, status, expires_at, first_seen_at,
                                           created_at, updated_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, 0, 0, 0, 0)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?8, ?8, ?8)",
                 params![
                     id,
                     project_path,
@@ -14624,7 +14632,8 @@ impl McStore {
                     content,
                     format!("h{id}"),
                     importance,
-                    expires_at
+                    expires_at,
+                    current_time_ms(),
                 ],
             )?;
             Ok(())
@@ -16938,6 +16947,7 @@ fn promote_facts_tx(
     tx: &rusqlite::Transaction<'_>,
     project_path: &str,
     facts: &[FactCandidate],
+    now_ms: i64,
 ) -> rusqlite::Result<Vec<PromotedRef>> {
     let mut active_content = HashSet::new();
     {
@@ -16976,7 +16986,7 @@ fn promote_facts_tx(
                 source_session_id, source_type, seen_count, retrieval_count,
                 first_seen_at, created_at, updated_at, last_seen_at, status,
                 expires_at, verification_status)
-             VALUES (?1,?2,?3,?4,?5,?6,'historian',1,0,0,0,0,0,'active',?7,'unverified')",
+             VALUES (?1,?2,?3,?4,?5,?6,'historian',1,0,?7,?7,?7,?7,'active',?8,'unverified')",
             params![
                 project_path,
                 &fact.category,
@@ -16984,6 +16994,7 @@ fn promote_facts_tx(
                 normalized_hash,
                 fact.importance.map(i64::from),
                 fact.source_session_id.as_deref(),
+                now_ms,
                 fact.expires_at,
             ],
         )?;
@@ -23159,6 +23170,109 @@ mod tests {
     }
 
     #[test]
+    fn promote_facts_stamps_all_lifecycle_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let now_ms = 1_725_000_123_456;
+        let facts = [FactCandidate {
+            category: "CONSTRAINTS".into(),
+            content: "timestamped historian fact".into(),
+            source_session_id: Some("session-with-fact".into()),
+            ..Default::default()
+        }];
+
+        let promoted = store
+            .inner
+            .with_conn_fenced(|tx| promote_facts_tx(tx, "git:proj", &facts, now_ms))
+            .unwrap();
+        let memory = store
+            .get_memory_full(promoted[0].memory_id)
+            .unwrap()
+            .unwrap();
+
+        assert!(now_ms > 0);
+        assert_eq!(memory.first_seen_at, now_ms);
+        assert_eq!(memory.created_at, now_ms);
+        assert_eq!(memory.updated_at, now_ms);
+        assert_eq!(memory.last_seen_at, now_ms);
+    }
+
+    #[test]
+    fn module_authored_memory_insert_paths_never_create_epoch_zero_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let assert_positive_timestamps = |memory_id: i64| {
+            let memory = store.get_memory_full(memory_id).unwrap().unwrap();
+            assert!(memory.first_seen_at > 0, "first_seen_at for {memory_id}");
+            assert!(memory.created_at > 0, "created_at for {memory_id}");
+            assert!(memory.updated_at > 0, "updated_at for {memory_id}");
+            assert!(memory.last_seen_at > 0, "last_seen_at for {memory_id}");
+        };
+
+        store
+            .seed_memory(900, "git:seed", "CONSTRAINTS", "seeded", 50)
+            .unwrap();
+        assert_positive_timestamps(900);
+        store
+            .seed_expiring_memory(
+                901,
+                "git:seed",
+                "CONSTRAINTS",
+                "expiring",
+                50,
+                9_999_999_999_999,
+            )
+            .unwrap();
+        assert_positive_timestamps(901);
+
+        let direct_id = store
+            .insert_memory(insert_input(
+                "git:direct",
+                "CONSTRAINTS",
+                "direct insert",
+                1_725_000_000_001,
+            ))
+            .unwrap();
+        assert_positive_timestamps(direct_id);
+
+        let facade_id = std::cell::Cell::new(None);
+        store
+            .with_facade_command(
+                "/route/facade",
+                "git:facade",
+                "memories",
+                "timestamp-invariant",
+                "ctx_memory",
+                "write",
+                None,
+                |tx| {
+                    let id = tx.insert_memory(insert_input(
+                        "git:facade",
+                        "CONSTRAINTS",
+                        "facade insert",
+                        1_725_000_000_002,
+                    ))?;
+                    facade_id.set(Some(id));
+                    Ok(Vec::new())
+                },
+            )
+            .unwrap();
+        assert_positive_timestamps(facade_id.get().unwrap());
+
+        let promoted = store
+            .promote_facts(
+                "git:promoted",
+                &[FactCandidate {
+                    category: "CONSTRAINTS".into(),
+                    content: "public promotion".into(),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        assert_positive_timestamps(promoted[0].memory_id);
+    }
+
+    #[test]
     fn promote_facts_exact_dedup_skips_duplicates_and_advances_watermark() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open(&descriptor(dir.path())).unwrap();
@@ -23502,6 +23616,14 @@ mod tests {
             })
             .unwrap();
         assert_eq!(first.row_version, 2);
+        let promoted_memory = store
+            .get_memory_full(first.promoted_refs[0].memory_id)
+            .unwrap()
+            .unwrap();
+        assert!(promoted_memory.created_at > 0);
+        assert_eq!(promoted_memory.first_seen_at, promoted_memory.created_at);
+        assert_eq!(promoted_memory.updated_at, promoted_memory.created_at);
+        assert_eq!(promoted_memory.last_seen_at, promoted_memory.created_at);
 
         let err = store
             .publish_historian_chunk(HistorianPublishRequest {

@@ -142,16 +142,19 @@ fn to_stored_compartment(
     }
 }
 
-/// Project a validated fact candidate onto the store's promotion input. The
-/// historian promotes facts with no importance/expiry/source at publish time —
-/// classification and decay are later, cache-neutral passes.
-fn to_store_fact(f: &crate::historian_validate::FactCandidate) -> FactCandidate {
+/// Project a validated fact candidate onto the store's promotion input. Historian facts
+/// have no importance or expiry at publish time, but retain the source session so later
+/// maintenance can relate them to the publication that created them.
+fn to_store_fact(
+    f: &crate::historian_validate::FactCandidate,
+    source_session_id: &str,
+) -> FactCandidate {
     FactCandidate {
         category: f.category.clone(),
         content: f.content.clone(),
         importance: None,
         expires_at: None,
-        source_session_id: None,
+        source_session_id: Some(source_session_id.to_string()),
     }
 }
 
@@ -671,7 +674,12 @@ pub fn publish_validated_chunk(
         .map(|c| to_stored_compartment(c, request.created_at_ms, request.boundary_dates))
         .collect();
     let facts: Vec<FactCandidate> = if request.promote_facts {
-        request.validated.facts.iter().map(to_store_fact).collect()
+        request
+            .validated
+            .facts
+            .iter()
+            .map(|fact| to_store_fact(fact, request.session_id))
+            .collect()
     } else {
         Vec::new()
     };
@@ -4745,6 +4753,14 @@ mod tests {
         assert_eq!(c2.p1.as_deref(), Some("second arc full and exact"));
         assert_eq!(c2.legacy, 0);
         assert_eq!(c2.created_at, 123);
+        let memories = store.load_active_memories("git:proj", 0).unwrap();
+        assert_eq!(memories.len(), 1);
+        let fact = store.get_memory_full(memories[0].id).unwrap().unwrap();
+        assert_eq!(fact.source_session_id.as_deref(), Some("ses"));
+        assert_eq!(fact.first_seen_at, 123);
+        assert_eq!(fact.created_at, 123);
+        assert_eq!(fact.updated_at, 123);
+        assert_eq!(fact.last_seen_at, 123);
     }
 
     #[test]
