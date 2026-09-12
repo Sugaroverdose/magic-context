@@ -91,8 +91,8 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **`docs/`:**
 - Purpose: Keep longer-lived subsystem design references, specs, and operational audit notes separate from root operational docs.
-- Contains: `AUDIT-KNOWN-ISSUES.md` (known issues and audit notes), `cache-policy/` (cache invalidation specs), and `specs/` (subsystem specification drafts).
-- Key files: `docs/AUDIT-KNOWN-ISSUES.md`, `docs/cache-policy/`, `docs/specs/`
+- Contains: `AUDIT-KNOWN-ISSUES.md` (known issues and audit notes), `specs/` (public specifications and the fixtures scripts read from them: context-window geometry, git-dedup goldens, prompt-surface budget and checklist), `evidence/` (committed audit evidence), and `private/` (gitignored design drafts and internal migration notes).
+- Key files: `docs/AUDIT-KNOWN-ISSUES.md`, `docs/specs/`, `docs/evidence/`
 
 **Rust Workspace (`crates/`):**
 - Purpose: Implement the harness-agnostic core transform, tokenizer, state database, and subc communication module in Rust.

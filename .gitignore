@@ -32,7 +32,8 @@ packages/dashboard/dist/
 packages/dashboard/node_modules/
 packages/dashboard/src-tauri/target/
 
-# Plugin README is copied from root at release time
+# Plugin README is generated: scripts/release.sh copies the root README into the
+# package at publish time so npm shows it; the root README.md is the source.
 packages/plugin/README.md
 .bg-shell/
 
@@ -71,9 +72,9 @@ packages/plugin/scripts/test-historian-prompt.ts
 # Local scratch directories — checkouts dropped here for one-off lookups
 .tmp-*/
 
-# Internal SUBC-migration design docs / specs (not public)
-docs/cache-policy/
-docs/specs/
+# Private design drafts and internal migration notes on a public repo; the
+# tracked specs and fixtures under docs/specs are public and read by scripts.
+docs/private/
 
 # Rust workspace build output
 /target
