@@ -49,8 +49,11 @@ const fencedSources: Array<{ path: string; sites: string[] }> = [
         sites: ["workspace_epoch_bump", "workspace_epoch_bump"],
     },
     {
+        // The chokepoint cannot import the logging chain (Node executes it
+        // directly), so it reports through the injected reporter instead.
         path: "packages/plugin/src/shared/sqlite.ts",
         sites: ["privileged_writer"],
+        reporterCall: "reportSlowPrivilegedWrite?.(",
     },
     {
         path: "packages/plugin/src/features/magic-context/git-commits/sweep-coordinator.ts",
@@ -153,14 +156,18 @@ function sourceFor(relativePath: string): string {
     return readFileSync(resolve(repoRoot, relativePath), "utf8");
 }
 
-function assertCoveredBeginImmediate(source: string, sites: string[]): void {
+function assertCoveredBeginImmediate(
+    source: string,
+    sites: string[],
+    reporterCall = "logSlowWriteTransaction(",
+): void {
     const matches = [...source.matchAll(beginImmediate)];
     expect(matches).toHaveLength(sites.length);
     for (let index = 0; index < matches.length; index += 1) {
         const match = matches[index];
         const nextBegin = matches[index + 1]?.index ?? source.length;
         const transactionRegion = source.slice(match.index, nextBegin);
-        expect(transactionRegion).toContain("logSlowWriteTransaction(");
+        expect(transactionRegion).toContain(reporterCall);
         if (sites[index] === "lease_dynamic_site") {
             expect(transactionRegion).toContain("logSlowWriteTransaction(site");
         } else {
@@ -208,7 +215,11 @@ describe("write transaction attribution fences", () => {
 
     test("lists every BEGIN IMMEDIATE writer and requires a covered site", () => {
         for (const fencedSource of fencedSources) {
-            assertCoveredBeginImmediate(sourceFor(fencedSource.path), fencedSource.sites);
+            assertCoveredBeginImmediate(
+                sourceFor(fencedSource.path),
+                fencedSource.sites,
+                "reporterCall" in fencedSource ? fencedSource.reporterCall : undefined,
+            );
         }
         for (const coveredSite of nonBeginCoveredSites) {
             expect(sourceFor(coveredSite.path)).toContain(

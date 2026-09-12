@@ -45,7 +45,21 @@ import { statSync } from "node:fs";
 // we use, so calls typed against BetterSqlite3 work under bun:sqlite and
 // node:sqlite at runtime (both expose prepare/run/get/all/exec/close).
 import type BetterSqlite3 from "better-sqlite3";
-import { logSlowWriteTransaction } from "./write-transaction-timing";
+
+/**
+ * Slow-write reporting is injected rather than imported: this module is also
+ * executed directly by Node (the `node:sqlite` smoke in CI, Pi, Desktop), and
+ * Node's type-stripping loader does not resolve extensionless imports, so any
+ * static import of the plugin's logging chain here breaks that path. The
+ * storage bootstrap registers the real reporter; until then slow privileged
+ * writes are simply not logged.
+ */
+type SlowWriteReporter = (site: string, transactionStartedAt: number) => void;
+let reportSlowPrivilegedWrite: SlowWriteReporter | undefined;
+
+export function registerSlowWriteReporter(reporter: SlowWriteReporter): void {
+    reportSlowPrivilegedWrite = reporter;
+}
 
 export type SqliteRuntime = "Bun" | "Node.js";
 
@@ -503,7 +517,7 @@ export function withPrivilegedWriter<T>(db: Database, operation: () => T): T {
         } else {
             db.exec("COMMIT");
             if (transactionStartedAt !== undefined) {
-                logSlowWriteTransaction("privileged_writer", transactionStartedAt);
+                reportSlowPrivilegedWrite?.("privileged_writer", transactionStartedAt);
             }
         }
         if (previousDepth > 0) privilegeDepth.set(db, previousDepth);

@@ -26,9 +26,11 @@ import {
     parseRpcPortFile,
     readProcessProbeEvidence,
 } from "../../shared/rpc-utils";
-import { Database, detectSqliteRuntime } from "../../shared/sqlite";
+import { Database, detectSqliteRuntime, registerSlowWriteReporter } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+
 import { ensureContextStoreUuid } from "./context-authority";
 import {
     attachFailClosedBlockingProcessEvidence,
@@ -43,6 +45,11 @@ import {
     setDatabase as setToolDefinitionDatabase,
 } from "./tool-definition-tokens";
 import { runToolOwnerBackfill } from "./tool-owner-backfill";
+
+// The SQLite chokepoint cannot import the logging chain itself (it is executed
+// directly by Node in the backend smoke); every storage open path runs through
+// this module, so registering here covers privileged writes on both runtimes.
+registerSlowWriteReporter(logSlowWriteTransaction);
 
 // Re-exported so existing `from "./storage-db"` importers (and tests) keep
 // resolving these; the definitions live in the leaf module to break the
