@@ -27,9 +27,7 @@ db.function("mc_facade_authority_route", () => "");
 db.function("mc_note_caller_project", () => "");
 db.exec("PRAGMA busy_timeout = 5000");
 
-const pending = db
-    .prepare("SELECT COUNT(*) AS n FROM mc_memories WHERE created_at <= 0")
-    .get().n;
+const pending = db.prepare("SELECT COUNT(*) AS n FROM mc_memories WHERE created_at <= 0").get().n;
 console.log(`module store: ${pending} rows with created_at <= 0; plan carries ${plan.rows.length}`);
 if (!apply) {
     console.log("dry-run; rerun with --apply");
@@ -57,8 +55,6 @@ try {
     db.exec("ROLLBACK");
     throw error;
 }
-const remaining = db
-    .prepare("SELECT COUNT(*) AS n FROM mc_memories WHERE created_at <= 0")
-    .get().n;
+const remaining = db.prepare("SELECT COUNT(*) AS n FROM mc_memories WHERE created_at <= 0").get().n;
 console.log(`module store: updated ${changed} rows; ${remaining} still at created_at <= 0`);
 db.close();
