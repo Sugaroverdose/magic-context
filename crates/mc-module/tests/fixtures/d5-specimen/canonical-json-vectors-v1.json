@@ -31,6 +31,10 @@
     },
     {
       "rule": 8,
+      "text": "N4 — Descend only through known block structure and classify nested tool_result children at the decoded mc_store::ResultBlockKind boundary (Text, Media, or Opaque), never by a raw type-name allowlist. On the Claude Code lane, nested tool_result content is decoded by Broca decode_result_block (79b1272e anthropic_decode.rs:648-661: text with a string payload is known; everything else, including malformed text, is raw Opaque) and by MC's Anthropic-shaped ingress for that lane. The pinned Claude Code D5 rule therefore canonicalizes exactly text with a string text field. Unknown, unsupported, or malformed children are opaque and their raw bytes are spliced unchanged into the canonical parent. tool_use input and arguments are ordinary JSON values and are never block-scanned. A top-level unknown block remains wholly opaque."
+    },
+    {
+      "rule": 9,
       "text": "Emit no trailing newline."
     }
   ],
@@ -279,6 +283,55 @@
       "input": 12345678901234567890.5,
       "expected_utf8": "12345678901234567000",
       "sha256": "afdcd3321a2fcdb3414cb69a0c92c6bb8d74c06066d721083cc01fec664ab97f"
+    }
+  ],
+  "block_aware_reference": {
+    "note": "The decoded-kind intersection is the pinned Claude Code D5 rule, not a raw type allowlist: on that lane nested tool_result content is decoded by Broca decode_result_block (79b1272e anthropic_decode.rs:648-661: text with a string payload is known; everything else, including malformed text, is raw Opaque) and by MC's Anthropic-shaped ingress for that lane. Widening requires a contract and vector revision.",
+    "result_block_kind": "mc-store/src/lib.rs:410-416: Text, Media, Opaque",
+    "parity_follow_up": "OpenCode and Pi consume different API structures and are not inputs to the Claude Code D5 rule. OpenCode emits Text from output_text at opencode.rs:703-707 and separately classifies attachments at opencode.rs:719-738; Pi parses its separate harness surface at pi.rs:845-892."
+  },
+  "block_aware_vectors": [
+    {
+      "name": "tool-result-opaque-child",
+      "input_json": "{ \"z_extension\" : 1e+00, \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_1\", \"content\" : [ { \"z\" : 1e+00, \"type\" : \"text\", \"text\" : \"\\u0061\" }, {  \"z_extension\" : [ 1e+00, true ], \"type\" : \"opaque_control\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } } ] }",
+      "expected_kind": "tool_result",
+      "expected_utf8": "{\"content\":[{\"text\":\"a\",\"type\":\"text\",\"z\":1},{  \"z_extension\" : [ 1e+00, true ], \"type\" : \"opaque_control\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } }],\"z_extension\":1}",
+      "sha256": "23479ec970ee80b6c6e19e6b30144c3965875aed7a1a8bad07b882409d7fe4b7"
+    },
+    {
+      "name": "tool-use-input-is-data",
+      "input_json": "{ \"type\" : \"tool_use\", \"input\" : { \"z\" : 1e+00, \"type\" : \"future_kind\", \"a\" : \"\\u0061\" }, \"id\" : \"toolu_2\", \"name\" : \"probe\" }",
+      "expected_kind": "tool_use",
+      "expected_utf8": "{\"input\":{\"a\":\"a\",\"type\":\"future_kind\",\"z\":1},\"name\":\"probe\"}",
+      "sha256": "3c987faffdc100247ab3f452dbc8e3bb7af9ba3c83429c466719f6a8c3056585"
+    },
+    {
+      "name": "tool-result-media-child-opaque-by-intersection",
+      "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_media\", \"content\" : [ {  \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } } ] }",
+      "expected_kind": "tool_result",
+      "expected_utf8": "{\"content\":[{  \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } }]}",
+      "sha256": "e2599fdfdae3bd9a2ae154b9c1f02e750829e40b8037037e54e6ad489207f61b"
+    },
+    {
+      "name": "tool-result-malformed-text-child",
+      "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_bad_text\", \"content\" : [ {  \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 } ] }",
+      "expected_kind": "tool_result",
+      "expected_utf8": "{\"content\":[{  \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 }]}",
+      "sha256": "08a73a524a23a6de1759754acbdd750d6cf2fcb4f74c15091c2f576f829bc262"
+    },
+    {
+      "name": "tool-result-valid-text-extension",
+      "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_text_extension\", \"content\" : [ { \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"text\" : \"\\u0062\", \"type\" : \"text\" } ] }",
+      "expected_kind": "tool_result",
+      "expected_utf8": "{\"content\":[{\"text\":\"b\",\"type\":\"text\",\"z_extension\":{\"a\":\"a\",\"z\":1}}]}",
+      "sha256": "eeaf01c5d32138d0b7581a0acf5b11dffb75d43ac180a0df7dbf552340994102"
+    },
+    {
+      "name": "top-level-opaque-wins",
+      "input_json": "{  \"z\" : 1e+00, \"type\" : \"future_outer\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{  \"z\" : 1e+00, \"type\" : \"future_outer\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] }",
+      "sha256": "ea49af8e15b3593402cca48ede75a8abfd7dbcedf4688666351bc764dd5390c8"
     }
   ],
   "opaque_control": {
