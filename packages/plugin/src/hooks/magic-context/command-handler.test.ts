@@ -393,7 +393,11 @@ describe("createMagicContextCommandHandler", () => {
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-status-off", arguments: "" },
+                    {
+                        command: "ctx-status",
+                        sessionID: "ses-status-off",
+                        arguments: "diagnostics",
+                    },
                     makeOutput(""),
                     {},
                 ),
@@ -573,14 +577,13 @@ describe("createMagicContextCommandHandler", () => {
                 [string, string, unknown]
             >;
             const [, text] = calls[0]!;
-            expect(text).toContain("## Magic Status");
-            expect(text).toContain("### Tags");
-            expect(text).toContain("### Pending Queue");
-            expect(text).toContain("### Cache TTL");
-            expect(text).toContain("- Active: 2");
-            expect(text).toContain("- Dropped: 1");
-            expect(text).toContain("- Drops: 1");
-            expect(text).toContain("**Protected tool tags:** 0 (0 tokens)");
+            expect(text).toContain("## Magic Context Status");
+            expect(text).toContain("**Context:**");
+            expect(text).toContain("**History compression:**");
+            expect(text).toContain("**Memory:**");
+            expect(text).toContain("**Search indexing:**");
+            expect(text).not.toContain("### Tags");
+            expect(text).not.toContain("Protected tool tags");
             expect(text).not.toContain("Host backends → MODULE");
         });
 
@@ -595,7 +598,11 @@ describe("createMagicContextCommandHandler", () => {
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-status-ops", arguments: "" },
+                    {
+                        command: "ctx-status",
+                        sessionID: "ses-status-ops",
+                        arguments: "diagnostics",
+                    },
                     makeOutput(""),
                     {},
                 ),
@@ -631,10 +638,10 @@ describe("createMagicContextCommandHandler", () => {
                 [string, string, unknown]
             >;
             const [, text] = calls[0]!;
-            expect(text).toContain("- Active: 0");
-            expect(text).toContain("- Dropped: 0");
-            expect(text).toContain("- Total queued: 0");
-            expect(text).toContain("**Protected tool tags:** 0 (0 tokens)");
+            expect(text).toContain("## Magic Context Status");
+            expect(text).toContain("0 memories · 0 notes");
+            expect(text).not.toContain("Total queued");
+            expect(text).not.toContain("Protected tool tags");
         });
     });
 
@@ -666,9 +673,10 @@ describe("createMagicContextCommandHandler", () => {
 
         it("renders shared status markdown through the normal response path without a live TUI sink", async () => {
             const sendNotification = mock(async () => {});
+            const getStatusDetail = mock(statusDetail);
             const handler = createMagicContextCommandHandler({
                 db,
-                getStatusDetail: statusDetail,
+                getStatusDetail,
                 sendNotification,
             });
 
@@ -683,9 +691,12 @@ describe("createMagicContextCommandHandler", () => {
 
             expect(sendNotification).toHaveBeenCalledWith(
                 "ses-sinkless",
-                expect.stringContaining("**Usage:** 75.0% (96,000 / 128,000 usable tokens)"),
+                expect.stringContaining(
+                    "**Context:** 75.0% of usable context (96,000 / 128,000 tokens)",
+                ),
                 {},
             );
+            expect(getStatusDetail).toHaveBeenCalledTimes(1);
             expect(drainNotifications()).toEqual([]);
         });
 
@@ -714,7 +725,7 @@ describe("createMagicContextCommandHandler", () => {
                     "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
                 );
 
-                expect(received).toEqual([{ action: "show-status-dialog" }]);
+                expect(received).toEqual([{ action: "show-status-dialog", diagnostics: false }]);
                 expect(getStatusDetail).not.toHaveBeenCalled();
                 expect(sendNotification).not.toHaveBeenCalled();
             } finally {
@@ -1239,7 +1250,11 @@ describe("createMagicContextCommandHandler", () => {
 
             await expectSentinel(
                 handler["command.execute.before"](
-                    { command: "ctx-status", sessionID: "ses-rust-status", arguments: "" },
+                    {
+                        command: "ctx-status",
+                        sessionID: "ses-rust-status",
+                        arguments: "diagnostics",
+                    },
                     makeOutput(""),
                     {},
                 ),
@@ -1558,7 +1573,7 @@ describe("createMagicContextCommandHandler", () => {
         const [, flushText] = flushCalls[0]!;
         const [, statusText] = statusCalls[0]!;
         expect(flushText).toContain("1 dropped");
-        expect(statusText).toContain("## Magic Status");
+        expect(statusText).toContain("## Magic Context Status");
     });
 
     it("delivers notification text before throwing the sentinel", async () => {
@@ -1608,7 +1623,7 @@ describe("createMagicContextCommandHandler", () => {
 
         expect(sendNotification).toHaveBeenCalledWith(
             "ses-stable-model",
-            expect.stringContaining("## Magic Status"),
+            expect.stringContaining("## Magic Context Status"),
             {},
         );
     });

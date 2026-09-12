@@ -1,27 +1,22 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
-import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
-import { getMostRecentTaskRunAt } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
-import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
-import { CANONICAL_DREAM_TASKS } from "@magic-context/core/features/magic-context/dreamer/task-registry";
-import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import type { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { getPendingOps } from "@magic-context/core/features/magic-context/storage";
-import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
-import { getOverflowState } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
-import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
-import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-status";
 import type { ConfigParseFailure } from "@magic-context/core/shared/config-diagnostics";
 import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
-import { sessionLog } from '@magic-context/core/shared/logger';
-import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
-import { renderUserFacingFailure, userFacingFailureCode } from '@magic-context/core/shared/user-facing-codes';
+import { sessionLog } from "@magic-context/core/shared/logger";
+import {
+	renderUserFacingFailure,
+	userFacingFailureCode,
+} from "@magic-context/core/shared/user-facing-codes";
 
-import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
-import { showStatusDialog } from "../dialogs/status-dialog";
-import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { resolvePiPressureSnapshot } from "../pi-pressure";
+import {
+	buildPiStatusDetail,
+	formatPiStatusDiagnostics,
+	formatPiStatusSummary,
+	type StatusDialogDetail,
+	showStatusDialog,
+} from "../dialogs/status-dialog";
 import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
 export interface RegisterCtxStatusDeps {
@@ -50,6 +45,7 @@ export interface RegisterCtxStatusDeps {
 	cacheTtlConfigured?: boolean;
 	configParseFailures?: ConfigParseFailure[];
 	hasDeprecatedProtectedTags?: boolean;
+	compactionEnabled?: boolean;
 }
 
 export type CtxStatusRuntimeDeps = Omit<
@@ -91,8 +87,18 @@ export function registerCtxStatusCommand(
 ): void {
 	pi.registerCommand("ctx-status", {
 		description: "Show Magic Context status for the current Pi session",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
 			const sendStatus = createCtxStatusSender(pi, ctx);
+			const mode = args.trim().toLowerCase();
+			if (mode !== "" && mode !== "diagnostics") {
+				sendStatus({
+					title: "/ctx-status",
+					text: "Usage: /ctx-status [diagnostics]",
+					level: "info",
+				});
+				return;
+			}
+			const diagnostics = mode === "diagnostics";
 			const runtimeDeps = deps.resolveStatusDeps?.(ctx) ?? deps;
 			const projectIdentity =
 				runtimeDeps.resolveProject?.(ctx).projectIdentity ??
@@ -110,68 +116,20 @@ export function registerCtxStatusCommand(
 
 			try {
 				if (ctx.hasUI) {
-					await showStatusDialog(pi, ctx, currentDeps);
+					await showStatusDialog(pi, ctx, currentDeps, diagnostics);
 					return;
 				}
 
-				const usage = ctx.getContextUsage?.();
-				const modelKey = ctx.model
-					? `${ctx.model.provider}/${ctx.model.id}`
-					: undefined;
-				let detectedContextLimit: number | undefined;
-				try {
-					const detected = getOverflowState(
-						currentDeps.db,
-						sessionId,
-					).detectedContextLimit;
-					if (detected > 0) detectedContextLimit = detected;
-				} catch {
-					// Status remains available when overflow metadata cannot be read.
-				}
-				const meta = getOrCreateSessionMeta(currentDeps.db, sessionId);
-				const windowGeometry = resolvePiWindowGeometry({
-					rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
-					rawContextWindowSource:
-						usage?.contextWindow === undefined ? "catalog" : "observed",
-					model: ctx.model,
-					detectedContextLimit,
-					persistedInputTokens: meta.lastInputTokens,
-					persistedPercentage: meta.lastContextPercentage,
-				});
-				const usableContextLimit = windowGeometry?.usableSoft;
-				const pressure = resolvePiPressureSnapshot({
-					persistedPercentage: meta.lastContextPercentage,
-					persistedInputTokens: meta.lastInputTokens,
-					liveInputTokens: usage?.tokens,
-					usableContextLimit,
-				});
-				const statusText = executeStatus(
-					currentDeps.db,
+				const statusDetail = buildPiStatusDetail(
+					pi,
+					ctx,
+					currentDeps,
 					sessionId,
-					currentDeps.executeThresholdPercentage,
-					modelKey,
-					currentDeps.historyBudgetPercentage,
-					currentDeps.commitClusterTrigger,
-					currentDeps.executeThresholdTokens,
-					usableContextLimit,
-					{
-						backlog: getDreamTaskBacklogs(
-							currentDeps.db,
-							currentDeps.projectIdentity,
-							CANONICAL_DREAM_TASKS,
-						),
-					},
-					windowGeometry,
-					resolveTailHygieneStatus(getPiChannel1Baseline(sessionId)),
-					pressure,
-					false,
-					{
-						cacheTtlConfig: currentDeps.cacheTtlConfig ?? "5m",
-						cacheTtlConfigured: currentDeps.cacheTtlConfigured === true,
-						configParseFailures: currentDeps.configParseFailures ?? [],
-					},
 				);
-				const details = buildStatusDetails(currentDeps, sessionId);
+				const statusText = diagnostics
+					? formatPiStatusDiagnostics(statusDetail)
+					: formatPiStatusSummary(statusDetail);
+				const details = buildStatusDetails(currentDeps, statusDetail);
 				const profileStatus = currentDeps.activeProfile ?? "none";
 				const storage = getMagicContextStorageResolution();
 				const deprecationNotice = currentDeps.hasDeprecatedProtectedTags
@@ -180,7 +138,9 @@ export function registerCtxStatusCommand(
 				sendStatus(
 					{
 						title: "/ctx-status",
-						text: `${statusText}${deprecationNotice}\n\nActive profile: ${profileStatus}\n\nStorage: ${storage.path} (${storage.source})`,
+						text: diagnostics
+							? `${statusText}${deprecationNotice}\n\nActive profile: ${profileStatus}\n\nStorage: ${storage.path} (${storage.source})`
+							: statusText,
 						level: "info",
 						rpcDisplay: "dialog",
 					},
@@ -203,81 +163,29 @@ export function registerCtxStatusCommand(
 }
 
 function buildStatusDetails(
-	deps: RegisterCtxStatusDeps,
-	sessionId: string,
+	deps: CtxStatusRuntimeDeps,
+	status: StatusDialogDetail,
 ): CtxStatusDetails {
-	const meta = getOrCreateSessionMeta(deps.db, sessionId);
-	const tags = getTagsBySession(deps.db, sessionId);
-	const activeTags = tags.filter((tag) => tag.status === "active");
-	const droppedTags = tags.filter((tag) => tag.status === "dropped");
-	const compartments = getCompartments(deps.db, sessionId);
-	const lastCompartment = compartments[compartments.length - 1];
-	const totalBytes = activeTags.reduce((sum, tag) => sum + tag.byteSize, 0);
-
 	return {
-		sessionId,
+		sessionId: status.sessionId,
 		projectIdentity: deps.projectIdentity,
-		activeProfile: deps.activeProfile ?? null,
-		activeTags: activeTags.length,
-		droppedTags: droppedTags.length,
-		totalBytes,
-		pendingOps: getPendingOps(deps.db, sessionId).length,
-		lastExecuteThreshold: meta.timesExecuteThresholdReached,
-		compartmentCount: compartments.length,
-		lastCompartmentRange: lastCompartment
-			? `${lastCompartment.startMessage}-${lastCompartment.endMessage}`
-			: null,
-		memoryCount: getMemoryCount(deps.db, deps.projectIdentity),
-		noteCount:
-			getNotes(deps.db, { sessionId, type: "session", status: "active" })
-				.length +
-			getNotes(deps.db, {
-				projectPath: deps.projectIdentity,
-				type: "smart",
-				status: ["pending", "ready"],
-			}).length,
-		dreamer: {
-			enabled: deps.dreamer?.runnable === true,
-			scheduleSummary: deps.dreamer?.scheduleSummary ?? null,
-			backlog: getDreamTaskBacklogs(
-				deps.db,
-				deps.projectIdentity,
-				CANONICAL_DREAM_TASKS,
-			),
-			// Dreamer V2 retired the V1 dream_state['last_dream_at'] field; the
-			// live "last successful run" is MAX(last_run_at) across the project's
-			// task_schedule_state rows (issue #194).
-			lastRunAt: getMostRecentTaskRunAt(deps.db, deps.projectIdentity),
+		activeProfile: status.activeProfile,
+		activeTags: status.activeTags,
+		droppedTags: status.droppedTags,
+		totalBytes: status.activeBytes,
+		pendingOps: status.pendingOpsCount,
+		lastExecuteThreshold: status.timesExecuteThresholdReached,
+		compartmentCount: status.compartmentCount,
+		lastCompartmentRange: status.lastCompartmentRange,
+		memoryCount: status.memoryCount,
+		noteCount: status.sessionNoteCount + status.readySmartNoteCount,
+		dreamer: status.dreamer,
+		historian: {
+			lastFireCount: status.timesExecuteThresholdReached,
+			inProgress: status.historianRunning,
+			lastFailureAt: status.historianLastFailureAt,
+			lastError: status.historianLastError,
+			failureCount: status.historianFailureCount,
 		},
-		historian: readHistorianState(deps.db, sessionId, meta),
-	};
-}
-
-function readHistorianState(
-	db: ContextDatabase,
-	sessionId: string,
-	meta: ReturnType<typeof getOrCreateSessionMeta>,
-): CtxStatusDetails["historian"] {
-	const row = db
-		.prepare<
-			[string],
-			{
-				historian_failure_count: number | null;
-				historian_last_error: string | null;
-				historian_last_failure_at: number | null;
-			}
-		>(
-			"SELECT historian_failure_count, historian_last_error, historian_last_failure_at FROM session_meta WHERE session_id = ?",
-		)
-		.get(sessionId);
-	return {
-		lastFireCount: meta.timesExecuteThresholdReached,
-		inProgress: meta.compartmentInProgress,
-		lastFailureAt:
-			typeof row?.historian_last_failure_at === "number"
-				? row.historian_last_failure_at
-				: null,
-		lastError: row?.historian_last_error ?? null,
-		failureCount: row?.historian_failure_count ?? 0,
 	};
 }

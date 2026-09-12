@@ -1584,6 +1584,7 @@ async function startPiMagicContextRuntime(
 		cacheTtlConfigured: bootProjectDeps.cacheTtlConfigured,
 		configParseFailures: bootProjectDeps.configParseFailures,
 		hasDeprecatedProtectedTags: bootProjectDeps.hasDeprecatedProtectedTags,
+		compactionEnabled: isCompactionEnabled(bootProjectDeps.config),
 		resolveStatusDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
 			return {
@@ -1604,6 +1605,7 @@ async function startPiMagicContextRuntime(
 				cacheTtlConfigured: current.cacheTtlConfigured,
 				configParseFailures: current.configParseFailures,
 				hasDeprecatedProtectedTags: current.hasDeprecatedProtectedTags,
+				compactionEnabled: isCompactionEnabled(current.config),
 			};
 		},
 	});

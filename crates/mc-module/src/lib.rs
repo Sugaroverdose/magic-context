@@ -6932,6 +6932,7 @@ impl McHandler {
                 "generation_invalidated": baseline.generation_invalidated,
                 "baseline_generation": baseline.baseline_generation,
                 "computed_at_ms": baseline.computed_at_ms,
+                "reclaimable_tool_output_count": crate::transform::reclaimable_tool_output_count(Some(baseline)),
             })
         });
         let summary = sanitize_status_text(
@@ -27953,6 +27954,7 @@ mod tests {
         assert!(session_status["pass_trace"]["first_divergence"].is_null());
         assert!(session_status["pass_trace"]["last_divergence"].is_string());
         assert!(session_status["tail_hygiene"]["u"].is_number());
+        assert!(session_status["tail_hygiene"]["reclaimable_tool_output_count"].is_number());
         assert!(session_status["tail_hygiene"]["t"].is_number());
         assert!(session_status["tail_hygiene"]["severity"].is_number());
         assert!(session_status["tail_hygiene"]["evaluable"].is_boolean());

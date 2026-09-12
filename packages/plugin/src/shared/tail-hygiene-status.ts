@@ -9,6 +9,7 @@ export interface WireTailHygieneBaseline {
     generation_invalidated?: boolean;
     baseline_generation?: number;
     computed_at_ms?: number;
+    reclaimable_tool_output_count?: number;
 }
 
 function finiteNumber(value: unknown, fallback = 0): number {
@@ -34,6 +35,10 @@ export function resolveTailHygieneStatus(
             generationInvalidated: rustBaseline.generation_invalidated === true,
             baselineGeneration: Math.max(0, finiteNumber(rustBaseline.baseline_generation)),
             computedAt: Math.max(0, finiteNumber(rustBaseline.computed_at_ms)),
+            reclaimableToolOutputCount: Math.max(
+                0,
+                Math.floor(finiteNumber(rustBaseline.reclaimable_tool_output_count)),
+            ),
         };
     }
     if (tsBaseline === undefined) return undefined;
@@ -47,6 +52,9 @@ export function resolveTailHygieneStatus(
         generationInvalidated: tsBaseline.generationInvalidated,
         baselineGeneration: Math.max(0, tsBaseline.baselineGeneration),
         computedAt: Math.max(0, tsBaseline.computedAt),
+        reclaimableToolOutputCount: tsBaseline.baselineParts.filter(
+            (part) => part.kind === "toolOutput" && part.uTokens > 0,
+        ).length,
     };
 }
 

@@ -13,12 +13,16 @@ export type EmbedDrainUiStatus = "idle" | "running" | "paused" | "stopped";
 
 export function getEmbedDrainUiStatus(
     sessionId: string,
-    progress: RecompProgress | undefined,
+    progress: Pick<RecompProgress, "kind" | "phase" | "message"> | undefined,
 ): { status: EmbedDrainUiStatus; detail?: string } {
     if (embedPauseBySession.has(sessionId)) {
         return { status: "paused" };
     }
-    if (progress?.kind === "embed" && progress.phase === "recomp") {
+    const activeRun = embedRunStateBySession.get(sessionId);
+    if (
+        (activeRun && !activeRun.signal.aborted) ||
+        (progress?.kind === "embed" && progress.phase === "recomp")
+    ) {
         return { status: "running" };
     }
     if (

@@ -1,7 +1,8 @@
 /** @jsxImportSource @opentui/solid */
 // @ts-nocheck
-import { createMemo } from "solid-js"
+import { createMemo, createSignal } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
+import { renderUserStatusSummary, statusSummaryFromDetail } from "../shared/status-summary"
 import { renderUserFacingFailure, userFacingFailureCode } from '../shared/user-facing-codes';
 import {
     createSidebarContentSlot,
@@ -139,10 +140,13 @@ const R = (props: { t: TuiThemeCurrent; l: string; v: string; fg?: string }) => 
     </box>
 )
 
-const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
+const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail; diagnostics?: boolean }) => {
     const theme = createMemo(() => (props.api as any).theme.current)
+    const [diagnostics, setDiagnostics] = createSignal(props.diagnostics === true)
     const t = () => theme()
     const s = () => props.s
+    const summaryLines = () =>
+        renderUserStatusSummary(statusSummaryFromDetail(s()), "plain").split("\n").slice(1)
     const compactionOff = () => s().compaction_enabled === false
 
     // Prefer the RPC-provided model context limit (what the sidebar shows) so the
@@ -231,6 +235,21 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 <text fg={t().textMuted}>v{packageJson.version}</text>
             </box>
 
+            <box
+                width="100%"
+                justifyContent="flex-end"
+                onMouseDown={() => setDiagnostics(!diagnostics())}
+            >
+                <text fg={diagnostics() ? t().accent : t().textMuted}>
+                    {diagnostics() ? "[x]" : "[ ]"} Diagnostics
+                </text>
+            </box>
+
+            {!diagnostics() ? (
+                <box flexDirection="column" width="100%">
+                    {summaryLines().map((line) => <text>{line}</text>)}
+                </box>
+            ) : (<>
             {s().configParseFailures.map((failure) => (
                 <text fg={t().error}>{formatConfigParseStatusLine(failure)}</text>
             ))}
@@ -458,6 +477,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <R t={t()} l="Last error time" v={s().loggerDiagnostics.lastErrorTime} fg={t().textMuted} />
                 )}
             </box>
+            </>)}
 
             {/* Footer */}
             <box marginTop={1} justifyContent="flex-end" width="100%">
@@ -618,7 +638,11 @@ function showUpgradeDialog(
     return true
 }
 
-async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
+async function showStatusDialog(
+    api: TuiPluginApi,
+    targetSessionId = getSessionId(api),
+    initialDiagnostics = false,
+): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
         showToast(api, { message: "No active session", variant: "warning" })
@@ -640,7 +664,9 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
         return false
     }
 
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={result.detail} />)
+    api.ui.dialog.replace(() => (
+        <StatusDialog api={api} s={result.detail} diagnostics={initialDiagnostics} />
+    ))
     return true
 }
 
@@ -1129,7 +1155,10 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         const stillActive = () =>
             getRpcGeneration() === generation && getSessionId(api) === requestedSessionId
         if (action === "show-status-dialog") {
-            return stillActive() && (await showStatusDialog(api, requestedSessionId))
+            return (
+                stillActive() &&
+                (await showStatusDialog(api, requestedSessionId, n.payload?.diagnostics === true))
+            )
         }
         if (action === "show-recomp-dialog") {
             return stillActive() && (await showRecompDialog(api, requestedSessionId))

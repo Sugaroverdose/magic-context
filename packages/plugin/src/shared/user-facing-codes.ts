@@ -102,6 +102,11 @@ export const USER_FACING_FAILURES = {
         sentence: "Local search indexing could not start.",
         action: "Run `npx @cortexkit/magic-context doctor`, then retry.",
     },
+    embedding_unavailable: {
+        code: "MC-E12",
+        sentence: "Search indexing could not finish.",
+        action: "Run /ctx-embed start again.",
+    },
     status_unavailable: {
         code: "MC-S01",
         sentence: "Magic Context status is temporarily unavailable.",
@@ -115,7 +120,7 @@ export const USER_FACING_FAILURES = {
     configuration_warning: {
         code: "MC-S03",
         sentence: "Some configuration settings could not be applied.",
-        action: "Fix the configuration warning shown in /ctx-status diagnostics, then restart.",
+        action: "Fix the configuration warning shown in /ctx-status diagnostics, then restart."
     },
     status_log_unavailable: {
         code: "MC-S04",

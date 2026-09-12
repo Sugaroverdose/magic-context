@@ -11164,7 +11164,7 @@ fn should_use_sticky_channel1_reminder(
     last_level == level.as_str()
 }
 
-fn reclaimable_tool_output_count(baseline: Option<&TailHygieneBaseline>) -> usize {
+pub(crate) fn reclaimable_tool_output_count(baseline: Option<&TailHygieneBaseline>) -> usize {
     baseline
         .into_iter()
         .flat_map(|baseline| baseline.baseline_parts.iter())

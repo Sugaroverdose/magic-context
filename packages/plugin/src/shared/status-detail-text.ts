@@ -9,7 +9,8 @@ import {
 } from "./opencode-db-path";
 import type { StatusDetail } from "./rpc-types";
 import { RUST_MODE_HOST_PATHS_LINE } from "./rust-mode-status";
-import { renderUserFacingFailure } from './user-facing-codes';
+import { renderUserStatusSummary, statusSummaryFromDetail } from "./status-summary";
+import { renderUserFacingFailure } from "./user-facing-codes";
 
 function formatCount(value: number): string {
     return Math.round(value).toLocaleString();
@@ -22,8 +23,13 @@ function formatCacheLane(detail: StatusDetail): string {
     return `live (${Math.round(detail.cacheRemainingMs / 1000)}s remaining); TTL ${detail.cacheTtl}`;
 }
 
-/** Render the same StatusDetail payload that powers the TUI dialog for chat-only clients. */
+/** Render the default user summary for chat-only OpenCode clients. */
 export function formatStatusDetailMarkdown(detail: StatusDetail): string {
+    return renderUserStatusSummary(statusSummaryFromDetail(detail), "markdown");
+}
+
+/** Render the opt-in operator detail that the status dialog exposes behind Diagnostics. */
+export function formatStatusDiagnosticsMarkdown(detail: StatusDetail): string {
     const usableLimit =
         detail.contextLimit > 0
             ? `${formatCount(detail.contextLimit)} usable tokens`
