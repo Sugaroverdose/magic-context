@@ -31,7 +31,7 @@
     },
     {
       "rule": 8,
-      "text": "N4 — Descend only through known block structure and classify nested tool_result children at the decoded mc_store::ResultBlockKind boundary (Text, Media, or Opaque), never by a raw type-name allowlist. On the Claude Code lane, nested tool_result content is decoded by Broca decode_result_block (79b1272e anthropic_decode.rs:648-661: text with a string payload is known; everything else, including malformed text, is raw Opaque) and by MC's Anthropic-shaped ingress for that lane. The pinned Claude Code D5 rule therefore canonicalizes exactly text with a string text field. Unknown, unsupported, or malformed children are opaque and their raw bytes are spliced unchanged into the canonical parent. tool_use input and arguments are ordinary JSON values and are never block-scanned. A top-level unknown block remains wholly opaque."
+      "text": "N4 — Classify every block at the pinned Claude Code decoded boundary over (context, role, block), never by a raw type-name allowlist. TopLevel follows Broca decode_content_block (79b1272e anthropic_decode.rs:560-607); ToolResultChild follows decode_result_block (79b1272e anthropic_decode.rs:648-661). Canonicalize only valid typed blocks, preserve every opaque block's exact raw bytes, descend only from a known user tool_result container into its content array, and refuse if an opaque descendant's raw bytes are unavailable. tool_use input is ordinary JSON data and is never block-scanned."
     },
     {
       "rule": 9,
@@ -184,37 +184,37 @@
     },
     {
       "name": "number-plain-at-1e-minus-5",
-      "input": 1e-5,
+      "input": 1e-05,
       "expected_utf8": "0.00001",
       "sha256": "661710915adfa7c40b5dbd6b2122dfa65b1accb57a8b7cdee05423ecfe14b0c7"
     },
     {
       "name": "number-plain-at-1e-minus-6",
-      "input": 1e-6,
+      "input": 1e-06,
       "expected_utf8": "0.000001",
       "sha256": "159fb29a827ad04b260aa6c8ab6d8637f8f2b38af5c4f3cb49d6a21205e040f8"
     },
     {
       "name": "number-exponent-at-1e-minus-7",
-      "input": 1e-7,
+      "input": 1e-07,
       "expected_utf8": "1e-7",
       "sha256": "5b33e02f2c5103a05d32f6ba9cb058294452bfbf393967f68bb30c1bdcbbab22"
     },
     {
       "name": "number-fractional-exponent-1-5e-minus-7",
-      "input": 1.5e-7,
+      "input": 1.5e-07,
       "expected_utf8": "1.5e-7",
       "sha256": "bbe54b73760f9025086de0202c3caa81352dc0260869890c9dca3cda39ba767f"
     },
     {
       "name": "number-exponent-at-1e21",
-      "input": 1e21,
+      "input": 1e+21,
       "expected_utf8": "1e+21",
       "sha256": "241c4643fa70b1dcde1205b71be4e3bebb17e9f880c8e1a33d0ead6c27271d3c"
     },
     {
       "name": "number-plain-at-1e20",
-      "input": 1e20,
+      "input": 1e+20,
       "expected_utf8": "100000000000000000000",
       "sha256": "c344e9487bfbd5c4e03c9fb90d62a5dde5e00b54d55c46e9f4a803aea162b80c"
     },
@@ -232,13 +232,13 @@
     },
     {
       "name": "number-negative-zero-integer",
-      "input": -0,
+      "input": 0,
       "expected_utf8": "0",
       "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
     },
     {
       "name": "number-trailing-fraction-zeroes",
-      "input": 1.2300,
+      "input": 1.23,
       "expected_utf8": "1.23",
       "sha256": "5dcdf9da31212582fc88326231ab1f9aadc986cc710f5e2946989d5df3afa8d0"
     },
@@ -256,7 +256,7 @@
     },
     {
       "name": "number-largest-finite",
-      "input": 1.7976931348623157e308,
+      "input": 1.7976931348623157e+308,
       "expected_utf8": "1.7976931348623157e+308",
       "sha256": "c2784e1abd6317452708f3fbf9641c16b959561bc621a1d408c23a20aa2cb585"
     },
@@ -280,15 +280,101 @@
     },
     {
       "name": "number-large-fraction-syntax",
-      "input": 12345678901234567890.5,
+      "input": 1.2345678901234567e+19,
       "expected_utf8": "12345678901234567000",
       "sha256": "afdcd3321a2fcdb3414cb69a0c92c6bb8d74c06066d721083cc01fec664ab97f"
     }
   ],
   "block_aware_reference": {
-    "note": "The decoded-kind intersection is the pinned Claude Code D5 rule, not a raw type allowlist: on that lane nested tool_result content is decoded by Broca decode_result_block (79b1272e anthropic_decode.rs:648-661: text with a string payload is known; everything else, including malformed text, is raw Opaque) and by MC's Anthropic-shaped ingress for that lane. Widening requires a contract and vector revision.",
+    "note": "The decoded boundary is the pinned Claude Code D5 rule over (context, role, block), never a raw type-name allowlist. TopLevel follows Broca decode_content_block (79b1272e anthropic_decode.rs:560-607); ToolResultChild follows decode_result_block (79b1272e anthropic_decode.rs:648-661). Widening requires a contract and vector revision.",
     "result_block_kind": "mc-store/src/lib.rs:410-416: Text, Media, Opaque",
-    "parity_follow_up": "OpenCode and Pi consume different API structures and are not inputs to the Claude Code D5 rule. OpenCode emits Text from output_text at opencode.rs:703-707 and separately classifies attachments at opencode.rs:719-738; Pi parses its separate harness surface at pi.rs:845-892."
+    "parity_follow_up": "OpenCode and Pi consume different API structures and are not inputs to the Claude Code D5 rule. OpenCode emits Text from output_text at opencode.rs:703-707 and separately classifies attachments at opencode.rs:719-738; Pi parses its separate harness surface at pi.rs:845-892.",
+    "decoder_boundary_table": [
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "text with string text",
+        "result": "known text",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "thinking with string thinking and signature",
+        "result": "known reasoning; thinking and signature fields retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "thinking without a valid string signature",
+        "result": "opaque; exact raw bytes retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "redacted_thinking with string data",
+        "result": "known redacted_reasoning",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "assistant",
+        "block": "tool_use with string id and name and present input",
+        "result": "known tool_use",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "user",
+        "block": "tool_use",
+        "result": "opaque; exact raw bytes retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "user",
+        "block": "tool_result with string tool_use_id and present content",
+        "result": "known tool_result container; array children use ToolResultChild",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "image or document",
+        "result": "opaque; exact raw bytes retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "malformed payload of a recognized type",
+        "result": "opaque; exact raw bytes retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "TopLevel",
+        "role": "any",
+        "block": "unknown type",
+        "result": "opaque; exact raw bytes retained",
+        "decoder_cite": "79b1272e anthropic_decode.rs:560-607 (decode_content_block)"
+      },
+      {
+        "context": "ToolResultChild",
+        "role": "user",
+        "block": "text with string text",
+        "result": "known ResultBlockKind::Text",
+        "decoder_cite": "79b1272e anthropic_decode.rs:648-661 (decode_result_block)"
+      },
+      {
+        "context": "ToolResultChild",
+        "role": "user",
+        "block": "anything else, including signed thinking or nested tool_result",
+        "result": "opaque ResultBlockKind; exact child raw bytes retained and no recursion",
+        "decoder_cite": "79b1272e anthropic_decode.rs:648-661 (decode_result_block)"
+      }
+    ]
   },
   "block_aware_vectors": [
     {
@@ -296,42 +382,167 @@
       "input_json": "{ \"z_extension\" : 1e+00, \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_1\", \"content\" : [ { \"z\" : 1e+00, \"type\" : \"text\", \"text\" : \"\\u0061\" }, {  \"z_extension\" : [ 1e+00, true ], \"type\" : \"opaque_control\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } } ] }",
       "expected_kind": "tool_result",
       "expected_utf8": "{\"content\":[{\"text\":\"a\",\"type\":\"text\",\"z\":1},{  \"z_extension\" : [ 1e+00, true ], \"type\" : \"opaque_control\", \"a_extension\" : { \"escaped\" : \"\\u0061\" } }],\"z_extension\":1}",
-      "sha256": "23479ec970ee80b6c6e19e6b30144c3965875aed7a1a8bad07b882409d7fe4b7"
+      "sha256": "23479ec970ee80b6c6e19e6b30144c3965875aed7a1a8bad07b882409d7fe4b7",
+      "context": "top_level",
+      "role": "user",
+      "raw_withheld": {
+        "expected": "refusal",
+        "expected_utf8": null,
+        "error_contains": "tool_result[toolu_1] has opaque descendant content[1] opaque_control"
+      }
     },
     {
       "name": "tool-use-input-is-data",
       "input_json": "{ \"type\" : \"tool_use\", \"input\" : { \"z\" : 1e+00, \"type\" : \"future_kind\", \"a\" : \"\\u0061\" }, \"id\" : \"toolu_2\", \"name\" : \"probe\" }",
       "expected_kind": "tool_use",
       "expected_utf8": "{\"input\":{\"a\":\"a\",\"type\":\"future_kind\",\"z\":1},\"name\":\"probe\"}",
-      "sha256": "3c987faffdc100247ab3f452dbc8e3bb7af9ba3c83429c466719f6a8c3056585"
+      "sha256": "3c987faffdc100247ab3f452dbc8e3bb7af9ba3c83429c466719f6a8c3056585",
+      "context": "top_level",
+      "role": "assistant"
     },
     {
       "name": "tool-result-media-child-opaque-by-intersection",
       "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_media\", \"content\" : [ {  \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } } ] }",
       "expected_kind": "tool_result",
       "expected_utf8": "{\"content\":[{  \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } }]}",
-      "sha256": "e2599fdfdae3bd9a2ae154b9c1f02e750829e40b8037037e54e6ad489207f61b"
+      "sha256": "e2599fdfdae3bd9a2ae154b9c1f02e750829e40b8037037e54e6ad489207f61b",
+      "context": "top_level",
+      "role": "user"
     },
     {
       "name": "tool-result-malformed-text-child",
       "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_bad_text\", \"content\" : [ {  \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 } ] }",
       "expected_kind": "tool_result",
       "expected_utf8": "{\"content\":[{  \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 }]}",
-      "sha256": "08a73a524a23a6de1759754acbdd750d6cf2fcb4f74c15091c2f576f829bc262"
+      "sha256": "08a73a524a23a6de1759754acbdd750d6cf2fcb4f74c15091c2f576f829bc262",
+      "context": "top_level",
+      "role": "user"
     },
     {
       "name": "tool-result-valid-text-extension",
       "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"toolu_text_extension\", \"content\" : [ { \"z_extension\" : { \"z\" : 1e+00, \"a\" : \"\\u0061\" }, \"text\" : \"\\u0062\", \"type\" : \"text\" } ] }",
       "expected_kind": "tool_result",
       "expected_utf8": "{\"content\":[{\"text\":\"b\",\"type\":\"text\",\"z_extension\":{\"a\":\"a\",\"z\":1}}]}",
-      "sha256": "eeaf01c5d32138d0b7581a0acf5b11dffb75d43ac180a0df7dbf552340994102"
+      "sha256": "eeaf01c5d32138d0b7581a0acf5b11dffb75d43ac180a0df7dbf552340994102",
+      "context": "top_level",
+      "role": "user"
     },
     {
       "name": "top-level-opaque-wins",
       "input_json": "{  \"z\" : 1e+00, \"type\" : \"future_outer\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] }",
       "expected_kind": "opaque",
       "expected_utf8": "{  \"z\" : 1e+00, \"type\" : \"future_outer\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] }",
-      "sha256": "ea49af8e15b3593402cca48ede75a8abfd7dbcedf4688666351bc764dd5390c8"
+      "sha256": "ea49af8e15b3593402cca48ede75a8abfd7dbcedf4688666351bc764dd5390c8",
+      "context": "top_level",
+      "role": "assistant"
+    },
+    {
+      "name": "top-level-assistant-text-string",
+      "context": "top_level",
+      "role": "assistant",
+      "input_json": "{ \"z\" : 1e+00, \"type\" : \"text\", \"text\" : \"\\u0061\" }",
+      "expected_kind": "text",
+      "expected_utf8": "{\"text\":\"a\",\"z\":1}",
+      "sha256": "e334592128ee5b164c6cabec72032e650d762bc46541b2ffddee3129f73d5a94"
+    },
+    {
+      "name": "top-level-user-text-string",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"text\", \"text\" : \"\\u0061\", \"z\" : 1e+00 }",
+      "expected_kind": "text",
+      "expected_utf8": "{\"text\":\"a\",\"z\":1}",
+      "sha256": "e334592128ee5b164c6cabec72032e650d762bc46541b2ffddee3129f73d5a94"
+    },
+    {
+      "name": "top-level-assistant-thinking-signed",
+      "context": "top_level",
+      "role": "assistant",
+      "input_json": "{ \"z_extension\" : 1e+00, \"type\" : \"thinking\", \"thinking\" : \"\\u0061\", \"signature\" : \"\\u0062\" }",
+      "expected_kind": "reasoning",
+      "expected_utf8": "{\"signature\":\"b\",\"thinking\":\"a\",\"z_extension\":1}",
+      "sha256": "b60bf17dccf3399713d40dc314a79b85c4bf8e97f8231c8df50ba59470647a07"
+    },
+    {
+      "name": "top-level-user-thinking-signed",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"thinking\", \"thinking\" : \"\\u0061\", \"signature\" : \"\\u0062\" }",
+      "expected_kind": "reasoning",
+      "expected_utf8": "{\"signature\":\"b\",\"thinking\":\"a\"}",
+      "sha256": "67ea19b334ddadb16227e24bb3780a9b99dfeff7134c3e3a5d6d7b87306994ba"
+    },
+    {
+      "name": "tool-result-child-thinking-signed",
+      "context": "tool_result_child",
+      "role": "user",
+      "input_json": "{ \"signature\" : \"\\u0062\", \"type\" : \"thinking\", \"thinking\" : \"\\u0061\" }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"signature\" : \"\\u0062\", \"type\" : \"thinking\", \"thinking\" : \"\\u0061\" }",
+      "sha256": "8a8b36e05c3d96872432bbc09dfa5f3151e7354f23ee401ae0659decbcc49c8e"
+    },
+    {
+      "name": "top-level-thinking-without-signature",
+      "context": "top_level",
+      "role": "assistant",
+      "input_json": "{ \"thinking\" : \"\\u0061\", \"type\" : \"thinking\", \"z\" : 1e+00 }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"thinking\" : \"\\u0061\", \"type\" : \"thinking\", \"z\" : 1e+00 }",
+      "sha256": "f0f96c40cd26e0a05d5578ef2232c1c8af58a955eaa4fa0a7e730da3572eca09"
+    },
+    {
+      "name": "top-level-redacted-thinking-valid",
+      "context": "top_level",
+      "role": "assistant",
+      "input_json": "{ \"z\" : 1e+00, \"type\" : \"redacted_thinking\", \"data\" : \"\\u0061\" }",
+      "expected_kind": "redacted_reasoning",
+      "expected_utf8": "{\"data\":\"a\",\"z\":1}",
+      "sha256": "a7f399232b0d5bfb3b4bb0e765cbcb7a4e916d0f8d5526cfdb32a29eeac349c2"
+    },
+    {
+      "name": "top-level-user-tool-use",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"tool_use\", \"id\" : \"toolu_user\", \"name\" : \"probe\", \"input\" : { \"a\" : \"\\u0061\" } }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"type\" : \"tool_use\", \"id\" : \"toolu_user\", \"name\" : \"probe\", \"input\" : { \"a\" : \"\\u0061\" } }",
+      "sha256": "0cd6e2501835478d08043ad7817ecdb84722327236c69481df7ab801e4f5d9d0"
+    },
+    {
+      "name": "top-level-image-opaque",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"type\" : \"image\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"image/png\", \"data\" : \"AA==\" } }",
+      "sha256": "b75a663935ec35c18855a2ba8d0304efc5c3f4a19d8c962a578fb225dedb3ab2"
+    },
+    {
+      "name": "top-level-document-opaque",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"document\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"application/pdf\", \"data\" : \"AA==\" } }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"type\" : \"document\", \"source\" : { \"type\" : \"base64\", \"media_type\" : \"application/pdf\", \"data\" : \"AA==\" } }",
+      "sha256": "e5fc7308befb2471fb816eb370b9f95bbc48c6099bd05f800975d522a8aac19a"
+    },
+    {
+      "name": "top-level-malformed-text",
+      "context": "top_level",
+      "role": "assistant",
+      "input_json": "{ \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 }",
+      "expected_kind": "opaque",
+      "expected_utf8": "{ \"text\" : [ \"\\u0061\" ], \"type\" : \"text\", \"z\" : 1e+00 }",
+      "sha256": "5f6a4ed4cd820ef3b55dc481265670a75aa7ee97d07995fd1e446ef82319c404"
+    },
+    {
+      "name": "tool-result-nested-tool-result-child",
+      "context": "top_level",
+      "role": "user",
+      "input_json": "{ \"type\" : \"tool_result\", \"tool_use_id\" : \"outer\", \"content\" : [ { \"type\" : \"tool_result\", \"tool_use_id\" : \"inner\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] } ] }",
+      "expected_kind": "tool_result",
+      "expected_utf8": "{\"content\":[{ \"type\" : \"tool_result\", \"tool_use_id\" : \"inner\", \"content\" : [ { \"type\" : \"text\", \"text\" : \"\\u0061\" } ] }]}",
+      "sha256": "a2d7be05087874216c0b74aa9e37dc1f51bc2466db6f3e26e3ac94e29c7485ed"
     }
   ],
   "opaque_control": {

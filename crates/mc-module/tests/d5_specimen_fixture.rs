@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mc_module::ck_wire::{OpaqueBlock, ResultBlockKind};
 use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::value::RawValue;
@@ -11,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "1f735283ce4f54514aa118299bda47fe9157990d8904885e7381cd2871b1ad22";
+const INDEX_SHA256: &str = "db1bfb2367cfaefcc9c047d439442ab2c1e3cfb8b4466a96c3ade218516ef000";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -161,28 +160,77 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
     output
 }
 
-fn result_content_block_kind(block: &Value) -> ResultBlockKind {
-    if let (Some("text"), Some(text)) = (
-        block.get("type").and_then(Value::as_str),
-        block.get("text").and_then(Value::as_str),
-    ) {
-        ResultBlockKind::Text {
-            text: text.to_owned(),
-        }
-    } else {
-        ResultBlockKind::Opaque {
-            opaque: OpaqueBlock {
-                source: serde_json::json!({ "type": "provider", "provider": "anthropic" }),
-                kind: block
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                raw: block.clone(),
-                arc: None,
-            },
-        }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodeContext {
+    TopLevel,
+    ToolResultChild,
+}
+
+fn decode_context(value: &str) -> DecodeContext {
+    match value {
+        "top_level" => DecodeContext::TopLevel,
+        "tool_result_child" => DecodeContext::ToolResultChild,
+        _ => panic!("unknown decoder context {value}"),
     }
+}
+
+fn decoder_would_decode_known(context: DecodeContext, role: &str, block: &Value) -> bool {
+    let Some(fields) = block.as_object() else {
+        return false;
+    };
+    let provider_kind = fields.get("type").and_then(Value::as_str);
+    if context == DecodeContext::ToolResultChild {
+        return provider_kind == Some("text") && fields.get("text").is_some_and(Value::is_string);
+    }
+    match provider_kind {
+        Some("text") => fields.get("text").is_some_and(Value::is_string),
+        Some("thinking") => {
+            fields.get("thinking").is_some_and(Value::is_string)
+                && fields.get("signature").is_some_and(Value::is_string)
+        }
+        Some("redacted_thinking") => fields.get("data").is_some_and(Value::is_string),
+        Some("tool_use") => {
+            role == "assistant"
+                && fields.get("id").is_some_and(Value::is_string)
+                && fields.get("name").is_some_and(Value::is_string)
+                && fields.contains_key("input")
+        }
+        Some("tool_result") => {
+            role == "user"
+                && fields.get("tool_use_id").is_some_and(Value::is_string)
+                && fields.contains_key("content")
+        }
+        _ => false,
+    }
+}
+
+fn contract_kind(context: DecodeContext, role: &str, block: &Value) -> &'static str {
+    if !decoder_would_decode_known(context, role, block) {
+        return "opaque";
+    }
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => "reasoning",
+        Some("redacted_thinking") => "redacted_reasoning",
+        Some("tool_use") => "tool_use",
+        Some("tool_result") => "tool_result",
+        Some("text") => "text",
+        _ => unreachable!("known decoder block has a mapped kind"),
+    }
+}
+
+fn block_identity(block: &Value) -> String {
+    let provider_kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    block
+        .get("id")
+        .or_else(|| block.get("tool_use_id"))
+        .and_then(Value::as_str)
+        .map_or_else(
+            || provider_kind.to_owned(),
+            |identity| format!("{provider_kind}[{identity}]"),
+        )
 }
 
 fn canonical_raw_json_bytes(raw: &RawValue) -> Vec<u8> {
@@ -190,47 +238,46 @@ fn canonical_raw_json_bytes(raw: &RawValue) -> Vec<u8> {
     canonical_json_bytes(&value)
 }
 
-fn canonical_tool_result_content_bytes(raw: &RawValue) -> Option<Vec<u8>> {
-    let items = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).ok()?;
+fn canonical_tool_result_content_bytes(
+    role: &str,
+    raw: &RawValue,
+) -> Result<Option<Vec<u8>>, String> {
+    let Ok(items) = serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()) else {
+        return Ok(None);
+    };
     let mut output = Vec::new();
     output.push(b'[');
     for (index, item) in items.iter().enumerate() {
         if index != 0 {
             output.push(b',');
         }
-        let value: Value = serde_json::from_str(item.get()).expect("parse result content block");
-        if matches!(
-            result_content_block_kind(&value),
-            ResultBlockKind::Opaque { .. }
-        ) {
-            output.extend_from_slice(item.get().as_bytes());
-        } else {
-            output.extend_from_slice(&canonical_json_bytes(&value));
-        }
+        output.extend_from_slice(&canonical_provider_block_bytes(
+            DecodeContext::ToolResultChild,
+            role,
+            item.as_ref(),
+        )?);
     }
     output.push(b']');
-    Some(output)
+    Ok(Some(output))
 }
 
-fn canonical_provider_block_bytes(raw: &RawValue) -> Vec<u8> {
+fn canonical_provider_block_bytes(
+    context: DecodeContext,
+    role: &str,
+    raw: &RawValue,
+) -> Result<Vec<u8>, String> {
     let block: Value = serde_json::from_str(raw.get()).expect("parse provider block");
+    if !decoder_would_decode_known(context, role, &block) {
+        return Ok(raw.get().as_bytes().to_vec());
+    }
+    if context == DecodeContext::ToolResultChild {
+        return Ok(canonical_json_bytes(&block));
+    }
+
     let provider_kind = block
         .get("type")
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !matches!(
-        provider_kind,
-        "thinking"
-            | "redacted_thinking"
-            | "tool_use"
-            | "tool_result"
-            | "text"
-            | "image"
-            | "document"
-    ) {
-        return raw.get().as_bytes().to_vec();
-    }
-
+        .expect("known provider kind");
     let fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw.get())
         .expect("parse provider block fields");
     let retained = fields
@@ -248,7 +295,7 @@ fn canonical_provider_block_bytes(raw: &RawValue) -> Vec<u8> {
         );
         output.push(b':');
         if provider_kind == "tool_result" && key == "content" {
-            if let Some(content) = canonical_tool_result_content_bytes(value) {
+            if let Some(content) = canonical_tool_result_content_bytes(role, value)? {
                 output.extend_from_slice(&content);
                 continue;
             }
@@ -256,7 +303,46 @@ fn canonical_provider_block_bytes(raw: &RawValue) -> Vec<u8> {
         output.extend_from_slice(&canonical_raw_json_bytes(value));
     }
     output.push(b'}');
-    output
+    Ok(output)
+}
+
+fn canonical_provider_block_without_raw(
+    context: DecodeContext,
+    role: &str,
+    block: &Value,
+) -> Result<Vec<u8>, String> {
+    if !decoder_would_decode_known(context, role, block) {
+        return Err(format!(
+            "opaque {} is missing its raw JSON bytes",
+            block_identity(block)
+        ));
+    }
+    if context == DecodeContext::TopLevel
+        && block.get("type").and_then(Value::as_str) == Some("tool_result")
+    {
+        if let Some(items) = block.get("content").and_then(Value::as_array) {
+            if let Some((index, child)) = items.iter().enumerate().find(|(_, child)| {
+                !decoder_would_decode_known(DecodeContext::ToolResultChild, role, child)
+            }) {
+                return Err(format!(
+                    "{} has opaque descendant content[{index}] {} but raw JSON bytes are unavailable",
+                    block_identity(block),
+                    block_identity(child)
+                ));
+            }
+        }
+    }
+
+    let mut payload = block.clone();
+    if context == DecodeContext::TopLevel {
+        let fields = payload
+            .as_object_mut()
+            .expect("known provider block object");
+        for key in ["type", "id", "tool_use_id"] {
+            fields.remove(key);
+        }
+    }
+    Ok(canonical_json_bytes(&payload))
 }
 
 fn assert_synthetic_string_segment(
@@ -415,7 +501,7 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
     );
     let index: Value = serde_json::from_slice(&index_bytes).expect("parse fixture index");
     let index = object(&index);
-    assert_eq!(number(&index["fixture_shape_version"]), 4);
+    assert_eq!(number(&index["fixture_shape_version"]), 5);
     assert_eq!(text(&index["readiness"]), "scaffold");
     assert_eq!(number(&index["opaque_blocks"]), 0);
     assert_eq!(text(&index["source_db_sha256"]), DB_SHA256);
@@ -543,17 +629,24 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
     }
 
     let block_reference = object(&vectors["block_aware_reference"]);
-    assert!(text(&block_reference["note"]).contains("decoded-kind intersection"));
+    assert!(text(&block_reference["note"]).contains("(context, role, block)"));
     assert!(text(&block_reference["note"]).contains("anthropic_decode.rs:648-661"));
     assert!(text(&block_reference["result_block_kind"]).contains("Text, Media, Opaque"));
     assert!(text(&block_reference["parity_follow_up"]).contains("opencode.rs:719-738"));
     assert!(text(&block_reference["parity_follow_up"]).contains("pi.rs:845-892"));
+    let boundary_table = array(&block_reference["decoder_boundary_table"]);
+    assert_eq!(boundary_table.len(), 12);
+    for row in boundary_table {
+        assert!(text(&object(row)["decoder_cite"]).contains("anthropic_decode.rs:"));
+    }
     let block_vectors = array(&vectors["block_aware_vectors"]);
-    assert_eq!(block_vectors.len(), 6);
+    assert_eq!(block_vectors.len(), 18);
     for vector in block_vectors {
         let vector = object(vector);
         let name = text(&vector["name"]);
         let input = text(&vector["input_json"]);
+        let context = decode_context(text(&vector["context"]));
+        let role = text(&vector["role"]);
         let expected = text(&vector["expected_utf8"]).as_bytes();
         assert_eq!(
             sha256_hex(expected),
@@ -562,17 +655,29 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
         );
         let raw = serde_json::from_str::<Box<RawValue>>(input).expect("parse raw N4 vector");
         assert_eq!(
-            canonical_provider_block_bytes(raw.as_ref()),
+            canonical_provider_block_bytes(context, role, raw.as_ref())
+                .expect("canonicalize raw N4 vector"),
             expected,
             "N4 block-aware vector {name}"
         );
         let parsed: Value = serde_json::from_str(input).expect("parse N4 provider block");
-        let (kind, _, _) = lift_provider_block_for_contract(parsed);
+        let (kind, _, _) = lift_provider_block_for_contract(context, role, parsed.clone());
         assert_eq!(
             kind,
             text(&vector["expected_kind"]),
-            "N4 top-level kind {name}"
+            "N4 decoded kind {name}"
         );
+        if let Some(raw_withheld) = vector.get("raw_withheld") {
+            let raw_withheld = object(raw_withheld);
+            assert_eq!(text(&raw_withheld["expected"]), "refusal");
+            assert_eq!(raw_withheld["expected_utf8"], Value::Null);
+            let error = canonical_provider_block_without_raw(context, role, &parsed)
+                .expect_err("opaque descendant without raw bytes must refuse");
+            assert!(
+                error.contains(text(&raw_withheld["error_contains"])),
+                "N4 raw-withheld refusal identity {name}: {error}"
+            );
+        }
     }
 
     let opaque = object(&vectors["opaque_control"]);
@@ -594,27 +699,21 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
 }
 
 fn lift_provider_block_for_contract(
+    context: DecodeContext,
+    role: &str,
     block: Value,
 ) -> (String, Map<String, Value>, Map<String, Value>) {
-    let provider_kind = object(&block)
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let kind = match provider_kind {
-        "thinking" => "reasoning",
-        "redacted_thinking" => "redacted_reasoning",
-        "tool_use" => "tool_use",
-        "tool_result" => "tool_result",
-        "text" => "text",
-        "image" => "image",
-        "document" => "document",
-        _ => return ("opaque".to_owned(), object(&block).clone(), Map::new()),
-    };
+    let kind = contract_kind(context, role, &block);
+    if kind == "opaque" {
+        return ("opaque".to_owned(), object(&block).clone(), Map::new());
+    }
     let mut payload = object(&block).clone();
     let mut lifted = Map::new();
-    for key in ["type", "id", "tool_use_id"] {
-        if let Some(value) = payload.remove(key) {
-            lifted.insert(key.to_owned(), value);
+    if context == DecodeContext::TopLevel {
+        for key in ["type", "id", "tool_use_id"] {
+            if let Some(value) = payload.remove(key) {
+                lifted.insert(key.to_owned(), value);
+            }
         }
     }
     (kind.to_owned(), payload, lifted)
@@ -628,7 +727,8 @@ fn d5_fixture_lifting_preserves_extensions_and_opaque_blocks() {
         "text": "visible",
         "vendor_extension": {"array": [true, 7, null]}
     });
-    let (kind, payload, lifted) = lift_provider_block_for_contract(provider);
+    let (kind, payload, lifted) =
+        lift_provider_block_for_contract(DecodeContext::TopLevel, "assistant", provider);
     assert_eq!(kind, "text");
     assert_eq!(
         lifted,
@@ -658,7 +758,8 @@ fn d5_fixture_lifting_preserves_extensions_and_opaque_blocks() {
         "tool_use_id": "opaque-tool-id",
         "extension": {"nested": ["unchanged"]}
     });
-    let (kind, payload, lifted) = lift_provider_block_for_contract(opaque.clone());
+    let (kind, payload, lifted) =
+        lift_provider_block_for_contract(DecodeContext::TopLevel, "assistant", opaque.clone());
     assert_eq!(kind, "opaque");
     assert!(lifted.is_empty());
     assert_eq!(Value::Object(payload), opaque);
