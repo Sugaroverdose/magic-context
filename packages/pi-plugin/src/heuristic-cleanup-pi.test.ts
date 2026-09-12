@@ -139,6 +139,8 @@ describe("applyPiHeuristicCleanup", () => {
 					],
 					timestamp: 2,
 				},
+				toolResultMessage("read-call-a", "first result", 3),
+				toolResultMessage("read-call-b", "second result", 4),
 			];
 			const { transcript, targets } = tagMessages(sessionId, db, messages);
 
@@ -184,6 +186,8 @@ describe("applyPiHeuristicCleanup", () => {
 					],
 					timestamp: 2,
 				},
+				toolResultMessage("read-call-a", "first result", 3),
+				toolResultMessage("read-call-b", "second result", 4),
 			];
 			const { transcript, targets } = tagMessages(sessionId, db, messages);
 
@@ -396,9 +400,7 @@ describe("applyPiHeuristicCleanup", () => {
 			// text "I will reduce now." (#2), assistant toolCall reduce-1 (#3),
 			// user toolResult reuses #3, user "next request" (#4), assistant
 			// "newer answer" (#5), user "latest request" (#6). reduce-1 = #3.
-			expect(textOf(replayTranscript.getOutputMessages()[2] as never)).toBe(
-				"[dropped §3§]",
-			);
+			expect(textOf(replayTranscript.getOutputMessages()[2] as never)).toBe("");
 		} finally {
 			closeQuietly(db);
 		}

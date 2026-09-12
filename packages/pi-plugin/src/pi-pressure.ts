@@ -100,7 +100,7 @@ export function computePiPressure(
 		Number.isFinite(usage.output)
 			? Math.max(0, usage.totalTokens - usage.output)
 			: undefined;
-	const inputTokens =
+	let inputTokens =
 		totalPromptTokens !== undefined && totalPromptTokens > 0
 			? Math.min(componentPromptTokens, totalPromptTokens)
 			: componentPromptTokens;
@@ -111,7 +111,7 @@ export function computePiPressure(
 		absoluteWall > 0 &&
 		inputTokens > absoluteWall
 	) {
-		return null;
+		inputTokens = absoluteWall;
 	}
 	const percentage = contextLimit > 0 ? (inputTokens / contextLimit) * 100 : 0;
 	return { inputTokens, percentage };
@@ -127,6 +127,8 @@ export interface ResolvePiPressureSnapshotArgs {
 	persistedInputTokens: number;
 	liveInputTokens?: number | null;
 	usableContextLimit?: number;
+	/** Scheduler recovery latch, used for historian admission, never a display denominator. */
+	minimumPercentage?: number;
 }
 
 /**
@@ -155,24 +157,33 @@ export function resolvePiPressureSnapshot(
 	const contextLimit =
 		typeof args.usableContextLimit === "number" &&
 		Number.isFinite(args.usableContextLimit) &&
-		args.usableContextLimit > 0
+		args.usableContextLimit >= 16_000 &&
+		args.usableContextLimit <= 10_000_000
 			? args.usableContextLimit
 			: undefined;
 
 	if (contextLimit !== undefined) {
 		return {
 			inputTokens,
-			percentage: inputTokens > 0 ? (inputTokens / contextLimit) * 100 : 0,
+			percentage: Math.max(
+				inputTokens > 0 ? (inputTokens / contextLimit) * 100 : 0,
+				Number.isFinite(args.minimumPercentage)
+					? (args.minimumPercentage ?? 0)
+					: 0,
+			),
 			contextLimit,
 		};
 	}
 
+	const inferredLimit = persistedInputTokens / (args.persistedPercentage / 100);
+	const validInferredLimit =
+		Number.isFinite(inferredLimit) &&
+		inferredLimit >= 16_000 &&
+		inferredLimit <= 10_000_000;
 	return {
-		inputTokens: persistedInputTokens,
-		percentage:
-			Number.isFinite(args.persistedPercentage) && args.persistedPercentage > 0
-				? args.persistedPercentage
-				: 0,
+		inputTokens,
+		percentage: validInferredLimit ? (inputTokens / inferredLimit) * 100 : 0,
+		...(validInferredLimit ? { contextLimit: inferredLimit } : {}),
 	};
 }
 

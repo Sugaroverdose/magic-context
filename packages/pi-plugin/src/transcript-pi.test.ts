@@ -480,15 +480,10 @@ describe("createPiTranscript", () => {
 			const output = transcript.getOutputMessages() as Array<{
 				content?: Array<{ type: string; text?: string }>;
 			}>;
-			expect(output[0]?.content?.[0]).toMatchObject({
-				type: "toolCall",
-				arguments: { dropped: "[dropped §1§]" },
-			});
-			expect(output[1]?.content).toEqual([
-				{ type: "text", text: "[dropped §1§]" },
-				{ type: "text", text: "[dropped §1§]" },
-				{ type: "text", text: "[dropped §1§]" },
-			]);
+			expect(output[0]?.content).toEqual([]);
+			expect(output[1]?.content).toEqual([]);
+			transcript.finalizeToolRemovals();
+			expect(output).toHaveLength(0);
 		} finally {
 			closeQuietly(db);
 		}

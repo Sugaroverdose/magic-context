@@ -210,7 +210,8 @@ describe("Pi ctx_reduce tool", () => {
 			drop: "1,2",
 		});
 		expect(isError).toBe(false);
-		expect(text.toLowerCase()).toContain("already");
+		expect(text).toContain("Already dropped: §1§");
+		expect(text).toContain("Already queued: §2§");
 
 		// Still exactly one pending op — no duplicate.
 		const ops = getPendingOps(db, sessionId);

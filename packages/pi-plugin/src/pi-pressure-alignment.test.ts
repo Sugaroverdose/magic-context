@@ -128,3 +128,29 @@ describe("Pi pressure alignment (#385)", () => {
 		}
 	});
 });
+
+it("does not display a one-token denominator or a stale percentage with no usage", () => {
+	expect(
+		resolvePiPressureSnapshot({
+			persistedPercentage: 931800,
+			persistedInputTokens: 9318,
+			usableContextLimit: 1,
+		}).percentage,
+	).toBe(0);
+	expect(
+		resolvePiPressureSnapshot({
+			persistedPercentage: 931800,
+			persistedInputTokens: 0,
+		}).percentage,
+	).toBe(0);
+});
+
+it("preserves the scheduler emergency pressure floor for historian admission", () => {
+	const args = {
+		persistedPercentage: 90.6,
+		persistedInputTokens: 184858,
+		usableContextLimit: 204000,
+		minimumPercentage: 95,
+	};
+	expect(resolvePiPressureSnapshot(args).percentage).toBe(95);
+});

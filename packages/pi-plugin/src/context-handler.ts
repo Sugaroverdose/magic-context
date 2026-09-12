@@ -115,7 +115,10 @@ import {
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
+import {
+	getNativeReplayState,
+	saveNativeToolInputs,
+} from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
 	createTagger,
@@ -235,7 +238,10 @@ import {
 	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
-import { canClearNativeReasoning } from "./native-replay-pi";
+import {
+	canClearNativeReasoning,
+	NATIVE_TOOL_REMOVAL_MARKER,
+} from "./native-replay-pi";
 import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
@@ -2839,21 +2845,23 @@ export function registerPiContextHandler(
 					lastInputTokens:
 						sessionMeta.lastInputTokens >
 						baseWindowGeometry.derivation.absoluteWall
-							? 0
+							? baseWindowGeometry.derivation.absoluteWall
 							: sessionMeta.lastInputTokens,
 					lastContextPercentage:
 						sessionMeta.lastInputTokens >
 						baseWindowGeometry.derivation.absoluteWall
-							? 0
+							? (baseWindowGeometry.derivation.absoluteWall /
+									baseWindowGeometry.usableSoft) *
+								100
 							: sessionMeta.lastContextPercentage,
 				});
 				provenInputTokens = 0;
 				sessionMeta.observedSafeInputTokens = 0;
 				sessionMeta.cacheAlertSent = false;
 				if (usageInputTokens > baseWindowGeometry.derivation.absoluteWall) {
-					usageInputTokens = 0;
-					usagePercentage = 0;
-					usedPersistedUsage = false;
+					usageInputTokens = baseWindowGeometry.derivation.absoluteWall;
+					usagePercentage =
+						(usageInputTokens / baseWindowGeometry.usableSoft) * 100;
 				}
 			}
 			const windowGeometry = resolvePiWindowGeometry({
@@ -3230,6 +3238,9 @@ export function registerPiContextHandler(
 						options.heuristics?.clearReasoningAge ??
 						DEFAULT_CLEAR_REASONING_AGE,
 					nativeReasoningMayClear: canClearNativeReasoning(ctx.model),
+					preserveReasoningToolArcs:
+						ctx.model?.api !== "openai-codex-responses" &&
+						ctx.model?.api !== "openai-responses",
 				},
 				canUseEmptySentinels,
 				temporalAwareness: options.injection?.temporalAwareness === true,
@@ -3308,6 +3319,7 @@ export function registerPiContextHandler(
 					taggerFloor,
 					sessionMeta,
 					piUsage,
+					minimumPercentage: usagePercentage,
 					historianStateSnapshot: historianStateForPass,
 				});
 			}
@@ -4239,6 +4251,7 @@ function maybeFireHistorian(args: {
 	piUsage:
 		| ReturnType<NonNullable<ExtensionContext["getContextUsage"]>>
 		| undefined;
+	minimumPercentage: number;
 	historianStateSnapshot: PiHistorianStateSnapshot;
 }): void {
 	const {
@@ -4361,6 +4374,7 @@ function maybeFireHistorian(args: {
 			persistedInputTokens: usage.inputTokens,
 			liveInputTokens: piUsage?.tokens,
 			usableContextLimit: usageContextLimit,
+			minimumPercentage: args.minimumPercentage,
 		});
 		sessionLog(
 			sessionId,
@@ -4713,6 +4727,7 @@ interface RunPipelineArgs {
 	reasoningClearing?: {
 		clearReasoningAge: number;
 		nativeReasoningMayClear: boolean;
+		preserveReasoningToolArcs: boolean;
 	};
 	/** True only when the active provider filters empty sentinel content safely. */
 	canUseEmptySentinels: boolean;
@@ -4955,11 +4970,45 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// when the visible array shifts (compaction trim / custom_message inserts),
 	// orphaning tags/source_contents/caveman/drop-state. Positional entryIds is
 	// exactly aligned here: tagging runs at transcript-build time, before any splice.
+	let nativeRemovalInputs: Map<string, string> | undefined;
+	try {
+		nativeRemovalInputs = getNativeReplayState(
+			args.db,
+			args.sessionId,
+		).toolInputs;
+	} catch {
+		/* Invalid native state must retain the whole pair. */
+	}
 	const tTranscriptBuild = performance.now();
 	const transcript = createPiTranscript(
 		args.messages,
 		args.sessionId,
 		args.entryIds,
+		{
+			preserveReasoningToolArcs:
+				args.reasoningClearing?.preserveReasoningToolArcs,
+			authorizeNativeToolRemoval: (callId) => {
+				if (!nativeRemovalInputs) return false;
+				if (nativeRemovalInputs.get(callId) === NATIVE_TOOL_REMOVAL_MARKER)
+					return true;
+				if (!isCacheBustingPass) return false;
+				try {
+					saveNativeToolInputs(
+						args.db,
+						args.sessionId,
+						new Map([[callId, NATIVE_TOOL_REMOVAL_MARKER]]),
+					);
+					nativeRemovalInputs.set(callId, NATIVE_TOOL_REMOVAL_MARKER);
+					return true;
+				} catch (error) {
+					sessionLog(
+						args.sessionId,
+						`native arc removal persistence failed; retaining pair: ${String(error)}`,
+					);
+					return false;
+				}
+			},
+		},
 	);
 	logTransformTiming(args.sessionId, "transcriptBuild", tTranscriptBuild);
 	// Reasoning clearing/replay mutate `part.thinking` in place. They MUST target
@@ -6333,6 +6382,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
+	transcript.finalizeToolRemovals();
 	const tDroppedPlaceholders = performance.now();
 	stripPiDroppedPlaceholderMessages({
 		db: args.db,

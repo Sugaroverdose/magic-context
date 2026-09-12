@@ -179,21 +179,38 @@ export function createCtxReduceTool(
 				return err(`Error: Conflicting operations — ${conflicts.join("; ")}.`);
 			}
 
-			const preFilterDropCount = dropIds.length;
+			const alreadyDropped = [
+				...new Set(dropIds.filter((id) => tagStatusMap.get(id) === "dropped")),
+			];
+			const alreadyQueued = [
+				...new Set(
+					dropIds.filter(
+						(id) =>
+							tagStatusMap.get(id) !== "dropped" &&
+							pendingMap.get(id) === "drop",
+					),
+				),
+			];
+			const skippedNote = [
+				alreadyDropped.length
+					? `Already dropped: ${formatIds(alreadyDropped)}.`
+					: "",
+				alreadyQueued.length
+					? `Already queued: ${formatIds(alreadyQueued)}.`
+					: "",
+			]
+				.filter(Boolean)
+				.join(" ");
 			dropIds = dropIds.filter(
 				(id) =>
 					!inertWhitespaceTagNumbers.has(id) &&
 					tagStatusMap.get(id) !== "dropped" &&
 					pendingMap.get(id) !== "drop",
 			);
-			const skippedCount = preFilterDropCount - dropIds.length;
 
 			if (dropIds.length === 0) {
 				return ok(
-					[
-						inertNote,
-						"All requested tags were already queued or processed. No new action is needed.",
-					]
+					[inertNote, skippedNote, "No new action is needed."]
 						.filter(Boolean)
 						.join(" "),
 				);
@@ -223,17 +240,14 @@ export function createCtxReduceTool(
 			const deferredDropIds = [
 				...new Set(dropIds.filter((id) => protectedSet.has(id))),
 			];
-			const skippedNote =
-				skippedCount > 0
-					? ` ${skippedCount} requested tag${skippedCount === 1 ? " was" : "s were"} already queued and need no action.`
-					: "";
+
 			const parts: string[] = [];
 			if (immediateDropIds.length > 0)
 				parts.push(`drop ${formatIds(immediateDropIds)}`);
 			if (deferredDropIds.length > 0)
 				parts.push(`deferred drop ${formatIds(deferredDropIds)}`);
 			return ok(
-				`Queued: ${parts.join(", ")}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`,
+				`Queued: ${parts.join(", ")}.${skippedNote ? ` ${skippedNote}` : ""}${inertNote ? ` ${inertNote}` : ""}`,
 			);
 		},
 	};

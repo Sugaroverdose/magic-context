@@ -154,7 +154,7 @@ describe("Pi rendered-tail hygiene walk", () => {
 		});
 	});
 
-	it("uses rendered sentinels, not durable tag status, to exclude a whole tool arc", () => {
+	it("counts surviving dropped arcs in T without advertising their bytes in U", () => {
 		const live = toolArc(
 			"owner",
 			"call",
@@ -182,8 +182,10 @@ describe("Pi rendered-tail hygiene walk", () => {
 			protectedTagNumbers: new Set(),
 			stableId: dropped.stableId,
 		});
-		expect(liveWithStaleStatus.u).toBeGreaterThan(0);
-		expect(droppedMeasured).toMatchObject({ u: 0, t: 0 });
+		expect(liveWithStaleStatus.u).toBe(0);
+		expect(liveWithStaleStatus.t).toBeGreaterThan(0);
+		expect(droppedMeasured.u).toBe(0);
+		expect(droppedMeasured.t).toBeGreaterThan(0);
 	});
 
 	it("keeps the recency reserve and newest three ctx_reduce exemplars out of U", () => {

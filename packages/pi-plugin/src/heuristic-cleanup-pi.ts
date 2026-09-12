@@ -360,6 +360,10 @@ export function applyPiHeuristicCleanup(
 		// narrowing it to the droppable subset folds real conversation/
 		// reasoning tail into the "irreducible prefix" and under-evicts.
 		const activeTags = tags.filter((t) => t.status === "active");
+		sessionLog(
+			sessionId,
+			`emergency candidates: loaded=${tags.length} active=${activeTags.length} activeTools=${activeTags.filter((tag) => tag.type === "tool").length} visibleCompleteTools=${droppableTags.length} windowYields=${(emergency.usagePercentage ?? 0) >= 95} cutoff=${protectedCutoff}`,
+		);
 		const plan = planEmergencyDrop({
 			tags: droppableTags as readonly EmergencyDropTag[],
 			floorTags: activeTags as readonly EmergencyDropTag[],

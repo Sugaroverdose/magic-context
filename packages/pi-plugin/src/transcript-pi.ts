@@ -77,6 +77,10 @@ import type {
 	TranscriptPart,
 	TranscriptPartKind,
 } from "@magic-context/core/shared/transcript";
+import {
+	canRemoveNativeToolCall,
+	removeNativeToolCall,
+} from "./native-replay-pi";
 import { resolvePiHarnessKind } from "./pi-harness-kind";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 
@@ -151,6 +155,10 @@ export function createPiTranscript(
 	source: unknown[],
 	sessionId: string | undefined,
 	entryIds?: readonly (string | undefined)[],
+	options: {
+		preserveReasoningToolArcs?: boolean;
+		authorizeNativeToolRemoval?: (callId: string) => boolean;
+	} = {},
 ): Transcript & {
 	/**
 	 * Pi-only escape hatch: returns the rebuilt message array suitable
@@ -181,9 +189,16 @@ export function createPiTranscript(
 	 * through a transcript part setter.
 	 */
 	getToolInputChanges(): ReadonlyMap<number, ReadonlySet<string>>;
+	/** Splice emptied tool messages only after the caller captures positional stable IDs. */
+	finalizeToolRemovals(): void;
 } {
 	const working = source.slice() as unknown as PiAgentMessage[];
 	const dirtyMessages = new Set<number>();
+	const removals = new Map<number, Set<number>>();
+	toolRemovals.set(working, removals);
+	if (options.authorizeNativeToolRemoval)
+		nativeRemovalAuthorization.set(working, options.authorizeNativeToolRemoval);
+	const emptyRemovedMessages = new Set<unknown>();
 	const toolInputChanges = new Map<number, Set<string>>();
 
 	// Normalize: fold consecutive toolResult runs into the immediately
@@ -205,6 +220,10 @@ export function createPiTranscript(
 		entryIds,
 	);
 
+	if (options.preserveReasoningToolArcs === false) {
+		for (const message of transcriptMessages)
+			message.requiresToolArcSkeleton = false;
+	}
 	let committed = false;
 
 	return {
@@ -213,6 +232,33 @@ export function createPiTranscript(
 		commit(): void {
 			if (committed) return;
 			committed = true;
+			for (const [index, parts] of removals) {
+				const message = working[index];
+				if (
+					(message.role !== "assistant" && message.role !== "toolResult") ||
+					!Array.isArray(message.content)
+				)
+					continue;
+				const next = {
+					...message,
+					content: message.content.filter((_, i) => !parts.has(i)),
+				} as PiAgentMessage;
+				for (const i of parts) {
+					const part = message.content[i];
+					if (part?.type === "toolCall") removeNativeToolCall(next, part.id);
+				}
+				working[index] = next;
+				dirtyMessages.add(index);
+				const nativeItems = (
+					next as { providerPayload?: { items?: unknown[] } }
+				).providerPayload?.items;
+				if (
+					Array.isArray(next.content) &&
+					next.content.length === 0 &&
+					(!Array.isArray(nativeItems) || nativeItems.length === 0)
+				)
+					emptyRemovedMessages.add(next);
+			}
 			// Sync mutations from `working` back into `source` so that
 			// any structural changes the caller applies to `source`
 			// directly (e.g. `<session-history>` injection's splice +
@@ -230,6 +276,11 @@ export function createPiTranscript(
 				if (idx < source.length && idx < working.length) {
 					(source as unknown as PiAgentMessage[])[idx] = working[idx];
 				}
+			}
+		},
+		finalizeToolRemovals(): void {
+			for (let i = source.length - 1; i >= 0; i--) {
+				if (emptyRemovedMessages.has(source[i])) source.splice(i, 1);
 			}
 		},
 		getOutputMessages(): unknown[] {
@@ -754,6 +805,19 @@ function createPiAssistantPart(
 			markDirty(messageIndex, p.id);
 			return true;
 		},
+		canRemove(): boolean {
+			const message = working[messageIndex] as PiAssistantMessage;
+			const part = message.content[partIndex];
+			return (
+				part?.type === "toolCall" &&
+				canRemoveNativeToolCall(message, part.id) &&
+				(!(message as { providerPayload?: unknown }).providerPayload ||
+					nativeRemovalAuthorization.get(working)?.(part.id) !== false)
+			);
+		},
+		remove(): boolean {
+			return markToolRemoval(working, messageIndex, partIndex);
+		},
 		// Replace this assistant part's content with a sentinel placeholder.
 		//
 		// CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",
@@ -819,6 +883,9 @@ function createPiToolResultPart(
 	return {
 		kind,
 		id: msg.toolCallId,
+		remove(): boolean {
+			return markToolRemoval(working, messageIndex, partIndex);
+		},
 		getText(): string | undefined {
 			const current = (working[messageIndex] as PiToolResultMessage).content;
 			const p = current[partIndex];
@@ -945,4 +1012,24 @@ function extractStableId(
 	// No entryIdByRef here: tagging runs at transcript-build time on the freshly
 	// sliced `working` array, so positional entryIds[index] is exactly aligned.
 	return resolvePiStableId(msg, index, entryIds);
+}
+
+// Part proxies keep positional indices until commit; splicing earlier would retarget later mutations.
+const toolRemovals = new WeakMap<PiAgentMessage[], Map<number, Set<number>>>();
+const nativeRemovalAuthorization = new WeakMap<
+	PiAgentMessage[],
+	(callId: string) => boolean
+>();
+function markToolRemoval(
+	working: PiAgentMessage[],
+	messageIndex: number,
+	partIndex: number,
+): boolean {
+	const removals = toolRemovals.get(working);
+	if (!removals) return false;
+	const parts = removals.get(messageIndex) ?? new Set<number>();
+	if (parts.has(partIndex)) return false;
+	parts.add(partIndex);
+	removals.set(messageIndex, parts);
+	return true;
 }
