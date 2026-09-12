@@ -34,8 +34,8 @@ import { FOLD_SKIP_REASON } from "../src/rust-scenario-support";
  *   3. Turn 12 is the transform pass where we observe historian starting.
  *      The mock records response completion so the shared suite can prove the
  *      main request overlaps the in-flight historian without a duration bound.
- *   4. Assert exactly ONE historian request was issued despite further main
- *      turns happening while the first historian run is still pending.
+ *   4. Assert no later historian request arrives before the first historian
+ *      response completes. Requests after completion are legitimate new runs.
  */
 
 // Historian system prompt marker, see compartment-prompt.ts.
@@ -218,14 +218,13 @@ describe("slow historian vs fast main", () => {
             expect(historianReqCountAtT12).toBeGreaterThanOrEqual(
                 historianReqCountBeforeT12,
             );
-            // Whatever that count is, it must not exceed the count after
-            // further turns — that would imply repeated re-triggering.
 
             // Now finish turn 12 and drive further turns for INVARIANT 2.
             await turn12Promise;
 
-            // INVARIANT 2: only one historian request, despite multiple further
-            // main turns while the first historian run is still pending.
+            // INVARIANT 2: no later historian request may overlap the first.
+            // On a slow host the 8s mock delay can finish before these turns, in
+            // which case a new historian run after that completion is legitimate.
             await h.sendPrompt(sessionId, "turn 13: additional turn while historian pending.");
             await h.sendPrompt(sessionId, "turn 14: more activity while historian pending.");
 
@@ -237,13 +236,25 @@ describe("slow historian vs fast main", () => {
             const historianRequests = h.mock
                 .requests()
                 .filter((r) => isHistorianRequest(r.body));
-            console.log(
-                `[TEST] historian requests observed: ${historianRequests.length}`,
+            const [firstHistorianRequest, ...laterHistorianRequests] = historianRequests;
+            expect(firstHistorianRequest).toBeDefined();
+            if (!firstHistorianRequest) {
+                throw new Error("Historian request missing after waitFor");
+            }
+
+            const firstResponseCompletedAt = firstHistorianRequest.responseCompletedAt;
+            const overlappingHistorianRequests = laterHistorianRequests.filter(
+                (request) =>
+                    request.receivedAt >= firstHistorianRequest.receivedAt &&
+                    (firstResponseCompletedAt === undefined ||
+                        request.receivedAt < firstResponseCompletedAt),
             );
-            expect(historianRequests.length).toBe(1);
+            console.log(
+                `[TEST] historian requests observed: ${historianRequests.length}; overlapping first: ${overlappingHistorianRequests.length}`,
+            );
+            expect(overlappingHistorianRequests).toHaveLength(0);
 
             // INVARIANT 3: at least one historian request was captured.
-            // Implied by INVARIANT 2 equality to 1, kept explicit for clarity.
             expect(historianRequests.length).toBeGreaterThanOrEqual(1);
 
         },
