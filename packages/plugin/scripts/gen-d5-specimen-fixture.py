@@ -52,6 +52,40 @@ CAPTURE_START_POSITION = 64
 PROBE_ORDINALS = (1824, 1864, 1927)
 
 
+class JsonInteger(int):
+    """A JSON integer together with the exact source token."""
+
+    def __new__(cls, token: str) -> "JsonInteger":
+        value = super().__new__(cls, token, 10)
+        value.lexeme = token
+        return value
+
+
+class JsonFloat(float):
+    """A JSON fraction or exponent together with the exact source token."""
+
+    def __new__(cls, token: str) -> "JsonFloat":
+        value = super().__new__(cls, token)
+        value.lexeme = token
+        return value
+
+
+def reject_nonfinite(token: str) -> None:
+    raise ValueError(f"non-finite JSON number {token}")
+
+
+JSON_DECODER = json.JSONDecoder(
+    parse_int=JsonInteger,
+    parse_float=JsonFloat,
+    parse_constant=reject_nonfinite,
+)
+
+
+def load_json(data: str | bytes) -> Any:
+    text = data.decode() if isinstance(data, bytes) else data
+    return JSON_DECODER.decode(text)
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -64,6 +98,41 @@ def compact_json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def ecmascript_number_to_string(value: float) -> str:
+    if not math.isfinite(value):
+        raise SystemExit("canonical JSON forbids non-finite floats")
+    if value == 0:
+        return "0"
+
+    sign = "-" if value < 0 else ""
+    shortest = repr(abs(value)).lower()
+    mantissa, separator, exponent_text = shortest.partition("e")
+    exponent = int(exponent_text) if separator else 0
+    integer, point, fraction = mantissa.partition(".")
+    digits = integer + (fraction if point else "")
+    decimal_position = len(integer) + exponent
+
+    leading_zeroes = len(digits) - len(digits.lstrip("0"))
+    digits = digits[leading_zeroes:].rstrip("0")
+    decimal_position -= leading_zeroes
+    digit_count = len(digits)
+
+    if digit_count <= decimal_position <= 21:
+        rendered = digits + "0" * (decimal_position - digit_count)
+    elif 0 < decimal_position <= 21:
+        rendered = digits[:decimal_position] + "." + digits[decimal_position:]
+    elif -6 < decimal_position <= 0:
+        rendered = "0." + "0" * (-decimal_position) + digits
+    else:
+        fraction = f".{digits[1:]}" if digit_count > 1 else ""
+        scientific_exponent = decimal_position - 1
+        exponent_sign = "+" if scientific_exponent >= 0 else "-"
+        rendered = (
+            f"{digits[0]}{fraction}e{exponent_sign}{abs(scientific_exponent)}"
+        )
+    return sign + rendered
+
+
 def canonical_json_bytes(value: Any) -> bytes:
     if value is None:
         return b"null"
@@ -73,16 +142,12 @@ def canonical_json_bytes(value: Any) -> bytes:
         return b"false"
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False).encode()
+    if isinstance(value, JsonInteger):
+        return ("0" if value.lexeme == "-0" else value.lexeme).encode()
     if isinstance(value, int):
         return str(value).encode()
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise SystemExit("canonical JSON forbids non-finite floats")
-        rendered = repr(value).lower()
-        if "e" in rendered:
-            mantissa, exponent = rendered.split("e")
-            rendered = f"{mantissa}e{int(exponent)}"
-        return rendered.encode()
+        return ecmascript_number_to_string(value).encode()
     if isinstance(value, list):
         return b"[" + b",".join(canonical_json_bytes(item) for item in value) + b"]"
     if isinstance(value, dict):
@@ -152,7 +217,7 @@ class JsonSpanParser:
             elif character == '"':
                 position += 1
                 token = self.text[start:position]
-                return JsonNode(json.loads(token), start, position)
+                return JsonNode(load_json(token), start, position)
             else:
                 position += 1
         raise SystemExit("unterminated JSON string")
@@ -208,7 +273,7 @@ class JsonSpanParser:
         while position < len(self.text) and self.text[position] not in " \t\r\n,]}":
             position += 1
         token = self.text[start:position]
-        return JsonNode(json.loads(token), start, position)
+        return JsonNode(load_json(token), start, position)
 
     def parse(self) -> JsonNode:
         root = self.parse_value(0)
@@ -332,7 +397,7 @@ def synthetic_character(
 def sanitize_opaque_string_token(
     token: str, ordinal: int, block_index: int, leaf_index: int, probe: str | None
 ) -> str:
-    decoded = json.loads(token)
+    decoded = load_json(token)
     if probe is not None and probe in decoded:
         raise SystemExit("approved probes in opaque blocks require a reviewed raw-token mapping")
 
@@ -365,7 +430,7 @@ def sanitize_opaque_string_token(
             replacement = "\\ud83d\\ude00"
             cursor += 12
         else:
-            character = json.loads(f'"{escaped}"')
+            character = load_json(f'"{escaped}"')
             replacement_character = synthetic_character(
                 character, ordinal, block_index, leaf_index, position
             )
@@ -378,7 +443,7 @@ def sanitize_opaque_string_token(
     sanitized = "".join(output)
     if len(sanitized.encode()) != len(token.encode()):
         raise SystemExit(f"opaque string token length drift at {ordinal}#{block_index}")
-    if len(json.loads(sanitized).encode()) != len(decoded.encode()):
+    if len(load_json(sanitized).encode()) != len(decoded.encode()):
         raise SystemExit(f"opaque decoded string length drift at {ordinal}#{block_index}")
     return sanitized
 
@@ -423,7 +488,7 @@ def sanitize_opaque_block_bytes(
         cursor = node.end
     if sanitized_text[cursor:] != text[cursor:]:
         raise SystemExit(f"opaque trailing bytes drift at {ordinal}#{block_index}")
-    lengths = decoded_string_byte_lengths(json.loads(sanitized_text))
+    lengths = decoded_string_byte_lengths(load_json(sanitized_text))
     return sanitized_text.encode(), 0, lengths
 
 
@@ -604,9 +669,9 @@ def load_source_state(db_path: Path, probes: list[dict[str, Any]]) -> dict[str, 
     connection.row_factory = sqlite3.Row
     candidates: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for row in connection.execute("SELECT session_id, core_state, meta FROM mc_cache_state"):
-        meta = json.loads(row["meta"])
+        meta = load_json(row["meta"])
         if meta.get("coverage_ordinal") == 1798 and meta.get("newest_live_ordinal") == 1939:
-            candidates.append((row["session_id"], json.loads(row["core_state"]), meta))
+            candidates.append((row["session_id"], load_json(row["core_state"]), meta))
     if len(candidates) != 1:
         raise SystemExit(f"expected one D5 predecessor state, found {len(candidates)}")
     session_id, core, meta = candidates[0]
@@ -914,8 +979,16 @@ def build_applied_state(state: dict[str, Any], probes: dict[int, bytes]) -> dict
 
 
 def validate_representation_contract(canonical_vectors: bytes) -> None:
-    document = json.loads(canonical_vectors)
-    for vector in document.get("vectors", []):
+    document = load_json(canonical_vectors)
+    rules = document.get("normative_algorithm", [])
+    if [rule.get("rule") for rule in rules] != list(range(1, 9)):
+        raise SystemExit("canonical JSON normative rules are incomplete")
+    if document.get("number_reference", {}).get("engine") != "Node.js v22.23.1":
+        raise SystemExit("canonical JSON number reference engine drift")
+    vectors = document.get("vectors", [])
+    if len(vectors) != 31:
+        raise SystemExit("canonical JSON vector count drift")
+    for vector in vectors:
         expected = vector["expected_utf8"].encode()
         actual = canonical_json_bytes(vector["input"])
         if actual != expected or sha256(expected) != vector["sha256"]:
@@ -936,7 +1009,7 @@ def validate_representation_contract(canonical_vectors: bytes) -> None:
 
     opaque_control = document["opaque_control"]
     opaque_raw = opaque_control["input_json"].encode()
-    opaque = json.loads(opaque_raw)
+    opaque = load_json(opaque_raw)
     if contract_kind(opaque.get("type", "")) != "opaque":
         raise SystemExit("unknown provider block did not map to opaque")
     expected = opaque_control["expected_utf8"].encode()
@@ -964,12 +1037,14 @@ Sanitization preserves message order, ordinals, roles, normalized source block c
 
 Contract clause 2 (types) pins `NativeBlock.bytes` to this normative canonical JSON algorithm:
 
-1. Parse to the JSON semantic value model and emit UTF-8.
+1. Parse valid JSON while retaining whether every number used integer syntax or fraction/exponent syntax, and emit UTF-8.
 2. Sort object keys lexicographically by Unicode code point, never by key length or source order.
 3. Use `,` and `:` separators with no surrounding whitespace.
 4. Do not ASCII-escape non-ASCII characters. Escape only quote, backslash, and U+0000–U+001F: use `\\n`, `\\r`, `\\t`, `\\b`, and `\\f` short forms, and lowercase `\\uXXXX` for the remaining controls.
-5. Render integers as shortest decimal. Render finite floats with the shortest round-trip representation, preserving `.0` and signed zero and spelling exponents as lowercase `e` with no `+` or leading zeroes.
-6. Emit no trailing newline.
+5. N1 — Preserve an integer-syntax number as canonical decimal text: no leading `+` or zeroes, map `-0` to `0`, and never route arbitrary-magnitude integers through binary64.
+6. N2 — Parse a fraction- or exponent-syntax number as finite IEEE-754 binary64 and serialize it with ECMAScript `Number::toString` (ECMA-262 §6.1.6.1.20 / `JSON.stringify`): shortest round-trip digits; plain decimal when 1e-6 ≤ |x| < 1e21, otherwise lowercase exponent notation with `+` retained for positive exponents; omit an integral fraction and map negative zero to `0`.
+7. N3 — Apply N1/N2 independently of language-default number formatters; Python re-lays out `repr`'s shortest digits instead of emitting `repr` directly, and Rust uses an exact ECMAScript formatter rather than `serde_json` Display.
+8. Emit no trailing newline.
 
 These rules are the definition; `canonical-json-vectors-v1.json` contains independent hand-written conformance checks designed to distinguish wrong ordering, escaping, and number algorithms. Known block kinds lift `type`, `id`, and `tool_use_id` into contract kind/tool-link fields while retaining every other provider field. Scalar text is normalized as `{{"text": ...}}`. Archive `V` entries are base64 compact JSON renderings of `NormalizedMessage` in contract field order; the applied-state payload is a stable JSON scaffold for units, tags, drops, and ledger without token counts or clocks.
 
@@ -1046,7 +1121,7 @@ def write_fixture(
         )
     index = {
         "schema_version": 1,
-        "fixture_shape_version": 2,
+        "fixture_shape_version": 3,
         "readiness": "scaffold",
         "opaque_blocks": sum(
             block_kind == "opaque"
@@ -1079,11 +1154,11 @@ def main() -> None:
     assert_digest(db_path, DB_SHA256, "source database")
     capture_bytes = assert_digest(capture_path, CAPTURE_SHA256, "13610 capture")
     probes_path = db_path.parent / "d5-content-probes.json"
-    probes = json.loads(probes_path.read_text())
+    probes = load_json(probes_path.read_text())
     if not isinstance(probes, list) or len(probes) != 3:
         raise SystemExit("expected exactly three probes beside the source database")
     state = load_source_state(db_path, probes)
-    capture = json.loads(capture_bytes)
+    capture = load_json(capture_bytes)
     raw_provider_blocks = capture_provider_block_bytes(capture_bytes)
     source_segment, manifest, archive, member_sources = build_fixture(
         state, capture, raw_provider_blocks, probes

@@ -3,7 +3,7 @@
   "normative_algorithm": [
     {
       "rule": 1,
-      "text": "Parse to the JSON semantic value model and emit UTF-8."
+      "text": "Parse valid JSON while retaining whether every number used integer syntax or fraction/exponent syntax, and emit UTF-8."
     },
     {
       "rule": 2,
@@ -19,13 +19,26 @@
     },
     {
       "rule": 5,
-      "text": "Render integers as shortest decimal and finite floats with shortest round-trip representation, preserving .0 and signed zero and spelling exponents with lowercase e, no plus sign, and no leading zeroes."
+      "text": "N1 — Preserve an integer-syntax number as canonical decimal text: no leading + or zeroes, map -0 to 0, and never route arbitrary-magnitude integers through binary64."
     },
     {
       "rule": 6,
+      "text": "N2 — Parse a fraction- or exponent-syntax number as finite IEEE-754 binary64 and serialize it with ECMAScript Number::toString (ECMA-262 §6.1.6.1.20 / JSON.stringify): shortest round-trip digits; plain decimal when 1e-6 <= |x| < 1e21, otherwise lowercase exponent notation with + retained for positive exponents; omit an integral fraction and map negative zero to 0."
+    },
+    {
+      "rule": 7,
+      "text": "N3 — Apply N1/N2 independently of language-default number formatters; Python re-lays out repr's shortest digits instead of emitting repr directly, and Rust uses ryu-js rather than serde_json Display."
+    },
+    {
+      "rule": 8,
       "text": "Emit no trailing newline."
     }
   ],
+  "number_reference": {
+    "engine": "Node.js v22.23.1",
+    "n1": "Expected integer bytes were obtained with node -e 'BigInt(lexeme).toString()'; BigInt is required because JSON.parse/JSON.stringify loses integers beyond 2^53.",
+    "n2": "Expected binary64 bytes were obtained with node -e 'JSON.stringify(Number(lexeme))'."
+  },
   "provenance": "hand-written independent canonical-form vectors; the numbered algorithm is normative and these vectors are conformance checks",
   "vectors": [
     {
@@ -118,8 +131,8 @@
         "negative_zero": -0.0,
         "whole": 1.0
       },
-      "expected_utf8": "{\"large\":1e21,\"negative_zero\":-0.0,\"whole\":1.0}",
-      "sha256": "e592e8b48738595562d1e5e65d4c032ec93b4f4a4fb4bb8cfc67224676ee5b5b"
+      "expected_utf8": "{\"large\":1e+21,\"negative_zero\":0,\"whole\":1}",
+      "sha256": "ad33480784620f1b2c679884c4775e53b7cb9c024abaf773b6e07961eb51113f"
     },
     {
       "name": "empty-containers",
@@ -164,6 +177,108 @@
       ],
       "expected_utf8": "[\"x\",{\"k\":\"v\"},false,null,0.125]",
       "sha256": "f50204ae4308a9844f6223f51ede1ba53756a9da2c9f7498ef05f697f297c738"
+    },
+    {
+      "name": "number-plain-at-1e-minus-5",
+      "input": 1e-5,
+      "expected_utf8": "0.00001",
+      "sha256": "661710915adfa7c40b5dbd6b2122dfa65b1accb57a8b7cdee05423ecfe14b0c7"
+    },
+    {
+      "name": "number-plain-at-1e-minus-6",
+      "input": 1e-6,
+      "expected_utf8": "0.000001",
+      "sha256": "159fb29a827ad04b260aa6c8ab6d8637f8f2b38af5c4f3cb49d6a21205e040f8"
+    },
+    {
+      "name": "number-exponent-at-1e-minus-7",
+      "input": 1e-7,
+      "expected_utf8": "1e-7",
+      "sha256": "5b33e02f2c5103a05d32f6ba9cb058294452bfbf393967f68bb30c1bdcbbab22"
+    },
+    {
+      "name": "number-fractional-exponent-1-5e-minus-7",
+      "input": 1.5e-7,
+      "expected_utf8": "1.5e-7",
+      "sha256": "bbe54b73760f9025086de0202c3caa81352dc0260869890c9dca3cda39ba767f"
+    },
+    {
+      "name": "number-exponent-at-1e21",
+      "input": 1e21,
+      "expected_utf8": "1e+21",
+      "sha256": "241c4643fa70b1dcde1205b71be4e3bebb17e9f880c8e1a33d0ead6c27271d3c"
+    },
+    {
+      "name": "number-plain-at-1e20",
+      "input": 1e20,
+      "expected_utf8": "100000000000000000000",
+      "sha256": "c344e9487bfbd5c4e03c9fb90d62a5dde5e00b54d55c46e9f4a803aea162b80c"
+    },
+    {
+      "name": "number-integral-float",
+      "input": 1.0,
+      "expected_utf8": "1",
+      "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+    },
+    {
+      "name": "number-negative-zero-float",
+      "input": -0.0,
+      "expected_utf8": "0",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "name": "number-negative-zero-integer",
+      "input": -0,
+      "expected_utf8": "0",
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "name": "number-trailing-fraction-zeroes",
+      "input": 1.2300,
+      "expected_utf8": "1.23",
+      "sha256": "5dcdf9da31212582fc88326231ab1f9aadc986cc710f5e2946989d5df3afa8d0"
+    },
+    {
+      "name": "number-binary64-artifact",
+      "input": 0.30000000000000004,
+      "expected_utf8": "0.30000000000000004",
+      "sha256": "06bad31060c1212ae832de4c031f7b31e3b48aed57858294478cb19450cf34ca"
+    },
+    {
+      "name": "number-smallest-subnormal",
+      "input": 5e-324,
+      "expected_utf8": "5e-324",
+      "sha256": "c46e7ca1be4c8734f373a56530787288fa2058d73d07855e9247e949f811a42a"
+    },
+    {
+      "name": "number-largest-finite",
+      "input": 1.7976931348623157e308,
+      "expected_utf8": "1.7976931348623157e+308",
+      "sha256": "c2784e1abd6317452708f3fbf9641c16b959561bc621a1d408c23a20aa2cb585"
+    },
+    {
+      "name": "integer-arbitrary-magnitude",
+      "input": 123456789012345678901234567890,
+      "expected_utf8": "123456789012345678901234567890",
+      "sha256": "f54e5c8f810648e7638d25eb7ed6d24b7e5999d588e88826f2aa837d2ee52ecd"
+    },
+    {
+      "name": "integer-above-2pow53",
+      "input": 9007199254740993,
+      "expected_utf8": "9007199254740993",
+      "sha256": "a1c367c29158357e62a3ff5d3e800fb7698a22396439dbc0a9d4929322afd35d"
+    },
+    {
+      "name": "integer-above-u64",
+      "input": 18446744073709551617,
+      "expected_utf8": "18446744073709551617",
+      "sha256": "a8482330e723ad4642b78444cbdb507ff747c51bbc0fa57e4546641336393be7"
+    },
+    {
+      "name": "number-large-fraction-syntax",
+      "input": 12345678901234567890.5,
+      "expected_utf8": "12345678901234567000",
+      "sha256": "afdcd3321a2fcdb3414cb69a0c92c6bb8d74c06066d721083cc01fec664ab97f"
     }
   ],
   "opaque_control": {

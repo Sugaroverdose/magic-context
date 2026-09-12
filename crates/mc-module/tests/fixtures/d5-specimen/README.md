@@ -12,12 +12,14 @@ Sanitization preserves message order, ordinals, roles, normalized source block c
 
 Contract clause 2 (types) pins `NativeBlock.bytes` to this normative canonical JSON algorithm:
 
-1. Parse to the JSON semantic value model and emit UTF-8.
+1. Parse valid JSON while retaining whether every number used integer syntax or fraction/exponent syntax, and emit UTF-8.
 2. Sort object keys lexicographically by Unicode code point, never by key length or source order.
 3. Use `,` and `:` separators with no surrounding whitespace.
 4. Do not ASCII-escape non-ASCII characters. Escape only quote, backslash, and U+0000–U+001F: use `\n`, `\r`, `\t`, `\b`, and `\f` short forms, and lowercase `\uXXXX` for the remaining controls.
-5. Render integers as shortest decimal. Render finite floats with the shortest round-trip representation, preserving `.0` and signed zero and spelling exponents as lowercase `e` with no `+` or leading zeroes.
-6. Emit no trailing newline.
+5. N1 — Preserve an integer-syntax number as canonical decimal text: no leading `+` or zeroes, map `-0` to `0`, and never route arbitrary-magnitude integers through binary64.
+6. N2 — Parse a fraction- or exponent-syntax number as finite IEEE-754 binary64 and serialize it with ECMAScript `Number::toString` (ECMA-262 §6.1.6.1.20 / `JSON.stringify`): shortest round-trip digits; plain decimal when 1e-6 ≤ |x| < 1e21, otherwise lowercase exponent notation with `+` retained for positive exponents; omit an integral fraction and map negative zero to `0`.
+7. N3 — Apply N1/N2 independently of language-default number formatters; Python re-lays out `repr`'s shortest digits instead of emitting `repr` directly, and Rust uses an exact ECMAScript formatter rather than `serde_json` Display.
+8. Emit no trailing newline.
 
 These rules are the definition; `canonical-json-vectors-v1.json` contains independent hand-written conformance checks designed to distinguish wrong ordering, escaping, and number algorithms. Known block kinds lift `type`, `id`, and `tool_use_id` into contract kind/tool-link fields while retaining every other provider field. Scalar text is normalized as `{"text": ...}`. Archive `V` entries are base64 compact JSON renderings of `NormalizedMessage` in contract field order; the applied-state payload is a stable JSON scaffold for units, tags, drops, and ledger without token counts or clocks.
 

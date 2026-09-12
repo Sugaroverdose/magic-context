@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "1c97cd7ca976319e86f71c32761353ee260eb6bce35b2c7bc9cf9a582d713b03";
+const INDEX_SHA256: &str = "b6582187cc4dad1a97387777cbcbc3764f564f610e9d959a3ab6ab0b2a1b1632";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -108,12 +108,18 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
             Value::Bool(true) => output.extend_from_slice(b"true"),
             Value::Bool(false) => output.extend_from_slice(b"false"),
             Value::Number(number) => {
-                let rendered = number.to_string().to_lowercase();
-                if let Some((mantissa, exponent)) = rendered.split_once('e') {
-                    let exponent = exponent.parse::<i32>().expect("JSON exponent");
-                    output.extend_from_slice(format!("{mantissa}e{exponent}").as_bytes());
+                let lexeme = number.as_str();
+                if lexeme.contains(['.', 'e', 'E']) {
+                    let value = lexeme.parse::<f64>().expect("finite binary64 JSON number");
+                    assert!(
+                        value.is_finite(),
+                        "canonical JSON forbids non-finite floats"
+                    );
+                    output.extend_from_slice(ryu_js::Buffer::new().format_finite(value).as_bytes());
+                } else if lexeme == "-0" {
+                    output.push(b'0');
                 } else {
-                    output.extend_from_slice(rendered.as_bytes());
+                    output.extend_from_slice(lexeme.as_bytes());
                 }
             }
             Value::String(text) => output.extend_from_slice(
@@ -309,7 +315,7 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
     );
     let index: Value = serde_json::from_slice(&index_bytes).expect("parse fixture index");
     let index = object(&index);
-    assert_eq!(number(&index["fixture_shape_version"]), 2);
+    assert_eq!(number(&index["fixture_shape_version"]), 3);
     assert_eq!(text(&index["readiness"]), "scaffold");
     assert_eq!(number(&index["opaque_blocks"]), 0);
     assert_eq!(text(&index["source_db_sha256"]), DB_SHA256);
@@ -402,13 +408,17 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
         "hand-written independent canonical-form vectors; the numbered algorithm is normative and these vectors are conformance checks"
     );
     let rules = array(&vectors["normative_algorithm"]);
-    assert_eq!(rules.len(), 6);
+    assert_eq!(rules.len(), 8);
     for (index, rule) in rules.iter().enumerate() {
         assert_eq!(number(&object(rule)["rule"]), index as u64 + 1);
         assert!(!text(&object(rule)["text"]).is_empty());
     }
+    let number_reference = object(&vectors["number_reference"]);
+    assert_eq!(text(&number_reference["engine"]), "Node.js v22.23.1");
+    assert!(text(&number_reference["n1"]).contains("BigInt"));
+    assert!(text(&number_reference["n2"]).contains("JSON.stringify"));
     let vector_values = array(&vectors["vectors"]);
-    assert_eq!(vector_values.len(), 14);
+    assert_eq!(vector_values.len(), 31);
     for vector in vector_values {
         let vector = object(vector);
         let name = text(&vector["name"]);
@@ -423,10 +433,12 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
             expected,
             "canonical JSON vector {name}"
         );
+        let reparsed =
+            serde_json::from_slice::<Value>(expected).expect("parse canonical vector output");
         assert_eq!(
-            serde_json::from_slice::<Value>(expected).expect("parse canonical vector"),
-            vector["input"],
-            "canonical JSON round trip {name}"
+            canonical_json_bytes(&reparsed),
+            expected,
+            "canonical JSON vector output is idempotent {name}"
         );
     }
 

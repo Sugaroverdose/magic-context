@@ -55,6 +55,8 @@ drive-fault = []
 
 [dev-dependencies]
 subc-core = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+ryu-js = "1.0.3"
 # Enable the store's seed helpers for mc-module's compose tests (populate memories +
 # mutations). The feature is gated so the writers never reach production builds.
 mc-store = { workspace = true, features = ["test-support"] }
