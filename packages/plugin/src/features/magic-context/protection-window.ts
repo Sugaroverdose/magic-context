@@ -261,8 +261,9 @@ export function readEpochFloorSnapshot(db: Database, sessionId: string): number 
 }
 
 /**
- * Compute the protection window for a session by loading all persisted tool rows
- * from the database.
+ * Read only the persisted tool suffix needed for protection. A tag-number group
+ * can span pages, so test the stopping condition only when the next group starts.
+ * Dropped rows still contribute to chronology and mass, just as in the pure walk.
  */
 export function getProtectionWindowForSession(
     db: Database,
@@ -274,13 +275,37 @@ export function getProtectionWindowForSession(
             ? floor
             : (readEpochFloorSnapshot(db, sessionId) ?? 0);
 
-    const rows = db
-        .prepare(
-            `SELECT ${TAG_SELECT_COLUMNS} FROM tags
-             WHERE session_id = ? AND type = 'tool'
-             ORDER BY tag_number ASC, id ASC`,
-        )
-        .all(sessionId) as ProtectionWindowRow[];
+    const pageSize = 256;
+    // Exclude the tool-owner partial index from planning: without ANALYZE it can
+    // win over chronology and force a whole-session sort before each small page.
+    const projection = `SELECT ${TAG_SELECT_COLUMNS} FROM tags
+        WHERE session_id = ? AND +type = 'tool'`;
+    const order = `ORDER BY tag_number DESC, id DESC LIMIT ${pageSize}`;
+    let page = db.prepare(`${projection} ${order}`).all(sessionId) as ProtectionWindowRow[];
+    const rows: ProtectionWindowRow[] = [];
+    let mass = 0;
+    let distinctTags = 0;
+    let currentTag: number | null = null;
+
+    while (page.length > 0) {
+        for (const row of page) {
+            const tagNumber = getRowTagNumber(row);
+            if (tagNumber !== currentTag) {
+                if (distinctTags >= 3 && mass >= effectiveFloor) {
+                    return computeProtectionWindow(rows, effectiveFloor);
+                }
+                distinctTags++;
+                currentTag = tagNumber;
+            }
+            rows.push(row);
+            mass += rowWindowMass(row);
+        }
+        if (page.length < pageSize) break;
+        const last = page[page.length - 1];
+        page = db
+            .prepare(`${projection} AND (tag_number, id) < (?, ?) ${order}`)
+            .all(sessionId, getRowTagNumber(last), getRowIdentity(last)) as ProtectionWindowRow[];
+    }
 
     return computeProtectionWindow(rows, effectiveFloor);
 }
