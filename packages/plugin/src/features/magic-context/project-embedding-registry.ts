@@ -595,6 +595,12 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             // intentionally omitted from identity (stored vectors use passage).
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
+            ...(config.query_instruction !== undefined
+                ? { query_instruction: config.query_instruction }
+                : {}),
+            ...(config.document_prefix !== undefined
+                ? { document_prefix: config.document_prefix }
+                : {}),
             ...(truncate ? { truncate } : {}),
             ...(config.max_input_tokens
                 ? {
@@ -687,6 +693,8 @@ function createProvider(
             apiKey: config.api_key,
             inputType: config.input_type,
             queryInputType: config.query_input_type,
+            queryInstruction: config.query_instruction,
+            documentPrefix: config.document_prefix,
             truncate: config.truncate,
             maxInputTokens: config.max_input_tokens,
         });

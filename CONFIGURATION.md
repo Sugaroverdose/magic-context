@@ -623,6 +623,10 @@ Controls semantic search for cross-session memories.
 | `local_dtype` | `string` | — | Local provider only. ONNX model dtype passed to the transformers.js feature-extraction pipeline (`auto`, `fp32`, `fp16`, `q8`, `int8`, `uint8`, `q4`, `bnb4`, `q4f16`, `q2`, `q2f16`, `q1`, `q1f16`). Omitted keeps the default `fp32` behavior. |
 | `endpoint` | `string` | — | Required for `"openai-compatible"`. |
 | `api_key` | `string` | — | Optional API key for remote endpoints. |
+| `query_instruction` | `string` \| `false` | model-family recipe | OpenAI-compatible query prefix. A string is prepended verbatim; `false` disables the built-in recipe. User-level only. |
+| `document_prefix` | `string` | model-family recipe | OpenAI-compatible stored-document prefix. Empty for Qwen3/gte/e5 instruct and `"search_document: "` for Nomic by default. User-level only. |
+
+Instruction-tuned embedding models are trained to distinguish retrieval queries from passages, so Magic Context automatically prepends the model card's query recipe for Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families. Plain local encoders are unchanged. Query instructions affect only live search vectors, not stored document vectors, so changing `query_instruction` does not re-embed the corpus; changing a non-empty `document_prefix` does because it changes every stored vector.
 
 When `provider: "off"`:
 

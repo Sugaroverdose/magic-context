@@ -43,7 +43,13 @@ const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descrip
  * historian spend on the user's dime.
  */
 const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools"] as const;
-const EMBEDDING_DESTINATION_FIELDS = ["endpoint", "provider", "fallback_provider"] as const;
+const EMBEDDING_USER_ONLY_FIELDS = [
+    "endpoint",
+    "provider",
+    "fallback_provider",
+    "query_instruction",
+    "document_prefix",
+] as const;
 const PERCENTAGE_THRESHOLD_REASON =
     "security: a repository may only raise compaction thresholds above the user's effective value; it cannot force earlier historian work or cloned-repo cost escalation.";
 const TOKEN_THRESHOLD_REASON =
@@ -335,8 +341,9 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  *    confidentiality. Only the machine operator's user config may opt into an
  *    externally managed trusted-group deployment.
  *  - `embedding.endpoint` / `embedding.provider` — a repo must not choose
- *    where private memory/search/commit text is embedded. User-level config is
- *    the trust boundary for embedding destinations.
+ *    where private memory/search/commit text is embedded. Query/document prefix
+ *    overrides also remain user-owned so a repository cannot alter the text sent
+ *    to that destination or silently force a corpus re-embed.
  *  - `transform_mode` is intentionally allowed at project tier so a repository
  *    can opt its own runtime into the experimental Rust pipeline. The resolver
  *    requires trusted user-level `subc` configuration before Rust can activate.
@@ -488,7 +495,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
     const embedding = projectRaw.embedding;
     if (isPlainObject(embedding)) {
         const removed: string[] = [];
-        for (const field of EMBEDDING_DESTINATION_FIELDS) {
+        for (const field of EMBEDDING_USER_ONLY_FIELDS) {
             if (field in embedding) {
                 delete embedding[field];
                 removed.push(field);
@@ -497,7 +504,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring embedding.${removed.join("/")} from project config ` +
-                    "(security: a repository cannot choose where private text is embedded).",
+                    "(security: a repository cannot choose where or how private text is embedded).",
             );
         }
     }

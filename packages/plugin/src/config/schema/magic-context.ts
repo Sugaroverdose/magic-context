@@ -677,6 +677,18 @@ const BaseEmbeddingConfigSchema = z
             .describe(
                 "Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type.",
             ),
+        query_instruction: z
+            .union([z.string(), z.literal(false)])
+            .optional()
+            .describe(
+                "OpenAI-compatible query prefix override. A string is prepended verbatim to search queries; false disables the built-in model-family instruction. Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families have built-in recipes. Query-only changes do not re-embed stored content. User-level only; project values are ignored.",
+            ),
+        document_prefix: z
+            .string()
+            .optional()
+            .describe(
+                "OpenAI-compatible stored-document prefix override, prepended verbatim. Defaults to the model-family recipe (empty for Qwen3/gte/e5 instruct; 'search_document: ' for Nomic). Changing it changes stored vectors and triggers re-embedding. User-level only; project values are ignored.",
+            ),
         truncate: z
             .string()
             .optional()
@@ -754,6 +766,12 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
+            ...(data.query_instruction !== undefined
+                ? { query_instruction: data.query_instruction }
+                : {}),
+            ...(data.document_prefix !== undefined
+                ? { document_prefix: data.document_prefix }
+                : {}),
             ...(truncate ? { truncate } : {}),
             ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };
@@ -787,6 +805,12 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
+            ...(data.query_instruction !== undefined
+                ? { query_instruction: data.query_instruction }
+                : {}),
+            ...(data.document_prefix !== undefined
+                ? { document_prefix: data.document_prefix }
+                : {}),
             ...(truncate ? { truncate } : {}),
             ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };

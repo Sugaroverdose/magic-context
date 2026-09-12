@@ -698,6 +698,35 @@ describe("MagicContextConfigSchema", () => {
             ).toThrow();
         });
 
+        it("preserves embedding instruction prefixes byte-for-byte and accepts false", () => {
+            const queryInstruction = "Instruct: custom task\nQuery: ";
+            const documentPrefix = "search_document: ";
+            const parsed = MagicContextConfigSchema.parse({
+                embedding: {
+                    provider: "openai-compatible",
+                    endpoint: "http://localhost:1234/v1",
+                    model: "custom/model",
+                    query_instruction: queryInstruction,
+                    document_prefix: documentPrefix,
+                },
+            }).embedding;
+
+            expect(parsed).toMatchObject({
+                query_instruction: queryInstruction,
+                document_prefix: documentPrefix,
+            });
+            expect(
+                MagicContextConfigSchema.parse({
+                    embedding: {
+                        provider: "openai-compatible",
+                        endpoint: "http://localhost:1234/v1",
+                        model: "custom/model",
+                        query_instruction: false,
+                    },
+                }).embedding,
+            ).toMatchObject({ query_instruction: false });
+        });
+
         it("defaults local embedding runtime to auto and accepts explicit overrides", () => {
             expect(
                 MagicContextConfigSchema.parse({ embedding: { provider: "local" } }).embedding,

@@ -39,11 +39,13 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     // not let a broken value re-register mid-session.
     "embedding.input_type",
     "embedding.truncate",
-    // max_input_tokens + query_input_type fold into the chunk-embedding identity
-    // (getChunkEmbeddingModelId); a failed substitution on either would otherwise
-    // register as trusted and could drive a bogus chunk identity / GC.
+    // max_input_tokens and document_prefix affect stored chunk vectors;
+    // query_input_type and query_instruction affect live query vectors. A failed
+    // substitution on any of them must not register a bogus runtime or model identity.
     "embedding.max_input_tokens",
     "embedding.query_input_type",
+    "embedding.query_instruction",
+    "embedding.document_prefix",
     "embedding.fallback_provider",
     "subc",
     "subc.connection_file",

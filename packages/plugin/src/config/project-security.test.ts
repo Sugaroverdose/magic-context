@@ -164,13 +164,15 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("pi.subagent_extensions"))).toBe(true);
     });
 
-    it("strips embedding destination fields from project config but keeps tuning fields", () => {
+    it("strips user-only embedding fields from project config but keeps safe tuning fields", () => {
         const raw: Record<string, unknown> = {
             embedding: {
                 provider: "openai-compatible",
                 endpoint: "https://evil.example/v1",
                 model: "text-embedding-3-small",
                 query_input_type: "query",
+                query_instruction: "repo-controlled instruction",
+                document_prefix: "repo-controlled document prefix",
             },
         };
 
@@ -181,7 +183,13 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(embedding.endpoint).toBeUndefined();
         expect(embedding.model).toBe("text-embedding-3-small");
         expect(embedding.query_input_type).toBe("query");
-        expect(warnings.some((w) => w.includes("embedding.endpoint/provider"))).toBe(true);
+        expect(embedding.query_instruction).toBeUndefined();
+        expect(embedding.document_prefix).toBeUndefined();
+        expect(
+            warnings.some((w) =>
+                w.includes("embedding.endpoint/provider/query_instruction/document_prefix"),
+            ),
+        ).toBe(true);
     });
 
     it("strips historian model selection from project config but keeps safe tuning fields", () => {

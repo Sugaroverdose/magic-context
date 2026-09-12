@@ -11,7 +11,7 @@ export interface EmbeddingProvider {
      *  request (or long-running local inference) before the provider's internal
      *  timeout fires — used by transform-hot-path callers that have their own
      *  sub-timeout (e.g. 3s auto-search wants to cancel the 30s embed fetch).
-     *  `purpose` selects asymmetric input_type on openai-compatible providers;
+     *  `purpose` selects asymmetric provider-side query/document handling;
      *  defaults to `"passage"` (indexed/stored content). */
     embed(
         text: string,
@@ -30,6 +30,7 @@ export interface EmbeddingProvider {
     embedItems?(
         items: readonly { id: string; text: string; contentSha256: string }[],
         signal?: AbortSignal,
+        purpose?: EmbeddingPurpose,
     ): Promise<Map<string, Float32Array>>;
     dispose(): Promise<void>;
     isLoaded(): boolean;

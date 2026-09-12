@@ -2,6 +2,7 @@ import { log } from "../../../shared/logger";
 import { sanitizeDiagnosticText } from "../../../shared/redaction";
 import type { EmbeddingFailure, EmbeddingFailureClass } from "./embedding-failure";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
+import { embeddingModelsMatch, resolveEmbeddingTextPrefixes } from "./embedding-model-match";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 import { blockedEmbeddingEndpointReason } from "./embedding-ssrf";
 
@@ -13,6 +14,10 @@ interface OpenAICompatibleEmbeddingProviderOptions {
     inputType?: string;
     /** Optional query `input_type` for search embeddings; falls back to inputType when unset. */
     queryInputType?: string;
+    /** Query text prefix override. `false` disables the model-family default. */
+    queryInstruction?: string | false;
+    /** Passage text prefix override. Defaults to the model-family recipe. */
+    documentPrefix?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
     truncate?: string;
     /** Maximum safe input tokens for chunk embeddings. */
@@ -34,72 +39,7 @@ function normalizeEndpoint(endpoint?: string): string {
     return endpoint?.trim().replace(/\/+$/, "") ?? "";
 }
 
-type ParsedEmbeddingModel = {
-    base: string;
-    tag?: string;
-};
-
-function parseEmbeddingModel(model: string): ParsedEmbeddingModel {
-    const lastColon = model.lastIndexOf(":");
-    // Colons in host-like prefixes (for example `host:port/model`) are not
-    // model tags because they occur before the final slash.
-    if (lastColon > model.lastIndexOf("/")) {
-        return { base: model.slice(0, lastColon), tag: model.slice(lastColon + 1) };
-    }
-    return { base: model };
-}
-
-function matchNormalizedEmbeddingModels(a: string, b: string): boolean {
-    if (a.length === 0 || b.length === 0) return true; // can't compare → don't reject
-    if (a === b) return true;
-    const longer = a.length >= b.length ? a : b;
-    const shorter = a.length >= b.length ? b : a;
-    const isBoundary = (ch: string) => ch === "-" || ch === "/";
-    // Version-expansion: longer = shorter + boundary + suffix (e.g. `…-small` → `…-small-v1`).
-    if (longer.startsWith(shorter) && isBoundary(longer.charAt(shorter.length))) return true;
-    // Vendor-prefix trim: longer = prefix + boundary + shorter (e.g. `openai/X` ↔ `X`).
-    if (longer.endsWith(shorter) && isBoundary(longer.charAt(longer.length - shorter.length - 1)))
-        return true;
-    return false;
-}
-
-/**
- * Whether the model an endpoint served is the model we asked for.
- *
- * Exact match after trim+lowercase, with TOKEN-BOUNDARY prefix/suffix tolerance
- * so a server that version-expands a name (`text-embedding-3-small` →
- * `…-small-v1`) or trims a vendor prefix (`openai/text-embedding-3-small` →
- * `text-embedding-3-small`) still counts as a match. OpenRouter routing tags
- * such as `:free` are ignored when only one side has a tag, while tags on both
- * sides must be equal so Ollama model-size tags remain distinct.
- *
- * Crucially this is NOT a plain substring test. A loose `a.includes(b)` would
- * MATCH a broadly-configured name against an unrelated served model that merely
- * contains it as a middle token — e.g. configured `qwen3-embedding`, served
- * `text-embedding-qwen3-embedding-0.6b` → store 0.6b vectors under the broad
- * identity (wrong-dim corruption, the exact failure this guard exists to stop).
- * So the shorter name must align on a `-`/`/` boundary as a genuine PREFIX or
- * SUFFIX of the longer, never as an interior fragment.
- */
-export function embeddingModelsMatch(served: string, requested: string): boolean {
-    const a = served.trim().toLowerCase();
-    const b = requested.trim().toLowerCase();
-    const servedModel = parseEmbeddingModel(a);
-    const requestedModel = parseEmbeddingModel(b);
-
-    // Matching tags identify the same provider-specific model variant. Different
-    // tags can identify different weights or sizes, so they must never be ignored.
-    if (
-        servedModel.tag !== undefined &&
-        requestedModel.tag !== undefined &&
-        servedModel.tag !== requestedModel.tag
-    ) {
-        return false;
-    }
-
-    // With zero or one tag, compare the untagged names using every existing rule.
-    return matchNormalizedEmbeddingModels(servedModel.base, requestedModel.base);
-}
+export { embeddingModelsMatch } from "./embedding-model-match";
 
 /**
  * Circuit breaker constants. Shared across all callers of this provider so a
@@ -141,6 +81,8 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private readonly apiKey: string;
     private readonly inputType: string;
     private readonly queryInputType: string;
+    private readonly queryPrefix: string;
+    private readonly documentPrefix: string;
     private readonly truncate: string;
     private initialized = false;
 
@@ -165,6 +107,13 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.apiKey = options.apiKey?.trim() ?? "";
         this.inputType = options.inputType?.trim() ?? "";
         this.queryInputType = options.queryInputType?.trim() ?? "";
+        const prefixes = resolveEmbeddingTextPrefixes(
+            this.model,
+            options.queryInstruction,
+            options.documentPrefix,
+        );
+        this.queryPrefix = prefixes.queryPrefix;
+        this.documentPrefix = prefixes.documentPrefix;
         this.truncate = options.truncate?.trim() ?? "";
         this.maxInputTokens =
             typeof options.maxInputTokens === "number" && Number.isFinite(options.maxInputTokens)
@@ -176,11 +125,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             model: this.model,
             ...(this.apiKey ? { api_key: this.apiKey } : {}),
             ...(this.inputType ? { input_type: this.inputType } : {}),
+            // A document prefix changes stored vectors and MUST mirror
+            // getEmbeddingProviderIdentity exactly. Preserve an explicit empty
+            // override because it disables families such as Nomic whose default
+            // document prefix is non-empty.
+            ...(options.documentPrefix !== undefined
+                ? { document_prefix: options.documentPrefix }
+                : {}),
             // truncate participates in identity (it changes which text an
-            // over-long input embeds). MUST mirror getEmbeddingProviderIdentity
-            // exactly — a missing field here makes the provider write under a
-            // different model_id than reads/GC resolve, silently zeroing results
-            // and reaping valid vectors.
+            // over-long input embeds). A missing field here makes the provider
+            // write under a different model_id than reads/GC resolve.
             ...(this.truncate ? { truncate: this.truncate } : {}),
         });
     }
@@ -244,7 +198,10 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         // and yields a stable near-zero-information vector. Callers should avoid
         // sending empty content where possible, but this is the single chokepoint
         // that guarantees a stray empty string can't 400 the request.
-        const requestTexts = texts.map((t) => (t.trim().length === 0 ? " " : t));
+        const textPrefix = purpose === "query" ? this.queryPrefix : this.documentPrefix;
+        const requestTexts = texts.map(
+            (text) => `${textPrefix}${text.trim().length === 0 ? " " : text}`,
+        );
 
         if (!(await this.initialize())) {
             return Array.from({ length: texts.length }, () => null);

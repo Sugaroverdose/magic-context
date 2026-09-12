@@ -56,6 +56,12 @@ function fallbackConfig(
     const inputType = typeof raw.input_type === "string" ? raw.input_type.trim() : "";
     const queryInputType =
         typeof raw.query_input_type === "string" ? raw.query_input_type.trim() : "";
+    const queryInstruction =
+        typeof raw.query_instruction === "string" || raw.query_instruction === false
+            ? raw.query_instruction
+            : undefined;
+    const documentPrefix =
+        typeof raw.document_prefix === "string" ? raw.document_prefix : undefined;
     const truncate = typeof raw.truncate === "string" ? raw.truncate.trim() : "";
     const maxInputTokens =
         typeof raw.max_input_tokens === "number" ? raw.max_input_tokens : undefined;
@@ -69,6 +75,8 @@ function fallbackConfig(
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
+            ...(queryInstruction !== undefined ? { query_instruction: queryInstruction } : {}),
+            ...(documentPrefix !== undefined ? { document_prefix: documentPrefix } : {}),
             ...(truncate ? { truncate } : {}),
             ...(maxInputTokens !== undefined ? { max_input_tokens: maxInputTokens } : {}),
         };

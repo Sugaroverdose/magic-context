@@ -23,7 +23,7 @@ Add the schema line for editor validation and autocomplete:
 ```
 
 :::note
-Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Profile definitions in `profiles` are user-level only; a project may set only `profile` to choose a named user profile. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Project `protected_tokens` may likewise only raise the effective user/default protection floor. Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
+Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, `embedding.query_instruction`, `embedding.document_prefix`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Profile definitions in `profiles` are user-level only; a project may set only `profile` to choose a named user profile. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Project `protected_tokens` may likewise only raise the effective user/default protection floor. Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
 :::
 
 ## Top-level switches
@@ -125,7 +125,7 @@ The background agent that condenses old conversation into compact history.
 
 ## Memory & recall
 
-Durable project memory, semantic search, and recall features.
+Durable project memory, semantic search, and recall features. OpenAI-compatible instruction-tuned embedding families receive their documented query instruction automatically because those models were trained to distinguish retrieval queries from passages; plain local encoders remain unchanged. Query instructions affect only live search vectors, not stored vectors, so changing `embedding.query_instruction` does not re-embed the corpus. A non-empty `embedding.document_prefix` does affect stored vectors and therefore changes the embedding identity.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -150,6 +150,8 @@ Durable project memory, semantic search, and recall features.
 | `embedding.api_key` | string | — | API key for remote embedding provider (optional) |
 | `embedding.input_type` | string | — | Default input_type for stored/indexed (passage) embeddings in the request body. Required by some openai-compatible providers (e.g. NVIDIA NIM). Omitted from the request when unset. |
 | `embedding.query_input_type` | string | — | Optional input_type for query (search) embeddings on asymmetric models (e.g. NVIDIA NIM 'query'). When unset, query embeddings use embedding.input_type. Passage/stored content always uses embedding.input_type. |
+| `embedding.query_instruction` | string \\| boolean | — | OpenAI-compatible query prefix override. A string is prepended verbatim to search queries; false disables the built-in model-family instruction. Qwen3-Embedding, gte-Qwen instruct, e5 instruct, and Nomic families have built-in recipes. Query-only changes do not re-embed stored content. User-level only; project values are ignored. |
+| `embedding.document_prefix` | string | — | OpenAI-compatible stored-document prefix override, prepended verbatim. Defaults to the model-family recipe (empty for Qwen3/gte/e5 instruct; 'search_document: ' for Nomic). Changing it changes stored vectors and triggers re-embedding. User-level only; project values are ignored. |
 | `embedding.truncate` | string | — | Optional truncate mode sent in the embedding request body (e.g. NVIDIA NIM accepts 'NONE' \| 'START' \| 'END'). Omitted from the request when unset. |
 | `embedding.max_input_tokens` | integer (–9007199254740991) | — | Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted. |
 | `embedding.local_runtime` | `"auto"` \\| `"native"` \\| `"wasm"` | `"auto"` | Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Set 'native' only to prefer speed while accepting that pre-1.4.0 Bun crash risk, or 'wasm' to avoid loading the native addon. |

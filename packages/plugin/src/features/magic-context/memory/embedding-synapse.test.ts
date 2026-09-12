@@ -129,7 +129,7 @@ describe("SynapseEmbeddingProvider", () => {
         expect(provider.maxInputTokens).toBe(512);
         expect(provider.modelId).toBe(getSynapseLaneIdentity("gte-modernbert-base-f16", "fp-live"));
 
-        const vector = await provider.embed("hello");
+        const vector = await provider.embed("hello", undefined, "query");
         expect(vector).toEqual(new Float32Array([1, 2, 3]));
         const request = client.requests.find((entry) => entry.method === "embed.query");
         expect(request?.params).toMatchObject({
@@ -138,6 +138,7 @@ describe("SynapseEmbeddingProvider", () => {
             required_epoch: 0,
             allow_equivalent: false,
             accept_declared: false,
+            purpose: "query",
         });
     });
 
@@ -150,13 +151,19 @@ describe("SynapseEmbeddingProvider", () => {
             clientFactory: async () => client,
         });
 
-        const vectors = await provider.embedItems([
-            { id: "memory:1", text: "one", contentSha256: sha256("one") },
-            { id: "memory:2", text: "two", contentSha256: sha256("two") },
-        ]);
+        const vectors = await provider.embedItems(
+            [
+                { id: "memory:1", text: "one", contentSha256: sha256("one") },
+                { id: "memory:2", text: "two", contentSha256: sha256("two") },
+            ],
+            undefined,
+            "query",
+        );
 
         expect(vectors.size).toBe(2);
-        expect(client.requests.filter((entry) => entry.method === "embed.batch")).toHaveLength(3);
+        const batchRequests = client.requests.filter((entry) => entry.method === "embed.batch");
+        expect(batchRequests).toHaveLength(3);
+        expect(batchRequests[0]?.params).toMatchObject({ purpose: "query" });
         const keys = client.requests
             .filter((entry) => entry.method === "embed.batch")
             .map((entry) => (entry.params as { request_key: string }).request_key);

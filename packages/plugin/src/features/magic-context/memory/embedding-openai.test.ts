@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
+import { QWEN3_QUERY_INSTRUCTION, resolveEmbeddingTextPrefixes } from "./embedding-model-match";
 import { embeddingModelsMatch, OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 
 describe("provider modelId matches canonical identity (write/read must agree)", () => {
@@ -33,6 +34,15 @@ describe("provider modelId matches canonical identity (write/read must agree)", 
                 truncate: "END",
             },
         },
+        {
+            name: "with document prefix",
+            config: {
+                provider: "openai-compatible",
+                endpoint: "http://h/v1",
+                model: "nomic-ai/nomic-embed-text-v1.5",
+                document_prefix: "custom-document: ",
+            },
+        },
     ];
     for (const c of cases) {
         test(c.name, () => {
@@ -42,6 +52,14 @@ describe("provider modelId matches canonical identity (write/read must agree)", 
                 apiKey: c.config.provider === "openai-compatible" ? c.config.api_key : undefined,
                 inputType:
                     c.config.provider === "openai-compatible" ? c.config.input_type : undefined,
+                queryInstruction:
+                    c.config.provider === "openai-compatible"
+                        ? c.config.query_instruction
+                        : undefined,
+                documentPrefix:
+                    c.config.provider === "openai-compatible"
+                        ? c.config.document_prefix
+                        : undefined,
                 truncate: c.config.provider === "openai-compatible" ? c.config.truncate : undefined,
             });
             expect(provider.modelId).toBe(getEmbeddingProviderIdentity(c.config));
@@ -242,6 +260,96 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
         const body = JSON.parse(init.body as string) as Record<string, unknown>;
         expect("input_type" in body).toBe(false);
+    });
+});
+
+describe("embedding model-family text recipes", () => {
+    test("normalizes vendor prefixes and OpenRouter tags for instruct families", () => {
+        expect(
+            resolveEmbeddingTextPrefixes("private/openrouter/qwen/qwen3-embedding-8b:free"),
+        ).toEqual({ queryPrefix: QWEN3_QUERY_INSTRUCTION, documentPrefix: "" });
+        expect(resolveEmbeddingTextPrefixes("Alibaba-NLP/gte-Qwen2-7B-instruct:latest")).toEqual({
+            queryPrefix: QWEN3_QUERY_INSTRUCTION,
+            documentPrefix: "",
+        });
+        expect(resolveEmbeddingTextPrefixes("intfloat/multilingual-e5-large-instruct")).toEqual({
+            queryPrefix: QWEN3_QUERY_INSTRUCTION,
+            documentPrefix: "",
+        });
+    });
+
+    test("keeps plain encoders bare and gives Nomic its asymmetric recipe", () => {
+        expect(resolveEmbeddingTextPrefixes("openai/text-embedding-3-small")).toEqual({
+            queryPrefix: "",
+            documentPrefix: "",
+        });
+        expect(resolveEmbeddingTextPrefixes("nomic-ai/nomic-embed-text-v1.5:latest")).toEqual({
+            queryPrefix: "search_query: ",
+            documentPrefix: "search_document: ",
+        });
+    });
+});
+
+describe("OpenAICompatibleEmbeddingProvider instruction wire", () => {
+    test("sends the exact family recipe by purpose and honors the disable override", async () => {
+        const inputs: string[][] = [];
+        const server = Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            async fetch(request) {
+                const body = (await request.json()) as { input: string[]; model: string };
+                inputs.push(body.input);
+                return Response.json({
+                    model: body.model,
+                    data: body.input.map(() => ({ embedding: [0.1, 0.2, 0.3] })),
+                });
+            },
+        });
+        const endpoint = `http://127.0.0.1:${server.port}/v1`;
+
+        try {
+            const qwen = new OpenAICompatibleEmbeddingProvider({
+                endpoint,
+                model: "qwen/qwen3-embedding-8b:free",
+            });
+            await qwen.embed("find the answer", undefined, "query");
+            await qwen.embed("stored passage", undefined, "passage");
+
+            const disabled = new OpenAICompatibleEmbeddingProvider({
+                endpoint,
+                model: "qwen/qwen3-embedding-8b:free",
+                queryInstruction: false,
+            });
+            await disabled.embed("find the answer", undefined, "query");
+            await disabled.embed("stored passage", undefined, "passage");
+
+            const plain = new OpenAICompatibleEmbeddingProvider({
+                endpoint,
+                model: "text-embedding-3-small",
+            });
+            await plain.embed("plain query", undefined, "query");
+            await plain.embed("plain document", undefined, "passage");
+
+            const nomic = new OpenAICompatibleEmbeddingProvider({
+                endpoint,
+                model: "nomic-ai/nomic-embed-text-v1.5",
+            });
+            await nomic.embed("nomic query", undefined, "query");
+            await nomic.embed("nomic document", undefined, "passage");
+        } finally {
+            server.stop(true);
+        }
+
+        expect(inputs).toEqual([
+            [`${QWEN3_QUERY_INSTRUCTION}find the answer`],
+            ["stored passage"],
+            ["find the answer"],
+            ["stored passage"],
+            ["plain query"],
+            ["plain document"],
+            ["search_query: nomic query"],
+            ["search_document: nomic document"],
+        ]);
     });
 });
 

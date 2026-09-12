@@ -393,6 +393,53 @@ describe("project embedding registry", () => {
         });
     });
 
+    it("keeps query instructions out of stored-vector identities and folds document prefixes in", () => {
+        const db = useTempDb();
+        const projectIdentity = "git:prefix-identity";
+        const features = { memoryEnabled: true, gitCommitEnabled: true };
+        const baseConfig: EmbeddingConfig = {
+            provider: "openai-compatible",
+            model: "qwen/qwen3-embedding-8b:free",
+            endpoint: "https://openrouter.ai/api/v1",
+        };
+
+        const withFamilyDefault = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            baseConfig,
+            features,
+            "/repo",
+        );
+        const withQueryDisabled = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            { ...baseConfig, query_instruction: false },
+            features,
+            "/repo",
+        );
+        const withCustomQuery = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            { ...baseConfig, query_instruction: "Instruct: custom\nQuery: " },
+            features,
+            "/repo",
+        );
+        const withDocumentPrefix = registerProjectEmbedding(
+            db,
+            projectIdentity,
+            { ...baseConfig, document_prefix: "search_document: " },
+            features,
+            "/repo",
+        );
+
+        expect(withQueryDisabled.modelId).toBe(withFamilyDefault.modelId);
+        expect(withQueryDisabled.chunkModelId).toBe(withFamilyDefault.chunkModelId);
+        expect(withCustomQuery.modelId).toBe(withFamilyDefault.modelId);
+        expect(withCustomQuery.chunkModelId).toBe(withFamilyDefault.chunkModelId);
+        expect(withDocumentPrefix.modelId).not.toBe(withFamilyDefault.modelId);
+        expect(withDocumentPrefix.chunkModelId).not.toBe(withFamilyDefault.chunkModelId);
+    });
+
     it("preserves existing provider and runtime identity goldens", () => {
         const db = useTempDb();
         const features = { memoryEnabled: true, gitCommitEnabled: true };

@@ -957,6 +957,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         signal?: AbortSignal,
         _purpose?: EmbeddingPurpose,
     ): Promise<Float32Array | null> {
+        // MiniLM and gte-modernbert are plain encoders, so query/document text
+        // stays byte-identical unless a future local model owns its own recipe.
         // Local inference is fast (typically <100ms) and can't be cancelled
         // mid-compute with transformers.js, so we honor `signal` only as a
         // pre-flight check — callers whose timeout already fired get null
@@ -1011,6 +1013,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         signal?: AbortSignal,
         _purpose?: EmbeddingPurpose,
     ): Promise<(Float32Array | null)[]> {
+        // Plain local encoders intentionally receive the original text for both purposes.
         if (texts.length === 0) {
             return [];
         }

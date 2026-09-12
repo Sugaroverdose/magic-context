@@ -149,7 +149,7 @@ const SECTION_ORDER: Array<{ keys: string[]; title: string; intro: string }> = [
     {
         keys: ["memory", "embedding"],
         title: "Memory & recall",
-        intro: "Durable project memory, semantic search, and recall features.",
+        intro: "Durable project memory, semantic search, and recall features. OpenAI-compatible instruction-tuned embedding families receive their documented query instruction automatically because those models were trained to distinguish retrieval queries from passages; plain local encoders remain unchanged. Query instructions affect only live search vectors, not stored vectors, so changing `embedding.query_instruction` does not re-embed the corpus. A non-empty `embedding.document_prefix` does affect stored vectors and therefore changes the embedding identity.",
     },
     {
         keys: ["dreamer"],
@@ -266,7 +266,7 @@ Add the schema line for editor validation and autocomplete:
 \`\`\`
 
 :::note
-Project-level configs cannot use \`{env:VAR}\` / \`{file:path}\` expansion. A cloned repository also cannot set \`output_reserve\`, \`sqlite.*\`, \`storage.enforce_private_permissions\`, hidden-agent prompts/permissions, \`historian.model\`, or \`historian.fallback_models\`. Profile definitions in \`profiles\` are user-level only; a project may set only \`profile\` to choose a named user profile. Project \`execute_threshold_percentage\` / \`execute_threshold_tokens\` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Project \`protected_tokens\` may likewise only raise the effective user/default protection floor. Dreamer model/schedule/task tuning and \`memory.enabled\` remain allowed project overrides.
+Project-level configs cannot use \`{env:VAR}\` / \`{file:path}\` expansion. A cloned repository also cannot set \`output_reserve\`, \`sqlite.*\`, \`storage.enforce_private_permissions\`, \`embedding.query_instruction\`, \`embedding.document_prefix\`, hidden-agent prompts/permissions, \`historian.model\`, or \`historian.fallback_models\`. Profile definitions in \`profiles\` are user-level only; a project may set only \`profile\` to choose a named user profile. Project \`execute_threshold_percentage\` / \`execute_threshold_tokens\` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Project \`protected_tokens\` may likewise only raise the effective user/default protection floor. Dreamer model/schedule/task tuning and \`memory.enabled\` remain allowed project overrides.
 :::
 
 ${sections.join("\n\n")}

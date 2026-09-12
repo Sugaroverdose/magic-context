@@ -85,6 +85,12 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             ...(apiKey ? { api_key: apiKey } : {}),
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
+            ...(config.query_instruction !== undefined
+                ? { query_instruction: config.query_instruction }
+                : {}),
+            ...(config.document_prefix !== undefined
+                ? { document_prefix: config.document_prefix }
+                : {}),
             ...(truncate ? { truncate } : {}),
             ...(config.max_input_tokens
                 ? {
@@ -134,6 +140,8 @@ function createProvider(config: EmbeddingConfig): EmbeddingProvider | null {
             apiKey: config.api_key,
             inputType: config.input_type,
             queryInputType: config.query_input_type,
+            queryInstruction: config.query_instruction,
+            documentPrefix: config.document_prefix,
             truncate: config.truncate,
             maxInputTokens: config.max_input_tokens,
         });
@@ -194,7 +202,12 @@ export function initializeEmbedding(config: EmbeddingConfig): void {
     const previousProviderIdentity =
         previousProvider?.modelId ?? resolveProviderIdentity(embeddingConfig);
 
-    if (previousProviderIdentity === nextProviderIdentity) {
+    const queryRecipeUnchanged =
+        embeddingConfig.provider !== "openai-compatible" ||
+        nextConfig.provider !== "openai-compatible" ||
+        (embeddingConfig.query_instruction === nextConfig.query_instruction &&
+            embeddingConfig.query_input_type === nextConfig.query_input_type);
+    if (previousProviderIdentity === nextProviderIdentity && queryRecipeUnchanged) {
         embeddingConfig = nextConfig;
         return;
     }

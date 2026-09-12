@@ -5,14 +5,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { loadPluginConfig } from "../packages/plugin/src/config";
+import type { EmbeddingConfig } from "../packages/plugin/src/config/schema/magic-context";
 import {
 	buildCanonicalChunkTextFromFts,
 	CHUNK_WINDOW_SAFETY_RATIO,
 	loadCompartmentChunkEmbeddingsForSearch,
 } from "../packages/plugin/src/features/magic-context/compartment-chunk-embedding";
-import { estimateTokens } from "../packages/plugin/src/hooks/magic-context/read-session-formatting";
 import { getLastCompartmentEndMessage } from "../packages/plugin/src/features/magic-context/compartment-storage";
 import { cosineSimilarity } from "../packages/plugin/src/features/magic-context/memory/cosine-similarity";
+import { resolveEmbeddingTextPrefixes } from "../packages/plugin/src/features/magic-context/memory/embedding-model-match";
 import { sanitizeFtsQuery } from "../packages/plugin/src/features/magic-context/memory/storage-memory-fts";
 import {
 	embedBatchForProject,
@@ -22,7 +23,6 @@ import {
 	registerProjectEmbedding,
 	registerProjectShadowEmbedding,
 } from "../packages/plugin/src/features/magic-context/project-embedding-registry";
-import { resolveEmbeddingRouting } from "../packages/plugin/src/plugin/embedding-routing";
 import {
 	type CapturedQueryEmbedding,
 	type UnifiedSearchOptions,
@@ -34,6 +34,8 @@ import {
 	openDatabase,
 } from "../packages/plugin/src/features/magic-context/storage-db";
 import { getVisibleMemoryIds } from "../packages/plugin/src/hooks/magic-context/inject-compartments";
+import { estimateTokens } from "../packages/plugin/src/hooks/magic-context/read-session-formatting";
+import { resolveEmbeddingRouting } from "../packages/plugin/src/plugin/embedding-routing";
 import {
 	getDataDir,
 	getMagicContextStorageDir,
@@ -90,6 +92,8 @@ interface Fixture {
 	queries: QueryFixture[];
 }
 
+type QueryInstructionMode = "config" | "on" | "off";
+
 interface CliArgs {
 	fixturePath: string;
 	outputPath: string;
@@ -98,6 +102,7 @@ interface CliArgs {
 	openCodeDbPath: string;
 	skipP1: boolean;
 	compareSpaces: boolean;
+	queryInstructionMode: QueryInstructionMode;
 }
 
 interface SafeHit {
@@ -254,6 +259,14 @@ function parseArgs(): CliArgs {
 		const index = args.indexOf(flag);
 		return index >= 0 ? args[index + 1] : undefined;
 	};
+	const queryInstructionValue = value("--query-instruction");
+	if (
+		queryInstructionValue !== undefined &&
+		queryInstructionValue !== "on" &&
+		queryInstructionValue !== "off"
+	) {
+		throw new Error("--query-instruction must be 'on' or 'off'");
+	}
 	if (args.includes("--help")) {
 		console.log(`Usage: bun scripts/ctx-search-benchmark.ts [options]
 
@@ -265,6 +278,8 @@ Options:
   --opencode-db PATH Live opencode.db path (opened via file: URI mode=ro)
   --skip-p1          Skip the on-the-fly P1-summary probe
   --compare-spaces   Compare qwen primary and Synapse shadow end-to-end
+  --query-instruction on|off
+                     Force the model-family query recipe on or off
   --help             Show this help`);
 		process.exit(0);
 	}
@@ -287,7 +302,32 @@ Options:
 		),
 		skipP1: args.includes("--skip-p1"),
 		compareSpaces: args.includes("--compare-spaces"),
+		queryInstructionMode: queryInstructionValue ?? "config",
 	};
+}
+
+function applyQueryInstructionMode(
+	config: ReturnType<typeof loadPluginConfig>,
+	mode: QueryInstructionMode,
+): ReturnType<typeof loadPluginConfig> {
+	if (mode === "config" || config.embedding.provider !== "openai-compatible")
+		return config;
+	const embedding = { ...config.embedding } as EmbeddingConfig;
+	if (mode === "off") {
+		embedding.query_instruction = false;
+	} else {
+		delete embedding.query_instruction;
+	}
+	return { ...config, embedding };
+}
+
+function queryRecipeCacheKey(config: EmbeddingConfig): string {
+	if (config.provider !== "openai-compatible") return config.provider;
+	return resolveEmbeddingTextPrefixes(
+		config.model,
+		config.query_instruction,
+		config.document_prefix,
+	).queryPrefix;
 }
 
 function openReadOnly(path: string): DatabaseType {
@@ -1431,12 +1471,14 @@ async function runSpaceComparison(args: {
 		synapse: new Map(),
 	};
 	const timings: Record<EmbeddingSpace, TimedEmbedding[]> = { qwen: [], synapse: [] };
+	const primaryQueryRecipe = queryRecipeCacheKey(config.embedding);
 	const embedOnce = (
 		space: EmbeddingSpace,
 		projectKey: string,
 		text: string,
 	): Promise<CapturedQueryEmbedding | null> => {
-		const cacheKey = `${projectKey}\u0000${text}`;
+		const recipeKey = space === "qwen" ? primaryQueryRecipe : "synapse-owned";
+		const cacheKey = `${projectKey}\u0000${recipeKey}\u0000${text}`;
 		let promise = caches[space].get(cacheKey);
 		if (promise) return promise;
 		promise = (async () => {
@@ -1567,6 +1609,7 @@ async function runSpaceComparison(args: {
 			openMode: "file: URI mode=ro + readonly constructor flag",
 		},
 		embedding: {
+			queryInstructionMode: cli.queryInstructionMode,
 			primaryProvider: config.embedding.provider,
 			primaryModel: "model" in config.embedding ? config.embedding.model : "off",
 			shadowProvider: "synapse",
@@ -1600,7 +1643,10 @@ async function main(): Promise<void> {
 		throw new Error("Could not initialize in-memory registration database");
 
 	try {
-		const config = loadPluginConfig(process.cwd());
+		const config = applyQueryInstructionMode(
+			loadPluginConfig(process.cwd()),
+			args.queryInstructionMode,
+		);
 		const projectSnapshots = new Map<
 			string,
 			NonNullable<ReturnType<typeof getProjectEmbeddingSnapshot>>
@@ -1696,11 +1742,12 @@ async function main(): Promise<void> {
 			string,
 			Promise<CapturedQueryEmbedding | null>
 		>();
+		const queryRecipe = queryRecipeCacheKey(config.embedding);
 		const embedOnce = (
 			projectKey: string,
 			text: string,
 		): Promise<CapturedQueryEmbedding | null> => {
-			const cacheKey = `${projectKey}\u0000${text}`;
+			const cacheKey = `${projectKey}\u0000${queryRecipe}\u0000${text}`;
 			let promise = queryEmbeddingCache.get(cacheKey);
 			if (!promise) {
 				const project = fixture.projects[projectKey];
@@ -1922,6 +1969,7 @@ async function main(): Promise<void> {
 						{ modelId: snapshot.modelId, chunkModelId: snapshot.chunkModelId },
 					]),
 				),
+				queryInstructionMode: args.queryInstructionMode,
 				queryEmbeddingsComputed: queryEmbeddingCache.size,
 				p1ProbeSkipped: args.skipP1,
 				p1CachePath: args.skipP1 ? null : args.p1CachePath,

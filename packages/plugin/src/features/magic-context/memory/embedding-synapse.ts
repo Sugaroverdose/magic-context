@@ -4,7 +4,7 @@ import { estimateTokens } from "../../../hooks/magic-context/read-session-format
 import { getHarness } from "../../../shared/harness";
 import { log } from "../../../shared/logger";
 import type { EmbeddingFailure } from "./embedding-failure";
-import type { EmbeddingProvider } from "./embedding-provider";
+import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 
 export const SYNAPSE_DEFAULT_MODEL = "gte-modernbert-base-f16";
 export const SYNAPSE_DEFAULT_QUERY_TIMEOUT_MS = 3_000;
@@ -368,6 +368,7 @@ export function getSynapseBatchRequestKey(args: {
     fingerprint: string;
     tableEpoch: number;
     items: readonly { id: string; contentSha256: string }[];
+    purpose?: EmbeddingPurpose;
 }): string {
     return sha256(
         stableJson({
@@ -379,6 +380,7 @@ export function getSynapseBatchRequestKey(args: {
             accept_declared: false,
             ids: args.items.map((item) => item.id),
             content_sha256: args.items.map((item) => item.contentSha256),
+            ...(args.purpose === "query" ? { purpose: args.purpose } : {}),
         }),
     );
 }
@@ -829,7 +831,11 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
         return this.initializing;
     }
 
-    async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
+    async embed(
+        text: string,
+        signal?: AbortSignal,
+        purpose: EmbeddingPurpose = "passage",
+    ): Promise<Float32Array | null> {
         if (!(await this.initialize()) || signal?.aborted || !this.metadata) return null;
         if (estimateTokens(text) > this.metadata.max_tokens) return null;
         try {
@@ -839,6 +845,7 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
                 this.requestConstraints({
                     id,
                     text,
+                    purpose,
                     deadline_ms: this.options.queryTimeoutMs ?? SYNAPSE_DEFAULT_QUERY_TIMEOUT_MS,
                 }),
                 this.options.queryTimeoutMs ?? SYNAPSE_DEFAULT_QUERY_TIMEOUT_MS,
@@ -869,20 +876,25 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
         }
     }
 
-    async embedBatch(texts: string[], signal?: AbortSignal): Promise<(Float32Array | null)[]> {
+    async embedBatch(
+        texts: string[],
+        signal?: AbortSignal,
+        purpose: EmbeddingPurpose = "passage",
+    ): Promise<(Float32Array | null)[]> {
         if (texts.length === 0) return [];
         const items = texts.map((text, index) => ({
             id: `item:${index}`,
             text,
             contentSha256: hashContent(text),
         }));
-        const map = await this.embedItems(items, signal);
+        const map = await this.embedItems(items, signal, purpose);
         return items.map((item) => map.get(item.id) ?? null);
     }
 
     async embedItems(
         items: readonly { id: string; text: string; contentSha256: string }[],
         signal?: AbortSignal,
+        purpose: EmbeddingPurpose = "passage",
     ): Promise<Map<string, Float32Array>> {
         const output = new Map<string, Float32Array>();
         if (items.length === 0 || !(await this.initialize()) || !this.metadata || signal?.aborted) {
@@ -897,14 +909,14 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
             const page = this.nextPage(eligibleItems, start);
             start += page.length;
             try {
-                const requestKey = this.requestKey(page);
+                const requestKey = this.requestKey(page, purpose);
                 let body: unknown = {};
                 let restarted = false;
                 for (;;) {
                     try {
                         body = await this.callWithRetry(
                             "embed.batch",
-                            this.batchRequest(page, requestKey),
+                            this.batchRequest(page, requestKey, purpose),
                             this.options.batchTimeoutMs ?? SYNAPSE_DEFAULT_BATCH_TIMEOUT_MS,
                             true,
                             signal,
@@ -999,6 +1011,7 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
     private batchRequest(
         items: readonly { id: string; text: string; contentSha256: string }[],
         requestKey: string,
+        purpose: EmbeddingPurpose,
     ): Record<string, unknown> {
         return this.requestConstraints({
             items: items.map((item) => ({
@@ -1007,11 +1020,13 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
                 content_sha256: item.contentSha256,
             })),
             request_key: requestKey,
+            purpose,
         });
     }
 
     private requestKey(
         items: readonly { id: string; text: string; contentSha256: string }[],
+        purpose: EmbeddingPurpose,
     ): string {
         if (!this.metadata)
             throw new SynapseEmbeddingError("transport", "Synapse metadata is unavailable");
@@ -1020,6 +1035,7 @@ export class SynapseEmbeddingProvider implements EmbeddingProvider {
             fingerprint: this.metadata.fingerprint,
             tableEpoch: this.metadata.table_epoch,
             items,
+            purpose,
         });
     }
 
