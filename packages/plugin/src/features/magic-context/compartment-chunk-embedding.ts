@@ -124,6 +124,7 @@ const existingHashStatements = new WeakMap<Database, PreparedStatement>();
 const existingHashByProjectStatements = new WeakMap<Database, PreparedStatement>();
 const deleteByCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertEmbeddingStatements = new WeakMap<Database, PreparedStatement>();
+const renumberEmbeddingWindowStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsStatements = new WeakMap<Database, PreparedStatement>();
 const searchRowsByModelStatements = new WeakMap<Database, PreparedStatement>();
 const searchPoolProbeStatements = new WeakMap<Database, PreparedStatement>();
@@ -182,6 +183,22 @@ function getInsertEmbeddingStatement(db: Database): PreparedStatement {
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         insertEmbeddingStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getRenumberEmbeddingWindowStatement(db: Database): PreparedStatement {
+    let stmt = renumberEmbeddingWindowStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `UPDATE compartment_chunk_embeddings
+             SET window_index = ?
+             WHERE compartment_id = ?
+               AND model_id = ?
+               AND project_path = ?
+               AND window_index = ?`,
+        );
+        renumberEmbeddingWindowStatements.set(db, stmt);
     }
     return stmt;
 }
@@ -1018,6 +1035,41 @@ function mapBackfillCandidateRows(rows: unknown[]): CompartmentChunkBackfillCand
 
 type ChunkCoverageDefect = "missing" | "stale" | "deferred" | null;
 
+function renumberOneBasedChunkWindows(
+    db: Database,
+    candidate: CompartmentChunkBackfillCandidate,
+    projectPath: string,
+    modelId: string,
+    windows: readonly CompartmentChunkWindow[],
+): void {
+    const update = getRenumberEmbeddingWindowStatement(db);
+    db.transaction(() => {
+        // Move lowest to highest so each old key is vacant before the next row
+        // moves into it, preserving the unique compartment/model/window key.
+        for (const window of windows) {
+            const result = update.run(
+                window.windowIndex,
+                candidate.id,
+                modelId,
+                projectPath,
+                window.windowIndex + 1,
+            );
+            if (result.changes !== 1) {
+                throw new Error(
+                    `Failed to renumber compartment ${candidate.id} window ${window.windowIndex + 1}`,
+                );
+            }
+        }
+    })();
+    invalidateDecodedSearchPools(
+        db,
+        ([sessionId, cachedProjectPath, cachedModelId]) =>
+            sessionId === candidate.sessionId &&
+            cachedProjectPath === projectPath &&
+            cachedModelId === modelId,
+    );
+}
+
 /** Classify one compartment against the transcript bytes the current model would embed. */
 function classifyChunkCoverageDefect(
     db: Database,
@@ -1041,6 +1093,15 @@ function classifyChunkCoverageDefect(
         maxInputTokens,
     );
     const existing = getExistingChunkHashes(db, candidate.id, modelId, projectPath);
+
+    const isMatchingOneBasedSet =
+        windows.length > 0 &&
+        existing.size === windows.length &&
+        windows.every((window) => existing.get(window.windowIndex + 1) === window.chunkHash);
+    if (isMatchingOneBasedSet) {
+        renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        return null;
+    }
 
     const expectedWindowIndexes = new Set(windows.map((window) => window.windowIndex));
     if ([...existing.keys()].some((windowIndex) => !expectedWindowIndexes.has(windowIndex))) {

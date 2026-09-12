@@ -4,4 +4,4 @@ Publish-time embedding now rejects an in-memory historian block when its ordinal
 
 ## Existing stores
 
-No migration is needed. The chunk coverage selector reconstructs each compartment from FTS and classifies rows with unexpected window indices or mismatched hashes as `stale`. The ordinary embedding drain re-embeds that compartment and atomically replaces its stored chunk rows.
+No migration is needed. The chunk coverage selector reconstructs each compartment from FTS and recognizes an exact one-based key shift when every hash still matches. It renumbers those rows transactionally in place, preserving vectors, hashes, and ordinal ranges without a provider call. A genuine hash or window mismatch remains `stale`, so the ordinary embedding drain re-embeds that compartment and atomically replaces its stored chunk rows.

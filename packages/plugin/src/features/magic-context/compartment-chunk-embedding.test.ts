@@ -24,6 +24,7 @@ import { runMigrations } from "./migrations";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
+    embedSessionCompartmentChunks,
     getProjectEmbeddingSnapshot,
     registerProjectEmbedding,
 } from "./project-embedding-registry";
@@ -292,11 +293,93 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("selector treats legacy one-based window keys as stale", () => {
+    test("classification renumbers matching one-based multi-window rows without embedding", async () => {
         const db = createDb();
+        const embeddedTexts: string[] = [];
         const sessionId = "ses-shifted-window";
         const projectPath = "/repo/shifted-window";
-        const modelId = "mock:shifted-window";
+        try {
+            _setTestProviderFactoryForProject(() => new CapturingEmbeddingProvider(embeddedTexts));
+            registerProjectEmbedding(
+                db,
+                projectPath,
+                { provider: "local", model: "mock-local", max_input_tokens: 64 },
+                { memoryEnabled: true, gitCommitEnabled: false },
+                projectPath,
+            );
+            recordSessionProjectIdentity(db, sessionId, projectPath);
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "a1",
+                    endMessageId: "a1",
+                    title: "Legacy shifted keys",
+                    content: "shifted",
+                    p1: "shifted",
+                },
+            ]);
+            insertFtsRow(
+                db,
+                sessionId,
+                1,
+                "assistant",
+                Array.from({ length: 320 }, (_, index) => `legacy-token-${index}`).join(" "),
+            );
+            const [compartment] = getCompartments(db, sessionId);
+            const modelId = currentChunkModelId(projectPath);
+            const expectedWindows = chunkCanonicalText(
+                buildCanonicalChunkTextFromFts(db, sessionId, 1, 1) ?? "",
+                1,
+                1,
+                64,
+            );
+            expect(expectedWindows.length).toBeGreaterThan(1);
+            replaceCompartmentChunkEmbeddings(
+                db,
+                expectedWindows.map((window) => ({
+                    compartmentId: compartment.id,
+                    sessionId,
+                    projectPath,
+                    window: { ...window, windowIndex: window.windowIndex + 1 },
+                    modelId,
+                    vector: new Float32Array([1, 0]),
+                })),
+            );
+
+            expect(await embedSessionCompartmentChunks(db, projectPath, sessionId)).toEqual({
+                status: "nothing",
+                embedded: 0,
+                total: 0,
+            });
+            expect(embeddedTexts).toEqual([]);
+            const stored = loadCompartmentChunkEmbeddingsForSearch(
+                db,
+                sessionId,
+                projectPath,
+                modelId,
+            );
+            expect(stored.map((row) => row.windowIndex)).toEqual(
+                expectedWindows.map((window) => window.windowIndex),
+            );
+            expect(stored.map((row) => row.chunkHash)).toEqual(
+                expectedWindows.map((window) => window.chunkHash),
+            );
+            expect(stored.map((row) => [row.windowStartOrdinal, row.windowEndOrdinal])).toEqual(
+                expectedWindows.map((window) => [window.startOrdinal, window.endOrdinal]),
+            );
+        } finally {
+            _resetProjectEmbeddingRegistryForTests();
+            closeQuietly(db);
+        }
+    });
+
+    test("classification keeps a hash-mismatched one-based window set stale", () => {
+        const db = createDb();
+        const sessionId = "ses-shifted-stale";
+        const projectPath = "/repo/shifted-stale";
+        const modelId = "mock:shifted-stale";
         try {
             recordSessionProjectIdentity(db, sessionId, projectPath);
             appendCompartments(db, sessionId, [
@@ -306,40 +389,41 @@ describe("compartment chunk embedding core", () => {
                     endMessage: 1,
                     startMessageId: "a1",
                     endMessageId: "a1",
-                    title: "Legacy shifted key",
-                    content: "shifted",
-                    p1: "shifted",
-                },
-                {
-                    sequence: 1,
-                    startMessage: 2,
-                    endMessage: 2,
-                    startMessageId: "a2",
-                    endMessageId: "a2",
-                    title: "Missing key",
-                    content: "missing",
-                    p1: "missing",
+                    title: "Stale shifted keys",
+                    content: "stale",
+                    p1: "stale",
                 },
             ]);
-            insertFtsRow(db, sessionId, 1, "assistant", "legacy shifted text");
-            insertFtsRow(db, sessionId, 2, "assistant", "missing text");
-            const [shifted, missing] = getCompartments(db, sessionId);
-            const [expectedWindow] = chunkCanonicalText(
+            insertFtsRow(
+                db,
+                sessionId,
+                1,
+                "assistant",
+                Array.from({ length: 320 }, (_, index) => `stale-token-${index}`).join(" "),
+            );
+            const [compartment] = getCompartments(db, sessionId);
+            const expectedWindows = chunkCanonicalText(
                 buildCanonicalChunkTextFromFts(db, sessionId, 1, 1) ?? "",
                 1,
                 1,
-                10_000,
+                64,
             );
-            replaceCompartmentChunkEmbeddings(db, [
-                {
-                    compartmentId: shifted.id,
+            expect(expectedWindows.length).toBeGreaterThan(1);
+            replaceCompartmentChunkEmbeddings(
+                db,
+                expectedWindows.map((window, index) => ({
+                    compartmentId: compartment.id,
                     sessionId,
                     projectPath,
-                    window: { ...expectedWindow, windowIndex: 1 },
+                    window: {
+                        ...window,
+                        windowIndex: window.windowIndex + 1,
+                        chunkHash: index === 0 ? `stale-${window.chunkHash}` : window.chunkHash,
+                    },
                     modelId,
                     vector: new Float32Array([1, 0]),
-                },
-            ]);
+                })),
+            );
 
             expect(
                 loadUnembeddedSessionChunkCandidates(
@@ -349,20 +433,14 @@ describe("compartment chunk embedding core", () => {
                     modelId,
                     1,
                     undefined,
-                    10_000,
+                    64,
                 ).map((candidate) => candidate.id),
-            ).toEqual([missing.id]);
+            ).toEqual([compartment.id]);
             expect(
-                loadUnembeddedSessionChunkCandidates(
-                    db,
-                    projectPath,
-                    sessionId,
-                    modelId,
-                    2,
-                    undefined,
-                    10_000,
-                ).map((candidate) => candidate.id),
-            ).toEqual([missing.id, shifted.id]);
+                loadCompartmentChunkEmbeddingsForSearch(db, sessionId, projectPath, modelId).map(
+                    (row) => row.windowIndex,
+                ),
+            ).toEqual(expectedWindows.map((window) => window.windowIndex + 1));
         } finally {
             closeQuietly(db);
         }
