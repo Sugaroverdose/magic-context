@@ -44,6 +44,7 @@ SOURCE_LABEL = f"VACUUM {DB_SHA256}"
 GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
 CANONICAL_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/canonical-json-vectors-v1.json"
 REDEEM_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/redeem-vectors-v1.json"
+COVERAGE_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/coverage-proof-vectors-v1.json"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
 PREDECESSOR_KEY = "d5-fixture-predecessor"
 ATTEMPT_ID = "d5-fixture-attempt-0001"
@@ -1273,6 +1274,10 @@ OpenCode and Pi consume different API structures and are not inputs to the Claud
 
 No D5 lineage serializer exists at this baseline. The closest tagged module fixture union is internally tagged (`crates/mc-module/src/tail_hygiene.rs:1212-1238`), while the current facade state-sync request is a struct rather than an operation union (`crates/mc-module/src/lib.rs:793-863`). Clause 2 therefore controls deliberately: `LineageRequest` is one internally tagged object whose `op` discriminator and redeem fields are siblings with no `args` wrapper; `LineageResponse` uses the externally keyed clause spelling `{{"redeem":{{"result":...}}}}`; and nested payload unions are internally tagged by `kind`. This is the pinned wire rule slice 2 must implement. The owner-authored expectations in `redeem-vectors-v1.json` are independent fixture data, never generated from the precedence evaluator.
 
+## Coverage-proof preimage bytes
+
+`coverage-proof-vectors-v1.json` follows R16's internal `kind` tags and executes R17.2 step 0 from each vector's `served_array`; expectations remain owner-authored fixture data. A located block's `bytes` field contributes its exact decoded UTF-8 bytes, while `locator:null` contributes zero bytes. With `T(s) = U64BE(len(UTF-8(s))) || UTF-8(s)` and `B(x) = U64BE(len(x)) || x`, the exact unit preimage is `U32BE(24) || ASCII("mc.d5.unit-projection.v1") || U32BE(1) || T(unit) || U64BE(row_version) || B(bytes)`. The exact aggregate preimage is `U32BE(19) || ASCII("mc.d5.projection.v1") || U32BE(1) || U64BE(row_version) || U64BE(unit_count)`, followed in listed order for each validated unit by `T(unit) || U64BE(compartment_sequence) || U64BE(start) || U64BE(end) || B(bytes)`. SHA-256 of those complete preimages is compared with the unit and aggregate `sha256` fields. VALIDATED records become RECORDED only after the sequence marks the pass accepted; rejected sequence steps publish nothing.
+
 Regenerate from the two private inputs:
 
 ```sh
@@ -1296,6 +1301,7 @@ def write_fixture(
     repository_root = Path(__file__).resolve().parents[3]
     canonical_vectors = (repository_root / CANONICAL_VECTORS_PATH).read_bytes()
     redeem_vectors = (repository_root / REDEEM_VECTORS_PATH).read_bytes()
+    coverage_vectors = (repository_root / COVERAGE_VECTORS_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
@@ -1303,6 +1309,7 @@ def write_fixture(
         "expected-archive-v1.json": json_bytes(archive),
         "canonical-json-vectors-v1.json": canonical_vectors,
         "redeem-vectors-v1.json": redeem_vectors,
+        "coverage-proof-vectors-v1.json": coverage_vectors,
         "README.md": readme_text().encode(),
     }
     for name, data in payloads.items():
@@ -1314,12 +1321,16 @@ def write_fixture(
         "138 members retain no source text and three probe members retain only their approved probe string"
     )
     for name, data in payloads.items():
-        if name in {"canonical-json-vectors-v1.json", "redeem-vectors-v1.json"}:
-            source = (
-                "hand-written independent canonical-form vectors"
-                if name == "canonical-json-vectors-v1.json"
-                else "owner-authored D5 redeem contract vectors"
-            )
+        if name in {
+            "canonical-json-vectors-v1.json",
+            "redeem-vectors-v1.json",
+            "coverage-proof-vectors-v1.json",
+        }:
+            source = {
+                "canonical-json-vectors-v1.json": "hand-written independent canonical-form vectors",
+                "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
+                "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
+            }[name]
             entries.append(
                 {
                     "path": name,
@@ -1373,22 +1384,27 @@ def refresh_fixture_index(output: Path) -> None:
     index_path = output / "fixture-index-v1.json"
     index = load_json(index_path.read_bytes())
     entries = {entry["path"]: entry for entry in index["files"]}
-    redeem_path = output / "redeem-vectors-v1.json"
-    redeem_bytes = redeem_path.read_bytes()
-    entries[redeem_path.name] = {
-        "path": redeem_path.name,
-        "byte_size": len(redeem_bytes),
-        "sha256": sha256(redeem_bytes),
-        "derived": False,
-        "source": "owner-authored D5 redeem contract vectors",
-        "generation_script": GENERATOR_PATH,
+    owner_vectors = {
+        "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
+        "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
     }
+    for name, source in owner_vectors.items():
+        data = (output / name).read_bytes()
+        entries[name] = {
+            "path": name,
+            "byte_size": len(data),
+            "sha256": sha256(data),
+            "derived": False,
+            "source": source,
+            "generation_script": GENERATOR_PATH,
+        }
     ordered_names = [
         "source-segment-v1.json",
         "expected-manifest-v1.json",
         "expected-archive-v1.json",
         "canonical-json-vectors-v1.json",
         "redeem-vectors-v1.json",
+        "coverage-proof-vectors-v1.json",
         "README.md",
     ]
     for name in ordered_names:
