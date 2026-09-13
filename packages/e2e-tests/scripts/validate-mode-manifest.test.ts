@@ -37,7 +37,7 @@ describe("mode manifest validator", () => {
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
-        expect(excluded).toEqual([
+        expect([...excluded].sort()).toEqual([
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/runner.test.ts",
