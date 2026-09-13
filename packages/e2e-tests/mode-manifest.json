@@ -854,6 +854,54 @@
                 "OVERLAY-SAME-PATH-AUTO-REFRESH",
                 "PI-EXTENSION-RELOAD"
             ]
+        },
+        {
+            "path": "tests/opencode2/pins.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: pins the captured GA host evidence (sha256) — unit-shaped, needs no host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ]
+        },
+        {
+            "path": "tests/opencode2/probes.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: boots the real @opencode/cli@2.0.3 in the hermetic v2 runner (throwaway roots, fd guard); v1/v2 payload, hidden-agent and rpc-entry probes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ]
+        },
+        {
+            "path": "tests/opencode2/runner.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: hermetic runner guards and handoff against the real GA host; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ]
+        },
+        {
+            "path": "tests/opencode2/store-reader.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: session_message reader against real v2 host writes; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
+            "contract_refs": [
+                "OC2-S1"
+            ]
         }
     ]
 }

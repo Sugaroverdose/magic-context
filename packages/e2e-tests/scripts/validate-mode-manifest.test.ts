@@ -18,7 +18,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(69);
+        expect(validation.files.length).toBe(73);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -37,7 +37,13 @@ describe("mode manifest validator", () => {
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);
-        expect(excluded).toEqual(["tests/window-overlay-reload.test.ts"]);
+        expect(excluded).toEqual([
+            "tests/opencode2/pins.test.ts",
+            "tests/opencode2/probes.test.ts",
+            "tests/opencode2/runner.test.ts",
+            "tests/opencode2/store-reader.test.ts",
+            "tests/window-overlay-reload.test.ts",
+        ]);
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
     });
 
