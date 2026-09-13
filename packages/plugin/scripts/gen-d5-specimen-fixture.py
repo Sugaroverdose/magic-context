@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import itertools
 import json
 import math
 import sqlite3
@@ -1216,6 +1217,110 @@ def validate_representation_contract(canonical_vectors: bytes) -> None:
         raise SystemExit("opaque in-place sanitization control failed")
 
 
+def d5_blob(value: bytes) -> bytes:
+    return len(value).to_bytes(8, "big") + value
+
+
+def d5_text(value: str) -> bytes:
+    return d5_blob(value.encode())
+
+
+def d5_digest(tag: str, payload: bytes) -> str:
+    encoded_tag = tag.encode("ascii")
+    preimage = (
+        len(encoded_tag).to_bytes(4, "big")
+        + encoded_tag
+        + (1).to_bytes(4, "big")
+        + payload
+    )
+    return sha256(preimage)
+
+
+def d5_unit_digest(unit: str, row_version: int, source: bytes) -> str:
+    payload = d5_text(unit) + row_version.to_bytes(8, "big") + d5_blob(source)
+    return d5_digest("mc.d5.unit-projection.v1", payload)
+
+
+def d5_projection_digest(row_version: int, units: list[dict[str, Any]]) -> str:
+    payload = row_version.to_bytes(8, "big") + len(units).to_bytes(8, "big")
+    for unit in units:
+        kind = unit["kind"]
+        payload += d5_text(unit["unit"]) + d5_text(kind["kind"])
+        if kind["kind"] == "compartment":
+            payload += kind["compartment_sequence"].to_bytes(8, "big")
+        payload += unit["coverage"]["start"].to_bytes(8, "big")
+        payload += unit["coverage"]["end"].to_bytes(8, "big")
+        payload += d5_blob(unit["source_text"].encode())
+    return d5_digest("mc.d5.projection.v1", payload)
+
+
+def validate_coverage_contract(coverage_vectors: bytes) -> None:
+    document = load_json(coverage_vectors)
+    if document.get("schema") != "mc.d5.coverage-proof-vectors.v1":
+        raise SystemExit("coverage-proof schema drift")
+    if "R17.3 step 0" not in document.get("encoding_rule", {}).get(
+        "unit_validation", ""
+    ):
+        raise SystemExit("coverage-proof R17.3 rule drift")
+    vectors = document.get("vectors", [])
+    if len(vectors) != 58:
+        raise SystemExit("coverage-proof vector count drift")
+    for vector in vectors:
+        projection = vector["d5_carry"]["projection_digest"]
+        row_version = projection["row_version"]
+        for unit in projection["units"]:
+            if set(unit["kind"]) not in ({"kind"}, {"kind", "compartment_sequence"}):
+                raise SystemExit(f"coverage-proof unit kind shape failed: {vector['id']}")
+            computed = d5_unit_digest(
+                unit["unit"], row_version, unit["source_text"].encode()
+            )
+            if vector["id"] in {"V05", "V39"}:
+                if unit["sha256"] == computed:
+                    raise SystemExit("coverage-proof tampered control became valid")
+            elif unit["sha256"] != computed:
+                raise SystemExit(f"coverage-proof unit digest failed: {vector['id']}")
+        computed = d5_projection_digest(row_version, projection["units"])
+        if vector["id"] == "V40":
+            if projection["sha256"] == computed:
+                raise SystemExit("coverage-proof aggregate control became valid")
+        elif projection["sha256"] != computed:
+            raise SystemExit(f"coverage-proof aggregate digest failed: {vector['id']}")
+        for recorded in vector["recorded_before"]:
+            for unit in recorded["units"]:
+                computed = d5_unit_digest(
+                    unit["unit"], recorded["row_version"], unit["source_text"].encode()
+                )
+                if unit["sha256"] != computed:
+                    raise SystemExit(f"coverage-proof recorded digest failed: {vector['id']}")
+
+    space = document["r17_3_unit_precondition_space"]
+    dimensions = space["dimensions"]
+    names = list(dimensions)
+    cells = itertools.product(*(dimensions[name] for name in names))
+    cell_count = 0
+    for values in cells:
+        cell_count += 1
+        cell = dict(zip(names, values))
+        rows = [
+            row["row_id"]
+            for row in document["r17_3_unit_rule_table"]
+            if all(cell[name] in allowed for name, allowed in row["preconditions"].items())
+        ]
+        if len(rows) != 1:
+            raise SystemExit(f"coverage-proof R17.3 cell {cell} matched rows {rows}")
+    if cell_count != 192:
+        raise SystemExit(f"coverage-proof R17.3 domain has {cell_count} cells")
+
+    counterexamples = document["thalamus_counterexamples_json"].encode()
+    if sha256(counterexamples) != "c027ffed96f4acb855a834ddbc96411c874dd05f5212cf5f142080b714fa9628":
+        raise SystemExit("coverage-proof Thalamus counterexample bytes drift")
+    artifact = load_json(counterexamples)
+    if artifact.get("unit_digest_sentinel_verified") is not True:
+        raise SystemExit("coverage-proof Thalamus digest sentinel missing")
+    if d5_unit_digest("u1", 7, b"red") != "3dc9079367264990f8614660b3f0a1f5ab3b133c4ed3e841bff793f38a84f90a":
+        raise SystemExit("coverage-proof unit digest sentinel failed")
+
+
 def readme_text() -> str:
     return f"""# D5 specimen fixture
 
@@ -1276,7 +1381,7 @@ No D5 lineage serializer exists at this baseline. The closest tagged module fixt
 
 ## Coverage-proof preimage bytes
 
-`coverage-proof-vectors-v1.json` follows R16's internal `kind` tags and executes R17.2 step 0 from each vector's `served_array`; expectations remain owner-authored fixture data. A located block's `bytes` field contributes its exact decoded UTF-8 bytes, while `locator:null` contributes zero bytes. With `T(s) = U64BE(len(UTF-8(s))) || UTF-8(s)` and `B(x) = U64BE(len(x)) || x`, the exact unit preimage is `U32BE(24) || ASCII("mc.d5.unit-projection.v1") || U32BE(1) || T(unit) || U64BE(row_version) || B(bytes)`. The exact aggregate preimage is `U32BE(19) || ASCII("mc.d5.projection.v1") || U32BE(1) || U64BE(row_version) || U64BE(unit_count)`, followed in listed order for each validated unit by `T(unit) || U64BE(compartment_sequence) || U64BE(start) || U64BE(end) || B(bytes)`. SHA-256 of those complete preimages is compared with the unit and aggregate `sha256` fields. VALIDATED records become RECORDED only after the sequence marks the pass accepted; rejected sequence steps publish nothing.
+`coverage-proof-vectors-v1.json` follows R16's internal `kind` tags and executes R17.3 step 0 from each vector's `served_array`; expectations remain owner-authored fixture data. Every digest has its exact `source_text` beside it. A located block's `bytes` must equal those decoded UTF-8 bytes, while `locator:null` requires empty `source_text`. With `T(s) = U64BE(len(UTF-8(s))) || UTF-8(s)` and `B(x) = U64BE(len(x)) || x`, the exact unit preimage is `U32BE(24) || ASCII("mc.d5.unit-projection.v1") || U32BE(1) || T(unit) || U64BE(row_version) || B(bytes)`. The exact aggregate preimage is `U32BE(19) || ASCII("mc.d5.projection.v1") || U32BE(1) || U64BE(row_version) || U64BE(unit_count)`, followed in listed order for each validated unit by `T(unit) || T(kind) || [U64BE(compartment_sequence) only for compartment] || U64BE(start) || U64BE(end) || B(bytes)`. SHA-256 of those complete preimages is compared with the unit and aggregate `sha256` fields. The 192-cell independent product covers proof variant, unit kind, locator presence, current-pass membership, and row-version relation exactly once. VALIDATED records become RECORDED only after the complete pass is accepted; a proof-rejected pass leaves complete RECORDED state and custody unchanged.
 
 Regenerate from the two private inputs:
 
@@ -1303,6 +1408,7 @@ def write_fixture(
     redeem_vectors = (repository_root / REDEEM_VECTORS_PATH).read_bytes()
     coverage_vectors = (repository_root / COVERAGE_VECTORS_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
+    validate_coverage_contract(coverage_vectors)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
         "expected-manifest-v1.json": json_bytes(manifest),
@@ -1382,6 +1488,7 @@ def write_fixture(
 def refresh_fixture_index(output: Path) -> None:
     """Refresh hashes without requiring the private source inputs."""
     index_path = output / "fixture-index-v1.json"
+    validate_coverage_contract((output / "coverage-proof-vectors-v1.json").read_bytes())
     index = load_json(index_path.read_bytes())
     entries = {entry["path"]: entry for entry in index["files"]}
     owner_vectors = {
