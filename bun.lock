@@ -5,7 +5,7 @@
     "": {},
     "packages/cli": {
       "name": "@cortexkit/magic-context",
-      "version": "0.42.1",
+      "version": "0.42.2",
       "bin": {
         "magic-context": "dist/index.js",
       },
@@ -71,7 +71,7 @@
     },
     "packages/pi-plugin": {
       "name": "@cortexkit/pi-magic-context",
-      "version": "0.42.1",
+      "version": "0.42.2",
       "dependencies": {
         "@cortexkit/subc-client": "0.4.1",
         "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
@@ -108,7 +108,7 @@
     },
     "packages/plugin": {
       "name": "@cortexkit/opencode-magic-context",
-      "version": "0.42.1",
+      "version": "0.42.2",
       "dependencies": {
         "@cortexkit/subc-client": "0.11.1",
         "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
@@ -161,6 +161,9 @@
       },
     },
   },
+  "trustedDependencies": [
+    "@opencode/cli",
+  ],
   "overrides": {
     "adm-zip": "0.6.0",
   },
