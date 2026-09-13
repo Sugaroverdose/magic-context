@@ -387,12 +387,11 @@ export function assistantAwaitingToolsFromOpenCodeDb(db: Database, sessionId: st
     if (hasNewerRealUserMessage(db, sessionId, latestAssistant.timeCreated)) return false;
     if (latestAssistant.finish === "tool-calls") return true;
 
-    // Mark message_id as the selective term so stale statistics cannot make the
-    // planner walk the session-only index. Keep session_id for schema variants
-    // whose useful part index starts with (session_id, message_id).
+    // Keep the session check for cross-session safety, but disqualify it from
+    // index selection so the bounded message-id predicate drives the stock index.
     const partRows = db
         .prepare(
-            "SELECT data FROM part WHERE session_id = ? AND likelihood(message_id = ?, 0.000001)",
+            "SELECT data FROM part WHERE +session_id = ? AND likelihood(message_id = ?, 0.000001)",
         )
         .all(sessionId, latestAssistant.id) as PartDataRow[];
 

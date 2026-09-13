@@ -379,7 +379,7 @@ function removeLegacyMarkerLineageRows(
                AND EXISTS (
                    SELECT 1
                    FROM part p
-                   WHERE p.session_id = m.session_id
+                   WHERE +p.session_id = m.session_id
                      AND p.message_id = m.id
                      AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
                      AND COALESCE(json_extract(p.data, '$.text'), '') = ?
@@ -397,7 +397,7 @@ function removeLegacyMarkerLineageRows(
     if (legacySummaryIds.length === 0) return;
 
     const deleteSummaryParts = db.prepare(
-        "DELETE FROM part WHERE session_id = ? AND message_id = ?",
+        "DELETE FROM part WHERE +session_id = ? AND message_id = ?",
     );
     const deleteSummary = db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?");
     for (const summaryMessageId of legacySummaryIds) {
@@ -409,7 +409,7 @@ function removeLegacyMarkerLineageRows(
     // lineage is identified, retain only the deterministic boundary part.
     db.prepare(
         `DELETE FROM part
-         WHERE session_id = ?
+         WHERE +session_id = ?
            AND message_id = ?
            AND id <> ?
            AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'
@@ -568,52 +568,78 @@ export interface SessionCompactionMarkerRows {
 }
 
 /**
- * List every compaction marker present in opencode.db for a session.
+ * List compaction markers that have completed Magic Context summaries.
  *
- * Used by the fork-orphan hygiene pass (#263): OpenCode's `/fork` copies the
- * parent session's message rows — including this plugin's compaction marker
- * rows — into the fork, while magic-context's durable marker state (context.db)
- * is NOT inherited (PARITY.md gap #25). The fork then owns marker rows its
- * state knows nothing about. This scan enumerates all markers so the caller can
- * diff them against the persisted state and repair the ones it does not own.
- *
- * Errors propagate to the caller (the hygiene pass treats any failure as
- * "skip this pass and retry later" — never as a fatal transform error).
+ * The orphan-reconciliation caller cannot act on native or part-only markers.
+ * Discovering completed summaries first bounds part reads to their parent
+ * boundaries and avoids a full-session part scan plus one message scan per row.
  */
 export function listSessionCompactionMarkers(sessionId: string): SessionCompactionMarkerRows[] {
     const db = getWritableOpenCodeDb();
-    const partRows = db
+    const summaryRows = db
         .prepare(
-            `SELECT id, message_id
-             FROM part
+            `SELECT id, json_extract(data, '$.parentID') AS boundary_message_id
+             FROM message
              WHERE session_id = ?
-               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
+               AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+               AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
+               AND COALESCE(json_extract(data, '$.providerID'), '') = 'magic-context'
+             ORDER BY time_created ASC, id ASC`,
         )
-        .all(sessionId) as Array<{ id?: unknown; message_id?: unknown }>;
+        .all(sessionId) as Array<{ id?: unknown; boundary_message_id?: unknown }>;
 
-    const markers: SessionCompactionMarkerRows[] = [];
-    const summaryStmt = db.prepare(
-        `SELECT id
-         FROM message
-         WHERE session_id = ?
-           AND COALESCE(json_extract(data, '$.parentID'), '') = ?
-           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
-           AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
-           AND COALESCE(json_extract(data, '$.providerID'), '') = 'magic-context'`,
-    );
-    for (const row of partRows) {
-        if (typeof row.id !== "string" || typeof row.message_id !== "string") continue;
-        const summaryRows = summaryStmt.all(sessionId, row.message_id) as Array<{ id?: unknown }>;
-        const summaryMessageIds = summaryRows.flatMap((summaryRow) =>
-            typeof summaryRow.id === "string" ? [summaryRow.id] : [],
-        );
-        markers.push({
-            compactionPartId: row.id,
-            boundaryMessageId: row.message_id,
-            summaryMessageIds,
-        });
+    const summaryIdsByBoundary = new Map<string, string[]>();
+    for (const row of summaryRows) {
+        if (typeof row.id !== "string" || typeof row.boundary_message_id !== "string") continue;
+        const summaryIds = summaryIdsByBoundary.get(row.boundary_message_id) ?? [];
+        summaryIds.push(row.id);
+        summaryIdsByBoundary.set(row.boundary_message_id, summaryIds);
     }
-    return markers;
+
+    const boundaryIds = [...summaryIdsByBoundary.keys()];
+    const markers: Array<SessionCompactionMarkerRows & { timeCreated: number }> = [];
+    const chunkSize = 800;
+    for (let offset = 0; offset < boundaryIds.length; offset += chunkSize) {
+        const boundaryChunk = boundaryIds.slice(offset, offset + chunkSize);
+        const placeholders = boundaryChunk.map(() => "?").join(", ");
+        const partRows = db
+            .prepare(
+                `SELECT id, message_id, time_created
+                 FROM part
+                 WHERE +session_id = ?
+                   AND likelihood(message_id IN (${placeholders}), 0.000001)
+                   AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'
+                 ORDER BY time_created ASC, id ASC`,
+            )
+            .all(sessionId, ...boundaryChunk) as Array<{
+            id?: unknown;
+            message_id?: unknown;
+            time_created?: unknown;
+        }>;
+        for (const row of partRows) {
+            if (
+                typeof row.id !== "string" ||
+                typeof row.message_id !== "string" ||
+                typeof row.time_created !== "number"
+            ) {
+                continue;
+            }
+            const summaryMessageIds = summaryIdsByBoundary.get(row.message_id);
+            if (!summaryMessageIds) continue;
+            markers.push({
+                compactionPartId: row.id,
+                boundaryMessageId: row.message_id,
+                summaryMessageIds: [...summaryMessageIds],
+                timeCreated: row.time_created,
+            });
+        }
+    }
+    markers.sort(
+        (left, right) =>
+            left.timeCreated - right.timeCreated ||
+            left.compactionPartId.localeCompare(right.compactionPartId),
+    );
+    return markers.map(({ timeCreated: _, ...marker }) => marker);
 }
 
 /**
@@ -642,7 +668,7 @@ export function removeForeignCompactionMarker(
         const db = getWritableOpenCodeDb();
         db.transaction(() => {
             const deletePartsOfMessage = db.prepare(
-                "DELETE FROM part WHERE session_id = ? AND message_id = ?",
+                "DELETE FROM part WHERE +session_id = ? AND message_id = ?",
             );
             const deleteMessage = db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?");
             for (const summaryMessageId of marker.summaryMessageIds) {
@@ -796,7 +822,7 @@ export function removeMcOwnedCompactionMarkers(
                AND EXISTS (
                    SELECT 1
                    FROM part p
-                   WHERE p.session_id = m.session_id
+                   WHERE +p.session_id = m.session_id
                      AND p.message_id = m.id
                      AND COALESCE(json_extract(p.data, '$.type'), '') = 'text'
                      AND COALESCE(json_extract(p.data, '$.text'), '') = ?
@@ -881,7 +907,7 @@ export function removeMcOwnedCompactionMarkers(
     let retainedLineages = 0;
 
     const deletePartsOfMessage = db.prepare(
-        "DELETE FROM part WHERE session_id = ? AND message_id = ?",
+        "DELETE FROM part WHERE +session_id = ? AND message_id = ?",
     );
     const deleteMessage = db.prepare("DELETE FROM message WHERE session_id = ? AND id = ?");
     const deletePart = db.prepare("DELETE FROM part WHERE session_id = ? AND id = ?");
