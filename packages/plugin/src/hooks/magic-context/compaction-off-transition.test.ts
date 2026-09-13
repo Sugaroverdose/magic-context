@@ -763,7 +763,8 @@ describe("reconcileCompactionMode — transition algebra", () => {
         db.exec(`
             CREATE TRIGGER interrupt_first_off_clear
             BEFORE UPDATE OF compaction_marker_state ON session_meta
-            WHEN OLD.compaction_marker_state <> '' AND NEW.compaction_marker_state = ''
+            WHEN OLD.compaction_marker_state <> ''
+                AND (NEW.compaction_marker_state = '' OR json_type(NEW.compaction_marker_state, '$.deferredClear') = 'object')
             BEGIN SELECT RAISE(ABORT, 'simulated interrupt after notice intent'); END;
         `);
 
