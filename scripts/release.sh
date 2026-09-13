@@ -139,6 +139,13 @@ run_package_tests() {
   # reachable.
   status=0
   output=$(bun run --cwd "$dir" test 2>&1) || status=$?
+  # Print the verdict facts BEFORE the (large) captured output so they survive
+  # even when the stream is cut mid-echo: a run that dies without a summary
+  # otherwise leaves no line naming why the release stopped.
+  local pass_lines fail_lines
+  pass_lines=$(printf '%s\n' "$output" | grep -cE "^ *[1-9][0-9]* pass" || true)
+  fail_lines=$(printf '%s\n' "$output" | grep -cE "^ *[1-9][0-9]* fail" || true)
+  echo "  [$label] test process exit=$status summary_pass_lines=$pass_lines summary_fail_lines=$fail_lines output_lines=$(printf '%s\n' "$output" | wc -l | tr -d ' ')"
   echo "$output"
   if echo "$output" | grep -qE "[1-9][0-9]* fail"; then
     echo "Error: $label tests failed (fail count > 0)"
