@@ -38,6 +38,7 @@ export interface TaskGateContext {
     promotionThreshold: number;
 }
 
+/** Raw status count used only to let curate transition expired active rows. */
 export function countActiveMemories(db: Database, projectPath: string): number {
     const row = db
         .prepare<[string], { cnt: number }>(
@@ -47,19 +48,40 @@ export function countActiveMemories(db: Database, projectPath: string): number {
     return row?.cnt ?? 0;
 }
 
-/** Active/permanent memories with NO mapping row yet — the map-memories scope. */
+/** Count the same live active/permanent pool loaded by getMemoriesByProject. */
+export function countLiveMemories(
+    db: Database,
+    projectPath: string,
+    options: { unclassifiedOnly?: boolean } = {},
+): number {
+    const unclassified = options.unclassifiedOnly && hasMemoryClassifiedAtColumn(db);
+    const row = db
+        .prepare<[string, number], { cnt: number }>(
+            `SELECT COUNT(*) AS cnt
+               FROM memories
+              WHERE project_path = ?
+                AND status IN ('active','permanent')
+                AND (expires_at IS NULL OR expires_at > ?)
+                ${unclassified ? "AND classified_at IS NULL" : ""}`,
+        )
+        .get(projectPath, Date.now());
+    return row?.cnt ?? 0;
+}
+
+/** Live active/permanent memories with NO mapping row yet — the map-memories scope. */
 export function countUnmappedActiveMemories(db: Database, projectPath: string): number {
     const row = db
-        .prepare<[string], { cnt: number }>(
+        .prepare<[string, number], { cnt: number }>(
             `SELECT COUNT(*) AS cnt
                FROM memories m
               WHERE m.project_path = ?
                 AND m.status IN ('active','permanent')
+                AND (m.expires_at IS NULL OR m.expires_at > ?)
                 AND NOT EXISTS (
                     SELECT 1 FROM memory_verifications v WHERE v.memory_id = m.id
                 )`,
         )
-        .get(projectPath);
+        .get(projectPath, Date.now());
     return row?.cnt ?? 0;
 }
 
@@ -98,30 +120,32 @@ export function countProjectSessionsSince(
 
 function countMappedMemories(db: Database, projectPath: string): number {
     const row = db
-        .prepare<[string], { cnt: number }>(
+        .prepare<[string, number], { cnt: number }>(
             `SELECT COUNT(DISTINCT m.id) AS cnt
                FROM memories m
                JOIN memory_verifications v ON v.memory_id = m.id
               WHERE m.project_path = ?
                 AND m.status IN ('active','permanent')
+                AND (m.expires_at IS NULL OR m.expires_at > ?)
                 AND v.file_path <> ''`,
         )
-        .get(projectPath);
+        .get(projectPath, Date.now());
     return row?.cnt ?? 0;
 }
 
 function countUnverifiedMappedMemories(db: Database, projectPath: string): number {
     const row = db
-        .prepare<[string], { cnt: number }>(
+        .prepare<[string, number], { cnt: number }>(
             `SELECT COUNT(DISTINCT m.id) AS cnt
                FROM memories m
                JOIN memory_verifications v ON v.memory_id = m.id
               WHERE m.project_path = ?
                 AND m.status IN ('active','permanent')
+                AND (m.expires_at IS NULL OR m.expires_at > ?)
                 AND v.file_path <> ''
                 AND v.verified_at = 0`,
         )
-        .get(projectPath);
+        .get(projectPath, Date.now());
     return row?.cnt ?? 0;
 }
 
@@ -131,11 +155,12 @@ function countBroadCycleCandidates(
     cycleStartAt: number,
 ): number {
     const row = db
-        .prepare<[string, number], { cnt: number }>(
+        .prepare<[string, number, number], { cnt: number }>(
             `SELECT COUNT(*) AS cnt
                FROM memories m
               WHERE m.project_path = ?
                 AND m.status IN ('active','permanent')
+                AND (m.expires_at IS NULL OR m.expires_at > ?)
                 AND (
                     SELECT MAX(v.verified_at)
                       FROM memory_verifications v
@@ -143,21 +168,22 @@ function countBroadCycleCandidates(
                        AND v.file_path <> ''
                 ) < ?`,
         )
-        .get(projectPath, cycleStartAt);
+        .get(projectPath, Date.now(), cycleStartAt);
     return row?.cnt ?? 0;
 }
 
 function countCueCandidates(db: Database, projectPath: string): number {
-    if (!hasMuralCueColumns(db)) return countActiveMemories(db, projectPath);
+    if (!hasMuralCueColumns(db)) return countLiveMemories(db, projectPath);
     const row = db
-        .prepare<[string], { cnt: number }>(
+        .prepare<[string, number], { cnt: number }>(
             `SELECT COUNT(*) AS cnt
                FROM memories
               WHERE project_path = ?
                 AND status IN ('active','permanent')
+                AND (expires_at IS NULL OR expires_at > ?)
                 AND (mural_cue IS NULL OR mural_cue_hash IS NULL OR updated_at > mural_cue_at)`,
         )
-        .get(projectPath);
+        .get(projectPath, Date.now());
     return row?.cnt ?? 0;
 }
 
@@ -170,20 +196,6 @@ function countStalePrimers(db: Database, projectPath: string): number {
                 AND status = 'active'
                 AND (answer IS NULL OR TRIM(answer) = '' OR answer_refreshed_at IS NULL
                      OR last_observed_at > answer_refreshed_at)`,
-        )
-        .get(projectPath);
-    return row?.cnt ?? 0;
-}
-
-function countUnclassifiedActiveMemories(db: Database, projectPath: string): number {
-    if (!hasMemoryClassifiedAtColumn(db)) return countActiveMemories(db, projectPath);
-    const row = db
-        .prepare<[string], { cnt: number }>(
-            `SELECT COUNT(*) AS cnt
-               FROM memories
-              WHERE project_path = ?
-                AND status IN ('active','permanent')
-                AND classified_at IS NULL`,
         )
         .get(projectPath);
     return row?.cnt ?? 0;
@@ -226,7 +238,7 @@ export function getDreamTaskBacklog(
 ): DreamTaskBacklog {
     switch (task) {
         case "map-memories": {
-            const total = countActiveMemories(db, projectPath);
+            const total = countLiveMemories(db, projectPath);
             return { pending: countUnmappedActiveMemories(db, projectPath), total };
         }
         case "verify": {
@@ -252,16 +264,19 @@ export function getDreamTaskBacklog(
             return { pending, total };
         }
         case "curate": {
-            const total = countActiveMemories(db, projectPath);
+            const total = countLiveMemories(db, projectPath);
             return { pending: total, total };
         }
         case "compress-cues": {
-            const total = countActiveMemories(db, projectPath);
+            const total = countLiveMemories(db, projectPath);
             return { pending: countCueCandidates(db, projectPath), total };
         }
         case "classify-memories": {
-            const total = countActiveMemories(db, projectPath);
-            return { pending: countUnclassifiedActiveMemories(db, projectPath), total };
+            const total = countLiveMemories(db, projectPath);
+            return {
+                pending: countLiveMemories(db, projectPath, { unclassifiedOnly: true }),
+                total,
+            };
         }
         case "retrospective": {
             const pending = countProjectSessionsSince(
@@ -327,8 +342,8 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
 
         case "verify":
             // The executor's file gate does the precise incremental partition; the
-            // scheduler only avoids taking the memory lease when there is no pool.
-            return countActiveMemories(db, project) > 0;
+            // scheduler only avoids taking the memory lease when there is no live pool.
+            return countLiveMemories(db, project) > 0;
 
         case "verify-broad":
             // Keep an open cycle runnable even when another task removed the last
@@ -336,24 +351,24 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
             // cycle still needs an active pool before taking the memory lease.
             return (
                 getTaskScheduleState(db, project, "verify-broad")?.lastBroadRunAt != null ||
-                countActiveMemories(db, project) > 0
+                countLiveMemories(db, project) > 0
             );
 
         case "curate":
-            // Curate is whole-pool hygiene, but still needs an active pool before
-            // taking the shared memory lease.
+            // Curate owns expiry hygiene, so its gate intentionally uses the raw
+            // status pool: an expired-only project still needs one transition run.
             return countActiveMemories(db, project) > 0;
 
         case "compress-cues":
-            // Cheap pre-gate: only take the memory lease when a pool exists. The
+            // Cheap pre-gate: only take the memory lease when a live pool exists. The
             // executor's selectCandidates does the precise NULL/stale-hash cue
             // partition and no-ops when everything is already compressed.
-            return countActiveMemories(db, project) > 0;
+            return countLiveMemories(db, project) > 0;
 
         case "classify-memories":
-            // Classification scores the active project memory pool directly. It has
+            // Classification scores the live project memory pool directly. It has
             // no file gate, watermark, or completeness prerequisites.
-            return countActiveMemories(db, project) > 0;
+            return countLiveMemories(db, project) > 0;
 
         case "retrospective":
             // Cheap pre-gate: any project session updated since the CONTENT

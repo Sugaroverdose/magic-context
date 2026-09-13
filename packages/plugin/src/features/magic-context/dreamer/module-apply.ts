@@ -1,5 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
-import { getContextStoreUuid } from "../context-authority";
+import { type AuthorityModuleClient, getContextStoreUuid } from "../context-authority";
 import type { ClassifyModuleClient } from "./classify";
 
 export class DreamerModuleBusyError extends Error {
@@ -24,8 +24,10 @@ export class DreamerModuleFailureError extends Error {
     }
 }
 
+export type DreamerModuleClient = ClassifyModuleClient & Pick<AuthorityModuleClient, "mirrorPull">;
+
 export interface DreamerModuleRoute {
-    moduleClient: ClassifyModuleClient;
+    moduleClient: DreamerModuleClient;
     moduleSessionId: string;
     moduleProjectRoot: string;
     moduleContextStoreUuid: string;
@@ -40,7 +42,7 @@ export async function resolveDreamerModuleRoute(args: {
     projectIdentity: string;
     projectRoot: string;
     transformMode?: "ts" | "rust";
-    moduleClient?: ClassifyModuleClient & {
+    moduleClient?: DreamerModuleClient & {
         authorityStatus?: (args: {
             context_store_uuid: string;
             project: string;
