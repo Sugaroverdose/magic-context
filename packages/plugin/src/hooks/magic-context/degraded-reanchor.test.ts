@@ -70,6 +70,8 @@ function createOpenCodeDb(dataHome: string): Database {
     ocDb.exec(
         "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
     );
+    ocDb.exec("CREATE INDEX part_session_idx ON part(session_id)");
+    ocDb.exec("CREATE INDEX part_message_id_id_idx ON part(message_id, id)");
     return ocDb;
 }
 
@@ -141,6 +143,56 @@ function makeContextDb(): Database {
     initializeDatabase(d);
     getOrCreateSessionMeta(d, SESSION_ID);
     return d;
+}
+
+function legacyListActionableMarkers(
+    ocDb: Database,
+    sessionId: string,
+): Array<{ compactionPartId: string; boundaryMessageId: string; summaryMessageIds: string[] }> {
+    const parts = ocDb
+        .prepare(
+            `SELECT id, message_id FROM part
+             WHERE session_id = ?
+               AND COALESCE(json_extract(data, '$.type'), '') = 'compaction'`,
+        )
+        .all(sessionId) as Array<{ id: string; message_id: string }>;
+    const summaries = ocDb.prepare(
+        `SELECT id FROM message
+         WHERE session_id = ?
+           AND COALESCE(json_extract(data, '$.parentID'), '') = ?
+           AND COALESCE(json_extract(data, '$.summary'), 0) = 1
+           AND COALESCE(json_extract(data, '$.finish'), '') = 'stop'
+           AND COALESCE(json_extract(data, '$.providerID'), '') = 'magic-context'`,
+    );
+    return parts.flatMap((part) => {
+        const summaryMessageIds = (
+            summaries.all(sessionId, part.message_id) as Array<{ id: string }>
+        ).map((row) => row.id);
+        return summaryMessageIds.length > 0
+            ? [
+                  {
+                      compactionPartId: part.id,
+                      boundaryMessageId: part.message_id,
+                      summaryMessageIds,
+                  },
+              ]
+            : [];
+    });
+}
+
+function normalizedMarkerSet(
+    markers: Array<{
+        compactionPartId: string;
+        boundaryMessageId: string;
+        summaryMessageIds: string[];
+    }>,
+): string[] {
+    return markers
+        .map(
+            (marker) =>
+                `${marker.compactionPartId}:${marker.boundaryMessageId}:${[...marker.summaryMessageIds].sort().join(",")}`,
+        )
+        .sort();
 }
 
 beforeEach(() => {
@@ -258,9 +310,146 @@ describe("Layer A — fork-orphan marker hygiene (#263)", () => {
 
         const remaining = listSessionCompactionMarkers(SESSION_ID);
         const partIds = remaining.map((m) => m.compactionPartId).sort();
-        expect(partIds).toEqual(
-            ["prt_native_compaction", "prt_old_compaction", "prt_ours_compaction"].sort(),
+        // Discovery intentionally omits native markers because reconciliation
+        // cannot act on rows without a completed Magic Context summary.
+        expect(partIds).toEqual(["prt_old_compaction", "prt_ours_compaction"].sort());
+    });
+
+    it("old and reversed discovery produce identical actionable sets across 900 boundaries", () => {
+        insertMagicContextMarker(opencodeDb, SESSION_ID, {
+            boundaryId: "msg_owned_boundary",
+            summaryId: "msg_owned_summary",
+            partId: "prt_owned_compaction",
+            summaryPartId: "prt_owned_summary_part",
+            time: 10_000,
+        });
+        setPersistedCompactionMarkerState(db, SESSION_ID, {
+            boundaryMessageId: "msg_owned_boundary",
+            summaryMessageId: "msg_owned_summary",
+            compactionPartId: "prt_owned_compaction",
+            summaryPartId: "prt_owned_summary_part",
+            boundaryOrdinal: 901,
+            targetEndMessageId: "msg_owned_boundary",
+        });
+
+        for (let index = 0; index < 900; index += 1) {
+            insertMagicContextMarker(opencodeDb, SESSION_ID, {
+                boundaryId: `msg_bulk_boundary_${index}`,
+                summaryId: `msg_bulk_summary_${index}`,
+                partId: `prt_bulk_compaction_${index}`,
+                summaryPartId: `prt_bulk_summary_part_${index}`,
+                time: index + 1,
+            });
+        }
+        insertOcMessage(opencodeDb, "msg_extra_summary", SESSION_ID, 20, {
+            role: "assistant",
+            parentID: "msg_bulk_boundary_10",
+            summary: true,
+            finish: "stop",
+            providerID: "magic-context",
+        });
+        insertOcPart(opencodeDb, "prt_extra_compaction", "msg_bulk_boundary_10", SESSION_ID, 20, {
+            type: "compaction",
+            auto: true,
+        });
+
+        insertOcMessage(opencodeDb, "msg_native_boundary", SESSION_ID, 11_000, { role: "user" });
+        insertOcPart(opencodeDb, "prt_native", "msg_native_boundary", SESSION_ID, 11_000, {
+            type: "compaction",
+        });
+        insertOcMessage(opencodeDb, "msg_native_summary", SESSION_ID, 11_001, {
+            role: "assistant",
+            parentID: "msg_native_boundary",
+            summary: true,
+            finish: "stop",
+            providerID: "anthropic",
+        });
+
+        insertMagicContextMarker(opencodeDb, "other-session", {
+            boundaryId: "msg_cross_boundary",
+            summaryId: "msg_cross_summary",
+            partId: "prt_cross_compaction",
+            summaryPartId: "prt_cross_summary_part",
+            time: 12_000,
+        });
+
+        insertOcMessage(opencodeDb, "msg_missing_summary", SESSION_ID, 13_001, {
+            role: "assistant",
+            parentID: "msg_missing_boundary",
+            summary: true,
+            finish: "stop",
+            providerID: "magic-context",
+        });
+        insertOcPart(opencodeDb, "prt_missing", "msg_missing_boundary", SESSION_ID, 13_000, {
+            type: "compaction",
+        });
+        insertMagicContextMarker(opencodeDb, SESSION_ID, {
+            boundaryId: "msg_new_orphan_boundary",
+            summaryId: "msg_new_orphan_summary",
+            partId: "prt_new_orphan",
+            summaryPartId: "prt_new_orphan_summary_part",
+            time: 20_000,
+        });
+
+        const legacy = legacyListActionableMarkers(opencodeDb, SESSION_ID);
+        const reversed = listSessionCompactionMarkers(SESSION_ID);
+        expect(normalizedMarkerSet(reversed)).toEqual(normalizedMarkerSet(legacy));
+
+        const result = reconcileForkOrphanedCompactionMarkers(db, SESSION_ID);
+        expect(result).toEqual({ removed: 1, failed: false });
+        expect(
+            normalizedMarkerSet(listSessionCompactionMarkers(SESSION_ID)).some((key) =>
+                key.startsWith("prt_new_orphan:"),
+            ),
+        ).toBe(false);
+        expect(
+            opencodeDb.prepare("SELECT 1 FROM part WHERE id = 'prt_native'").get(),
+        ).not.toBeNull();
+        expect(
+            opencodeDb.prepare("SELECT 1 FROM part WHERE id = 'prt_missing'").get(),
+        ).not.toBeNull();
+    });
+
+    it("old and reversed discovery preserve retry decisions when marker removal fails", () => {
+        insertMagicContextMarker(opencodeDb, SESSION_ID, {
+            boundaryId: "msg_owned_boundary",
+            summaryId: "msg_owned_summary",
+            partId: "prt_owned_compaction",
+            summaryPartId: "prt_owned_summary_part",
+            time: 1_000,
+        });
+        insertMagicContextMarker(opencodeDb, SESSION_ID, {
+            boundaryId: "msg_failing_boundary",
+            summaryId: "msg_failing_summary",
+            partId: "prt_failing_compaction",
+            summaryPartId: "prt_failing_summary_part",
+            time: 2_000,
+        });
+        setPersistedCompactionMarkerState(db, SESSION_ID, {
+            boundaryMessageId: "msg_owned_boundary",
+            summaryMessageId: "msg_owned_summary",
+            // Simulate durable ownership pointing at a marker part that vanished.
+            // The remaining owned-boundary marker must still be harmless, while
+            // the newer orphan remains the only actionable deletion.
+            compactionPartId: "prt_stale_owned",
+            summaryPartId: "prt_owned_summary_part",
+            boundaryOrdinal: 1,
+            targetEndMessageId: "msg_owned_boundary",
+        });
+        expect(normalizedMarkerSet(listSessionCompactionMarkers(SESSION_ID))).toEqual(
+            normalizedMarkerSet(legacyListActionableMarkers(opencodeDb, SESSION_ID)),
         );
+        opencodeDb.exec(`CREATE TRIGGER reject_orphan_delete
+            BEFORE DELETE ON part WHEN OLD.id = 'prt_failing_compaction'
+            BEGIN SELECT RAISE(ABORT, 'simulated removal failure'); END`);
+
+        expect(reconcileForkOrphanedCompactionMarkers(db, SESSION_ID)).toEqual({
+            removed: 0,
+            failed: true,
+        });
+        expect(
+            opencodeDb.prepare("SELECT 1 FROM part WHERE id = 'prt_failing_compaction'").get(),
+        ).not.toBeNull();
     });
 
     it("fork simulation: degraded pass repairs the orphan, next pass exits degraded", () => {

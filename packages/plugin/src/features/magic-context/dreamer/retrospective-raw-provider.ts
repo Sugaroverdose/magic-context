@@ -444,15 +444,15 @@ function normalizeOpenCodeRows(
     if (rows.length === 0) return [];
 
     // Restrict the part read to the capped, globally unique message IDs we kept.
-    // The selectivity hint keeps stale statistics from favoring a session-wide
-    // index walk while retaining compatibility with composite session/id indexes.
+    // Unary `+` keeps the session check for cross-session safety while making the
+    // bounded message-id predicate drive the stock OpenCode part index.
     const messageIds = rows.map((row) => row.id);
     const placeholders = messageIds.map(() => "?").join(", ");
     const partRows = db
         .prepare<string[], OpenCodePartRow>(
             `SELECT message_id, data
                FROM part
-              WHERE session_id = ?
+              WHERE +session_id = ?
                 AND likelihood(message_id IN (${placeholders}), 0.000001)
               ORDER BY time_created ASC, id ASC`,
         )
