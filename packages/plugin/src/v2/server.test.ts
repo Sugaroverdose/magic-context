@@ -57,3 +57,16 @@ test("published package exposes no ./server entry the v1 host would load as v2",
     const byDirectory = Host.resolve({ directory });
     expect(byDirectory.rpc).toBeUndefined();
 });
+
+// The v2 SDK's OpenTUI peers conflict with the v1 TUI runtime. Keep v2
+// development tooling out of the dependency tree npm installs for v1 users.
+test("published runtime dependencies contain no v2 @opencode packages", () => {
+    const pkg = JSON.parse(
+        readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8"),
+    ) as {
+        dependencies: Record<string, string>;
+    };
+    expect(Object.keys(pkg.dependencies).filter((name) => name.startsWith("@opencode/"))).toEqual(
+        [],
+    );
+});
