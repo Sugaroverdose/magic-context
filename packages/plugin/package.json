@@ -23,7 +23,6 @@
     "directory": "packages/plugin"
   },
   "files": [
-    "server.js",
     "dist",
     "src/tui",
     "src/tui-compiled",
@@ -89,10 +88,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./server": {
-      "types": "./dist/v2/server.d.ts",
-      "import": "./dist/v2/server.js"
     },
     "./tui": {
       "types": "./src/tui/index.tsx",
