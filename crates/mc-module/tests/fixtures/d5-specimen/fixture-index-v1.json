@@ -3793,9 +3793,17 @@
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
+      "path": "coverage-proof-vectors-v1.json",
+      "byte_size": 329529,
+      "sha256": "8b83390099c5a5c502f4b738304a6d41ee872e4a9341d67aa4d75ee33bb1d3a4",
+      "derived": false,
+      "source": "owner-authored D5 coverage-proof contract vectors",
+      "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    },
+    {
       "path": "README.md",
-      "byte_size": 9108,
-      "sha256": "47743cad817b87bded086eb057b02bddfd3dec3dfb67716550911defd9baf946",
+      "byte_size": 10140,
+      "sha256": "3501567f7ea054233f2f62bae0bbfe81768616cc2cb97dfc916489ed30ae8ec2",
       "derived": true,
       "source": "VACUUM f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0",
       "length_geometry_source": "capture_13610 766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b",
