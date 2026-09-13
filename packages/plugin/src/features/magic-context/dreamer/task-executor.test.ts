@@ -290,6 +290,75 @@ describe("createDreamTaskExecutor — curate", () => {
         expect(capturedPrompt).not.toContain("verified_files");
     });
 
+    test("archives expired active memories before curation without expiring permanent rows", async () => {
+        db = freshDb();
+        const project = "/repo/expired-curate";
+        const now = Date.now();
+        const expired = insertMemory(db, {
+            projectPath: project,
+            category: "KNOWN_ISSUES",
+            content: "This legacy issue has reached its TTL.",
+            expiresAt: now - 1,
+        });
+        const permanent = insertMemory(db, {
+            projectPath: project,
+            category: "PROJECT_RULES",
+            content: "Permanent memories are never expired.",
+            expiresAt: now - 1,
+        });
+        db.prepare("UPDATE memories SET status = 'permanent' WHERE id = ?").run(permanent.id);
+        const create = mock(async () => ({ data: { id: "must-not-create" } }));
+        const client = {
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create,
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+
+        const result = await executor(
+            { task: "curate", schedule: "0 4 * * 0", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder-expired-curate",
+                leaseKey: leaseKeyFor("curate", project),
+            },
+        );
+
+        expect(result).toMatchObject({
+            status: "completed",
+            detail: "curate: archived 1 expired memory",
+        });
+        expect(create).not.toHaveBeenCalled();
+        expect(
+            db.prepare("SELECT status, metadata_json FROM memories WHERE id = ?").get(expired.id),
+        ).toEqual({
+            status: "archived",
+            metadata_json: JSON.stringify({ archive_reason: "expired" }),
+        });
+        expect(db.prepare("SELECT status FROM memories WHERE id = ?").get(permanent.id)).toEqual({
+            status: "permanent",
+        });
+        expect(
+            db
+                .prepare(
+                    "SELECT mutation_type, target_memory_id FROM memory_mutation_log WHERE project_path = ?",
+                )
+                .all(project),
+        ).toEqual([{ mutation_type: "archive", target_memory_id: expired.id }]);
+        expect(
+            JSON.parse(getDreamRuns(db, project)[0]?.memory_changes_json ?? "null"),
+        ).toMatchObject({
+            archived: 1,
+            archivedIds: [expired.id],
+        });
+    });
+
     test("accepts tool-only curate output after completed ctx_memory operations", async () => {
         db = freshDb();
         const project = "/repo/curate-tool-only";

@@ -34,6 +34,7 @@ import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { type ClassifyModuleClient, runClassify } from "./classify";
 import { takeCurateSafetyRefusalCount } from "./curate-memory-safety";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
+import { archiveExpiredMemories } from "./expire-memories";
 import {
     acquireLeaseWithAcquisition,
     type LeaseAcquisition,
@@ -280,6 +281,10 @@ function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOperation
     return summary;
 }
 
+function formatExpiredArchiveProgress(count: number): string {
+    return `curate: archived ${count} expired ${count === 1 ? "memory" : "memories"}`;
+}
+
 function formatCurateMemoryOperations(actions: readonly string[]): string {
     const actionCounts = new Map<string, number>();
     for (const action of actions) actionCounts.set(action, (actionCounts.get(action) ?? 0) + 1);
@@ -359,6 +364,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
         const parent = await resolveParentSessionId();
         let moduleRoute: Awaited<ReturnType<typeof resolveDreamerModuleRoute>>;
         if (
+            config.task === "curate" ||
             config.task === "map-memories" ||
             config.task === "compress-cues" ||
             config.task === "classify-memories" ||
@@ -791,6 +797,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 recordRun,
                 computeMemoryDelta,
                 reportProgress,
+                leaseAcquisition,
+                moduleRoute,
             });
         } catch (error) {
             const { transient, brief } = classifyFailure(error);
@@ -1263,6 +1271,8 @@ async function runAgenticTask(
             before: ReturnType<typeof getMemoryCountsByStatus>,
         ) => { written: number; deleted: number; archived: number; merged: number } | null;
         reportProgress: (processed: number, refused?: number) => void;
+        leaseAcquisition: LeaseAcquisition;
+        moduleRoute?: DreamerModuleRoute;
     },
 ): Promise<TaskExecOutcome> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
@@ -1283,21 +1293,6 @@ async function runAgenticTask(
                   structure: existsSync(`${docsDir}/STRUCTURE.md`),
               }
             : undefined;
-    // verify / verify-broad / classify-memories now run via their own non-agentic
-    // manifest runners and never reach runAgenticTask. The agentic path handles
-    // curate / maintain-docs only.
-    let curateMemories: ReturnType<typeof loadActiveMemoryPromptMemories> | undefined;
-    if (task === "curate") {
-        curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
-        log(`[dreamer] curate pool: in_scope=${curateMemories.length}`);
-    }
-
-    const taskPrompt = buildDreamTaskPrompt(task, {
-        projectPath: projectIdentity,
-        lastDreamAt: lastRunAt ? String(lastRunAt) : null,
-        existingDocs,
-        curate: curateMemories ? { memories: curateMemories } : undefined,
-    });
 
     const abortController = new AbortController();
     let leaseLost = false;
@@ -1314,7 +1309,42 @@ async function runAgenticTask(
 
     let childSessionId: string | null = null;
     let promptSettled = false;
+    let expiredArchived = 0;
     try {
+        // Curate owns the TTL lifecycle transition. It runs after the memory-domain
+        // lease heartbeat starts and uses the same authority-specific archive path
+        // as curate's ctx_memory operations.
+        let curateMemories: ReturnType<typeof loadActiveMemoryPromptMemories> | undefined;
+        if (task === "curate") {
+            expiredArchived = await archiveExpiredMemories({
+                db,
+                projectIdentity,
+                holderId,
+                leaseKey,
+                leaseAcquisition: helpers.leaseAcquisition,
+                moduleRoute: helpers.moduleRoute,
+            });
+            if (leaseLost) throw new Error("Dream lease lost during expired-memory archive");
+            curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
+            log(
+                `[dreamer] curate pool: in_scope=${curateMemories.length} expired_archived=${expiredArchived}`,
+            );
+            if (curateMemories.length === 0 && expiredArchived > 0) {
+                const progress = formatExpiredArchiveProgress(expiredArchived);
+                helpers.recordRun("completed", null, {
+                    memoryChanges: helpers.computeMemoryDelta(memoryBefore),
+                    progress,
+                });
+                return { status: "completed", detail: progress };
+            }
+        }
+
+        const taskPrompt = buildDreamTaskPrompt(task, {
+            projectPath: projectIdentity,
+            lastDreamAt: lastRunAt ? String(lastRunAt) : null,
+            existingDocs,
+            curate: curateMemories ? { memories: curateMemories } : undefined,
+        });
         const createResponse = await createChildSessionWithFence({
             client: deps.client,
             db,
@@ -1430,6 +1460,7 @@ async function runAgenticTask(
         const curateOutput =
             task === "curate" ? (run.validated as CurateValidatedOutput) : undefined;
         const progress = [
+            expiredArchived > 0 ? formatExpiredArchiveProgress(expiredArchived) : null,
             curateOutput && curateOutput.memoryOperations.completedActions.length > 0
                 ? formatCurateMemoryOperations(curateOutput.memoryOperations.completedActions)
                 : null,
