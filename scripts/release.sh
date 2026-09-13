@@ -425,10 +425,55 @@ if [ -z "$RUN_ID" ]; then
     exit 1
 fi
 echo "  → Watching workflow run $RUN_ID (blocks until publish completes or fails)..."
-if ! gh run watch "$RUN_ID" --exit-status --interval 30 > /dev/null 2>&1; then
+# `gh run watch` exits non-zero on transient API errors too, not only on a
+# failed run; a false "RELEASE FAILED" while the run was still in progress cost
+# a manual re-watch on 2026-09-13. Trust only the run's terminal status: keep
+# watching until the run is no longer queued/in_progress, then judge it.
+RUN_STATUS=""
+for attempt in 1 2 3 4 5 6; do
+    gh run watch "$RUN_ID" --exit-status --interval 30 > /dev/null 2>&1 || true
+    RUN_STATUS=$(gh run view "$RUN_ID" --json status -q '.status' 2>/dev/null || echo "")
+    case "$RUN_STATUS" in
+        queued|in_progress|waiting|requested|pending|"") sleep 30 ;;
+        *) break ;;
+    esac
+done
+RUN_CONCLUSION=$(gh run view "$RUN_ID" --json conclusion -q '.conclusion' 2>/dev/null || echo "unknown")
+if [ "$RUN_CONCLUSION" != "success" ]; then
     echo "" >&2
-    echo "  ✗ RELEASE FAILED in CI (run $RUN_ID). Failing jobs:" >&2
-    gh run view "$RUN_ID" --json jobs -q '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "    - " + .name' >&2
+    echo "  ✗ RELEASE FAILED in CI (run $RUN_ID, status=$RUN_STATUS conclusion=$RUN_CONCLUSION). Failing jobs:" >&2
+    gh run view "$RUN_ID" --json jobs -q '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | "    - " + .name + " (" + .status + "/" + .conclusion + ")"' >&2
     exit 1
 fi
 echo "  ✓ Released $TAG — CI publish completed"
+
+# npm can acknowledge a publish ("+ pkg@version", provenance signed) and still
+# leave the version STAGED and invisible: absent from the packument's `time`
+# map, 404 on the tarball, and E409 "previously staged version" on every retry
+# (2026-09-13: @cortexkit/pi-magic-context@0.42.2). The publish job's exit
+# status therefore proves nothing about installability; the packument is the
+# only signal that tells the truth. Poll it for each package before calling the
+# release shipped.
+echo "  → Verifying registry visibility for $VERSION..."
+MISSING=""
+for pkg in @cortexkit/opencode-magic-context @cortexkit/pi-magic-context @cortexkit/magic-context; do
+    seen=""
+    for attempt in $(seq 1 20); do
+        if curl -fsS "https://registry.npmjs.org/${pkg/\//%2F}" -H 'Cache-Control: no-cache' 2>/dev/null \
+            | grep -q "\"$VERSION\":\"[0-9]"; then
+            seen=1; break
+        fi
+        sleep 30
+    done
+    if [ -n "$seen" ]; then
+        echo "    ✓ $pkg@$VERSION visible on the registry"
+    else
+        echo "    ✗ $pkg@$VERSION NOT visible after 10 minutes (publish acknowledged but staged?)" >&2
+        MISSING="$MISSING $pkg"
+    fi
+done
+if [ -n "$MISSING" ]; then
+    echo "  ✗ RELEASE INCOMPLETE: not installable at $VERSION:$MISSING" >&2
+    echo "    A staged version cannot be re-published (E409); if it never lands, the next patch version is the recovery." >&2
+    exit 1
+fi
