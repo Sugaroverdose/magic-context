@@ -1,0 +1,68 @@
+[
+	{
+		"id": "msg_09b67476c001MZMCs3OfaWYJud",
+		"session_id": "ses_f6498b9feffevmSIRgPiBvqC5w",
+		"type": "user",
+		"seq": 4,
+		"data": {
+			"time": {
+				"created": 1789313632142
+			},
+			"text": "fixture prompt"
+		}
+	},
+	{
+		"id": "msg_09b6747a3001f8TB92HI6tzDbM",
+		"session_id": "ses_f6498b9feffevmSIRgPiBvqC5w",
+		"type": "assistant",
+		"seq": 5,
+		"data": {
+			"time": {
+				"created": 1789313632188,
+				"streamed": 1789313632198,
+				"completed": 1789313632200
+			},
+			"agent": "build",
+			"model": {
+				"id": "mock-model",
+				"providerID": "openai",
+				"variant": "default"
+			},
+			"content": [
+				{
+					"type": "text",
+					"text": "fixture reply",
+					"state": {
+						"itemId": "msg_resp_66cf288ffc834d03a382c09a_0"
+					}
+				}
+			],
+			"finish": "stop",
+			"providerState": {
+				"responseId": "resp_66cf288ffc834d03a382c09a"
+			},
+			"cost": 0,
+			"tokens": {
+				"input": 100,
+				"output": 10,
+				"reasoning": 0,
+				"cache": {
+					"read": 0,
+					"write": 0
+				}
+			}
+		}
+	},
+	{
+		"id": "msg_09b6747cc0017D20kTx2CzwClb",
+		"session_id": "ses_f6498b9feffevmSIRgPiBvqC5w",
+		"type": "idle",
+		"seq": 10,
+		"data": {
+			"time": {
+				"created": 1789313632204
+			},
+			"outcome": "succeeded"
+		}
+	}
+]
