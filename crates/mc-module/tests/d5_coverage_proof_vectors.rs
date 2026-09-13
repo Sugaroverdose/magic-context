@@ -16,6 +16,9 @@ struct Fixture {
     gateway_state: GatewayState,
     precondition_space: PreconditionSpace,
     precedence_table: Vec<PrecedenceRow>,
+    r17_3_unit_precondition_space: PreconditionSpace,
+    r17_3_unit_rule_table: Vec<PrecedenceRow>,
+    thalamus_counterexamples_json: String,
     vectors: Vec<Vector>,
     vector_sequences: Vec<VectorSequence>,
 }
@@ -62,7 +65,7 @@ struct GatewayState {
     held_receipts: Vec<HeldReceipt>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RedeemedReceipt {
     receipt_id: String,
@@ -78,7 +81,7 @@ struct KnownUnit {
     row_version: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct RecordedPass {
     receipt_id: String,
@@ -86,7 +89,7 @@ struct RecordedPass {
     units: Vec<UnitRecordV1>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct HeldReceipt {
     receipt_id: String,
@@ -129,6 +132,12 @@ struct Vector {
     gateway_folded_frontier: u64,
     expected: Expected,
     precedence_row: String,
+    #[serde(default)]
+    r17_3_preconditions: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    r17_3_rule_row: Option<String>,
+    #[serde(default)]
+    counterexample_id: Option<String>,
     #[serde(default)]
     loss_specimen: Option<LossSpecimen>,
 }
@@ -211,15 +220,23 @@ struct ProjectionDigest {
 #[serde(deny_unknown_fields)]
 struct UnitRecordV1 {
     unit: String,
+    kind: UnitKind,
     coverage: UnitCoverage,
     locator: Option<UnitLocator>,
+    source_text: String,
     sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum UnitKind {
+    Compartment { compartment_sequence: u64 },
+    Reduction,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct UnitCoverage {
-    compartment_sequence: u64,
     start: u64,
     end: u64,
 }
@@ -291,14 +308,14 @@ struct ServedBlock {
     bytes: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestBlock {
     identity: BlockIdentity,
     provenance: Provenance,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Provenance {
     Native {
@@ -322,7 +339,8 @@ struct VectorSequence {
 struct SequenceStep {
     vector_id: String,
     accepted: bool,
-    recorded_units_after: Vec<String>,
+    recorded_after: Vec<RecordedPass>,
+    custody_after: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -412,7 +430,15 @@ fn projection_ce1(row_version: u64, units: &[(&UnitRecordV1, &[u8])]) -> Vec<u8>
     );
     for (record, bytes) in units {
         encoded.extend_from_slice(&ce1_text(&record.unit));
-        encoded.extend_from_slice(&record.coverage.compartment_sequence.to_be_bytes());
+        match &record.kind {
+            UnitKind::Compartment {
+                compartment_sequence,
+            } => {
+                encoded.extend_from_slice(&ce1_text("compartment"));
+                encoded.extend_from_slice(&compartment_sequence.to_be_bytes());
+            }
+            UnitKind::Reduction => encoded.extend_from_slice(&ce1_text("reduction")),
+        }
         encoded.extend_from_slice(&record.coverage.start.to_be_bytes());
         encoded.extend_from_slice(&record.coverage.end.to_be_bytes());
         encoded.extend_from_slice(&ce1_bytes(bytes));
@@ -765,13 +791,12 @@ fn recorded_record<'a>(vector: &'a Vector, unit: &str) -> Option<(&'a UnitRecord
         .find(|(record, _)| record.unit == unit)
 }
 
-fn seen_record<'a>(vector: &'a Vector, unit: &str) -> Option<(&'a UnitRecordV1, u64)> {
+fn validated_record<'a>(vector: &'a Vector, unit: &str) -> Option<(&'a UnitRecordV1, u64)> {
     current_record(&vector.d5_carry, unit)
         .map(|record| (record, vector.d5_carry.projection_digest.row_version))
-        .or_else(|| recorded_record(vector, unit))
 }
 
-fn receipt_presence(fixture: &Fixture, vector: &Vector) -> &'static str {
+fn receipt_presence(_fixture: &Fixture, vector: &Vector) -> &'static str {
     let Some(proofs) = vector.d5_carry.coverage_proof.as_deref() else {
         return "all_present_matching";
     };
@@ -800,18 +825,20 @@ fn receipt_presence(fixture: &Fixture, vector: &Vector) -> &'static str {
                 unit,
                 row_version,
             } => {
-                let Some((record, record_row)) = seen_record(vector, unit) else {
+                let Some((record, record_row)) = validated_record(vector, unit) else {
                     continue;
                 };
-                if record.sha256 != *sha256 || record_row != *row_version {
+                if record.sha256 != *sha256
+                    || record_row != *row_version
+                    || !matches!(record.kind, UnitKind::Reduction)
+                    || identity.ordinal < record.coverage.start
+                    || identity.ordinal > record.coverage.end
+                {
                     return "digest_mismatch";
                 }
-                if record.locator.is_some() && served_span_member(vector, identity).is_none() {
+                let member_is_present = served_span_member(vector, identity).is_some();
+                if member_is_present != record.locator.is_some() {
                     return "member_absent";
-                }
-                let known = known_unit(fixture, unit);
-                if known.is_none() && record.locator.is_some() {
-                    return "digest_mismatch";
                 }
             }
         }
@@ -838,7 +865,7 @@ fn member_representation(vector: &Vector) -> &'static str {
         }) = carry_member(&vector.d5_carry, identity)
         {
             reduced = true;
-            if seen_record(vector, unit).is_none() {
+            if validated_record(vector, unit).is_none() {
                 return "reduced_unit_unlisted";
             }
         }
@@ -851,7 +878,7 @@ fn member_representation(vector: &Vector) -> &'static str {
 }
 
 fn unit_is_seen(vector: &Vector, unit: &str) -> bool {
-    seen_record(vector, unit).is_some()
+    validated_record(vector, unit).is_some()
 }
 
 fn relevant_units(proofs: Option<&[CoverageProofV1]>) -> Vec<&str> {
@@ -893,26 +920,21 @@ fn real_geometry(fixture: &Fixture, vector: &Vector) -> &'static str {
         {
             return "member_present";
         }
-        let Some((record, row_version)) = seen_record(vector, unit) else {
+        let Some((record, _)) = validated_record(vector, unit) else {
             return if known_unit(fixture, unit).is_some() {
                 "absent_and_covered"
             } else {
                 "unknown_unit"
             };
         };
-        if covered.iter().any(|identity| {
-            identity.ordinal < record.coverage.start || identity.ordinal > record.coverage.end
-        }) {
+        if !matches!(record.kind, UnitKind::Compartment { .. })
+            || record.locator.is_none()
+            || record.source_text.is_empty()
+            || covered.iter().any(|identity| {
+                identity.ordinal < record.coverage.start || identity.ordinal > record.coverage.end
+            })
+        {
             return "coverage_end_too_low";
-        }
-        if vector.recorded_before.iter().any(|pass| {
-            pass.receipt_id == vector.d5_carry.receipt_id
-                && pass.units.iter().any(|prior| {
-                    prior.unit == *unit
-                        && (row_version < pass.row_version || prior.coverage != record.coverage)
-                })
-        }) {
-            return "row_version_regressed";
         }
     }
     "absent_and_covered"
@@ -936,10 +958,17 @@ fn fold_coverage(fixture: &Fixture, vector: &Vector) -> &'static str {
     };
     let records = units
         .iter()
-        .filter_map(|unit| seen_record(vector, unit).map(|(record, _)| record))
+        .filter_map(|unit| validated_record(vector, unit).map(|(record, _)| record))
         .collect::<Vec<_>>();
     if records.len() != units.len() {
         return "unit_unseen";
+    }
+    if records.iter().any(|record| {
+        !matches!(record.kind, UnitKind::Compartment { .. })
+            || record.locator.is_none()
+            || record.source_text.is_empty()
+    }) {
+        return "gap";
     }
     let all_covered = fixture.manifest.members.iter().all(|member| {
         records.iter().any(|record| {
@@ -975,7 +1004,14 @@ fn discharge_evidence(fixture: &Fixture, vector: &Vector) -> &'static str {
         DischargeBy::Fold { units } => {
             let max_end = units
                 .iter()
-                .filter_map(|unit| seen_record(vector, unit).map(|(record, _)| record.coverage.end))
+                .filter_map(|unit| {
+                    validated_record(vector, unit).and_then(|(record, _)| {
+                        (matches!(record.kind, UnitKind::Compartment { .. })
+                            && record.locator.is_some()
+                            && !record.source_text.is_empty())
+                        .then_some(record.coverage.end)
+                    })
+                })
                 .max();
             if max_end.is_none() || max_end == Some(vector.gateway_folded_frontier) {
                 "fold_ok"
@@ -984,6 +1020,13 @@ fn discharge_evidence(fixture: &Fixture, vector: &Vector) -> &'static str {
             }
         }
         DischargeBy::Reduction { units } => {
+            let records_are_current_reductions = units.iter().all(|unit| {
+                validated_record(vector, unit)
+                    .is_some_and(|(record, _)| matches!(record.kind, UnitKind::Reduction))
+            });
+            if !records_are_current_reductions {
+                return "reduction_digest_wrong";
+            }
             let mapped = vector
                 .d5_carry
                 .members
@@ -1116,18 +1159,23 @@ fn unit_validation(vector: &Vector) -> &'static str {
         let Some(bytes) = served_block_bytes(vector, record) else {
             return "digest_tampered";
         };
+        if bytes != record.source_text.as_bytes()
+            || (record.locator.is_none() && !record.source_text.is_empty())
+            || (matches!(record.kind, UnitKind::Compartment { .. }) && bytes.is_empty())
+        {
+            return "digest_tampered";
+        }
         let ce1 = unit_ce1(&record.unit, row_version, bytes);
         if domain_digest("mc.d5.unit-projection.v1", &ce1) != record.sha256 {
             return "digest_tampered";
         }
-        if vector.recorded_before.iter().any(|pass| {
-            pass.receipt_id == vector.d5_carry.receipt_id
-                && pass.units.iter().any(|prior| {
-                    prior.unit == record.unit
-                        && (prior.coverage != record.coverage || row_version < pass.row_version)
-                })
-        }) {
-            return "recorded_coverage_conflict";
+        if let Some((prior, prior_row_version)) = recorded_record(vector, &record.unit) {
+            if row_version < prior_row_version
+                || (row_version == prior_row_version
+                    && (prior.coverage != record.coverage || prior.kind != record.kind))
+            {
+                return "recorded_coverage_conflict";
+            }
         }
         validated.push((record, bytes));
     }
@@ -1204,13 +1252,20 @@ fn assert_digest_provenance(fixture: &Fixture) {
             let bytes = served_block_bytes(vector, record).unwrap_or_else(|| {
                 panic!("{} missing locator bytes for {}", vector.id, record.unit)
             });
+            assert_eq!(
+                bytes,
+                record.source_text.as_bytes(),
+                "{} source_text for {}",
+                vector.id,
+                record.unit
+            );
             let ce1 = unit_ce1(
                 &record.unit,
                 vector.d5_carry.projection_digest.row_version,
-                bytes,
+                record.source_text.as_bytes(),
             );
             let computed = domain_digest("mc.d5.unit-projection.v1", &ce1);
-            if vector.name == "tampered current unit with no prior entry" {
+            if unit_validation(vector) == "digest_tampered" {
                 assert_ne!(record.sha256, computed, "tampered control must differ");
             } else {
                 assert_eq!(
@@ -1219,7 +1274,23 @@ fn assert_digest_provenance(fixture: &Fixture) {
                     vector.id, record.unit
                 );
             }
-            units.push((record, bytes));
+            units.push((record, record.source_text.as_bytes()));
+        }
+        for pass in &vector.recorded_before {
+            for record in &pass.units {
+                let ce1 = unit_ce1(
+                    &record.unit,
+                    pass.row_version,
+                    record.source_text.as_bytes(),
+                );
+                assert_eq!(
+                    record.sha256,
+                    domain_digest("mc.d5.unit-projection.v1", &ce1),
+                    "{} recorded unit {}",
+                    vector.id,
+                    record.unit
+                );
+            }
         }
         let ce1 = projection_ce1(vector.d5_carry.projection_digest.row_version, &units);
         if unit_validation(vector) != "aggregate_mismatch" {
@@ -1230,6 +1301,261 @@ fn assert_digest_provenance(fixture: &Fixture) {
                 vector.id
             );
         }
+    }
+}
+
+fn precondition_cells(space: &PreconditionSpace) -> Vec<PreconditionCell> {
+    fn visit(
+        dimensions: &[(&String, &Vec<String>)],
+        at: usize,
+        cell: &mut BTreeMap<String, String>,
+        cells: &mut Vec<PreconditionCell>,
+    ) {
+        if at == dimensions.len() {
+            cells.push(PreconditionCell(cell.clone()));
+            return;
+        }
+        let (name, domain) = dimensions[at];
+        for value in domain {
+            cell.insert(name.clone(), value.clone());
+            visit(dimensions, at + 1, cell, cells);
+        }
+        cell.remove(name);
+    }
+
+    let dimensions = space.dimensions.iter().collect::<Vec<_>>();
+    let mut cells = Vec::new();
+    visit(&dimensions, 0, &mut BTreeMap::new(), &mut cells);
+    cells
+}
+
+fn assert_r17_3_precondition_space(space: &PreconditionSpace) {
+    assert_eq!(
+        space.evaluation_order,
+        [
+            "unit_membership",
+            "row_version_relation",
+            "proof_variant",
+            "unit_kind",
+            "locator_presence"
+        ]
+    );
+    let expected = BTreeMap::from([
+        (
+            "proof_variant",
+            vec![
+                "receipt_backed",
+                "real_compartment",
+                "discharged_fold",
+                "discharged_reduction",
+            ],
+        ),
+        ("unit_kind", vec!["compartment", "reduction"]),
+        ("locator_presence", vec!["present", "none"]),
+        (
+            "unit_membership",
+            vec!["validated", "recorded_only", "absent"],
+        ),
+        (
+            "row_version_relation",
+            vec!["regressed", "equal_same", "equal_diff_coverage", "advanced"],
+        ),
+    ]);
+    assert_eq!(space.dimensions.len(), expected.len());
+    for (name, domain) in expected {
+        assert_eq!(space.dimensions[name], domain, "R17.3 dimension {name}");
+    }
+    assert!(space.independence_rule.contains("independent product"));
+}
+
+fn cited_unit(vector: &Vector) -> Option<(&str, &'static str)> {
+    let proof = vector.d5_carry.coverage_proof.as_deref()?.first()?;
+    match proof {
+        CoverageProofV1::ReceiptBacked { covered } => {
+            let identity = covered.first()?;
+            let member = carry_member(&vector.d5_carry, identity)?;
+            match &member.validation {
+                CarryValidation::ProjectionDigest { unit, .. } => Some((unit, "receipt_backed")),
+                CarryValidation::Frozen { .. } => None,
+            }
+        }
+        CoverageProofV1::RealCompartment { unit, .. } => Some((unit, "real_compartment")),
+        CoverageProofV1::Discharged {
+            by: DischargeBy::Fold { units },
+        } => units.first().map(|unit| (unit.as_str(), "discharged_fold")),
+        CoverageProofV1::Discharged {
+            by: DischargeBy::Reduction { units },
+        } => units
+            .first()
+            .map(|unit| (unit.as_str(), "discharged_reduction")),
+        _ => None,
+    }
+}
+
+fn r17_3_vector_cell(vector: &Vector) -> Option<PreconditionCell> {
+    let (unit, proof_variant) = cited_unit(vector)?;
+    let current = current_record(&vector.d5_carry, unit);
+    let recorded = recorded_record(vector, unit);
+    let (record, unit_membership) = match (current, recorded) {
+        (Some(record), _) => (record, "validated"),
+        (None, Some((record, _))) => (record, "recorded_only"),
+        (None, None) => return None,
+    };
+    let row_version_relation = match (current, recorded) {
+        (Some(current), Some((prior, prior_row))) => {
+            let current_row = vector.d5_carry.projection_digest.row_version;
+            if current_row < prior_row {
+                "regressed"
+            } else if current_row > prior_row {
+                "advanced"
+            } else if current.coverage == prior.coverage && current.kind == prior.kind {
+                "equal_same"
+            } else {
+                "equal_diff_coverage"
+            }
+        }
+        _ => "equal_same",
+    };
+    let unit_kind = match &record.kind {
+        UnitKind::Compartment { .. } => "compartment",
+        UnitKind::Reduction => "reduction",
+    };
+    Some(PreconditionCell(BTreeMap::from([
+        ("proof_variant".to_string(), proof_variant.to_string()),
+        ("unit_kind".to_string(), unit_kind.to_string()),
+        (
+            "locator_presence".to_string(),
+            if record.locator.is_some() {
+                "present"
+            } else {
+                "none"
+            }
+            .to_string(),
+        ),
+        ("unit_membership".to_string(), unit_membership.to_string()),
+        (
+            "row_version_relation".to_string(),
+            row_version_relation.to_string(),
+        ),
+    ])))
+}
+
+fn legacy_counterexample_aggregate(row_version: u64, case: &Value) -> String {
+    let records = case["current_units"].as_array().expect("current units");
+    let sources = case["current_unit_bytes"]
+        .as_array()
+        .expect("current unit bytes");
+    assert_eq!(records.len(), sources.len());
+    let mut encoded = row_version.to_be_bytes().to_vec();
+    encoded.extend_from_slice(&(records.len() as u64).to_be_bytes());
+    for (record, source) in records.iter().zip(sources) {
+        encoded.extend_from_slice(&ce1_text(record["unit"].as_str().expect("unit")));
+        let coverage = &record["coverage"];
+        encoded.extend_from_slice(
+            &coverage["compartment_sequence"]
+                .as_u64()
+                .expect("compartment sequence")
+                .to_be_bytes(),
+        );
+        encoded.extend_from_slice(&coverage["start"].as_u64().expect("start").to_be_bytes());
+        encoded.extend_from_slice(&coverage["end"].as_u64().expect("end").to_be_bytes());
+        encoded.extend_from_slice(&ce1_bytes(source.as_str().expect("source").as_bytes()));
+    }
+    domain_digest("mc.d5.projection.v1", &encoded)
+}
+
+#[test]
+fn d5_r17_3_unit_precondition_table_is_total() {
+    let (fixture, _) = load_fixture();
+    let space = &fixture.r17_3_unit_precondition_space;
+    assert_r17_3_precondition_space(space);
+    let cells = precondition_cells(space);
+    assert_eq!(cells.len(), 192);
+    for cell in cells {
+        let rows = fixture
+            .r17_3_unit_rule_table
+            .iter()
+            .filter(|row| row_matches(row, &cell))
+            .map(|row| row.row_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(!rows.is_empty(), "uncovered R17.3 cell {cell:?}");
+    }
+}
+
+#[test]
+fn d5_r17_3_unit_precondition_table_is_disjoint() {
+    let (fixture, _) = load_fixture();
+    let space = &fixture.r17_3_unit_precondition_space;
+    assert_r17_3_precondition_space(space);
+    for cell in precondition_cells(space) {
+        let rows = fixture
+            .r17_3_unit_rule_table
+            .iter()
+            .filter(|row| row_matches(row, &cell))
+            .map(|row| row.row_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            rows.len() <= 1,
+            "overlapping R17.3 cell {cell:?} matched rows {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn d5_thalamus_counterexamples_are_verbatim_and_digest_controlled() {
+    let (fixture, _) = load_fixture();
+    assert_eq!(
+        sha256_hex(fixture.thalamus_counterexamples_json.as_bytes()),
+        "c027ffed96f4acb855a834ddbc96411c874dd05f5212cf5f142080b714fa9628"
+    );
+    let artifact: Value =
+        serde_json::from_str(&fixture.thalamus_counterexamples_json).expect("counterexamples JSON");
+    assert_eq!(artifact["rule_source_commit"], "23d26ae99");
+    assert_eq!(artifact["unit_digest_sentinel_verified"], true);
+    assert_eq!(
+        domain_digest("mc.d5.unit-projection.v1", &unit_ce1("u1", 7, b"red")),
+        "3dc9079367264990f8614660b3f0a1f5ab3b133c4ed3e841bff793f38a84f90a"
+    );
+    let cases = artifact["cases"].as_array().expect("counterexample cases");
+    assert_eq!(
+        cases
+            .iter()
+            .map(|case| case["id"].as_str().expect("case id"))
+            .collect::<Vec<_>>(),
+        [
+            "empty_reduction_as_fold",
+            "prior_unit_absent_from_current_pass"
+        ]
+    );
+    for case in cases {
+        let row_version = case["row_version"].as_u64().expect("row version");
+        for (record, source) in case["current_units"]
+            .as_array()
+            .expect("current units")
+            .iter()
+            .zip(
+                case["current_unit_bytes"]
+                    .as_array()
+                    .expect("current bytes"),
+            )
+        {
+            assert_eq!(
+                record["sha256"].as_str().expect("unit digest"),
+                domain_digest(
+                    "mc.d5.unit-projection.v1",
+                    &unit_ce1(
+                        record["unit"].as_str().expect("unit"),
+                        row_version,
+                        source.as_str().expect("source").as_bytes(),
+                    ),
+                )
+            );
+        }
+        assert_eq!(
+            case["aggregate_sha256"].as_str().expect("aggregate digest"),
+            legacy_counterexample_aggregate(row_version, case)
+        );
+        assert_eq!(case["required_safe_outcome"], "d5_carry_proof_mismatch");
     }
 }
 
@@ -1365,6 +1691,9 @@ fn d5_coverage_classifiers_cover_schema_valid_carry_grammar() {
                     reason: None,
                 },
                 precedence_row: "unused".to_string(),
+                r17_3_preconditions: None,
+                r17_3_rule_row: None,
+                counterexample_id: None,
                 loss_specimen: None,
             };
             let cell = classify(&fixture, &vector);
@@ -1422,6 +1751,41 @@ fn d5_coverage_unknown_kind_is_a_typed_mismatch() {
     );
 }
 
+fn custody_snapshot(fixture: &Fixture) -> Value {
+    serde_json::json!({
+        "receipt_id": fixture.gateway_state.receipt_id,
+        "predecessor_key": fixture.gateway_state.predecessor_key,
+        "successor_key": fixture.gateway_state.successor_key,
+        "lineage_id": fixture.gateway_state.lineage_id,
+        "redeemed_receipts": fixture.gateway_state.redeemed_receipts,
+        "held_receipts": fixture.gateway_state.held_receipts,
+    })
+}
+
+fn publish_accepted_pass(recorded: &mut Vec<RecordedPass>, vector: &Vector) {
+    let published_units = vector
+        .d5_carry
+        .projection_digest
+        .units
+        .iter()
+        .map(|unit| unit.unit.as_str())
+        .collect::<BTreeSet<_>>();
+    for pass in recorded.iter_mut() {
+        if pass.receipt_id == vector.d5_carry.receipt_id {
+            pass.units
+                .retain(|unit| !published_units.contains(unit.unit.as_str()));
+        }
+    }
+    recorded.retain(|pass| !pass.units.is_empty());
+    if !vector.d5_carry.projection_digest.units.is_empty() {
+        recorded.push(RecordedPass {
+            receipt_id: vector.d5_carry.receipt_id.clone(),
+            row_version: vector.d5_carry.projection_digest.row_version,
+            units: vector.d5_carry.projection_digest.units.clone(),
+        });
+    }
+}
+
 #[test]
 fn d5_coverage_vectors_agree_with_owner_authored_table() {
     let (fixture, fixture_bytes) = load_fixture();
@@ -1439,7 +1803,7 @@ fn d5_coverage_vectors_agree_with_owner_authored_table() {
     assert!(fixture
         .encoding_rule
         .unit_validation
-        .contains("R17.2 step 0"));
+        .contains("R17.3 step 0"));
     assert!(fixture.gateway_state.recorded.is_empty());
     assert_eq!(fixture.manifest.schema_version, 1);
     assert_eq!(fixture.manifest.normalization_version, 1);
@@ -1461,7 +1825,10 @@ fn d5_coverage_vectors_agree_with_owner_authored_table() {
         .iter()
         .all(|held| !held.successor_key.is_empty()));
     assert!(fixture.gateway_state.known_units.iter().all(|unit| {
-        unit.compartment_sequence > 0 && unit.row_version == 12 && unit.unit_digest.len() == 64
+        unit.compartment_sequence > 0
+            && !unit.unit.is_empty()
+            && unit.row_version == 12
+            && unit.unit_digest.len() == 64
     }));
     assert!(fixture.gateway_state.held_receipts.iter().all(|held| {
         held.manifest_blocks.iter().all(|block| {
@@ -1556,48 +1923,86 @@ fn d5_coverage_vectors_agree_with_owner_authored_table() {
             "{} owner expected reason",
             vector.id
         );
+        match (&vector.r17_3_preconditions, &vector.r17_3_rule_row) {
+            (Some(preconditions), Some(rule_row)) => {
+                let actual = r17_3_vector_cell(vector).expect("R17.3 cited unit cell");
+                assert_eq!(&actual.0, preconditions, "{} R17.3 cell", vector.id);
+                let selected = fixture
+                    .r17_3_unit_rule_table
+                    .iter()
+                    .filter(|row| row_matches(row, &actual))
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), 1, "{} R17.3 selected row", vector.id);
+                assert_eq!(selected[0].row_id, *rule_row, "{} R17.3 row", vector.id);
+                let unit_outcome = if vector.expected.outcome == "REFUSED" {
+                    "MISMATCH"
+                } else {
+                    "ACCEPTED"
+                };
+                assert_eq!(
+                    selected[0].expected_outcome, unit_outcome,
+                    "{} R17.3 owner outcome",
+                    vector.id
+                );
+            }
+            (None, None) => {}
+            _ => panic!("{} incomplete R17.3 vector metadata", vector.id),
+        }
+        if let Some(counterexample_id) = &vector.counterexample_id {
+            assert!(matches!(
+                counterexample_id.as_str(),
+                "empty_reduction_as_fold" | "prior_unit_absent_from_current_pass"
+            ));
+            assert_eq!(vector.expected.outcome, "REFUSED");
+        }
     }
-    assert_eq!(fixture.vectors.len(), 45);
+    assert_eq!(fixture.vectors.len(), 58);
 
     assert_eq!(fixture.vector_sequences.len(), 1);
     let sequence = &fixture.vector_sequences[0];
-    assert_eq!(sequence.id, "S01_accept_then_publish");
-    let mut published = BTreeSet::new();
+    assert_eq!(sequence.id, "S01_accept_reject_accept");
+    let custody = custody_snapshot(&fixture);
+    let mut recorded = Vec::new();
     for step in &sequence.steps {
         let vector = fixture
             .vectors
             .iter()
             .find(|vector| vector.id == step.vector_id)
             .expect("sequence vector");
-        let before = vector
-            .recorded_before
-            .iter()
-            .flat_map(|pass| pass.units.iter().map(|unit| unit.unit.clone()))
-            .collect::<BTreeSet<_>>();
         assert_eq!(
-            before, published,
-            "{} recorded-before ordering",
+            vector.recorded_before, recorded,
+            "{} complete recorded-before ordering",
             step.vector_id
         );
+        assert_eq!(unit_validation(vector), "all_valid");
+        let cell = classify(&fixture, vector);
+        let row = fixture
+            .precedence_table
+            .iter()
+            .find(|row| row_matches(row, &cell))
+            .expect("sequence precedence row");
+        let oracle_accepted = row.expected_outcome != "REFUSED";
+        assert_eq!(
+            oracle_accepted, step.accepted,
+            "{} acceptance",
+            step.vector_id
+        );
+        let before_rejection = recorded.clone();
         if step.accepted {
-            assert_eq!(unit_validation(vector), "all_valid");
-            published.extend(
-                vector
-                    .d5_carry
-                    .projection_digest
-                    .units
-                    .iter()
-                    .map(|unit| unit.unit.clone()),
-            );
+            publish_accepted_pass(&mut recorded, vector);
         } else {
-            assert_ne!(unit_validation(vector), "all_valid");
+            assert_eq!(
+                recorded, before_rejection,
+                "{} rejected pass published records",
+                step.vector_id
+            );
         }
         assert_eq!(
-            published,
-            step.recorded_units_after.iter().cloned().collect(),
-            "{} publish-after-accept ordering",
+            recorded, step.recorded_after,
+            "{} complete publish-after-accept ordering",
             step.vector_id
         );
+        assert_eq!(custody, step.custody_after, "{} custody", step.vector_id);
     }
 
     let loss = fixture

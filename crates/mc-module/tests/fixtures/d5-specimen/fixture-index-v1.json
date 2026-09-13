@@ -3794,8 +3794,8 @@
     },
     {
       "path": "coverage-proof-vectors-v1.json",
-      "byte_size": 329529,
-      "sha256": "8b83390099c5a5c502f4b738304a6d41ee872e4a9341d67aa4d75ee33bb1d3a4",
+      "byte_size": 501639,
+      "sha256": "77df0a05e4a0e18e0342ba1466964893e9acd8065fe86cff289be13b91900a29",
       "derived": false,
       "source": "owner-authored D5 coverage-proof contract vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
