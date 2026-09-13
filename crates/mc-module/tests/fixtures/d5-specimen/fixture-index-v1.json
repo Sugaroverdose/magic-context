@@ -3795,9 +3795,17 @@
     {
       "path": "coverage-proof-vectors-v1.json",
       "byte_size": 501639,
-      "sha256": "77df0a05e4a0e18e0342ba1466964893e9acd8065fe86cff289be13b91900a29",
+      "sha256": "0272d949202f7ac68043189232b1df62278842f24454de0e9dd589e756fcc6d0",
       "derived": false,
       "source": "owner-authored D5 coverage-proof contract vectors",
+      "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    },
+    {
+      "path": "aggregate-preimages-v1.json",
+      "byte_size": 5069,
+      "sha256": "952938e6ea60b5d5a6c639b73931c901f8767e8d224961310991de5031e9f957",
+      "derived": false,
+      "source": "independently derived R17.4 CE1 aggregate preimages",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {

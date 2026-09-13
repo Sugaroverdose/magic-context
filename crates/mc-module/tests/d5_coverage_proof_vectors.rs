@@ -34,6 +34,48 @@ struct EncodingRule {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AggregatePreimages {
+    schema: String,
+    derivation: String,
+    vectors: Vec<AggregateVector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AggregateVector {
+    name: String,
+    tag: String,
+    version: u32,
+    row_version: u64,
+    units: Vec<AggregateUnit>,
+    preimage_hex: String,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AggregateUnit {
+    unit: String,
+    kind: AggregateKind,
+    coverage: UnitCoverage,
+    bytes_utf8: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AggregateKind {
+    Compartment { compartment: AggregateCompartment },
+    Reduction(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AggregateCompartment {
+    compartment_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     schema_version: u64,
     normalization_version: u64,
@@ -368,6 +410,12 @@ fn load_fixture() -> (Fixture, Vec<u8>) {
     (fixture, bytes)
 }
 
+fn load_aggregate_preimages() -> AggregatePreimages {
+    let bytes = fs::read(fixture_dir().join("aggregate-preimages-v1.json"))
+        .expect("read D5 aggregate preimages");
+    serde_json::from_slice(&bytes).expect("parse D5 aggregate preimage schema")
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -410,6 +458,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn decode_hex(value: &str) -> Vec<u8> {
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty(), "hex must contain whole bytes");
+    pairs
+        .iter()
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex is ASCII");
+            u8::from_str_radix(pair, 16).expect("valid hex byte")
+        })
+        .collect()
+}
+
 fn domain_digest(tag: &str, ce1: &[u8]) -> String {
     sha256_hex(&domain_preimage(tag, ce1))
 }
@@ -434,10 +494,10 @@ fn projection_ce1(row_version: u64, units: &[(&UnitRecordV1, &[u8])]) -> Vec<u8>
             UnitKind::Compartment {
                 compartment_sequence,
             } => {
-                encoded.extend_from_slice(&ce1_text("compartment"));
+                encoded.extend_from_slice(&0_u32.to_be_bytes());
                 encoded.extend_from_slice(&compartment_sequence.to_be_bytes());
             }
-            UnitKind::Reduction => encoded.extend_from_slice(&ce1_text("reduction")),
+            UnitKind::Reduction => encoded.extend_from_slice(&1_u32.to_be_bytes()),
         }
         encoded.extend_from_slice(&record.coverage.start.to_be_bytes());
         encoded.extend_from_slice(&record.coverage.end.to_be_bytes());
@@ -1716,6 +1776,62 @@ fn d5_coverage_classifiers_cover_schema_valid_carry_grammar() {
         assert!(
             observed[required].len() >= 4 || required == "variant_tag",
             "grammar breadth for {required}"
+        );
+    }
+}
+
+#[test]
+fn d5_aggregate_preimages_match_r17_4_ce1() {
+    let fixture = load_aggregate_preimages();
+    assert_eq!(fixture.schema, "mc.d5.aggregate-preimages.v1");
+    assert!(fixture.derivation.contains("independent Python CE1"));
+    assert_eq!(fixture.vectors.len(), 6);
+
+    for vector in fixture.vectors {
+        assert_eq!(vector.tag, "mc.d5.projection.v1", "{} tag", vector.name);
+        assert_eq!(vector.version, 1, "{} version", vector.name);
+        let records = vector
+            .units
+            .into_iter()
+            .map(|unit| {
+                let kind = match unit.kind {
+                    AggregateKind::Compartment { compartment } => UnitKind::Compartment {
+                        compartment_sequence: compartment.compartment_sequence,
+                    },
+                    AggregateKind::Reduction(tag) => {
+                        assert_eq!(tag, "reduction", "{} reduction tag", vector.name);
+                        UnitKind::Reduction
+                    }
+                };
+                (
+                    UnitRecordV1 {
+                        unit: unit.unit,
+                        kind,
+                        coverage: unit.coverage,
+                        locator: None,
+                        source_text: String::new(),
+                        sha256: String::new(),
+                    },
+                    unit.bytes_utf8.into_bytes(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let record_refs = records
+            .iter()
+            .map(|(record, bytes)| (record, bytes.as_slice()))
+            .collect::<Vec<_>>();
+        let payload = projection_ce1(vector.row_version, &record_refs);
+        assert_eq!(
+            payload,
+            decode_hex(&vector.preimage_hex),
+            "{} payload",
+            vector.name
+        );
+        assert_eq!(
+            domain_digest(&vector.tag, &payload),
+            vector.sha256,
+            "{} digest",
+            vector.name
         );
     }
 }

@@ -46,6 +46,8 @@ GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
 CANONICAL_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/canonical-json-vectors-v1.json"
 REDEEM_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/redeem-vectors-v1.json"
 COVERAGE_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/coverage-proof-vectors-v1.json"
+AGGREGATE_PREIMAGES_PATH = "crates/mc-module/tests/fixtures/d5-specimen/aggregate-preimages-v1.json"
+AGGREGATE_PREIMAGES_SHA256 = "952938e6ea60b5d5a6c639b73931c901f8767e8d224961310991de5031e9f957"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
 PREDECESSOR_KEY = "d5-fixture-predecessor"
 ATTEMPT_ID = "d5-fixture-attempt-0001"
@@ -1245,13 +1247,43 @@ def d5_projection_digest(row_version: int, units: list[dict[str, Any]]) -> str:
     payload = row_version.to_bytes(8, "big") + len(units).to_bytes(8, "big")
     for unit in units:
         kind = unit["kind"]
-        payload += d5_text(unit["unit"]) + d5_text(kind["kind"])
+        payload += d5_text(unit["unit"])
         if kind["kind"] == "compartment":
+            payload += (0).to_bytes(4, "big")
             payload += kind["compartment_sequence"].to_bytes(8, "big")
+        elif kind["kind"] == "reduction":
+            payload += (1).to_bytes(4, "big")
+        else:
+            raise SystemExit(f"coverage-proof unknown unit kind: {kind['kind']}")
         payload += unit["coverage"]["start"].to_bytes(8, "big")
         payload += unit["coverage"]["end"].to_bytes(8, "big")
         payload += d5_blob(unit["source_text"].encode())
     return d5_digest("mc.d5.projection.v1", payload)
+
+
+def refresh_coverage_projection_digests(path: Path) -> int:
+    document = load_json(path.read_bytes())
+    moved = 0
+    for vector in document["vectors"]:
+        if vector["id"] == "V40":
+            continue
+        projection = vector["d5_carry"]["projection_digest"]
+        computed = d5_projection_digest(projection["row_version"], projection["units"])
+        if projection["sha256"] != computed:
+            projection["sha256"] = computed
+            moved += 1
+    path.write_bytes(json_bytes(document))
+    return moved
+
+
+def validate_aggregate_preimages(aggregate_preimages: bytes) -> None:
+    if sha256(aggregate_preimages) != AGGREGATE_PREIMAGES_SHA256:
+        raise SystemExit("aggregate-preimages fixture digest drift")
+    document = load_json(aggregate_preimages)
+    if document.get("schema") != "mc.d5.aggregate-preimages.v1":
+        raise SystemExit("aggregate-preimages schema drift")
+    if len(document.get("vectors", [])) != 6:
+        raise SystemExit("aggregate-preimages vector count drift")
 
 
 def validate_coverage_contract(coverage_vectors: bytes) -> None:
@@ -1407,8 +1439,10 @@ def write_fixture(
     canonical_vectors = (repository_root / CANONICAL_VECTORS_PATH).read_bytes()
     redeem_vectors = (repository_root / REDEEM_VECTORS_PATH).read_bytes()
     coverage_vectors = (repository_root / COVERAGE_VECTORS_PATH).read_bytes()
+    aggregate_preimages = (repository_root / AGGREGATE_PREIMAGES_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
     validate_coverage_contract(coverage_vectors)
+    validate_aggregate_preimages(aggregate_preimages)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
         "expected-manifest-v1.json": json_bytes(manifest),
@@ -1416,6 +1450,7 @@ def write_fixture(
         "canonical-json-vectors-v1.json": canonical_vectors,
         "redeem-vectors-v1.json": redeem_vectors,
         "coverage-proof-vectors-v1.json": coverage_vectors,
+        "aggregate-preimages-v1.json": aggregate_preimages,
         "README.md": readme_text().encode(),
     }
     for name, data in payloads.items():
@@ -1431,11 +1466,13 @@ def write_fixture(
             "canonical-json-vectors-v1.json",
             "redeem-vectors-v1.json",
             "coverage-proof-vectors-v1.json",
+            "aggregate-preimages-v1.json",
         }:
             source = {
                 "canonical-json-vectors-v1.json": "hand-written independent canonical-form vectors",
                 "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
                 "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
+                "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
             }[name]
             entries.append(
                 {
@@ -1488,12 +1525,15 @@ def write_fixture(
 def refresh_fixture_index(output: Path) -> None:
     """Refresh hashes without requiring the private source inputs."""
     index_path = output / "fixture-index-v1.json"
+    moved = refresh_coverage_projection_digests(output / "coverage-proof-vectors-v1.json")
     validate_coverage_contract((output / "coverage-proof-vectors-v1.json").read_bytes())
+    validate_aggregate_preimages((output / "aggregate-preimages-v1.json").read_bytes())
     index = load_json(index_path.read_bytes())
     entries = {entry["path"]: entry for entry in index["files"]}
     owner_vectors = {
         "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
         "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
+        "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
     }
     for name, source in owner_vectors.items():
         data = (output / name).read_bytes()
@@ -1512,6 +1552,7 @@ def refresh_fixture_index(output: Path) -> None:
         "canonical-json-vectors-v1.json",
         "redeem-vectors-v1.json",
         "coverage-proof-vectors-v1.json",
+        "aggregate-preimages-v1.json",
         "README.md",
     ]
     for name in ordered_names:
@@ -1520,6 +1561,7 @@ def refresh_fixture_index(output: Path) -> None:
         entries[name]["sha256"] = sha256(data)
     index["files"] = [entries[name] for name in ordered_names]
     index_path.write_bytes(json_bytes(index))
+    print(f"moved {moved} coverage-proof aggregate digests")
 
 
 def main() -> None:
