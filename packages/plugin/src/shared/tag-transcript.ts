@@ -1063,13 +1063,20 @@ function buildAggregateTarget(
                 occurrences.some((occ) => occ.kind === "tool_use") &&
                 occurrences.some((occ) => occ.kind === "tool_result");
             if (!complete) return "incomplete";
-            if (
-                !requiresToolArcSkeleton &&
-                occurrences.every((occ) => occ.part.remove && occ.part.canRemove?.() !== false)
-            ) {
-                let removed = false;
-                for (const occ of occurrences) removed = occ.part.remove?.() || removed;
-                return removed ? "removed" : "absent";
+            if (!requiresToolArcSkeleton) {
+                const authorization = occurrences.map((occ) => occ.part.canRemove?.());
+                // A failed durable marker is not permission to substitute a new
+                // skeleton. Keep both halves unchanged and leave the drop queued.
+                if (authorization.includes("defer")) return "incomplete";
+                if (
+                    occurrences.every(
+                        (occ, index) => occ.part.remove && authorization[index] !== false,
+                    )
+                ) {
+                    let removed = false;
+                    for (const occ of occurrences) removed = occ.part.remove?.() || removed;
+                    return removed ? "removed" : "absent";
+                }
             }
             // Adapters without structural removal retain paired sentinels.
             const sentinel = `[dropped \u00a7${tagId}\u00a7]`;

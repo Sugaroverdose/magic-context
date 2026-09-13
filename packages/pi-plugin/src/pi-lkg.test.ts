@@ -5,7 +5,12 @@ import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lk
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 
-import { createPiLkgCoordinator, type PiLkgCaptureTiming } from "./pi-lkg";
+import {
+	createPiLkgCoordinator,
+	type PiLkgCaptureTiming,
+	resolvePiLkgOutputEntryIds,
+} from "./pi-lkg";
+import { assertPiRawFallbackFits } from "./pi-raw-fallback";
 
 function message(content: string): Record<string, unknown> {
 	return { role: "user", content, timestamp: 1 };
@@ -173,4 +178,231 @@ describe("Pi incremental LKG capture", () => {
 
 		expect(timings.at(-1)?.reusedPrefix).toBe(appended.length - 1);
 	});
+});
+
+describe("Pi contracted LKG", () => {
+	for (const divergence of ["none", "content", "interior-gap"] as const) {
+		it(`replays a captured suffix plus append only without ${divergence} divergence`, () => {
+			const harness = createHarness();
+			databases.push(harness.db);
+			const sessionId = `contracted-${divergence}`;
+			const inputs = [
+				message("covered"),
+				message("survivor"),
+				message("interior"),
+				message("anchor"),
+			];
+			const output = [
+				message("summary"),
+				message("served covered"),
+				message("served survivor"),
+				message("served interior"),
+				message("served anchor"),
+			];
+			const snapshot = harness.coordinator.beginPass({
+				sessionId,
+				messages: inputs,
+				entryIds: ["a", "b", "c", "d"],
+				modelKey: "model",
+				providerKey: "provider",
+			});
+			harness.coordinator.captureAppliedPass({
+				snapshot,
+				outputMessages: output,
+				outputEntryIds: [null, "a", "b", "c", "d"],
+				cacheBusting: false,
+			});
+			harness.flushCapture();
+			const next = harness.coordinator.beginPass({
+				sessionId,
+				messages: [
+					divergence === "content" ? message("changed") : inputs[1],
+					...(divergence === "interior-gap" ? [] : [inputs[2]]),
+					inputs[3],
+					message("appended"),
+				],
+				entryIds: [
+					"b",
+					...(divergence === "interior-gap" ? [] : ["c"]),
+					"d",
+					"e",
+				],
+				modelKey: "model",
+				providerKey: "provider",
+			});
+			const replay = harness.coordinator.replay(next);
+			if (divergence === "none")
+				expect(replay).toEqual({
+					ok: true,
+					messages: [output[0], ...output.slice(2), message("appended")],
+				});
+			else expect(replay.ok).toBe(false);
+			resetLkgSlotsForTest();
+			const restarted = createPiLkgCoordinator(harness.db);
+			expect(restarted.replay(next)).toEqual(replay);
+		});
+	}
+	it("captures stable unmapped entries but rejects ambiguous duplicate identities", () => {
+		const harness = createHarness();
+		databases.push(harness.db);
+		const args = {
+			sessionId: "unmapped",
+			messages: [message("one"), message("host injected"), message("three")],
+			entryIds: ["a", undefined, "c"],
+			modelKey: null,
+			providerKey: null,
+		};
+		const snapshot = harness.coordinator.beginPass(args);
+		expect(snapshot.preparationFailure).toBeNull();
+		harness.coordinator.captureAppliedPass({
+			snapshot,
+			outputMessages: args.messages,
+			cacheBusting: false,
+		});
+		harness.flushCapture();
+		expect(
+			harness.coordinator.replay(harness.coordinator.beginPass(args)),
+		).toEqual({ ok: true, messages: args.messages });
+		expect(
+			harness.coordinator.beginPass({
+				...args,
+				messages: [message("one"), message("same"), message("same")],
+				entryIds: ["a", undefined, undefined],
+			}).preparationFailure,
+		).toBe("lkg_duplicate_entry_id");
+	});
+});
+
+it("Pi high-fill recovery replays a mapped contraction with 16 stable host entries instead of over-wall raw", () => {
+	const harness = createHarness();
+	databases.push(harness.db);
+	const inputs = Array.from({ length: 2927 }, (_, index) =>
+		message(`${index}: ${"x".repeat(350)}`),
+	);
+	const ids = inputs.map((_, index) =>
+		index >= 500 && index < 516 ? undefined : `entry-${index}`,
+	);
+	const snapshot = harness.coordinator.beginPass({
+		sessionId: "pi-high-fill",
+		messages: inputs,
+		entryIds: ids,
+		modelKey: "openai-codex/gpt-5.6-sol",
+		providerKey: "openai-codex",
+	});
+	expect(snapshot.preparationFailure).toBeNull();
+	// Model a successful transform's boundary trim and frozen tool reductions.
+	const served = inputs
+		.slice(1420)
+		.map((_, index) => message(`frozen output ${index + 1420}`));
+	harness.coordinator.captureAppliedPass({
+		snapshot,
+		outputMessages: served,
+		outputEntryIds: snapshot.inputs.slice(1420).map((input) => input.id),
+		cacheBusting: true,
+	});
+	harness.flushCapture();
+	const nextInputs = [
+		...inputs.slice(268),
+		message("new one"),
+		message("new two"),
+	];
+	const next = harness.coordinator.beginPass({
+		sessionId: "pi-high-fill",
+		messages: nextInputs,
+		entryIds: [...ids.slice(268), "new-1", "new-2"],
+		modelKey: "openai-codex/gpt-5.6-sol",
+		providerKey: "openai-codex",
+	});
+	expect(() =>
+		assertPiRawFallbackFits(
+			nextInputs,
+			204000,
+			() => {},
+			new Error("database is locked"),
+		),
+	).toThrow();
+	const replay = harness.coordinator.replay(next);
+	expect(replay.ok).toBe(true);
+	if (!replay.ok) throw new Error(replay.reason);
+	expect(replay.messages).toEqual([
+		...served,
+		message("new one"),
+		message("new two"),
+	]);
+	expect(() =>
+		assertPiRawFallbackFits(
+			replay.messages,
+			204000,
+			() => {},
+			new Error("database is locked"),
+		),
+	).not.toThrow();
+});
+
+it("rejects corrupt durable output ownership before contraction", () => {
+	const harness = createHarness();
+	databases.push(harness.db);
+	const snapshot = harness.coordinator.beginPass({
+		sessionId: "corrupt-ownership",
+		messages: [message("a"), message("b")],
+		entryIds: ["a", "b"],
+		modelKey: null,
+		providerKey: null,
+	});
+	harness.coordinator.captureAppliedPass({
+		snapshot,
+		outputMessages: [message("b")],
+		outputEntryIds: ["b"],
+		cacheBusting: false,
+	});
+	harness.flushCapture();
+	harness.db
+		.prepare("UPDATE lkg_slots SET input_id_seq = ? WHERE session_id = ?")
+		.run(
+			JSON.stringify({
+				version: 1,
+				inputIds: ["a", "b"],
+				piOutputEntryIds: ["not-owned"],
+			}),
+			"corrupt-ownership",
+		);
+	resetLkgSlotsForTest();
+	const restarted = createPiLkgCoordinator(harness.db);
+	const next = restarted.beginPass({
+		sessionId: "corrupt-ownership",
+		messages: [message("b")],
+		entryIds: ["b"],
+		modelKey: null,
+		providerKey: null,
+	});
+	expect(restarted.replay(next)).toEqual({ ok: false, reason: "lkg_miss" });
+});
+
+it("maps synthetic todo results to their assistant owner without guessing ambiguous owners", () => {
+	const assistant = {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "todo-call", syntheticTodoMarker: true }],
+	};
+	const result = {
+		role: "toolResult",
+		toolCallId: "todo-call",
+		syntheticTodoMarker: true,
+	};
+	expect(
+		resolvePiLkgOutputEntryIds(
+			[message("summary"), assistant, result],
+			1,
+			(entry) => (entry === assistant ? "owner" : undefined),
+		),
+	).toEqual([null, "owner", "owner"]);
+	const duplicate = structuredClone(assistant);
+	expect(
+		resolvePiLkgOutputEntryIds([assistant, duplicate, result], 0, (entry) =>
+			entry === assistant
+				? "first"
+				: entry === duplicate
+					? "second"
+					: undefined,
+		),
+	).toEqual(["first", "second", undefined]);
 });

@@ -167,7 +167,7 @@ export function applyHeuristicCleanup(
                         emergencyReclaimedTokens += estimateEmergencyDropReclaimTokens(tag);
                     }
                 }
-            })();
+            }).immediate();
             sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
         } else {
             sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
@@ -219,7 +219,7 @@ export function applyHeuristicCleanup(
                     }
                 }
             }
-        })();
+        }).immediate();
     }
 
     // Deduplication: auto-drop older identical tool calls (same tool + same params)
@@ -277,7 +277,7 @@ export function applyHeuristicCleanup(
                     }
                 }
             }
-        })();
+        }).immediate();
     }
 
     if (droppedTools > 0 || deduplicatedTools > 0 || droppedInjections > 0) {

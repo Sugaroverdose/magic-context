@@ -411,7 +411,7 @@ export function applyPiHeuristicCleanup(
 						emergencyDroppedTools++;
 					}
 				}
-			})();
+			}).immediate();
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {
 			sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);
@@ -458,7 +458,7 @@ export function applyPiHeuristicCleanup(
 					droppedStaleReduceCalls++;
 				}
 			}
-		})();
+		}).immediate();
 	}
 
 	// ── Pass 2: strip system injections from message tags ─────────────
@@ -504,7 +504,7 @@ export function applyPiHeuristicCleanup(
 					}
 				}
 			}
-		})();
+		}).immediate();
 	}
 
 	// ── Pass 3: tool dedup (Pi-shape fingerprinter) ───────────────────
@@ -549,7 +549,7 @@ export function applyPiHeuristicCleanup(
 					}
 				}
 			}
-		})();
+		}).immediate();
 	}
 
 	if (
