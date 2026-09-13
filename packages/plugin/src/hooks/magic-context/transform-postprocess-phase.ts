@@ -31,6 +31,7 @@ import {
     addTrailingBlankDecisions,
     clearEmergencyDropSample,
     demoteTrailingBlankKeepDecisions,
+    getDeferredClearedCompactionMarkerState,
     getEmergencyInputSample,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
@@ -40,6 +41,7 @@ import {
     NEWEST_REASONING_BEARING_ASSISTANT,
     type PersistedCompactionMarkerState,
     type PostprocessReplaySnapshot,
+    retireDeferredClearedCompactionMarkerState,
     setEmergencyDropSample,
     THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
     thinkingBindingRecoveryFrozenId,
@@ -558,6 +560,7 @@ export function runRustModePostprocess(args: {
             sessionId: args.sessionId,
             tagger: args.tagger,
             ctxReduceAvailability: args.ctxReduceAvailability,
+            isCacheBustingPass: args.materializedBoundary != null,
         },
     );
     for (const anchor of getNoteNudgeAnchors(args.db, args.sessionId)) {
@@ -708,8 +711,19 @@ export function reconcileMarkerRepresentation(
         sessionId: string;
         tagger: Tagger;
         ctxReduceAvailability: CtxReduceAvailabilityVerdict;
+        isCacheBustingPass?: boolean;
     },
 ): boolean {
+    if (persistedMarkerState === null) {
+        if (options.isCacheBustingPass === true) {
+            retireDeferredClearedCompactionMarkerState(options.db, options.sessionId);
+        } else {
+            persistedMarkerState = getDeferredClearedCompactionMarkerState(
+                options.db,
+                options.sessionId,
+            );
+        }
+    }
     const retainedMessages: MessageLike[] = [];
     const staleSummaryIds = new Set<string>();
     for (const message of messages) {
@@ -2289,6 +2303,7 @@ export async function runPostTransformPhase(
             sessionId: args.sessionId,
             tagger: args.tagger,
             ctxReduceAvailability: args.ctxReduceAvailability,
+            isCacheBustingPass,
         });
     }
 

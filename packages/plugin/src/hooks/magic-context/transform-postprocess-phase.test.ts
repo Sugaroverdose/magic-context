@@ -702,6 +702,61 @@ describe("stripped placeholder replay across temporary marker windows", () => {
 });
 
 describe("deferred compaction marker representation", () => {
+    it("replays byte-identical arrays after marker state is cleared between defer passes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-marker-cleared-defer";
+        setPersistedCompactionMarkerState(db, sessionId, {
+            boundaryMessageId: "boundary",
+            summaryMessageId: "summary",
+            compactionPartId: "compaction",
+            summaryPartId: "summary-part",
+            boundaryOrdinal: 10,
+            targetEndMessageId: "boundary",
+        });
+        const source = [
+            {
+                info: { id: "tail-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "retained user turn" }],
+            },
+        ] as MessageLike[];
+        const first = structuredClone(source);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, first, { schedulerDecision: "defer" }),
+        );
+        setPersistedCompactionMarkerState(db, sessionId, null);
+        expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
+        const second = structuredClone(source);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, second, { schedulerDecision: "defer" }),
+        );
+        const hash = (messages: MessageLike[]) =>
+            new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex");
+        expect(first.some((message) => message.info.id === "summary")).toBe(true);
+        expect(hash(second)).toBe(hash(first));
+        // A new tagger simulates restart; replay is durable, not an in-memory pin.
+        const third = structuredClone(source);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, third, {
+                schedulerDecision: "defer",
+                tagger: createTagger(),
+            }),
+        );
+        expect(hash(third)).toBe(hash(first));
+        const priced = structuredClone(source);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, priced, {
+                schedulerDecision: "execute",
+                pendingMaterializationSessions: new Set([sessionId]),
+            }),
+        );
+        expect(priced.some((message) => message.info.id === "summary")).toBe(false);
+        const after = structuredClone(source);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, after, { schedulerDecision: "defer" }),
+        );
+        expect(hash(after)).toBe(hash(priced));
+    });
     it("ignores a persisted message that carries a forged syntheticHead flag", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
@@ -1363,7 +1418,10 @@ describe("deferred compaction marker representation", () => {
 });
 
 describe("deferred compaction marker advance representation", () => {
-    it("keeps the advance drain byte-identical with the next pass after removing the old marker", async () => {
+    it.each([
+        false,
+        true,
+    ])("keeps the advance drain byte-identical with the next pass (cleared=%s)", async (cleared) => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-marker-advance-wire-stability";
@@ -1497,6 +1555,22 @@ describe("deferred compaction marker advance representation", () => {
         loserTagger.initFromDb(sessionId, db);
         const taggedLoser = tagMessages(sessionId, loserMessages, loserTagger, db);
         const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        if (cleared) {
+            const before = cloneMessages(drainMessages);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, before, { schedulerDecision: "defer" }),
+            );
+            setPersistedCompactionMarkerState(db, sessionId, null);
+            const after = cloneMessages(drainMessages).filter((message) => !message.info.summary);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, after, { schedulerDecision: "defer" }),
+            );
+            const hash = (messages: MessageLike[]) =>
+                new Bun.CryptoHasher("sha256").update(JSON.stringify(messages)).digest("hex");
+            expect(hash(after)).toBe(hash(before));
+            expect(getPersistedCompactionMarkerState(db, sessionId)).toBeNull();
+            expect(getPendingCompactionMarkerState(db, sessionId)?.ordinal).toBe(20);
+        }
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, drainMessages, {

@@ -2265,11 +2265,50 @@ export function setPersistedCompactionMarkerState(
     sessionId: string,
     state: PersistedCompactionMarkerState | null,
 ): void {
-    ensureSessionMetaRow(db, sessionId);
-    const json = state ? JSON.stringify(state) : "";
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        // Logical cleanup must not erase the wire representation on a defer pass.
+        // A tombstone has no top-level marker fields, so ordinary marker readers see
+        // null while the transform can replay the last marker until a priced pass.
+        const previous =
+            state === null
+                ? (getPersistedCompactionMarkerState(db, sessionId) ??
+                  getDeferredClearedCompactionMarkerState(db, sessionId))
+                : null;
+        const json = state
+            ? JSON.stringify(state)
+            : previous
+              ? JSON.stringify({ deferredClear: previous })
+              : "";
+        db.prepare(
+            "UPDATE session_meta SET compaction_marker_state = ?, compaction_marker_target_end_message_id = ? WHERE session_id = ?",
+        ).run(json, state?.targetEndMessageId ?? null, sessionId);
+    })();
+}
+
+/** Read the last wire marker retained by a logical clear, including across restarts. */
+export function getDeferredClearedCompactionMarkerState(
+    db: Database,
+    sessionId: string,
+): PersistedCompactionMarkerState | null {
+    const row = db
+        .prepare("SELECT compaction_marker_state FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { compaction_marker_state?: string } | undefined;
+    try {
+        const parsed = JSON.parse(row?.compaction_marker_state || "null");
+        return parsePersistedCompactionMarkerState(JSON.stringify(parsed?.deferredClear));
+    } catch {
+        return null;
+    }
+}
+
+/** Retire a cleared marker's replay only when the transform has bust permission. */
+export function retireDeferredClearedCompactionMarkerState(db: Database, sessionId: string): void {
+    const previous = getDeferredClearedCompactionMarkerState(db, sessionId);
+    if (!previous) return;
     db.prepare(
-        "UPDATE session_meta SET compaction_marker_state = ?, compaction_marker_target_end_message_id = ? WHERE session_id = ?",
-    ).run(json, state?.targetEndMessageId ?? null, sessionId);
+        "UPDATE session_meta SET compaction_marker_state = '' WHERE session_id = ? AND compaction_marker_state = ?",
+    ).run(sessionId, JSON.stringify({ deferredClear: previous }));
 }
 
 // ── Stripped placeholder message IDs ──
