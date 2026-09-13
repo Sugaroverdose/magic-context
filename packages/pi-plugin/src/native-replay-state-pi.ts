@@ -7,6 +7,7 @@ import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import {
 	clearNativeReasoning,
+	NATIVE_TOOL_REMOVAL_MARKER,
 	rewriteNativeToolInput,
 } from "./native-replay-pi";
 import { SYNTH_USER_ID_PREFIX } from "./read-session-pi";
@@ -152,4 +153,39 @@ export function applyNativeReasoningReplayPi(
 	}
 	for (const [index, message] of pending) args.messages[index] = message;
 	return nextIds.size;
+}
+
+/** Freeze structural removal before touching either half of a Pi tool arc. */
+export function authorizePiToolRemoval(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	callId: string;
+	saved: Map<string, string> | undefined;
+	canApply: boolean;
+}): boolean | "defer" {
+	if (!args.saved) return false;
+	if (args.saved.get(args.callId) === NATIVE_TOOL_REMOVAL_MARKER) return true;
+	if (!args.canApply) return false;
+	try {
+		saveNativeToolInputs(
+			args.db,
+			args.sessionId,
+			new Map([[args.callId, NATIVE_TOOL_REMOVAL_MARKER]]),
+		);
+		args.saved.set(args.callId, NATIVE_TOOL_REMOVAL_MARKER);
+		return true;
+	} catch (error) {
+		sessionLog(
+			args.sessionId,
+			`tool arc removal persistence failed; retaining pair: ${String(error)}`,
+		);
+		// A previously dropped legacy arc already served a skeleton. Replay
+		// that shape, but do not turn a new drop into a fresh sentinel mutation.
+		const priorDrop = args.db
+			.prepare(
+				"SELECT 1 FROM tags WHERE session_id = ? AND type = 'tool' AND message_id = ? AND status = 'dropped' LIMIT 1",
+			)
+			.get(args.sessionId, args.callId);
+		return priorDrop ? false : "defer";
+	}
 }

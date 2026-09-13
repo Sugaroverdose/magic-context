@@ -66,7 +66,33 @@ export function parsePersistedLkgSlot(row: unknown): LkgSlot | undefined {
     const jsonPrefix = record.json_prefix;
     const lastInputMessageId = record.last_input_message_id;
     const capturedAt = record.captured_at;
-    const inputIdSeq = parseStringArray(record.input_id_seq);
+    // Legacy and OpenCode rows keep the plain ID array. Pi adds versioned
+    // output ownership so a hydrated slot can prove a head-contraction splice.
+    let inputIdsRaw = record.input_id_seq;
+    let piOutputEntryIds: (string | null)[] | undefined;
+    if (typeof inputIdsRaw === "string") {
+        try {
+            const metadata = JSON.parse(inputIdsRaw);
+            if (
+                metadata &&
+                !Array.isArray(metadata) &&
+                metadata.version === 1 &&
+                Array.isArray(metadata.piOutputEntryIds)
+            ) {
+                if (
+                    !metadata.piOutputEntryIds.every(
+                        (id: unknown) => id === null || (typeof id === "string" && id.length > 0),
+                    )
+                )
+                    return undefined;
+                piOutputEntryIds = metadata.piOutputEntryIds;
+                inputIdsRaw = JSON.stringify(metadata.inputIds);
+            }
+        } catch {
+            return undefined;
+        }
+    }
+    const inputIdSeq = parseStringArray(inputIdsRaw);
     const inputContentDigests = parseStringArray(record.input_content_digests);
     const modelKey = parseNullableString(record.model_key);
     const providerKey = parseNullableString(record.provider_key);
@@ -84,6 +110,20 @@ export function parsePersistedLkgSlot(row: unknown): LkgSlot | undefined {
     ) {
         return undefined;
     }
+    if (piOutputEntryIds) {
+        try {
+            const output = JSON.parse(jsonPrefix);
+            const inputs = new Set(inputIdSeq);
+            if (
+                !Array.isArray(output) ||
+                output.length !== piOutputEntryIds.length ||
+                piOutputEntryIds.some((id) => id !== null && !inputs.has(id))
+            )
+                return undefined;
+        } catch {
+            return undefined;
+        }
+    }
     let inputContentSignatures: string[] | undefined;
     if (record.input_content_signatures !== null && record.input_content_signatures !== undefined) {
         const parsed = parseStringArray(record.input_content_signatures);
@@ -100,6 +140,7 @@ export function parsePersistedLkgSlot(row: unknown): LkgSlot | undefined {
         capturedAt,
     };
     if (inputContentSignatures) slot.inputContentSignatures = inputContentSignatures;
+    if (piOutputEntryIds) slot.piOutputEntryIds = piOutputEntryIds;
     const rowVersion = parseNullableInteger(record.row_version);
     if (rowVersion !== undefined) slot.rowVersion = rowVersion;
     const captureSequence = parseNullableInteger(record.capture_sequence);
@@ -133,7 +174,15 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
         ).run(
             sessionId,
             slot.jsonPrefix,
-            JSON.stringify(slot.inputIdSeq),
+            JSON.stringify(
+                slot.piOutputEntryIds
+                    ? {
+                          version: 1,
+                          inputIds: slot.inputIdSeq,
+                          piOutputEntryIds: slot.piOutputEntryIds,
+                      }
+                    : slot.inputIdSeq,
+            ),
             JSON.stringify(slot.inputContentDigests),
             slot.inputContentSignatures ? JSON.stringify(slot.inputContentSignatures) : null,
             slot.lastInputMessageId,

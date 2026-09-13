@@ -7,6 +7,8 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import type { PendingOp, TagEntry } from "../../features/magic-context/types";
+import { sessionLog } from "../../shared/logger";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { TagTarget } from "./tag-messages";
 
 // Max characters kept from the original user content when a user-message tag
@@ -74,100 +76,127 @@ export function applyPendingOperations(
     editMarkerTagIds: ReadonlySet<number> = new Set(),
 ): boolean {
     let didMutateMessage = false;
-    db.transaction(() => {
-        const tags = preloadedTags ?? getTagsBySession(db, sessionId);
-        const tagStatusById = new Map(tags.map((tag) => [tag.tagNumber, tag.status] as const));
-        const tagTypeById = new Map(tags.map((tag) => [tag.tagNumber, tag.type] as const));
-        const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
-        const opsToApply: Array<{ op: PendingOp; synthetic: boolean }> = [
-            ...pendingOps.map((op) => ({ op, synthetic: false })),
-            ...syntheticPendingOps.map((op) => ({ op, synthetic: true })),
-        ];
+    let admitted = false;
+    let startedAt = 0;
+    try {
+        db.transaction(() => {
+            admitted = true;
+            startedAt = performance.now();
+            const tags = preloadedTags ?? getTagsBySession(db, sessionId);
+            const tagStatusById = new Map(tags.map((tag) => [tag.tagNumber, tag.status] as const));
+            const tagTypeById = new Map(tags.map((tag) => [tag.tagNumber, tag.type] as const));
+            const pendingOps = preloadedPendingOps ?? getPendingOps(db, sessionId);
+            const opsToApply: Array<{ op: PendingOp; synthetic: boolean }> = [
+                ...pendingOps.map((op) => ({ op, synthetic: false })),
+                ...syntheticPendingOps.map((op) => ({ op, synthetic: true })),
+            ];
 
-        // Newest-K tool calls at THIS moment — the skeleton window. Computed
-        // once per apply pass over all tool tags (any status: the window
-        // reflects conversation recency, not droppability).
-        const skeletonWindow = new Set(
-            tags
-                .filter((tag) => tag.type === "tool")
-                .map((tag) => tag.tagNumber)
-                .sort((left, right) => right - left)
-                .slice(0, RECENT_TOOL_SKELETON_WINDOW),
-        );
+            // Newest-K tool calls at THIS moment — the skeleton window. Computed
+            // once per apply pass over all tool tags (any status: the window
+            // reflects conversation recency, not droppability).
+            const skeletonWindow = new Set(
+                tags
+                    .filter((tag) => tag.type === "tool")
+                    .map((tag) => tag.tagNumber)
+                    .sort((left, right) => right - left)
+                    .slice(0, RECENT_TOOL_SKELETON_WINDOW),
+            );
 
-        for (const { op: pendingOp, synthetic } of opsToApply) {
-            const tagStatus = tagStatusById.get(pendingOp.tagId);
-            if (tagStatus === "compacted" || tagStatus === "dropped") {
-                if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
-                continue;
-            }
+            for (const { op: pendingOp, synthetic } of opsToApply) {
+                const tagStatus = tagStatusById.get(pendingOp.tagId);
+                if (tagStatus === "compacted" || tagStatus === "dropped") {
+                    if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
+                    continue;
+                }
 
-            if (protectedTagIds.has(pendingOp.tagId)) {
-                continue;
-            }
+                if (protectedTagIds.has(pendingOp.tagId)) {
+                    continue;
+                }
 
-            const target = targets.get(pendingOp.tagId);
-            const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
+                const target = targets.get(pendingOp.tagId);
+                const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
-            if (synthetic) {
-                // Synthetic two-pass reclaim must never persist a DB-only drop for
-                // a tag that is absent/incomplete on this pass's visible wire. It
-                // only rides an already-mutating pass when the target can actually
-                // reclaim bytes right now; real pending ops keep their legacy
-                // absent persistence semantics for user-requested ctx_reduce.
-                if (!isToolTag || target?.canDrop?.() !== true) continue;
-            }
+                if (synthetic) {
+                    // Synthetic two-pass reclaim must never persist a DB-only drop for
+                    // a tag that is absent/incomplete on this pass's visible wire. It
+                    // only rides an already-mutating pass when the target can actually
+                    // reclaim bytes right now; real pending ops keep their legacy
+                    // absent persistence semantics for user-requested ctx_reduce.
+                    if (!isToolTag || target?.canDrop?.() !== true) continue;
+                }
 
-            let shouldPersistDrop = false;
-            if (isToolTag) {
-                if (editMarkerTagIds.has(pendingOp.tagId)) {
-                    // Superseded edit/write: compress to a filePath-preserving
-                    // marker even when the tag is inside the recent skeleton
-                    // window. Frozen as drop_mode="edit_marker", replayed by mode.
-                    const markResult = target?.editMarker?.() ?? "absent";
-                    if (markResult === "incomplete" || markResult === "absent") {
-                        continue;
-                    }
-                    didMutateMessage = true;
-                    updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
-                    shouldPersistDrop = true;
-                } else if (skeletonWindow.has(pendingOp.tagId)) {
-                    const truncResult = target?.truncate?.() ?? "absent";
-                    if (
-                        truncResult === "incomplete" ||
-                        (synthetic && truncResult !== "truncated")
-                    ) {
-                        continue;
-                    }
-                    if (truncResult === "truncated") {
+                let shouldPersistDrop = false;
+                if (isToolTag) {
+                    if (editMarkerTagIds.has(pendingOp.tagId)) {
+                        // Superseded edit/write: compress to a filePath-preserving
+                        // marker even when the tag is inside the recent skeleton
+                        // window. Frozen as drop_mode="edit_marker", replayed by mode.
+                        const markResult = target?.editMarker?.() ?? "absent";
+                        if (markResult === "incomplete" || markResult === "absent") {
+                            continue;
+                        }
                         didMutateMessage = true;
+                        updateTagDropMode(db, sessionId, pendingOp.tagId, "edit_marker");
+                        shouldPersistDrop = true;
+                    } else if (skeletonWindow.has(pendingOp.tagId)) {
+                        const truncResult = target?.truncate?.() ?? "absent";
+                        if (
+                            truncResult === "incomplete" ||
+                            (synthetic && truncResult !== "truncated")
+                        ) {
+                            continue;
+                        }
+                        if (truncResult === "truncated") {
+                            didMutateMessage = true;
+                        }
+                        updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
+                        shouldPersistDrop = true;
+                    } else {
+                        const dropResult = target?.drop?.() ?? "absent";
+                        if (
+                            dropResult === "incomplete" ||
+                            (synthetic && dropResult !== "removed")
+                        ) {
+                            continue;
+                        }
+                        if (dropResult === "removed") {
+                            didMutateMessage = true;
+                        }
+                        updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
+                        shouldPersistDrop = true;
                     }
-                    updateTagDropMode(db, sessionId, pendingOp.tagId, "truncated");
+                } else if (target) {
+                    const changed = target.setContent(buildReplacementContent(pendingOp.tagId));
+                    if (changed) didMutateMessage = true;
                     shouldPersistDrop = true;
-                } else {
-                    const dropResult = target?.drop?.() ?? "absent";
-                    if (dropResult === "incomplete" || (synthetic && dropResult !== "removed")) {
-                        continue;
-                    }
-                    if (dropResult === "removed") {
-                        didMutateMessage = true;
-                    }
-                    updateTagDropMode(db, sessionId, pendingOp.tagId, "full");
+                } else if (!synthetic) {
                     shouldPersistDrop = true;
                 }
-            } else if (target) {
-                const changed = target.setContent(buildReplacementContent(pendingOp.tagId));
-                if (changed) didMutateMessage = true;
-                shouldPersistDrop = true;
-            } else if (!synthetic) {
-                shouldPersistDrop = true;
-            }
 
-            if (!shouldPersistDrop) continue;
-            updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
-            if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
+                if (!shouldPersistDrop) continue;
+                updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
+                if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
+            }
+        }).immediate();
+    } catch (error) {
+        // Acquire the writer before reading tags or changing wire bytes. A WAL
+        // read-to-write upgrade cannot wait under busy_timeout. Failed admission
+        // leaves both the pending queue and this pass's representation untouched.
+        if (
+            !admitted &&
+            /database (?:table )?is locked|sqlite_(busy|locked)/i.test(String(error))
+        ) {
+            sessionLog(
+                sessionId,
+                "pending operations write admission busy; retaining prior bytes for retry",
+            );
+            return false;
         }
-    })();
+        // Once mutation starts, rollback of SQLite alone cannot restore the wire.
+        throw error;
+    } finally {
+        if (admitted) logSlowWriteTransaction("apply_pending_operations", startedAt);
+    }
     return didMutateMessage;
 }
 

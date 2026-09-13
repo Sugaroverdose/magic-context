@@ -170,7 +170,8 @@ export interface TranscriptPart {
     /** Remove one half of a complete tool arc. Callers must remove both halves together. */
     remove?(): boolean;
     /** Refuse structural deletion when the adapter cannot match provider-native identity safely. */
-    canRemove?(): boolean;
+    /** A deferred durable decision vetoes the whole drop, including sentinel fallback. */
+    canRemove?(): boolean | "defer";
 
     /**
      * Optional: serialized byte size of the part's REAL payload, including

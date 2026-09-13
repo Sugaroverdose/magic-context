@@ -174,9 +174,16 @@ describe("Pi context handler LKG replay", () => {
 						maxTokens: 68000,
 					};
 					Object.assign(firstCtx, { model });
-					expect(
-						await handler({ messages: firstRaw as never[] }, firstCtx as never),
-					).toBeDefined();
+					const firstServed = await handler(
+						{ messages: firstRaw as never[] },
+						firstCtx as never,
+					);
+					expect(firstServed).toBeDefined();
+					if (!firstServed) throw new Error("Expected an applied capture pass");
+					const expectedReplay = [
+						structuredClone(firstServed.messages.at(-1)),
+						...structuredClone(raw.slice(1)),
+					];
 					await nextImmediate();
 					appendCompartments(db, sessionId, [
 						{
@@ -190,8 +197,8 @@ describe("Pi context handler LKG replay", () => {
 							p1: "Covered history",
 						},
 					]);
-					// Model the next pass after publication removed the covered head. The
-					// stored served JSON has no entry-id-to-output map proving a safe splice.
+					// Publication removes only the covered head; replay retains the captured
+					// surviving entry and appends untouched new entries.
 					db.exec("PRAGMA busy_timeout=0");
 					locker.exec("BEGIN IMMEDIATE");
 					const ctx = fakeContext(sessionId, process.cwd(), ids, raw as never);
@@ -220,7 +227,9 @@ describe("Pi context handler LKG replay", () => {
 						// The guard stops at the first serialized prefix crossing the wall.
 						let bytes = 0;
 						for (let end = 1; end <= raw.length; end++) {
-							bytes = Buffer.byteLength(JSON.stringify(raw.slice(0, end)));
+							bytes = Buffer.byteLength(
+								JSON.stringify(expectedReplay.slice(0, end)),
+							);
 							if (bytes > 204000 * 4) break;
 						}
 						expect(
@@ -232,17 +241,20 @@ describe("Pi context handler LKG replay", () => {
 						);
 					} else {
 						if (mode === "host") {
-							expect(await pass).toEqual(pristine);
+							expect(await pass).toEqual(expectedReplay);
 							expect(host.controller.signal.aborted).toBe(false);
 							expect(host.entries).toEqual([]);
-						} else expect(await pass).toBeUndefined();
+						} else expect((await pass)?.messages).toEqual(expectedReplay);
 						expect(
 							logLines.some((line) =>
 								line.includes("raw_fallback_over_context_limit"),
 							),
 						).toBe(false);
 					}
-					expect(logLines.join("\n")).toContain("lkg_invalidated_reshape");
+					if (count === 300)
+						expect(logLines.join("\n")).toContain(
+							"LKG replay served 300 messages",
+						);
 				} finally {
 					if (locker.inTransaction) locker.exec("ROLLBACK");
 					restoreLog();

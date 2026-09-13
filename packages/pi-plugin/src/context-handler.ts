@@ -115,10 +115,7 @@ import {
 	resolveEpochFloorForPass,
 	setEmergencyDropSample,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
-import {
-	getNativeReplayState,
-	saveNativeToolInputs,
-} from "@magic-context/core/features/magic-context/storage-native-replay";
+import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
 import {
 	createTagger,
@@ -238,13 +235,11 @@ import {
 	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
-import {
-	canClearNativeReasoning,
-	NATIVE_TOOL_REMOVAL_MARKER,
-} from "./native-replay-pi";
+import { canClearNativeReasoning } from "./native-replay-pi";
 import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
+	authorizePiToolRemoval,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
@@ -260,6 +255,7 @@ import {
 	type PiLkgPassSnapshot,
 	piStorageErrorReason,
 	reconcilePiLkgEntryIds,
+	resolvePiLkgOutputEntryIds,
 } from "./pi-lkg";
 import {
 	formatPiPressureForLog,
@@ -2443,6 +2439,9 @@ export function registerPiContextHandler(
 				modelKey: lkgModelKey,
 				providerKey: lkgProviderKey,
 			});
+			const lkgInputIdByRef = new Map<unknown, string>();
+			for (const input of lkgPassSnapshot.inputs)
+				lkgInputIdByRef.set(event.messages[input.messageIndex], input.id);
 			const thinkingBindingRecoveryApplied = applyPiThinkingBindingRecovery({
 				db: options.db,
 				sessionId,
@@ -3189,6 +3188,9 @@ export function registerPiContextHandler(
 				projectDirectory,
 				sessionMeta,
 				messages: event.messages,
+				lkgEntryIds: event.messages.map((message) =>
+					lkgInputIdByRef.get(message),
+				),
 				smartDrops: options.smartDrops === true,
 				protectedTags: options.protectedTags ?? 20,
 				protectedTokens: options.protectedTokens,
@@ -3662,6 +3664,13 @@ export function registerPiContextHandler(
 				lkgCoordinator.captureAppliedPass({
 					snapshot: lkgPassSnapshot,
 					outputMessages,
+					outputEntryIds: resolvePiLkgOutputEntryIds(
+						outputMessages,
+						result.syntheticLeadingCount,
+						(message) =>
+							result.postCommitEntryIdByRef.get(message) ??
+							result.lkgEntryIdByRef.get(message),
+					),
 					// Refresh every successful SOFT/SOFT+ pass; a cache-busting pass
 					// first invalidates the stale representation until the async capture lands.
 					cacheBusting: result.bustedThisPass,
@@ -4622,6 +4631,7 @@ interface RunPipelineArgs {
 	projectDirectory: string;
 	sessionMeta: ReturnType<typeof getOrCreateSessionMeta>;
 	messages: Parameters<typeof createPiTranscript>[0];
+	lkgEntryIds?: readonly (string | undefined)[];
 	/** Smart-drops (experimental, default off): also reclaim tool output that a
 	 *  later call supersedes, on top of the age-based auto-drop. Off → messages
 	 *  sent to the model are byte-identical to the age-based-only behavior. */
@@ -4788,6 +4798,7 @@ interface RunPipelineResult {
 	 * the consumer correctly falls to its degraded (entryIds === null) path.
 	 */
 	postCommitEntryIdByRef: ReadonlyMap<object, string>;
+	lkgEntryIdByRef: ReadonlyMap<object, string>;
 }
 
 function pendingPiMarkerCoveredByRenderedBoundary(
@@ -4914,6 +4925,7 @@ async function runCompactionOffPipeline(
 			pendingDropTagNumbers: new Set(),
 		},
 		postCommitEntryIdByRef: new Map(),
+		lkgEntryIdByRef: new Map(),
 	};
 }
 
@@ -4989,27 +5001,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.reasoningClearing?.preserveReasoningToolArcs,
 			// Legacy full drops were skeletons even without a native envelope. The
 			// existing tool-input lane freezes their first priced structural removal.
-			authorizeToolRemoval: (callId) => {
-				if (!nativeRemovalInputs) return false;
-				if (nativeRemovalInputs.get(callId) === NATIVE_TOOL_REMOVAL_MARKER)
-					return true;
-				if (!isCacheBustingPass) return false;
-				try {
-					saveNativeToolInputs(
-						args.db,
-						args.sessionId,
-						new Map([[callId, NATIVE_TOOL_REMOVAL_MARKER]]),
-					);
-					nativeRemovalInputs.set(callId, NATIVE_TOOL_REMOVAL_MARKER);
-					return true;
-				} catch (error) {
-					sessionLog(
-						args.sessionId,
-						`tool arc removal persistence failed; retaining pair: ${String(error)}`,
-					);
-					return false;
-				}
-			},
+			authorizeToolRemoval: (callId) =>
+				authorizePiToolRemoval({
+					db: args.db,
+					sessionId: args.sessionId,
+					callId,
+					saved: nativeRemovalInputs,
+					canApply: isCacheBustingPass,
+				}),
 		},
 	);
 	logTransformTiming(args.sessionId, "transcriptBuild", tTranscriptBuild);
@@ -6246,6 +6245,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tPostCommitStableIdMaps = performance.now();
 	const postCommitStableIdByRef = new Map<object, string>();
 	const postCommitEntryIdByRef = new Map<object, string>();
+	const lkgEntryIdByRef = new Map<object, string>();
 	for (let i = 0; i < args.messages.length; i++) {
 		const m = args.messages[i];
 		if (!m || typeof m !== "object") continue;
@@ -6256,6 +6256,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			args.entryIdByRef ?? undefined,
 		);
 		if (id) postCommitStableIdByRef.set(m as object, id);
+		const lkgId = args.lkgEntryIds?.[i];
+		if (lkgId) lkgEntryIdByRef.set(m as object, lkgId);
 		// Real-only: positional entryIds[i] is a real SessionEntry id or undefined
 		// (never pi-msg-*). Authoritative here because nothing has spliced yet.
 		const realId = args.entryIds?.[i];
@@ -6620,6 +6622,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		activeTags,
 		channelBaselineSnapshot,
 		postCommitEntryIdByRef,
+		lkgEntryIdByRef,
 	};
 }
 

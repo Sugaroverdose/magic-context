@@ -158,7 +158,7 @@ export function createPiTranscript(
 	options: {
 		preserveReasoningToolArcs?: boolean;
 		/** Gate first structural application for every arc, including calls without native envelopes. */
-		authorizeToolRemoval?: (callId: string) => boolean;
+		authorizeToolRemoval?: (callId: string) => boolean | "defer";
 	} = {},
 ): Transcript & {
 	/**
@@ -806,14 +806,15 @@ function createPiAssistantPart(
 			markDirty(messageIndex, p.id);
 			return true;
 		},
-		canRemove(): boolean {
+		canRemove(): boolean | "defer" {
 			const message = working[messageIndex] as PiAssistantMessage;
 			const part = message.content[partIndex];
-			return (
-				part?.type === "toolCall" &&
-				canRemoveNativeToolCall(message, part.id) &&
-				toolRemovalAuthorization.get(working)?.(part.id) !== false
-			);
+			if (
+				part?.type !== "toolCall" ||
+				!canRemoveNativeToolCall(message, part.id)
+			)
+				return false;
+			return toolRemovalAuthorization.get(working)?.(part.id) ?? true;
 		},
 		remove(): boolean {
 			return markToolRemoval(working, messageIndex, partIndex);
@@ -1018,7 +1019,7 @@ function extractStableId(
 const toolRemovals = new WeakMap<PiAgentMessage[], Map<number, Set<number>>>();
 const toolRemovalAuthorization = new WeakMap<
 	PiAgentMessage[],
-	(callId: string) => boolean
+	(callId: string) => boolean | "defer"
 >();
 function markToolRemoval(
 	working: PiAgentMessage[],

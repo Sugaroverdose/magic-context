@@ -6,6 +6,8 @@ import type { MessageLike } from "./transform-operations";
 
 export interface LkgSlot {
     jsonPrefix: string;
+    /** Pi output ownership; null denotes a synthetic entry independent of raw-head trims. */
+    piOutputEntryIds?: readonly (string | null)[];
     inputIdSeq: string[];
     inputContentDigests: string[];
     /** Cheap content signatures aligned with `inputIdSeq`, used to reuse digests. */
@@ -70,7 +72,9 @@ function slotBytes(slot: LkgSlot): number {
         (total, digest) => total + 2 * digest.length,
         0,
     );
-    return 2 * slot.jsonPrefix.length + digestBytes + LKG_METADATA_BYTES;
+    const ownershipBytes =
+        slot.piOutputEntryIds?.reduce((total, id) => total + (id?.length ?? 0) * 2 + 8, 0) ?? 0;
+    return 2 * slot.jsonPrefix.length + digestBytes + ownershipBytes + LKG_METADATA_BYTES;
 }
 
 export type LkgContentField = string | number | boolean | symbol;
@@ -383,6 +387,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
     const entry = {
         slot: {
             ...slot,
+            ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
             inputIdSeq: [...slot.inputIdSeq],
             inputContentDigests: [...slot.inputContentDigests],
             inputContentSignatures: slot.inputContentSignatures
@@ -421,6 +426,7 @@ function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
     const entry = {
         slot: {
             ...slot,
+            ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
             inputIdSeq: [...slot.inputIdSeq],
             inputContentDigests: [...slot.inputContentDigests],
             inputContentSignatures: slot.inputContentSignatures
@@ -457,6 +463,7 @@ function hydrateSlotFromPersistence(sessionId: string): LkgSlot | undefined {
 function copySlotForRead(slot: LkgSlot): LkgSlot {
     return {
         ...slot,
+        ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
         inputIdSeq: [...slot.inputIdSeq],
         inputContentDigests: [...slot.inputContentDigests],
         inputContentSignatures: slot.inputContentSignatures

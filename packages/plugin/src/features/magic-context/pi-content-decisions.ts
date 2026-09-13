@@ -56,46 +56,54 @@ export function freezePiContentDecision(
     kind: PiContentDecisionKind,
     messageId: string,
 ): boolean {
-    ensureSessionMetaRow(db, sessionId);
-    const entry = encodePiContentDecision(kind, messageId);
-    return db.transaction(() => {
-        for (let attempt = 0; attempt < 5; attempt++) {
-            const row = db
-                .prepare(
-                    "SELECT merged_reasoning_stripped_ids AS decisions FROM session_meta WHERE session_id = ?",
-                )
-                .get(sessionId) as { decisions: string | null };
-            const current = readEntries(row.decisions);
-            if (current.includes(entry)) return true;
-            // Tags survive compartment projection; only actual deletion invalidates a choice.
-            const ownsTag = db.prepare(
-                "SELECT 1 FROM tags WHERE session_id = ? AND message_id = ? LIMIT 1",
-            );
-            const ownsMessage = db.prepare(
-                "SELECT 1 FROM tags WHERE session_id = ? AND message_id >= ? AND message_id < ? LIMIT 1",
-            );
-            const kept = current.filter((value) => {
-                const decision = decodePiContentDecision(value);
-                return (
-                    !decision ||
-                    !!(decision[0] === "seam-temporal-strip"
-                        ? ownsMessage.get(sessionId, `${decision[1]}:p`, `${decision[1]}:q`)
-                        : ownsTag.get(sessionId, decision[1]))
-                );
-            });
-            if (
-                kept.filter((value) => decodePiContentDecision(value) !== null).length >=
-                PI_CONTENT_DECISION_LIMIT
-            )
+    try {
+        ensureSessionMetaRow(db, sessionId);
+        const entry = encodePiContentDecision(kind, messageId);
+        return db
+            .transaction(() => {
+                for (let attempt = 0; attempt < 5; attempt++) {
+                    const row = db
+                        .prepare(
+                            "SELECT merged_reasoning_stripped_ids AS decisions FROM session_meta WHERE session_id = ?",
+                        )
+                        .get(sessionId) as { decisions: string | null };
+                    const current = readEntries(row.decisions);
+                    if (current.includes(entry)) return true;
+                    // Tags survive compartment projection; only actual deletion invalidates a choice.
+                    const ownsTag = db.prepare(
+                        "SELECT 1 FROM tags WHERE session_id = ? AND message_id = ? LIMIT 1",
+                    );
+                    const ownsMessage = db.prepare(
+                        "SELECT 1 FROM tags WHERE session_id = ? AND message_id >= ? AND message_id < ? LIMIT 1",
+                    );
+                    const kept = current.filter((value) => {
+                        const decision = decodePiContentDecision(value);
+                        return (
+                            !decision ||
+                            !!(decision[0] === "seam-temporal-strip"
+                                ? ownsMessage.get(sessionId, `${decision[1]}:p`, `${decision[1]}:q`)
+                                : ownsTag.get(sessionId, decision[1]))
+                        );
+                    });
+                    if (
+                        kept.filter((value) => decodePiContentDecision(value) !== null).length >=
+                        PI_CONTENT_DECISION_LIMIT
+                    )
+                        return false;
+                    kept.push(entry);
+                    const result = db
+                        .prepare(
+                            "UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ? AND merged_reasoning_stripped_ids IS ?",
+                        )
+                        .run(JSON.stringify(kept), sessionId, row.decisions);
+                    if (result.changes > 0) return true;
+                }
                 return false;
-            kept.push(entry);
-            const result = db
-                .prepare(
-                    "UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ? AND merged_reasoning_stripped_ids IS ?",
-                )
-                .run(JSON.stringify(kept), sessionId, row.decisions);
-            if (result.changes > 0) return true;
-        }
-        return false;
-    })();
+            })
+            .immediate();
+    } catch (error) {
+        // No caller changes served bytes until this durable decision succeeds.
+        if (/database (?:table )?is locked|sqlite_(busy|locked)/i.test(String(error))) return false;
+        throw error;
+    }
 }

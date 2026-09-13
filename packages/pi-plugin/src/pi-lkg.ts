@@ -18,6 +18,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/transform-operations";
 import { sessionLog } from "@magic-context/core/shared/logger";
+import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
 interface PiLkgInputSnapshot {
@@ -83,6 +84,7 @@ export interface PiLkgCoordinator {
 	captureAppliedPass(args: {
 		snapshot: PiLkgPassSnapshot;
 		outputMessages: readonly unknown[];
+		outputEntryIds?: readonly (string | null | undefined)[];
 		cacheBusting: boolean;
 	}): void;
 }
@@ -207,14 +209,16 @@ function snapshotInputs(
 	}
 	const inputs: PiLkgInputSnapshot[] = [];
 	const seen = new Set<string>();
-	for (let index = firstStableIndex; index < entryIds.length; index += 1) {
-		const id = entryIds[index];
-		if (typeof id !== "string" || id.length === 0) {
-			return { inputs: [], failure: "lkg_entry_id_gap" };
-		}
-		if (seen.has(id)) return { inputs: [], failure: "lkg_duplicate_entry_id" };
+	for (let index = 0; index < entryIds.length; index += 1) {
 		const fields = lkgContentFields(messages[index]);
 		if (!fields) return { inputs: [], failure: "lkg_content_snapshot_failed" };
+		// Host extensions can inject entries absent from JSONL. A detached full-
+		// content digest gives those entries a stable identity without guessing a
+		// positional JSONL owner. Identical unknown entries remain ambiguous.
+		const id =
+			entryIds[index] ||
+			`pi-lkg-unmapped:${lkgContentDigestFromFields(fields)}`;
+		if (seen.has(id)) return { inputs: [], failure: "lkg_duplicate_entry_id" };
 		seen.add(id);
 		inputs.push({ id, messageIndex: index, fields });
 	}
@@ -332,11 +336,49 @@ export function createPiLkgCoordinator(
 		) {
 			return { ok: false, reason: "lkg_miss" };
 		}
-		// A published boundary can contract the live input prefix. Keep the shared
-		// exact-prefix fence: jsonPrefix stores served bytes, not a mapping from
-		// input entry ids to served entries (which may include m0/m1 and drops).
-		// Slicing that JSON by an input count could remove the wrong messages.
-		// The context handler fit-checks raw input when this replay is refused.
+		const slot = getSlot(snapshot.sessionId);
+		const start = slot?.inputIdSeq.indexOf(snapshot.inputs[0]?.id ?? "") ?? -1;
+		if (slot && start > 0) {
+			const ownership = slot.piOutputEntryIds;
+			if (!ownership)
+				return { ok: false, reason: "lkg_output_mapping_unavailable" };
+			if (
+				slot.modelKey !== snapshot.modelKey ||
+				slot.providerKey !== snapshot.providerKey
+			)
+				return { ok: false, reason: "lkg_model_mismatch" };
+			const surviving = snapshot.inputs.slice(
+				0,
+				snapshot.replayAnchorInputIndex + 1,
+			);
+			if (
+				surviving.length !== slot.inputIdSeq.length - start ||
+				surviving.some(
+					(input, index) => input.id !== slot.inputIdSeq[start + index],
+				)
+			)
+				return { ok: false, reason: "lkg_invalidated_reshape" };
+			if (
+				surviving.some(
+					(input, index) =>
+						lkgContentDigestFromFields(input.fields) !==
+						slot.inputContentDigests[start + index],
+				)
+			)
+				return { ok: false, reason: "lkg_content_mismatch" };
+			const removed = new Set(slot.inputIdSeq.slice(0, start));
+			const prefix = JSON.parse(slot.jsonPrefix) as MessageLike[];
+			return {
+				ok: true,
+				messages: [
+					...prefix.filter(
+						(_, index) =>
+							ownership[index] === null || !removed.has(ownership[index] ?? ""),
+					),
+					...snapshot.pristineTail,
+				],
+			};
+		}
 		const entry: LkgEntryNote = {
 			pristineTail: snapshot.pristineTail,
 			entryInputIds: snapshot.inputs.map((input) => input.id),
@@ -380,6 +422,29 @@ export function createPiLkgCoordinator(
 			return;
 		}
 		const state = stateFor(snapshot.sessionId);
+		const idsByDigest = new Map<string, string | undefined>();
+		if (!args.outputEntryIds)
+			for (const input of snapshot.inputs) {
+				const digest = lkgContentDigestFromFields(input.fields);
+				idsByDigest.set(digest, idsByDigest.has(digest) ? undefined : input.id);
+			}
+		const inferredIds =
+			args.outputEntryIds ??
+			args.outputMessages.map((message) => {
+				const fields = lkgContentFields(message);
+				if (!fields) return undefined;
+				const digest = lkgContentDigestFromFields(fields);
+				return idsByDigest.get(digest);
+			});
+		const outputIds = args.outputEntryIds ?? inferredIds;
+		const inputIds = new Set(snapshot.inputs.map((input) => input.id));
+		const ownership =
+			outputIds.length === args.outputMessages.length &&
+			outputIds.every(
+				(id) => id === null || (typeof id === "string" && inputIds.has(id)),
+			)
+				? ([...outputIds] as (string | null)[])
+				: undefined;
 		state.captureSequence += 1;
 		const plan: PiLkgCapturePlan = {
 			sessionId: snapshot.sessionId,
@@ -447,6 +512,7 @@ export function createPiLkgCoordinator(
 				reusedPrefix = incremental.reusedPrefix;
 				const slot = {
 					jsonPrefix: plan.jsonPrefix,
+					piOutputEntryIds: ownership,
 					inputIdSeq,
 					inputContentDigests: incremental.digests,
 					inputContentSignatures,
@@ -503,4 +569,53 @@ export function createPiLkgCoordinator(
 	};
 
 	return { beginPass, replay, captureAppliedPass };
+}
+
+/** Synthetic todo results follow their assistant owner when a raw head is trimmed. */
+export function resolvePiLkgOutputEntryIds(
+	messages: readonly unknown[],
+	syntheticLeadingCount: number,
+	entryId: (message: object) => string | undefined,
+): (string | null | undefined)[] {
+	const ids = messages.map((message, index) =>
+		index < syntheticLeadingCount
+			? null
+			: isRecord(message)
+				? entryId(message)
+				: undefined,
+	);
+	const syntheticOwners = new Map<string, string | undefined>();
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		const owner = ids[index];
+		if (
+			typeof owner !== "string" ||
+			!isRecord(message) ||
+			message.role !== "assistant" ||
+			!Array.isArray(message.content)
+		)
+			continue;
+		for (const part of message.content) {
+			if (
+				isRecord(part) &&
+				part.type === "toolCall" &&
+				part.syntheticTodoMarker === true &&
+				typeof part.id === "string"
+			)
+				syntheticOwners.set(
+					part.id,
+					syntheticOwners.has(part.id) ? undefined : owner,
+				);
+		}
+	}
+	return ids.map((id, index) => {
+		const message = messages[index];
+		return id === undefined &&
+			isRecord(message) &&
+			message.role === "toolResult" &&
+			message.syntheticTodoMarker === true &&
+			typeof message.toolCallId === "string"
+			? syntheticOwners.get(message.toolCallId)
+			: id;
+	});
 }
