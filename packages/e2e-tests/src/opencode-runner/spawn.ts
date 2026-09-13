@@ -20,7 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { prepareContextDatabase } from "../prepare-context-db";
-import { assertMockEndpoint, pinMockAgents } from "../mock-routing";
+import { assertMockEndpoint, assertMockProviders, pinMockAgents } from "../mock-routing";
 import {
     buildHermeticBinaries,
     detectRustModePrereqs,
@@ -320,6 +320,14 @@ function writeConfigs(
 
     const registeredProviders = opencodeConfig.provider as Record<string, { options?: { baseURL?: string } }>;
     assertMockEndpoint(registeredProviders[mockProviderID]?.options?.baseURL, mockProviderURL);
+    for (const provider of Object.values(registeredProviders)) {
+        assertMockEndpoint(provider.options?.baseURL, mockProviderURL);
+    }
+    // Prevent environment credentials and the built-in catalog from enabling
+    // providers absent from the fixture, including automatic small-model calls.
+    opencodeConfig.enabled_providers = Object.keys(registeredProviders);
+    opencodeConfig.model = `${mockProviderID}/${mockModelID}`;
+    opencodeConfig.small_model = `${mockProviderID}/${mockModelID}`;
 
     // magic-context defaults tuned for fast triggering in tests. This is the
     // USER-tier config: thresholds live here because project-tier thresholds are
@@ -341,6 +349,9 @@ function writeConfigs(
     }
 
     writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+    if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
+        console.error(`[mock-config] ${JSON.stringify({ configDir: env.configDir, mockProviderURL, opencodeConfig, magicContext })}`);
+    }
 
     // The plugin's loadPluginConfig() looks for magic-context.jsonc under
     // ${XDG_CONFIG_HOME}/opencode/magic-context.jsonc (user config) or
@@ -717,6 +728,13 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
             mockProviderID: resolvedOpts.mockProviderID,
             mockModelID: resolvedOpts.mockModelID,
         });
+        const providers = await fetch(`${url}/config/providers`).then((response) => response.json());
+        assertMockProviders(providers, resolvedOpts.mockProviderURL);
+        if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
+            const endpoints = (providers as { providers: Array<{ id: string; options?: { baseURL?: string } }> }).providers
+                .map((provider) => ({ id: provider.id, baseURL: provider.options?.baseURL }));
+            console.error(`[mock-effective-providers] ${JSON.stringify({ url, endpoints })}`);
+        }
     } catch (err) {
         // Surface captured output on boot failure to help debugging.
         child.kill("SIGTERM");

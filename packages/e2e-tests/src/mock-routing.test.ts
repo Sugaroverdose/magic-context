@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { assertHistorianMockRouting, assertMockEndpoint, pinMockAgents } from "./mock-routing";
+import { assertHistorianMockRouting, assertMockEndpoint, assertMockProviders, pinMockAgents } from "./mock-routing";
 
 describe("mock child-agent routing", () => {
   it("pins omitted and blank models without enabling the dreamer", () => {
@@ -48,4 +48,13 @@ describe("mock child-agent routing", () => {
       db.close();
     }
   });
+});
+
+it("rejects extra effective providers even when the configured mock is correct", () => {
+  const expected = "http://127.0.0.1:1234";
+  const mock = { options: { baseURL: expected } };
+  assertMockProviders({ providers: [mock] }, expected);
+  expect(() => assertMockProviders({ providers: [mock, { options: {} }] }, expected)).toThrow("Off-mock");
+  expect(() => assertMockProviders({ providers: [mock, { options: { baseURL: "http://127.0.0.1:53864" } }] }, expected)).toThrow("Off-mock");
+  expect(() => assertMockProviders({ providers: [] }, expected)).toThrow("Missing effective");
 });

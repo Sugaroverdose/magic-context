@@ -78,3 +78,12 @@ export function assertMockEndpoint(actual: unknown, expected: string): void {
     throw new Error(`Off-mock provider endpoint: ${String(actual)}; expected loopback ${expected}`);
   }
 }
+
+/** Validate the resolved provider list, not just the config submitted to OpenCode. */
+export function assertMockProviders(value: unknown, expected: string): void {
+  const providers = (value as { providers?: Array<{ options?: { baseURL?: string } }> })?.providers;
+  if (!Array.isArray(providers) || providers.length === 0) {
+    throw new Error("Missing effective mock providers");
+  }
+  for (const provider of providers) assertMockEndpoint(provider.options?.baseURL, expected);
+}

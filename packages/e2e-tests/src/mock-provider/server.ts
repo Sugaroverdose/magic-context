@@ -91,11 +91,15 @@ export class MockProvider {
     private captured: CapturedRequest[] = [];
     private defaultResponse: MockResponse | null = null;
     private matchers: RequestMatcher[] = [];
+    private misses = 0;
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
         const port = options.port ?? 0; // 0 = pick any available port
         this.server = Bun.serve({
             port,
+            // Bind the address advertised to the child. A localhost listener can
+            // coexist with an unrelated IPv4 listener on the same port on macOS.
+            hostname: "127.0.0.1",
             fetch: async (req) => this.handle(req),
         });
         const actualPort = this.server.port ?? 0;
@@ -154,12 +158,22 @@ export class MockProvider {
     private async handle(req: Request): Promise<Response> {
         const url = new URL(req.url);
         const method = req.method;
+        const expectedHost = `127.0.0.1:${this.server?.port}`;
+        if (url.host !== expectedHost || req.headers.get("host") !== expectedHost) {
+            throw new Error(`Off-mock request host: ${req.url}; expected ${expectedHost}`);
+        }
 
         // Accept paths with and without /v1; AI SDK providers differ in how they join baseURL.
         const isMessages = url.pathname === "/messages" || url.pathname === "/v1/messages";
         const isResponses = url.pathname === "/responses" || url.pathname === "/v1/responses";
 
-        if (method === "POST" && (isMessages || isResponses)) {
+        const matched = method === "POST" && (isMessages || isResponses);
+        if (!matched) this.misses++;
+        if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
+            console.error(`[mock-request] ${JSON.stringify({ url: req.url, method, host: req.headers.get("host"), matched, misses: this.misses })}`);
+        }
+
+        if (matched) {
             let body: Record<string, unknown> = {};
             try {
                 body = (await req.json()) as Record<string, unknown>;
