@@ -180,6 +180,13 @@ check "magic-context plugin log exists" "test -s $PLUGIN_LOG"
 
 # Shared DB should now exist and have at least one tagged message.
 check "shared SQLite DB created" "test -f $DB_PATH"
+# A missing DB means the plugin booted (its log exists) but never opened
+# storage or never ran a transform; the plugin log is the only artifact that
+# says which, so print it here instead of leaving CI to guess.
+if [[ ! -f "$DB_PATH" && -s "$PLUGIN_LOG" ]]; then
+    echo "  ── magic-context log (shared DB missing) ──"
+    tail -60 "$PLUGIN_LOG"
+fi
 
 if [[ -f "$DB_PATH" ]]; then
     SESSION_META_COUNT=$(sqlite3 "$DB_PATH" \
