@@ -7089,10 +7089,12 @@ impl McHandler {
         }
         let route_project_root = binding.project_root.to_string_lossy();
         let authority_status = |domain: &str| -> Result<Value, McStoreError> {
-            Ok(match store.authority_project_state_for_route(&route_project_root, domain)? {
-                Some((project, state)) => json!({ "project": project, "state": state }),
-                None => Value::Null,
-            })
+            Ok(
+                match store.authority_project_state_for_route(&route_project_root, domain)? {
+                    Some((project, state)) => json!({ "project": project, "state": state }),
+                    None => Value::Null,
+                },
+            )
         };
         let memory_authority = match authority_status("memories") {
             Ok(authority) => authority,
@@ -11504,7 +11506,7 @@ impl McHandler {
         Ok(())
     }
 
-        async fn resolve_facade_scope(
+    async fn resolve_facade_scope(
         &self,
         channel: u16,
         arguments: Option<&Map<String, Value>>,
@@ -12017,7 +12019,11 @@ impl McHandler {
                             format!(
                                 "Found {} active {}:\n\n{body}",
                                 rows.len(),
-                                if rows.len() == 1 { "memory" } else { "memories" }
+                                if rows.len() == 1 {
+                                    "memory"
+                                } else {
+                                    "memories"
+                                }
                             ),
                             false,
                         )
@@ -19394,27 +19400,19 @@ mod tests {
     #[test]
     fn memory_mirror_health_surfaces_a_frozen_non_frontier_cursor_with_a_code() {
         let handler = McHandler::new();
-        handler
-            .memory_mirror_health
-            .observe_frontier(4_850, 275);
-        handler
-            .memory_mirror_health
-            .observe_pull(3_726, 1_000);
+        handler.memory_mirror_health.observe_frontier(4_850, 275);
+        handler.memory_mirror_health.observe_pull(3_726, 1_000);
 
-        let within_bound = handler.augment_memory_mirror_health(
-            DispatchHealth::new().report(40_999),
-            40_999,
-        );
+        let within_bound =
+            handler.augment_memory_mirror_health(DispatchHealth::new().report(40_999), 40_999);
         assert_eq!(within_bound.status, HealthStatus::Ok);
         assert_eq!(
             within_bound.metrics.unwrap()["memory_mirror"]["stalled"],
             json!(false)
         );
 
-        let stalled = handler.augment_memory_mirror_health(
-            DispatchHealth::new().report(41_000),
-            41_000,
-        );
+        let stalled =
+            handler.augment_memory_mirror_health(DispatchHealth::new().report(41_000), 41_000);
         assert_eq!(stalled.status, HealthStatus::Degraded);
         assert!(stalled
             .detail
@@ -25865,7 +25863,10 @@ mod tests {
             resolver.clone(),
         );
         let project_root = project.to_str().unwrap();
-        handler.bind_route(7, binding_with_harness(project_root, "opencode2", "slow-map"));
+        handler.bind_route(
+            7,
+            binding_with_harness(project_root, "opencode2", "slow-map"),
+        );
         activate_module_authority(
             &store,
             "store",
@@ -25911,9 +25912,12 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(tool_body(read)["content"][0]["text"], json!(format!(
+        assert_eq!(
+            tool_body(read)["content"][0]["text"],
+            json!(format!(
             "Memory [ID: {memory_id}] in CONSTRAINTS (status: active): serve from module authority"
-        )));
+        ))
+        );
 
         let write = call_facade(
             &handler,
