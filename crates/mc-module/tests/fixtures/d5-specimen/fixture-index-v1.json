@@ -3810,8 +3810,8 @@
     },
     {
       "path": "output-identity-vectors-v1.json",
-      "byte_size": 111249,
-      "sha256": "2dc231e3fa14d1d94102bc30dfb470cf55d012cab9f6b11bbf94bd9468b02740",
+      "byte_size": 118660,
+      "sha256": "5761a1e413c793648243fd1c8d2eeb833b1c2c1ec833fc70a4750c8b9e0aa558",
       "derived": false,
       "source": "owner-authored D5 returned-message output identity vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"

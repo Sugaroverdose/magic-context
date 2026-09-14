@@ -1,6 +1,6 @@
 {
   "schema": "mc.d5.output-identity-vectors.v1",
-  "contract_version": "1.3.24",
+  "contract_version": "1.3.25",
   "source_evidence": {
     "private_specimen_store": {
       "source": "MC_D5_SPECIMEN_DB or the standard private specimen location",
@@ -33,9 +33,9 @@
     "synthetic_mid_literals": {
       "path": "crates/mc-module/src/transform.rs",
       "lines": "91-95,5935-5943",
-      "fact": "M0_ID is mc_m0 and the frozen-prefix block identity literal for m1 is mc_m1#0, fixing serving MID mc_m1."
+      "fact": "M0_ID is mc_m0, the frozen-prefix block identity literal for m1 is mc_m1#0, and R44b fixes synthetic todo serving MIDs as <call_id>:call and <call_id>:result."
     },
-    "implementation_status": "The claude-code-anthropic profile-epoch stamping implementation is intentionally absent from this fixture task."
+    "implementation_status": "The claude-code-anthropic profile-epoch stamping implementation is intentionally absent from this fixture task; v1.3.25 and R44b settle the gateway and non-identity metadata behavior pinned here."
   },
   "returned_view_grammar": {
     "view_name": "ReturnedMessageViewV1",
@@ -52,7 +52,18 @@
       "synthetic/native ordinal shape",
       "unit locator bytes"
     ],
-    "refusal_algebra": "Returned-view malformed stamps use RefusalReason invalid_arguments with RefusalDetails.field; no new RefusalReason literal is introduced."
+    "evaluation_scope": "The gateway evaluates ReturnedMessageViewV1 only on the clause-21a carry-proof path while carry is outstanding.",
+    "proof_mismatch_transport": "Any returned-view stamp or locator defect is proof_mismatch with HTTP 503 and gateway error.code d5_carry_proof_mismatch.",
+    "outside_scope": "Without outstanding carry the returned-message view is not evaluated and produces no gateway verdict.",
+    "synthetic_serving_mids": "m0=mc_m0; m1=mc_m1; synthetic todo=<call_id>:call and <call_id>:result. These values are meta.harness_id stamps.",
+    "synthesized_messages": "Only m0, m1, and the synthetic todo pair are returned synthesized messages.",
+    "gateway_identity_fields": [
+      "harness_id",
+      "ordinal",
+      "synthetic"
+    ],
+    "gateway_view_limit": "The gateway returned-message view reads harness_id, ordinal, and synthetic and nothing else.",
+    "provider_rendering": "Provider rendering omits all HarnessMeta metadata."
   },
   "observed_geometry": {
     "successor_m0_payload_bytes": 65585,
@@ -158,7 +169,12 @@
           "meta": {
             "harness_id": "ccm-1940",
             "ordinal": 1940,
-            "synthetic": false
+            "synthetic": false,
+            "summary": true,
+            "errored": true,
+            "finish": "end_turn",
+            "created_at_ms": 1789166336504,
+            "completed_at_ms": 1789166336512
           }
         }
       ]
@@ -201,6 +217,36 @@
             "harness_id": "mc_synthetic_todo_c4a22134ee90be17:result",
             "ordinal": null,
             "synthetic": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "no-outstanding-carry",
+      "base": null,
+      "insert_before_position": null,
+      "shape": "[native message; no outstanding D5 carry]",
+      "messages": [
+        {
+          "position": 0,
+          "message_class": "native_no_outstanding_carry",
+          "role": "user",
+          "blocks": [
+            {
+              "index": 0,
+              "kind": "text",
+              "bytes_base64": "W3Nhbml0aXplZDpzdWNjZXNzb3ItbmF0aXZlLTE5NDA6MTI4XVtzYW5pdGl6ZWQ6c3VjY2Vzc29yLW5hdGl2ZS0xOTQwOjEyOF1bc2FuaXRpemVkOnN1Y2Nlc3Nvci1uYXRpdmUtMTk0MDoxMjhdW3Nhbml0aXplZDpzdWNjZXM="
+            }
+          ],
+          "meta": {
+            "harness_id": "ccm-1940",
+            "ordinal": 1940,
+            "synthetic": false,
+            "summary": true,
+            "errored": true,
+            "finish": "end_turn",
+            "created_at_ms": 1789166336504,
+            "completed_at_ms": 1789166336512
           }
         }
       ]
@@ -269,8 +315,15 @@
             "synthetic": false
           }
         ],
-        "refusal": null
-      }
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "accepted",
+          "http_status": null,
+          "error_code": null
+        },
+        "defect": null
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V02_unstamped",
@@ -287,17 +340,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[3].meta.harness_id",
-            "reason": "required serving MID stamp is missing"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[3].meta.harness_id",
+          "reason": "required serving MID stamp is missing",
           "returned_position": 3
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V03_duplicate_mid",
@@ -315,17 +370,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[3].meta.harness_id",
-            "reason": "serving MID duplicates returned position 2"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[3].meta.harness_id",
+          "reason": "serving MID duplicates returned position 2",
           "returned_position": 3
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V04_carry_claims_synthetic",
@@ -345,17 +402,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[2].meta.synthetic",
-            "reason": "manifest-named carry member cannot claim synthetic"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[2].meta.synthetic",
+          "reason": "manifest-named carry member cannot claim synthetic",
           "returned_position": 2
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V05_carry_wrong_ordinal",
@@ -375,17 +434,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[2].meta.ordinal",
-            "reason": "manifest source ordinal is 1823, got 1824"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[2].meta.ordinal",
+          "reason": "manifest source ordinal is 1823, got 1824",
           "returned_position": 2
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V06_synthetic_todo_locator",
@@ -440,8 +501,15 @@
             "synthetic": false
           }
         ],
-        "refusal": null
-      }
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "accepted",
+          "http_status": null,
+          "error_code": null
+        },
+        "defect": null
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V07_synthetic_todo_locator_altered",
@@ -460,17 +528,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "unit_locators[todo-result-unit].bytes",
-            "reason": "returned bytes at (mid, index) do not match the committed unit"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "unit_locators[todo-result-unit].bytes",
+          "reason": "returned bytes at (mid, index) do not match the committed unit",
           "returned_position": 5
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V08_descent_rebased_ordinal",
@@ -513,8 +583,15 @@
             "synthetic": false
           }
         ],
-        "refusal": null
-      }
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "accepted",
+          "http_status": null,
+          "error_code": null
+        },
+        "defect": null
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V09_synthetic_with_ordinal",
@@ -534,17 +611,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[0].meta.ordinal",
-            "reason": "synthetic returned message must not carry an ordinal"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[0].meta.ordinal",
+          "reason": "synthetic returned message must not carry an ordinal",
           "returned_position": 0
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V10_precedence_unstamped_before_later_duplicate",
@@ -566,17 +645,19 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[2].meta.harness_id",
-            "reason": "required serving MID stamp is missing"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[2].meta.harness_id",
+          "reason": "required serving MID stamp is missing",
           "returned_position": 2
         }
-      }
+      },
+      "outstanding_carry": true
     },
     {
       "id": "V11_swapped_carry_mids",
@@ -594,40 +675,179 @@
       "expected": {
         "outcome": "REFUSED",
         "positions": [],
-        "refusal": {
-          "reason": "invalid_arguments",
-          "receipt_id": null,
-          "details": {
-            "kind": "field",
-            "field": "returned_messages[2].meta.ordinal",
-            "reason": "manifest source ordinal is 1824, got 1823"
-          },
+        "gateway_verdict": {
+          "evaluated": true,
+          "classification": "proof_mismatch",
+          "http_status": 503,
+          "error_code": "d5_carry_proof_mismatch"
+        },
+        "defect": {
+          "field": "returned_messages[2].meta.ordinal",
+          "reason": "manifest source ordinal is 1824, got 1823",
           "returned_position": 2
         }
+      },
+      "outstanding_carry": true
+    },
+    {
+      "id": "V12_no_outstanding_carry_no_view",
+      "name": "without outstanding carry the returned-message view produces no gateway verdict",
+      "array": "no-outstanding-carry",
+      "mutations": [],
+      "unit_locator": null,
+      "descent_mapping": null,
+      "outstanding_carry": false,
+      "expected": {
+        "outcome": "not_evaluated",
+        "positions": [],
+        "gateway_verdict": null,
+        "defect": null
       }
     }
   ],
-  "unsettled": [
-    {
-      "name": "gateway_transport_for_output_stamp_refusal",
-      "silence": "Clause 5 and R44a require refusal but do not assign an HTTP status or gateway error.code. These vectors pin only the closed RefusalReason invalid_arguments shape."
-    },
-    {
-      "name": "synthetic_todo_serving_mid_allocation",
-      "silence": "R44a requires a synthetic unit locator to bind bytes but does not normatively allocate the two synthetic todo serving MIDs. The fixture uses the existing deterministic call id plus :call and :result solely as locator coordinates."
-    },
-    {
-      "name": "lineage_boundary_serving_mid_literal",
-      "silence": "Clause 5 names lineage_boundary as synthetic but does not specify its serving MID literal. No literal is selected by these vectors."
-    },
-    {
-      "name": "non_identity_harness_meta_policy",
-      "silence": "The rule stamps harness_id, ordinal, and synthetic shape but does not state whether other HarnessMeta fields may be removed. This fixture makes no stripping claim."
-    }
-  ],
+  "unsettled": [],
   "generation": {
     "fixture_kind": "owner-authored",
     "index_source": "owner-authored D5 returned-message output identity vectors",
     "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+  },
+  "mc_output_boundary_only": {
+    "verified_by": "mc stamping output wire (mc-module transform); not gateway round-trip",
+    "native_passthrough": {
+      "array": "specimen-main",
+      "returned_position": 4,
+      "mid": "ccm-1940",
+      "ingress_non_identity_meta_json": "{\"summary\":true,\"errored\":true,\"finish\":\"end_turn\",\"created_at_ms\":1789166336504,\"completed_at_ms\":1789166336512}",
+      "returned_non_identity_meta_json": "{\"summary\":true,\"errored\":true,\"finish\":\"end_turn\",\"created_at_ms\":1789166336504,\"completed_at_ms\":1789166336512}",
+      "expected": {
+        "outcome": "accepted",
+        "meta_bytes_equal": true,
+        "defect": null
+      }
+    },
+    "synthesized_fields_must_be_absent": [
+      "summary",
+      "errored",
+      "finish",
+      "created_at_ms",
+      "completed_at_ms"
+    ],
+    "synthesized_negative_vectors": [
+      {
+        "id": "V13_synthetic_summary_malformed",
+        "name": "a synthesized message carrying summary is malformed",
+        "array": "specimen-main",
+        "mutation": {
+          "kind": "set_non_identity_meta",
+          "position": 0,
+          "summary": true,
+          "errored": null,
+          "finish": null,
+          "created_at_ms": null,
+          "completed_at_ms": null
+        },
+        "expected": {
+          "outcome": "malformed",
+          "meta_bytes_equal": null,
+          "defect": {
+            "field": "returned_messages[0].meta.summary",
+            "reason": "synthesized returned message must not carry summary",
+            "returned_position": 0
+          }
+        }
+      },
+      {
+        "id": "V14_synthetic_errored_malformed",
+        "name": "a synthesized message carrying errored is malformed",
+        "array": "specimen-main",
+        "mutation": {
+          "kind": "set_non_identity_meta",
+          "position": 0,
+          "summary": null,
+          "errored": true,
+          "finish": null,
+          "created_at_ms": null,
+          "completed_at_ms": null
+        },
+        "expected": {
+          "outcome": "malformed",
+          "meta_bytes_equal": null,
+          "defect": {
+            "field": "returned_messages[0].meta.errored",
+            "reason": "synthesized returned message must not carry errored",
+            "returned_position": 0
+          }
+        }
+      },
+      {
+        "id": "V15_synthetic_finish_malformed",
+        "name": "a synthesized message carrying finish is malformed",
+        "array": "specimen-main",
+        "mutation": {
+          "kind": "set_non_identity_meta",
+          "position": 0,
+          "summary": null,
+          "errored": null,
+          "finish": "end_turn",
+          "created_at_ms": null,
+          "completed_at_ms": null
+        },
+        "expected": {
+          "outcome": "malformed",
+          "meta_bytes_equal": null,
+          "defect": {
+            "field": "returned_messages[0].meta.finish",
+            "reason": "synthesized returned message must not carry finish",
+            "returned_position": 0
+          }
+        }
+      },
+      {
+        "id": "V16_synthetic_created_at_ms_malformed",
+        "name": "a synthesized message carrying created_at_ms is malformed",
+        "array": "specimen-main",
+        "mutation": {
+          "kind": "set_non_identity_meta",
+          "position": 0,
+          "summary": null,
+          "errored": null,
+          "finish": null,
+          "created_at_ms": 1789166336504,
+          "completed_at_ms": null
+        },
+        "expected": {
+          "outcome": "malformed",
+          "meta_bytes_equal": null,
+          "defect": {
+            "field": "returned_messages[0].meta.created_at_ms",
+            "reason": "synthesized returned message must not carry created_at_ms",
+            "returned_position": 0
+          }
+        }
+      },
+      {
+        "id": "V17_synthetic_completed_at_ms_malformed",
+        "name": "a synthesized message carrying completed_at_ms is malformed",
+        "array": "specimen-main",
+        "mutation": {
+          "kind": "set_non_identity_meta",
+          "position": 0,
+          "summary": null,
+          "errored": null,
+          "finish": null,
+          "created_at_ms": null,
+          "completed_at_ms": 1789166336512
+        },
+        "expected": {
+          "outcome": "malformed",
+          "meta_bytes_equal": null,
+          "defect": {
+            "field": "returned_messages[0].meta.completed_at_ms",
+            "reason": "synthesized returned message must not carry completed_at_ms",
+            "returned_position": 0
+          }
+        }
+      }
+    ]
   }
 }

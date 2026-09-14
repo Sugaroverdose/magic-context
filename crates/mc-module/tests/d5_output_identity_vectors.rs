@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
@@ -21,7 +21,8 @@ struct Fixture {
     unit_locators: Vec<UnitLocator>,
     descent_mappings: Vec<DescentMapping>,
     vectors: Vec<Vector>,
-    unsettled: Vec<Unsettled>,
+    unsettled: Vec<serde_json::Value>,
+    mc_output_boundary_only: McOutputBoundaryOnly,
     generation: Generation,
 }
 
@@ -71,7 +72,14 @@ struct ReturnedViewGrammar {
     source_segment_ce1_assignment: String,
     preimage_change: String,
     evaluation_order: Vec<String>,
-    refusal_algebra: String,
+    evaluation_scope: String,
+    proof_mismatch_transport: String,
+    outside_scope: String,
+    synthetic_serving_mids: String,
+    synthesized_messages: String,
+    gateway_identity_fields: Vec<String>,
+    gateway_view_limit: String,
+    provider_rendering: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +131,11 @@ struct ReturnedMeta {
     harness_id: Option<String>,
     ordinal: Option<u64>,
     synthetic: bool,
+    summary: Option<bool>,
+    errored: Option<bool>,
+    finish: Option<String>,
+    created_at_ms: Option<i64>,
+    completed_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +170,7 @@ struct Vector {
     mutations: Vec<Mutation>,
     unit_locator: Option<String>,
     descent_mapping: Option<String>,
+    outstanding_carry: bool,
     expected: Verdict,
 }
 
@@ -185,6 +199,14 @@ enum Mutation {
         first_position: u64,
         second_position: u64,
     },
+    SetNonIdentityMeta {
+        position: u64,
+        summary: Option<bool>,
+        errored: Option<bool>,
+        finish: Option<String>,
+        created_at_ms: Option<i64>,
+        completed_at_ms: Option<i64>,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -192,7 +214,8 @@ enum Mutation {
 struct Verdict {
     outcome: String,
     positions: Vec<PositionIdentity>,
-    refusal: Option<Refusal>,
+    gateway_verdict: Option<GatewayVerdict>,
+    defect: Option<Defect>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -206,30 +229,66 @@ struct PositionIdentity {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Refusal {
-    reason: RefusalReason,
-    receipt_id: Option<String>,
-    details: RefusalDetails,
-    returned_position: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum RefusalReason {
-    InvalidArguments,
+struct GatewayVerdict {
+    evaluated: bool,
+    classification: String,
+    http_status: Option<u16>,
+    error_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RefusalDetails {
-    Field { field: String, reason: String },
+#[serde(deny_unknown_fields)]
+struct Defect {
+    field: String,
+    reason: String,
+    returned_position: u64,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Unsettled {
+struct McOutputBoundaryOnly {
+    verified_by: String,
+    native_passthrough: NativePassthrough,
+    synthesized_fields_must_be_absent: Vec<String>,
+    synthesized_negative_vectors: Vec<BoundaryVector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativePassthrough {
+    array: String,
+    returned_position: u64,
+    mid: String,
+    ingress_non_identity_meta_json: String,
+    returned_non_identity_meta_json: String,
+    expected: BoundaryVerdict,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundaryVector {
+    id: String,
     name: String,
-    silence: String,
+    array: String,
+    mutation: Mutation,
+    expected: BoundaryVerdict,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct BoundaryVerdict {
+    outcome: String,
+    meta_bytes_equal: Option<bool>,
+    defect: Option<Defect>,
+}
+
+#[derive(Serialize)]
+struct NonIdentityMeta<'a> {
+    summary: Option<bool>,
+    errored: Option<bool>,
+    finish: &'a Option<String>,
+    created_at_ms: Option<i64>,
+    completed_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,11 +432,10 @@ fn apply_mutations(messages: &mut [ReturnedMessage], mutations: &[Mutation]) {
                 ordinal,
                 synthetic,
             } => {
-                message_at(messages, *position).meta = ReturnedMeta {
-                    harness_id: harness_id.clone(),
-                    ordinal: *ordinal,
-                    synthetic: *synthetic,
-                };
+                let meta = &mut message_at(messages, *position).meta;
+                meta.harness_id.clone_from(harness_id);
+                meta.ordinal = *ordinal;
+                meta.synthetic = *synthetic;
             }
             Mutation::AlterBytes {
                 position,
@@ -407,6 +465,21 @@ fn apply_mutations(messages: &mut [ReturnedMessage], mutations: &[Mutation]) {
                 message_at(messages, *first_position).meta.harness_id = second;
                 message_at(messages, *second_position).meta.harness_id = first;
             }
+            Mutation::SetNonIdentityMeta {
+                position,
+                summary,
+                errored,
+                finish,
+                created_at_ms,
+                completed_at_ms,
+            } => {
+                let meta = &mut message_at(messages, *position).meta;
+                meta.summary = *summary;
+                meta.errored = *errored;
+                meta.finish.clone_from(finish);
+                meta.created_at_ms = *created_at_ms;
+                meta.completed_at_ms = *completed_at_ms;
+            }
         }
     }
 }
@@ -415,16 +488,29 @@ fn field_refusal(position: u64, field: String, reason: String) -> Verdict {
     Verdict {
         outcome: "REFUSED".to_string(),
         positions: Vec::new(),
-        refusal: Some(Refusal {
-            reason: RefusalReason::InvalidArguments,
-            receipt_id: None,
-            details: RefusalDetails::Field { field, reason },
+        gateway_verdict: Some(GatewayVerdict {
+            evaluated: true,
+            classification: "proof_mismatch".to_string(),
+            http_status: Some(503),
+            error_code: Some("d5_carry_proof_mismatch".to_string()),
+        }),
+        defect: Some(Defect {
+            field,
+            reason,
             returned_position: position,
         }),
     }
 }
 
 fn evaluate(fixture: &Fixture, vector: &Vector) -> Verdict {
+    if !vector.outstanding_carry {
+        return Verdict {
+            outcome: "not_evaluated".to_string(),
+            positions: Vec::new(),
+            gateway_verdict: None,
+            defect: None,
+        };
+    }
     let mut messages = assemble_array(fixture, &vector.array);
     apply_mutations(&mut messages, &vector.mutations);
     let manifest = fixture
@@ -527,7 +613,54 @@ fn evaluate(fixture: &Fixture, vector: &Vector) -> Verdict {
     Verdict {
         outcome: "accepted".to_string(),
         positions,
-        refusal: None,
+        gateway_verdict: Some(GatewayVerdict {
+            evaluated: true,
+            classification: "accepted".to_string(),
+            http_status: None,
+            error_code: None,
+        }),
+        defect: None,
+    }
+}
+
+fn non_identity_meta_json(meta: &ReturnedMeta) -> String {
+    serde_json::to_string(&NonIdentityMeta {
+        summary: meta.summary,
+        errored: meta.errored,
+        finish: &meta.finish,
+        created_at_ms: meta.created_at_ms,
+        completed_at_ms: meta.completed_at_ms,
+    })
+    .expect("serialize non-identity HarnessMeta")
+}
+
+fn evaluate_boundary_vector(fixture: &Fixture, vector: &BoundaryVector) -> BoundaryVerdict {
+    let mut messages = assemble_array(fixture, &vector.array);
+    apply_mutations(&mut messages, std::slice::from_ref(&vector.mutation));
+    for message in messages.iter().filter(|message| message.meta.synthetic) {
+        let fields = [
+            ("summary", message.meta.summary.is_some()),
+            ("errored", message.meta.errored.is_some()),
+            ("finish", message.meta.finish.is_some()),
+            ("created_at_ms", message.meta.created_at_ms.is_some()),
+            ("completed_at_ms", message.meta.completed_at_ms.is_some()),
+        ];
+        if let Some((field, _)) = fields.into_iter().find(|(_, present)| *present) {
+            return BoundaryVerdict {
+                outcome: "malformed".to_string(),
+                meta_bytes_equal: None,
+                defect: Some(Defect {
+                    field: format!("returned_messages[{}].meta.{field}", message.position),
+                    reason: format!("synthesized returned message must not carry {field}"),
+                    returned_position: message.position,
+                }),
+            };
+        }
+    }
+    BoundaryVerdict {
+        outcome: "accepted".to_string(),
+        meta_bytes_equal: None,
+        defect: None,
     }
 }
 
@@ -550,7 +683,7 @@ fn d5_output_identity_fixture_parses_and_reserializes_byte_identically() {
     reserialized.push(b'\n');
     assert_eq!(reserialized, bytes);
     assert_eq!(fixture.schema, "mc.d5.output-identity-vectors.v1");
-    assert_eq!(fixture.contract_version, "1.3.24");
+    assert_eq!(fixture.contract_version, "1.3.25");
     assert_eq!(
         fixture.source_evidence.private_specimen_store.sha256,
         "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0"
@@ -634,7 +767,26 @@ fn d5_output_identity_returned_view_does_not_change_ce1_preimages() {
         .source_segment_ce1_assignment
         .contains("mc.d5.manifest.v1"));
     assert!(grammar.preimage_change.starts_with("none"));
-    assert!(grammar.refusal_algebra.contains("invalid_arguments"));
+    assert!(grammar.evaluation_scope.contains("clause-21a"));
+    assert!(grammar.proof_mismatch_transport.contains("HTTP 503"));
+    assert!(grammar
+        .proof_mismatch_transport
+        .contains("d5_carry_proof_mismatch"));
+    assert!(grammar.outside_scope.contains("no gateway verdict"));
+    assert!(grammar.synthetic_serving_mids.contains("<call_id>:call"));
+    assert_eq!(
+        grammar.synthesized_messages,
+        "Only m0, m1, and the synthetic todo pair are returned synthesized messages."
+    );
+    assert_eq!(
+        grammar.gateway_identity_fields,
+        ["harness_id", "ordinal", "synthetic"]
+    );
+    assert!(grammar.gateway_view_limit.contains("and nothing else"));
+    assert_eq!(
+        grammar.provider_rendering,
+        "Provider rendering omits all HarnessMeta metadata."
+    );
     assert_eq!(
         grammar.evaluation_order,
         [
@@ -780,7 +932,21 @@ fn d5_output_identity_every_returned_position_is_accounted_once() {
         .filter(|vector| vector.expected.outcome == "REFUSED")
     {
         assert!(vector.expected.positions.is_empty(), "{}", vector.id);
-        assert!(vector.expected.refusal.is_some(), "{}", vector.id);
+        let gateway = vector
+            .expected
+            .gateway_verdict
+            .as_ref()
+            .expect("refused carry path has a gateway verdict");
+        assert!(gateway.evaluated, "{}", vector.id);
+        assert_eq!(gateway.classification, "proof_mismatch", "{}", vector.id);
+        assert_eq!(gateway.http_status, Some(503), "{}", vector.id);
+        assert_eq!(
+            gateway.error_code.as_deref(),
+            Some("d5_carry_proof_mismatch"),
+            "{}",
+            vector.id
+        );
+        assert!(vector.expected.defect.is_some(), "{}", vector.id);
     }
 }
 
@@ -816,6 +982,82 @@ fn d5_output_identity_synthetic_locator_binds_actual_bytes() {
     let locator = &fixture.unit_locators[0];
     assert_eq!(locator.unit, "unit:synthetic-todo-result");
     assert_eq!(locator.index, 0);
+    let messages = assemble_array(&fixture, "specimen-with-synthetic-todo");
+    let call_id = "mc_synthetic_todo_c4a22134ee90be17";
+    let call_mid = format!("{call_id}:call");
+    let result_mid = format!("{call_id}:result");
+    assert_eq!(
+        messages[4].meta.harness_id.as_deref(),
+        Some(call_mid.as_str())
+    );
+    assert_eq!(
+        messages[5].meta.harness_id.as_deref(),
+        Some(result_mid.as_str())
+    );
+    for message in &messages[4..=5] {
+        assert!(message.meta.synthetic);
+        assert_eq!(message.meta.ordinal, None);
+        assert_eq!(message.meta.summary, None);
+        assert_eq!(message.meta.errored, None);
+        assert_eq!(message.meta.finish, None);
+        assert_eq!(message.meta.created_at_ms, None);
+        assert_eq!(message.meta.completed_at_ms, None);
+    }
+}
+
+#[test]
+fn d5_output_identity_no_outstanding_carry_has_no_gateway_verdict() {
+    let (fixture, _) = load_fixture();
+    assert_vector(&fixture, "V12_no_outstanding_carry_no_view");
+    let vector = vector(&fixture, "V12_no_outstanding_carry_no_view");
+    assert!(!vector.outstanding_carry);
+    assert_eq!(vector.expected.outcome, "not_evaluated");
+    assert!(vector.expected.gateway_verdict.is_none());
+    assert!(vector.expected.defect.is_none());
+}
+
+#[test]
+fn d5_output_identity_mc_output_boundary_preserves_native_meta_and_rejects_synthetic_meta() {
+    let (fixture, _) = load_fixture();
+    let boundary = &fixture.mc_output_boundary_only;
+    assert_eq!(
+        boundary.verified_by,
+        "mc stamping output wire (mc-module transform); not gateway round-trip"
+    );
+    assert_eq!(
+        boundary.synthesized_fields_must_be_absent,
+        [
+            "summary",
+            "errored",
+            "finish",
+            "created_at_ms",
+            "completed_at_ms",
+        ]
+    );
+    let native = &boundary.native_passthrough;
+    let messages = assemble_array(&fixture, &native.array);
+    let message = &messages[native.returned_position as usize];
+    assert_eq!(
+        message.meta.harness_id.as_deref(),
+        Some(native.mid.as_str())
+    );
+    let output_bytes = non_identity_meta_json(&message.meta);
+    assert_eq!(output_bytes, native.ingress_non_identity_meta_json);
+    assert_eq!(output_bytes, native.returned_non_identity_meta_json);
+    assert_eq!(native.expected.outcome, "accepted");
+    assert_eq!(native.expected.meta_bytes_equal, Some(true));
+    assert!(native.expected.defect.is_none());
+
+    assert_eq!(boundary.synthesized_negative_vectors.len(), 5);
+    for vector in &boundary.synthesized_negative_vectors {
+        assert_eq!(
+            evaluate_boundary_vector(&fixture, vector),
+            vector.expected,
+            "{}: {}",
+            vector.id,
+            vector.name
+        );
+    }
 }
 
 #[test]
@@ -859,12 +1101,12 @@ fn d5_output_identity_synthetic_with_ordinal_refuses() {
 fn d5_output_identity_refusal_precedence_is_fixture_data() {
     let (fixture, _) = load_fixture();
     assert_vector(&fixture, "V10_precedence_unstamped_before_later_duplicate");
-    let refusal = vector(&fixture, "V10_precedence_unstamped_before_later_duplicate")
+    let defect = vector(&fixture, "V10_precedence_unstamped_before_later_duplicate")
         .expected
-        .refusal
+        .defect
         .as_ref()
-        .expect("expected refusal");
-    assert_eq!(refusal.returned_position, 2);
+        .expect("expected defect");
+    assert_eq!(defect.returned_position, 2);
 }
 
 #[test]
@@ -874,25 +1116,12 @@ fn d5_output_identity_swapped_position_mids_refuse() {
 }
 
 #[test]
-fn d5_output_identity_contract_silences_are_named_not_filled() {
-    let (fixture, _) = load_fixture();
-    assert_eq!(
-        fixture
-            .unsettled
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "gateway_transport_for_output_stamp_refusal",
-            "lineage_boundary_serving_mid_literal",
-            "non_identity_harness_meta_policy",
-            "synthetic_todo_serving_mid_allocation",
-        ])
-    );
-    assert!(fixture
-        .unsettled
-        .iter()
-        .all(|entry| !entry.silence.is_empty()));
+fn d5_output_identity_v1325_rulings_leave_no_fixture_silences() {
+    let (fixture, bytes) = load_fixture();
+    assert!(fixture.unsettled.is_empty());
+    assert!(!String::from_utf8(bytes)
+        .expect("fixture UTF-8")
+        .contains("lineage_boundary"));
     assert_eq!(fixture.generation.fixture_kind, "owner-authored");
     assert_eq!(
         fixture.generation.index_source,
