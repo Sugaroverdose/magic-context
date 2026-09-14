@@ -388,8 +388,20 @@ bun scripts/version-sync.mjs "$VERSION"
 echo ""
 
 # Step 4: Commit (skip if versions were already at target)
+# Stage only what this script produced (the version sync and the regenerated
+# artifacts the lint step just checked). `git add -A` once swept unrelated files
+# edited in the checkout during the long gate phase into a release commit
+# (v0.42.4); anything else dirty at this point is a foreign change and aborts.
 echo "→ Committing version bump..."
-git add -A
+git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
+  packages/plugin/assets/magic-context.schema.json \
+  packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts
+if [ -n "$(git status --porcelain --untracked-files=no | grep -v '^[MARC] ')" ]; then
+  echo "Error: unrelated modified files present at bump time; refusing to fold them into the release commit:"
+  git status --porcelain --untracked-files=no | grep -v '^[MARC] '
+  git reset -q
+  exit 1
+fi
 if git diff --cached --quiet; then
   echo "  (no changes — version already at $VERSION)"
 else
