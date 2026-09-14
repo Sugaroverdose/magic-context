@@ -248,16 +248,32 @@ struct LateSupersededOperation {
     expected_refusal: Refusal,
     newer_upload_unchanged: bool,
     bytes_read: u64,
+    request_bytes_base64: Option<String>,
+    expected_bytes_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UploadAuthorizationVector {
     id: String,
+    op: UploadOperation,
     upload_kind: UploadKind,
     caller_kind: CallerKind,
     ticket_present: bool,
+    request_bytes_base64: String,
     expected: UploadAuthorizationExpected,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum UploadOperation {
+    #[serde(rename = "capacity.put")]
+    CapacityPut,
+    #[serde(rename = "capacity.finish")]
+    CapacityFinish,
+    #[serde(rename = "lineage.put")]
+    LineagePut,
+    #[serde(rename = "lineage.finish")]
+    LineageFinish,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -323,6 +339,22 @@ enum LineageRequest {
         digest: String,
         expected_open: Option<String>,
     },
+    #[serde(rename = "capacity.put")]
+    CapacityPut {
+        upload_id: String,
+        seq: u64,
+        bytes: String,
+    },
+    #[serde(rename = "capacity.finish")]
+    CapacityFinish { upload_id: String, digest: String },
+    #[serde(rename = "lineage.put")]
+    LineagePut {
+        upload_id: String,
+        seq: u64,
+        bytes: String,
+    },
+    #[serde(rename = "lineage.finish")]
+    LineageFinish { upload_id: String, digest: String },
     #[serde(rename = "capacity.check")]
     CapacityCheck {
         #[serde(rename = "P")]
@@ -339,9 +371,13 @@ enum LineageRequest {
 #[serde(deny_unknown_fields)]
 enum LineageResponse {
     #[serde(rename = "capacity.begin")]
-    CapacityBegin { result: BeginResult },
+    Begin { result: BeginResult },
+    #[serde(rename = "capacity.put")]
+    Put { result: PutResult },
+    #[serde(rename = "capacity.finish")]
+    Finish { result: FinishResult },
     #[serde(rename = "capacity.check")]
-    CapacityCheck { result: CapacityResult },
+    Check { result: CapacityResult },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -370,6 +406,24 @@ enum BeginResult {
 enum CapacityResult {
     #[serde(rename = "CHECKED")]
     Checked { estimate: CapacityEstimateV1 },
+    #[serde(rename = "REFUSED")]
+    Refused { refusal: Refusal },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum PutResult {
+    #[serde(rename = "STORED")]
+    Stored { seq: u64, chunk_digest: String },
+    #[serde(rename = "REFUSED")]
+    Refused { refusal: Refusal },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum FinishResult {
+    #[serde(rename = "FINISHED")]
+    Finished { upload: UploadRef },
     #[serde(rename = "REFUSED")]
     Refused { refusal: Refusal },
 }
@@ -474,7 +528,7 @@ struct Refusal {
 enum RefusalReason {
     InvalidArguments,
     ByteCap,
-    Conflict,
+    UploadConflict,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -490,8 +544,9 @@ enum RefusalDetails {
         limit: u64,
         units: String,
     },
-    Conflict {
-        state: String,
+    Live {
+        upload_id: String,
+        digest: String,
     },
 }
 
@@ -649,14 +704,14 @@ fn request_check(
             model,
             geometry,
         } => (predecessor_key, agent, incarnation, body, model, geometry),
-        LineageRequest::CapacityBegin { .. } => panic!("expected capacity.check request"),
+        _ => panic!("expected capacity.check request"),
     }
 }
 
 fn response_check(response: LineageResponse) -> CapacityResult {
     match response {
-        LineageResponse::CapacityCheck { result } => result,
-        LineageResponse::CapacityBegin { .. } => panic!("expected capacity.check response"),
+        LineageResponse::Check { result } => result,
+        _ => panic!("expected capacity.check response"),
     }
 }
 
@@ -681,14 +736,58 @@ fn request_begin(
             digest,
             expected_open,
         ),
-        LineageRequest::CapacityCheck { .. } => panic!("expected capacity.begin request"),
+        _ => panic!("expected capacity.begin request"),
     }
 }
 
 fn response_begin(response: LineageResponse) -> BeginResult {
     match response {
-        LineageResponse::CapacityBegin { result } => result,
-        LineageResponse::CapacityCheck { .. } => panic!("expected capacity.begin response"),
+        LineageResponse::Begin { result } => result,
+        _ => panic!("expected capacity.begin response"),
+    }
+}
+
+fn upload_operation(request: LineageRequest) -> (UploadOperation, String) {
+    match request {
+        LineageRequest::CapacityPut {
+            upload_id,
+            seq,
+            bytes,
+        } => {
+            assert_eq!(seq, 0);
+            assert_eq!(wire_bytes(&bytes), b"x");
+            (UploadOperation::CapacityPut, upload_id)
+        }
+        LineageRequest::CapacityFinish { upload_id, digest } => {
+            assert!(valid_digest(&digest));
+            (UploadOperation::CapacityFinish, upload_id)
+        }
+        LineageRequest::LineagePut {
+            upload_id,
+            seq,
+            bytes,
+        } => {
+            assert_eq!(seq, 0);
+            assert_eq!(wire_bytes(&bytes), b"x");
+            (UploadOperation::LineagePut, upload_id)
+        }
+        LineageRequest::LineageFinish { upload_id, digest } => {
+            assert!(valid_digest(&digest));
+            (UploadOperation::LineageFinish, upload_id)
+        }
+        _ => panic!("expected capacity or lineage upload operation"),
+    }
+}
+
+fn refused_upload_response(response: LineageResponse) -> Refusal {
+    match response {
+        LineageResponse::Put {
+            result: PutResult::Refused { refusal },
+        }
+        | LineageResponse::Finish {
+            result: FinishResult::Refused { refusal },
+        } => refusal,
+        _ => panic!("expected refused capacity upload response"),
     }
 }
 
@@ -835,10 +934,11 @@ fn evaluate_begin(
         if expected_open.as_deref() != Some(open.upload_id.as_str()) {
             return BeginResult::Refused {
                 refusal: Refusal {
-                    reason: RefusalReason::Conflict,
+                    reason: RefusalReason::UploadConflict,
                     receipt_id: None,
-                    details: RefusalDetails::Conflict {
-                        state: format!("live upload_id={} digest={}", open.upload_id, open.digest),
+                    details: RefusalDetails::Live {
+                        upload_id: open.upload_id.clone(),
+                        digest: open.digest.clone(),
                     },
                 },
             };
@@ -861,10 +961,11 @@ fn evaluate_begin(
             upload_id: replacement.upload_id.clone(),
         };
     }
-    assert!(
-        expected_open.is_none(),
-        "begin with no open upload requires expected_open none"
-    );
+    if expected_open.is_some() {
+        return BeginResult::Refused {
+            refusal: field_refusal("expected_open", "no open upload"),
+        };
+    }
     let record = vector
         .state_after
         .iter()
@@ -1042,7 +1143,7 @@ fn gateway_outcome(estimate: &CapacityEstimateV1, candidate_digest: &str) -> Gat
 fn d5_capacity_encodings_are_byte_exact() {
     let (fixture, _) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.capacity-estimate-vectors.v1");
-    assert_eq!(fixture.contract_version, "1.3.22");
+    assert_eq!(fixture.contract_version, "1.3.24");
     assert!(fixture
         .encoding_rule
         .lineage_request
@@ -1153,6 +1254,7 @@ fn d5_capacity_begin_is_ticketless_idempotent_and_single_open() {
             "B08_delayed_a_none_refuses_live_b",
             "B09_a_expected_b_supersedes",
             "B10_b_none_refuses_live_a",
+            "B11_expected_open_without_live_refuses",
         ]
     );
 
@@ -1262,19 +1364,33 @@ fn d5_capacity_begin_supersession_is_cas_guarded() {
         let BeginResult::Refused { refusal } = result else {
             panic!("{id} must refuse stale expected_open")
         };
-        assert_eq!(refusal.reason, RefusalReason::Conflict);
+        assert_eq!(refusal.reason, RefusalReason::UploadConflict);
         assert_eq!(refusal.receipt_id, None);
         assert_eq!(
             refusal.details,
-            RefusalDetails::Conflict {
-                state: format!(
-                    "live upload_id={} digest={}",
-                    vector.initial_records[0].upload_id, vector.initial_records[0].digest
-                ),
+            RefusalDetails::Live {
+                upload_id: vector.initial_records[0].upload_id.clone(),
+                digest: vector.initial_records[0].digest.clone(),
             }
         );
         assert_eq!(vector.state_after, vector.initial_records);
     }
+
+    let no_live = begin_vector(&fixture, "B11_expected_open_without_live_refuses");
+    assert!(no_live.initial_records.is_empty());
+    assert!(no_live.state_after.is_empty());
+    let request = parse_exact::<LineageRequest>(&no_live.request_bytes_base64, &no_live.id);
+    let (_, _, _, _, _, _, expected_open) = request_begin(request);
+    assert_eq!(expected_open.as_deref(), Some("capacity-begin-upload-old"));
+    assert_eq!(
+        response_begin(parse_exact::<LineageResponse>(
+            &no_live.expected_bytes_base64,
+            &no_live.id,
+        )),
+        BeginResult::Refused {
+            refusal: field_refusal("expected_open", "no open upload"),
+        }
+    );
 
     let return_to_a = begin_vector(&fixture, "B09_a_expected_b_supersedes");
     let request = parse_exact::<LineageRequest>(&return_to_a.request_bytes_base64, &return_to_a.id);
@@ -1800,7 +1916,10 @@ fn d5_capacity_different_digest_supersedes_without_wedging_scope() {
         .iter()
         .map(|operation| operation.operation.as_str())
         .collect::<BTreeSet<_>>();
-    assert_eq!(operations, BTreeSet::from(["put", "finish", "check"]));
+    assert_eq!(
+        operations,
+        BTreeSet::from(["capacity.put", "capacity.finish", "capacity.check"])
+    );
     for operation in &vector.late_operations {
         assert_eq!(operation.upload_id, vector.older_after.upload_id);
         assert_eq!(operation.expected_refusal.receipt_id, None);
@@ -1817,6 +1936,38 @@ fn d5_capacity_different_digest_supersedes_without_wedging_scope() {
         );
         assert!(operation.newer_upload_unchanged);
         assert_eq!(operation.bytes_read, 0);
+        match operation.operation.as_str() {
+            "capacity.put" | "capacity.finish" => {
+                let request = parse_exact::<LineageRequest>(
+                    operation
+                        .request_bytes_base64
+                        .as_deref()
+                        .expect("late capacity upload request bytes"),
+                    &operation.operation,
+                );
+                let (op, upload_id) = upload_operation(request);
+                let expected_op = if operation.operation == "capacity.put" {
+                    UploadOperation::CapacityPut
+                } else {
+                    UploadOperation::CapacityFinish
+                };
+                assert_eq!(op, expected_op);
+                assert_eq!(upload_id, operation.upload_id);
+                let refusal = refused_upload_response(parse_exact::<LineageResponse>(
+                    operation
+                        .expected_bytes_base64
+                        .as_deref()
+                        .expect("late capacity upload response bytes"),
+                    &operation.operation,
+                ));
+                assert_eq!(refusal, operation.expected_refusal);
+            }
+            "capacity.check" => {
+                assert_eq!(operation.request_bytes_base64, None);
+                assert_eq!(operation.expected_bytes_base64, None);
+            }
+            other => panic!("unexpected late operation {other}"),
+        }
     }
     let newer = checked_estimate(check_vector(&fixture, &vector.newer_check_vector_id));
     assert_eq!(newer.body_sha256, vector.newer_before_check.digest);
@@ -1869,13 +2020,30 @@ fn d5_capacity_upload_limits_are_explicit_per_scope() {
 #[test]
 fn d5_capacity_upload_authorization_keeps_ticket_domains_separate() {
     let (fixture, _) = load_fixture();
-    assert_eq!(fixture.upload_authorization_vectors.len(), 4);
+    assert_eq!(fixture.upload_authorization_vectors.len(), 8);
     for vector in &fixture.upload_authorization_vectors {
-        let authorized = matches!(
-            (vector.upload_kind, vector.caller_kind),
-            (UploadKind::Capacity, CallerKind::CapacityScope)
-                | (UploadKind::Lineage, CallerKind::LineageTicketBound)
+        let (op, upload_id) = upload_operation(parse_exact::<LineageRequest>(
+            &vector.request_bytes_base64,
+            &vector.id,
+        ));
+        assert_eq!(op, vector.op);
+        let capacity_operation = matches!(
+            vector.op,
+            UploadOperation::CapacityPut | UploadOperation::CapacityFinish
         );
+        assert_eq!(
+            capacity_operation,
+            vector.caller_kind == CallerKind::CapacityScope,
+            "{} operation authority",
+            vector.id
+        );
+        assert_eq!(
+            upload_id.contains("capacity-upload"),
+            vector.upload_kind == UploadKind::Capacity,
+            "{} upload identity",
+            vector.id
+        );
+        let authorized = capacity_operation == (vector.upload_kind == UploadKind::Capacity);
         assert_eq!(
             vector.ticket_present,
             vector.caller_kind == CallerKind::LineageTicketBound,
@@ -1903,16 +2071,9 @@ fn d5_capacity_upload_authorization_keeps_ticket_domains_separate() {
 }
 
 #[test]
-fn d5_capacity_fixture_names_unsettled_lifecycle_wire_details() {
+fn d5_capacity_fixture_has_no_unsettled_24a_ambiguities() {
     let (fixture, _) = load_fixture();
-    assert_eq!(fixture.unsettled_24a_ambiguities.len(), 3);
-    let joined = fixture.unsettled_24a_ambiguities.join("\n");
-    assert!(joined.contains("put/finish"));
-    assert!(joined.contains("lineage.put/lineage.finish"));
-    assert!(joined.contains("capacity.put/capacity.finish"));
-    assert!(joined.contains("BeginResult exposes only upload_id"));
-    assert!(joined.contains("closest existing RefusalDetails"));
-    assert!(joined.contains("conflict{state}"));
+    assert!(fixture.unsettled_24a_ambiguities.is_empty());
 }
 
 #[test]

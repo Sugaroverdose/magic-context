@@ -1,9 +1,9 @@
 {
   "schema": "mc.d5.capacity-estimate-vectors.v1",
-  "contract_version": "1.3.22",
+  "contract_version": "1.3.24",
   "encoding_rule": {
-    "lineage_request": "Internally tagged JSON object with discriminator op; capacity.begin and capacity.check fields are siblings of op with no args wrapper. capacity.begin expected_open is an explicit null or UploadId CAS expectation.",
-    "lineage_response": "Externally keyed operation object {\"capacity.begin\":{\"result\":...}} or {\"capacity.check\":{\"result\":...}}, following the clause 2 response convention.",
+    "lineage_request": "Internally tagged JSON object with discriminator op; capacity.begin, capacity.put, capacity.finish, and capacity.check fields are siblings of op with no args wrapper.",
+    "lineage_response": "Externally keyed operation object for capacity.begin, capacity.put, capacity.finish, or capacity.check, following the clause 2 response convention.",
     "nested_unions": "Internally tagged JSON objects retain discriminator kind; capacity.check upload carries ref:UploadRef; Known<T> is known{value}|unknown{reason}; nested DTO Option none is explicit null. CHECKED replay uses the complete canonical check_key, never digest alone.",
     "token_counts": "Every TokenCount and ByteCount is a checked nonnegative JSON integer; inline bytes are base64 and capped at 1048576 raw bytes.",
     "implementation_status": "No D5 lineage serializer exists at this baseline; owner-authored expectations pin the shared MC-gateway contract independently. Consumed and superseded sequence states contain no staged body bytes."
@@ -412,7 +412,7 @@
         }
       ],
       "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
-      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImNvbmZsaWN0IiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiY29uZmxpY3QiLCJzdGF0ZSI6ImxpdmUgdXBsb2FkX2lkPWNhcGFjaXR5LWJlZ2luLXVwbG9hZC0wMDAyIGRpZ2VzdD1mZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmIn19fX19",
+      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMiIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifX19fX0=",
       "state_after": [
         {
           "P": "session-capacity-0001",
@@ -484,7 +484,7 @@
         }
       ],
       "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMzAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
-      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImNvbmZsaWN0IiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiY29uZmxpY3QiLCJzdGF0ZSI6ImxpdmUgdXBsb2FkX2lkPWNhcGFjaXR5LWJlZ2luLXVwbG9hZC0wMDAxIGRpZ2VzdD0wNGNiMzRiMGM5MDJlMGJiMmYzOWZiMDM4NjA5ODVjYWY3MjU5YmVjMmZlZmE2NmNkZmQ4OWRmOTFiZmY4NTkxIn19fX19",
+      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMSIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifX19fX0=",
       "state_after": [
         {
           "P": "session-capacity-0001",
@@ -497,6 +497,15 @@
           "state": "open"
         }
       ],
+      "replayed_finished_ref": null
+    },
+    {
+      "id": "B11_expected_open_without_live_refuses",
+      "name": "expected_open cannot name an old id when no upload is live",
+      "initial_records": [],
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLW9sZCJ9",
+      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImludmFsaWRfYXJndW1lbnRzIiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiZmllbGQiLCJmaWVsZCI6ImV4cGVjdGVkX29wZW4iLCJyZWFzb24iOiJubyBvcGVuIHVwbG9hZCJ9fX19fQ==",
+      "state_after": [],
       "replayed_finished_ref": null
     }
   ],
@@ -853,11 +862,7 @@
       }
     }
   ],
-  "unsettled_24a_ambiguities": [
-    "R43b says capacity uploads use put/finish per clause 30 but does not name whether their op discriminators remain lineage.put/lineage.finish or become capacity.put/capacity.finish; authorization and supersession vectors therefore pin behavior without inventing a wire envelope.",
-    "Capacity BeginResult exposes only upload_id, so a live replay or a consumed-digest replacement cannot return the full UploadRef on that response; the vectors bind upload state and the later finished ref without adding a wire field.",
-    "The closest existing RefusalDetails encoding for begin supersession CAS failure is conflict{state}; live{upload_id,digest} is rendered as the state string because the shared details union has no structured live-upload arm."
-  ],
+  "unsettled_24a_ambiguities": [],
   "generation": {
     "fixture_kind": "owner-authored",
     "index_source": "owner-authored D5 capacity contract vectors",
@@ -906,20 +911,100 @@
   ],
   "upload_authorization_vectors": [
     {
-      "id": "U01_capacity_scope_owns_capacity_upload",
+      "id": "U01_capacity_put_owns_capacity",
+      "op": "capacity.put",
       "upload_kind": "capacity",
       "caller_kind": "capacity_scope",
       "ticket_present": false,
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LnB1dCIsInVwbG9hZF9pZCI6ImNhcGFjaXR5LXVwbG9hZC1hdXRob3JpemF0aW9uIiwic2VxIjowLCJieXRlcyI6ImVBPT0ifQ==",
       "expected": {
         "kind": "authorized",
         "refusal": null
       }
     },
     {
-      "id": "U02_lineage_ticket_cannot_use_capacity_upload",
+      "id": "U02_capacity_finish_owns_capacity",
+      "op": "capacity.finish",
+      "upload_kind": "capacity",
+      "caller_kind": "capacity_scope",
+      "ticket_present": false,
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmZpbmlzaCIsInVwbG9hZF9pZCI6ImNhcGFjaXR5LXVwbG9hZC1hdXRob3JpemF0aW9uIiwiZGlnZXN0IjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSJ9",
+      "expected": {
+        "kind": "authorized",
+        "refusal": null
+      }
+    },
+    {
+      "id": "U03_lineage_put_owns_lineage",
+      "op": "lineage.put",
+      "upload_kind": "lineage",
+      "caller_kind": "lineage_ticket_bound",
+      "ticket_present": true,
+      "request_bytes_base64": "eyJvcCI6ImxpbmVhZ2UucHV0IiwidXBsb2FkX2lkIjoibGluZWFnZS11cGxvYWQtYXV0aG9yaXphdGlvbiIsInNlcSI6MCwiYnl0ZXMiOiJlQT09In0=",
+      "expected": {
+        "kind": "authorized",
+        "refusal": null
+      }
+    },
+    {
+      "id": "U04_lineage_finish_owns_lineage",
+      "op": "lineage.finish",
+      "upload_kind": "lineage",
+      "caller_kind": "lineage_ticket_bound",
+      "ticket_present": true,
+      "request_bytes_base64": "eyJvcCI6ImxpbmVhZ2UuZmluaXNoIiwidXBsb2FkX2lkIjoibGluZWFnZS11cGxvYWQtYXV0aG9yaXphdGlvbiIsImRpZ2VzdCI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEifQ==",
+      "expected": {
+        "kind": "authorized",
+        "refusal": null
+      }
+    },
+    {
+      "id": "U05_capacity_put_rejects_lineage",
+      "op": "capacity.put",
+      "upload_kind": "lineage",
+      "caller_kind": "capacity_scope",
+      "ticket_present": false,
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LnB1dCIsInVwbG9hZF9pZCI6ImxpbmVhZ2UtdXBsb2FkLWF1dGhvcml6YXRpb24iLCJzZXEiOjAsImJ5dGVzIjoiZUE9PSJ9",
+      "expected": {
+        "kind": "refused",
+        "refusal": {
+          "reason": "invalid_arguments",
+          "receipt_id": null,
+          "details": {
+            "kind": "field",
+            "field": "upload_id",
+            "reason": "lineage upload requires its bound lifecycle ticket"
+          }
+        }
+      }
+    },
+    {
+      "id": "U06_capacity_finish_rejects_lineage",
+      "op": "capacity.finish",
+      "upload_kind": "lineage",
+      "caller_kind": "capacity_scope",
+      "ticket_present": false,
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmZpbmlzaCIsInVwbG9hZF9pZCI6ImxpbmVhZ2UtdXBsb2FkLWF1dGhvcml6YXRpb24iLCJkaWdlc3QiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIn0=",
+      "expected": {
+        "kind": "refused",
+        "refusal": {
+          "reason": "invalid_arguments",
+          "receipt_id": null,
+          "details": {
+            "kind": "field",
+            "field": "upload_id",
+            "reason": "lineage upload requires its bound lifecycle ticket"
+          }
+        }
+      }
+    },
+    {
+      "id": "U07_lineage_put_rejects_capacity",
+      "op": "lineage.put",
       "upload_kind": "capacity",
       "caller_kind": "lineage_ticket_bound",
       "ticket_present": true,
+      "request_bytes_base64": "eyJvcCI6ImxpbmVhZ2UucHV0IiwidXBsb2FkX2lkIjoiY2FwYWNpdHktdXBsb2FkLWF1dGhvcml6YXRpb24iLCJzZXEiOjAsImJ5dGVzIjoiZUE9PSJ9",
       "expected": {
         "kind": "refused",
         "refusal": {
@@ -934,20 +1019,12 @@
       }
     },
     {
-      "id": "U03_lineage_ticket_owns_lineage_upload",
-      "upload_kind": "lineage",
+      "id": "U08_lineage_finish_rejects_capacity",
+      "op": "lineage.finish",
+      "upload_kind": "capacity",
       "caller_kind": "lineage_ticket_bound",
       "ticket_present": true,
-      "expected": {
-        "kind": "authorized",
-        "refusal": null
-      }
-    },
-    {
-      "id": "U04_capacity_scope_cannot_use_lineage_upload",
-      "upload_kind": "lineage",
-      "caller_kind": "capacity_scope",
-      "ticket_present": false,
+      "request_bytes_base64": "eyJvcCI6ImxpbmVhZ2UuZmluaXNoIiwidXBsb2FkX2lkIjoiY2FwYWNpdHktdXBsb2FkLWF1dGhvcml6YXRpb24iLCJkaWdlc3QiOiIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIn0=",
       "expected": {
         "kind": "refused",
         "refusal": {
@@ -956,7 +1033,7 @@
           "details": {
             "kind": "field",
             "field": "upload_id",
-            "reason": "lineage upload requires its bound lifecycle ticket"
+            "reason": "capacity upload requires capacity-scope ownership"
           }
         }
       }
@@ -1202,7 +1279,7 @@
       "newer_body_bytes_base64": null,
       "late_operations": [
         {
-          "operation": "put",
+          "operation": "capacity.put",
           "upload_id": "capacity-begin-upload-0001",
           "expected_refusal": {
             "reason": "invalid_arguments",
@@ -1214,10 +1291,12 @@
             }
           },
           "newer_upload_unchanged": true,
-          "bytes_read": 0
+          "bytes_read": 0,
+          "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LnB1dCIsInVwbG9hZF9pZCI6ImNhcGFjaXR5LWJlZ2luLXVwbG9hZC0wMDAxIiwic2VxIjowLCJieXRlcyI6ImVBPT0ifQ==",
+          "expected_bytes_base64": "eyJjYXBhY2l0eS5wdXQiOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImZpZWxkIiwiZmllbGQiOiJ1cGxvYWRfaWQiLCJyZWFzb24iOiJzdXBlcnNlZGVkIn19fX19"
         },
         {
-          "operation": "finish",
+          "operation": "capacity.finish",
           "upload_id": "capacity-begin-upload-0001",
           "expected_refusal": {
             "reason": "invalid_arguments",
@@ -1229,10 +1308,12 @@
             }
           },
           "newer_upload_unchanged": true,
-          "bytes_read": 0
+          "bytes_read": 0,
+          "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmZpbmlzaCIsInVwbG9hZF9pZCI6ImNhcGFjaXR5LWJlZ2luLXVwbG9hZC0wMDAxIiwiZGlnZXN0IjoiMDRjYjM0YjBjOTAyZTBiYjJmMzlmYjAzODYwOTg1Y2FmNzI1OWJlYzJmZWZhNjZjZGZkODlkZjkxYmZmODU5MSJ9",
+          "expected_bytes_base64": "eyJjYXBhY2l0eS5maW5pc2giOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImZpZWxkIiwiZmllbGQiOiJ1cGxvYWRfaWQiLCJyZWFzb24iOiJzdXBlcnNlZGVkIn19fX19"
         },
         {
-          "operation": "check",
+          "operation": "capacity.check",
           "upload_id": "capacity-begin-upload-0001",
           "expected_refusal": {
             "reason": "invalid_arguments",
@@ -1244,7 +1325,9 @@
             }
           },
           "newer_upload_unchanged": true,
-          "bytes_read": 0
+          "bytes_read": 0,
+          "request_bytes_base64": null,
+          "expected_bytes_base64": null
         }
       ]
     }
