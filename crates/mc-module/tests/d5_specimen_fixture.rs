@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "3819a3623102969c1646d65d71c17465018e755740b94bf08869a4b9863a1d85";
+const INDEX_SHA256: &str = "ba430faa6219ce1708f6a4e2e24a4cb09dde254aef381858fb7986ba35547c4e";
 const CANONICAL_VECTORS_SHA256: &str =
     "8fc5b1b90997378941534bd5a0d88bebd6b10282f030ad25315612d77285f012";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
@@ -608,6 +608,7 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
                 | "redeem-vectors-v1.json"
                 | "scope-open-vectors-v1.json"
                 | "capacity-estimate-vectors-v1.json"
+                | "output-identity-vectors-v1.json"
                 | "coverage-proof-vectors-v1.json"
                 | "aggregate-preimages-v1.json"
         ) {
@@ -620,6 +621,9 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
                 "scope-open-vectors-v1.json" => "owner-authored D5 scope.open contract vectors",
                 "capacity-estimate-vectors-v1.json" => {
                     "owner-authored D5 capacity contract vectors"
+                }
+                "output-identity-vectors-v1.json" => {
+                    "owner-authored D5 returned-message output identity vectors"
                 }
                 "coverage-proof-vectors-v1.json" => {
                     "owner-authored D5 coverage-proof contract vectors"
