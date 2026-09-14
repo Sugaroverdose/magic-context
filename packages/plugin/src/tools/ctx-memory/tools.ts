@@ -50,7 +50,10 @@ import {
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
 import { sessionLog } from "../../shared/logger";
-import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
+import {
+    renderCapabilityRefusal,
+    renderUserFacingFailure,
+} from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
@@ -100,6 +103,10 @@ function memoryAuthorityRefusal(args: CtxMemoryArgs): string {
     const isMutation =
         args.action !== undefined && ["write", "update", "archive", "merge"].includes(args.action);
     return renderCapabilityRefusal(isMutation ? "memory_write" : "memory_access");
+}
+
+function memoryAuthorityMismatchRefusal(): string {
+    return renderUserFacingFailure("memory_authority_mismatch");
 }
 
 function moduleMemoryText(response: unknown, args: CtxMemoryArgs): string | null {
@@ -511,7 +518,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     : { skip: null, successor: null };
             if (curatePreflight.skip) return curatePreflight.skip;
 
-            if (args.action !== "list") {
+            {
                 const marker = getAuthorityManagedMarker(deps.db, projectPath);
                 let authorityState: "TS" | "PREPARING" | "MODULE" | "DRAINING" | null = null;
                 try {
@@ -519,6 +526,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         (await deps.rustToolBackends?.authorityState?.({
                             projectPath,
                             projectRoot: toolContext.directory,
+                            sessionId: toolContext.sessionID,
                             domain: "memories",
                         })) ?? null;
                 } catch (error) {
@@ -559,13 +567,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                     | "write"
                                     | "update"
                                     | "archive"
-                                    | "merge"
-                                    | "get",
+                                     | "merge"
+                                     | "list"
+                                     | "get",
                                 content: moduleArgs.content,
                                 category: moduleArgs.category,
                                 ids: moduleArgs.ids,
-                                reason: moduleArgs.reason,
-                            }),
+                                 reason: moduleArgs.reason,
+                                 limit:
+                                     moduleArgs.action === "list"
+                                         ? normalizeLimit(moduleArgs.limit)
+                                         : undefined,
+                             }),
                             moduleArgs,
                         );
                         return text ?? memoryAuthorityRefusal(args);
@@ -576,6 +589,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         sessionLog(toolContext.sessionID, "ctx_memory capability refusal", error);
                         return memoryAuthorityRefusal(args);
                     }
+                }
+                if (marker && (authorityState === null || authorityState === "TS")) {
+                    return memoryAuthorityMismatchRefusal();
                 }
                 if (marker || authorityState === "PREPARING" || authorityState === "DRAINING") {
                     return memoryAuthorityRefusal(args);
