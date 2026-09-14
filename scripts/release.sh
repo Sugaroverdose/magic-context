@@ -394,7 +394,7 @@ echo ""
 # (v0.42.4); anything else dirty at this point is a foreign change and aborts.
 echo "→ Committing version bump..."
 git add -- packages/plugin/package.json packages/pi-plugin/package.json packages/cli/package.json \
-  packages/plugin/assets/magic-context.schema.json \
+  assets/magic-context.schema.json \
   packages/plugin/src/hooks/magic-context/reference-seeds.generated.ts
 if [ -n "$(git status --porcelain --untracked-files=no | grep -v '^[MARC] ')" ]; then
   echo "Error: unrelated modified files present at bump time; refusing to fold them into the release commit:"
