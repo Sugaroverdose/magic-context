@@ -2361,9 +2361,11 @@ describe("Rust mode authority adapter", () => {
             );
             await Bun.sleep(20);
             cursorSamples.push(
-                db.prepare(
-                    "SELECT cursor, updated_at FROM mirror_cursors WHERE domain = 'memories'",
-                ).get() as { cursor: number; updated_at: number },
+                db
+                    .prepare(
+                        "SELECT cursor, updated_at FROM mirror_cursors WHERE domain = 'memories'",
+                    )
+                    .get() as { cursor: number; updated_at: number },
             );
         };
 

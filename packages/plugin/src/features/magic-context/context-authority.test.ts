@@ -238,7 +238,9 @@ describe("memory authority protocol", () => {
             checksum: "same",
         });
 
-        expect(database.prepare("SELECT COUNT(*) AS count FROM mirror_live_memory_rows").get()).toEqual({
+        expect(
+            database.prepare("SELECT COUNT(*) AS count FROM mirror_live_memory_rows").get(),
+        ).toEqual({
             count: 0,
         });
         database.close();

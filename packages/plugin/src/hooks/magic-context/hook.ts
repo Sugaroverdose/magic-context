@@ -968,10 +968,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       action,
                       content,
                       category,
-                       ids,
-                       reason,
-                       limit,
-                   }) => {
+                      ids,
+                      reason,
+                      limit,
+                  }) => {
                       const response = await rustModeModuleClient.call({
                           sessionId,
                           projectRoot,
@@ -984,9 +984,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   content,
                                   category,
                                   ids,
-                                   reason,
-                                   limit,
-                                   memory_project: memoryProject,
+                                  reason,
+                                  limit,
+                                  memory_project: memoryProject,
                               },
                           },
                       });

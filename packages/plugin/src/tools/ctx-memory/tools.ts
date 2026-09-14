@@ -50,10 +50,7 @@ import {
     toolCallIdFromContext,
 } from "../../plugin/rust-tool-backends";
 import { sessionLog } from "../../shared/logger";
-import {
-    renderCapabilityRefusal,
-    renderUserFacingFailure,
-} from "../../shared/user-facing-codes";
+import { renderCapabilityRefusal, renderUserFacingFailure } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
 import {
@@ -567,18 +564,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                     | "write"
                                     | "update"
                                     | "archive"
-                                     | "merge"
-                                     | "list"
-                                     | "get",
+                                    | "merge"
+                                    | "list"
+                                    | "get",
                                 content: moduleArgs.content,
                                 category: moduleArgs.category,
                                 ids: moduleArgs.ids,
-                                 reason: moduleArgs.reason,
-                                 limit:
-                                     moduleArgs.action === "list"
-                                         ? normalizeLimit(moduleArgs.limit)
-                                         : undefined,
-                             }),
+                                reason: moduleArgs.reason,
+                                limit:
+                                    moduleArgs.action === "list"
+                                        ? normalizeLimit(moduleArgs.limit)
+                                        : undefined,
+                            }),
                             moduleArgs,
                         );
                         return text ?? memoryAuthorityRefusal(args);

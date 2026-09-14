@@ -702,9 +702,7 @@ export function buildStatusDetail(
     const detail: StatusDetail = {
         ...base,
         hostBackendsModuleSide: rustMode,
-        memoryMirror: rustMode
-            ? getMemoryMirrorStatus(db, moduleFeedHead)
-            : undefined,
+        memoryMirror: rustMode ? getMemoryMirrorStatus(db, moduleFeedHead) : undefined,
         memoryAuthorityMismatch:
             rustMode &&
             moduleStatus?.authority !== undefined &&

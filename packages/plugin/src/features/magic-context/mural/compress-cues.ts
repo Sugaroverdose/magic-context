@@ -374,6 +374,9 @@ async function compressOneChunk(
         });
         agentSessionId = handle.id || null;
         if (!agentSessionId) throw new Error("Could not create compress-cues session.");
+        // The retry callbacks close over the opened run; bind it once so the closures
+        // see the resolved handle rather than the nullable slot it was assigned to.
+        const opened = handle;
 
         const run = await shared.promptSyncWithValidatedOutputRetry(
             args.client,
@@ -390,14 +393,14 @@ async function compressOneChunk(
             {
                 transport: Object.assign(
                     (request: import("../../../shared/model-suggestion-retry").PromptArgs) =>
-                        executor.attempt(handle!, request),
-                    { childSessionId: handle.childSessionId },
+                        executor.attempt(opened, request),
+                    { childSessionId: opened.childSessionId },
                 ),
                 timeoutMs: sliceMs,
                 signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:compress-cues",
-                fetchOutput: () => executor.collect(handle!, 50),
+                fetchOutput: () => executor.collect(opened, 50),
                 validateOutput: (completion) => {
                     const messages = completion.messages ?? [];
                     if (completion.lengthCapped) {

@@ -920,8 +920,7 @@ export function getMemoryMirrorStatus(
         typeof feedHead === "number" && Number.isSafeInteger(feedHead) && feedHead >= 0
             ? feedHead
             : null;
-    const pendingRows =
-        resolvedFeedHead === null ? null : Math.max(0, resolvedFeedHead - cursor);
+    const pendingRows = resolvedFeedHead === null ? null : Math.max(0, resolvedFeedHead - cursor);
     const stalled =
         liveRows > 0 &&
         pendingRows !== null &&
