@@ -413,10 +413,15 @@ describe("createCtxMemoryTools", () => {
                 { action: "update", ids: [1], content: "module update" },
                 { action: "archive", ids: [1] },
                 { action: "merge", ids: [1, 2], content: "module merge" },
+                { action: "list", limit: 5 },
                 { action: "get", ids: [1] },
             ] as const;
             for (const request of actions) {
-                const result = await moduleTools.ctx_memory.execute(request, toolContext());
+                const context =
+                    request.action === "list"
+                        ? dreamerToolContext("/repo/project", "ses-memory")
+                        : toolContext();
+                const result = await moduleTools.ctx_memory.execute(request, context);
                 expect(result).toContain(`module ${request.action}`);
             }
             expect(routed.map((request) => request.action)).toEqual([
@@ -424,6 +429,7 @@ describe("createCtxMemoryTools", () => {
                 "update",
                 "archive",
                 "merge",
+                "list",
                 "get",
             ]);
             expect(routed.every((request) => request.memoryProject === "/repo/project")).toBe(true);

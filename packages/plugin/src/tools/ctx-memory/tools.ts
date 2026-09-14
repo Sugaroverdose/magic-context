@@ -525,9 +525,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     authorityState =
                         (await deps.rustToolBackends?.authorityState?.({
                             projectPath,
-                              projectRoot: toolContext.directory,
-                              sessionId: toolContext.sessionID,
-                              domain: "memories",
+                            projectRoot: toolContext.directory,
+                            sessionId: toolContext.sessionID,
+                            domain: "memories",
                         })) ?? null;
                 } catch (error) {
                     if (marker) {

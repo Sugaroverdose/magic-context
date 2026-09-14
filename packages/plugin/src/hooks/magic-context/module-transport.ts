@@ -741,8 +741,8 @@ export class SubcModuleTransport {
         this.authorityProjectRoot = args.project;
         const { projectRoot, sessionId, ...body } = args;
         const response = await this.authorityRequest(
-            // A tool call has a real session route already. A project identity is not an
-            // OpenCode session id, so resolving it can wait until the route deadline.
+            // A tool call already has a real session route. Reusing it avoids asking the
+            // daemon to resolve the project identity as though it were an OpenCode session.
             sessionId ?? args.project,
             projectRoot ?? this.bindRootForAuthority(),
             "authority.status",
