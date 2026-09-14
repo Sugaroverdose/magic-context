@@ -397,11 +397,7 @@ describe("Pi doctor", () => {
         writeFileSync(
             join(agentDir, "settings.json"),
             JSON.stringify({
-                packages: [
-                    "npm:@cortexkit/pi-magic-context",
-                    unrelatedPlugin,
-                    brokenDevTree,
-                ],
+                packages: ["npm:@cortexkit/pi-magic-context", unrelatedPlugin, brokenDevTree],
             }),
         );
         createInstalledPiPlugin(agentDir, true);
@@ -409,11 +405,10 @@ describe("Pi doctor", () => {
 
         const code = await runDoctor(baseOptions(root, cwd, prompts));
 
-        expect(code).toBe(0);
+        expect(code).toBe(1);
         const output = prompts.messages.join("\n");
-        expect(output).toContain(
-            "PASS Embedding provider: local (native runtime selected and OK)",
-        );
+        expect(output).toContain("Multiple magic-context entries in Pi packages[]");
+        expect(output).toContain("PASS Embedding provider: local (native runtime selected and OK)");
         expect(output).not.toContain(
             "WARN Embedding provider: local — native runtime and WASM fallback both unavailable",
         );
@@ -441,10 +436,7 @@ describe("Pi doctor", () => {
             "module.exports = {};\n",
         );
         mkdirSync(join(wasmDevTree, "dist"), { recursive: true });
-        writeFileSync(
-            join(wasmDevTree, "dist", "transformers-node-wasm.js"),
-            "export {};\n",
-        );
+        writeFileSync(join(wasmDevTree, "dist", "transformers-node-wasm.js"), "export {};\n");
         writeFileSync(
             join(wasmDevTree, "package.json"),
             JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.0.0-dev" }),
@@ -461,11 +453,10 @@ describe("Pi doctor", () => {
 
         const code = await runDoctor(baseOptions(root, cwd, prompts));
 
-        expect(code).toBe(0);
+        expect(code).toBe(1);
         const output = prompts.messages.join("\n");
-        expect(output).toContain(
-            "PASS Embedding provider: local (native runtime selected and OK)",
-        );
+        expect(output).toContain("Multiple magic-context entries in Pi packages[]");
+        expect(output).toContain("PASS Embedding provider: local (native runtime selected and OK)");
         expect(output).not.toContain(
             "WARN Embedding provider: local — onnxruntime-node native binding failed",
         );
@@ -504,6 +495,69 @@ describe("Pi doctor", () => {
         expect(output).not.toContain(
             "WARN Embedding provider: local — native runtime and WASM fallback both unavailable",
         );
+    });
+
+    it("reports every broken candidate with its native and WASM reasons", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const brokenTrees = [makeTempRoot("mc-broken-first-"), makeTempRoot("mc-broken-second-")];
+        for (const tree of brokenTrees) {
+            writeFileSync(
+                join(tree, "package.json"),
+                JSON.stringify({ name: "@cortexkit/pi-magic-context" }),
+            );
+        }
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({ packages: ["npm:@cortexkit/pi-magic-context", ...brokenTrees] }),
+        );
+        const prompts = new MockPrompts();
+        await runDoctor(baseOptions(root, cwd, prompts));
+        const warnings = prompts.messages.filter((message) =>
+            message.includes("WARN Embedding provider: local"),
+        );
+        for (const tree of brokenTrees) {
+            expect(
+                warnings.some(
+                    (warning) =>
+                        warning.includes(tree) &&
+                        warning.includes("native:") &&
+                        warning.includes("WASM:"),
+                ),
+            ).toBe(true);
+        }
+    });
+
+    it.each([
+        false,
+        true,
+    ])("detects npm plus local Magic Context identity (object source: %s)", async (objectSource) => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+        const localDir = join(agentDir, "local-plugin");
+        mkdirSync(localDir);
+        writeFileSync(
+            join(localDir, "package.json"),
+            JSON.stringify({ name: "@cortexkit/pi-magic-context" }),
+        );
+        const source = "./local-plugin";
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({
+                packages: ["npm:@cortexkit/pi-magic-context", objectSource ? { source } : source],
+            }),
+        );
+        const prompts = new MockPrompts();
+        expect(await runDoctor(baseOptions(root, cwd, prompts))).toBe(1);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("Multiple magic-context entries in Pi packages[]");
+        expect(output).toContain(source);
+        expect(output).not.toContain("Other Pi extensions registered:");
+        expect(output).not.toContain("selected runtime unverified");
     });
 
     it("reports the WASM fallback when onnxruntime-node is completely absent", async () => {
