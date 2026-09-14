@@ -3,6 +3,27 @@
     "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/opencode2/automatic-s3-paths.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Automatic historian and dreamer paths run in the dedicated real GA lane",
+            "contract_refs": ["R22", "R36"]
+        },
+        {
+            "path": "tests/opencode2/fold-s3-owner.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Checkpoint ownership and restored-tail taxonomy run in the dedicated real GA lane",
+            "contract_refs": ["I6a", "I7", "I8", "R39"]
+        },
+        {
+            "path": "tests/opencode2/marker-s3-runtime.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Instrumented v2 marker exclusion with a real v1 control runs in the dedicated GA lane",
+            "contract_refs": ["I10"]
+        },
+        {
             "path": "tests/opencode2/hidden-s3-executor.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

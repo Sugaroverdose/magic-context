@@ -15,6 +15,7 @@ export interface SessionContext {
     system: Array<Record<string, unknown>>;
     tools: Record<string, { description: string; input: unknown }>;
     options: Record<string, unknown>;
+    result?: { summary: string };
 }
 export interface V2Context {
     location: { directory: string };

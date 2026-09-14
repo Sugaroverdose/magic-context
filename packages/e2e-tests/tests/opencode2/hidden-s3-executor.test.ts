@@ -1,3 +1,7 @@
+import { TestHarness } from "../../src/harness";
+import { runValidatedHistorianPass } from "../../../plugin/src/hooks/magic-context/compartment-runner-historian";
+import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "../../../plugin/src/hooks/magic-context/compartment-prompt";
+import { calibrationChunk, calibrationOutput, calibrationPrompt } from "./calibration-s3-fixture";
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,3 +84,55 @@ test("R34 real GA warming-shaped generate stays byte-untouched", async () => {
         expect(JSON.stringify(host.mock.requests().at(-1)!.body)).toContain("protected source turn");
     });
 }, 60000);
+
+
+test("R38 compress-cues executes one metered generate and applies its cue on real GA", async () => {
+    await proof(async (host, client, sessionID) => {
+        const before = host.mock.requests().length;
+        host.mock.addMatcher((body) => {
+            const prompt = JSON.stringify(body);
+            const match = prompt.match(/\[(\d+)\]/);
+            if (!prompt.includes("<cues>") || !match) return null;
+            return { text: `<cues><cue id="${match[1]}">stable source ordinals</cue></cues>`, usage: { input_tokens: 100, output_tokens: 10 } };
+        });
+        await trigger(client, sessionID, "S3_COMPRESS");
+        const result = capture(host.cwd);
+        expect(result.result.status).toBe("completed");
+        expect(result.cues).toEqual([{ mural_cue: "stable source ordinals" }]);
+        expect(result.rows[0].tasks_succeeded).toBe(1);
+        expect(host.mock.requests().length - before).toBe(1);
+    });
+}, 60000);
+
+
+test("R33 calibration: v1 child and v2 own/session-system arms preserve prompt bytes and record validator verdicts", async () => {
+    const strings = (value: unknown): string[] => typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];
+    const metrics: Record<string, unknown> = {};
+    const v1 = await TestHarness.create();
+    try {
+        const parent = await v1.createSession();
+        await v1.sendPrompt(parent, "Calibration parent");
+        v1.mock.setDefault({ text: calibrationOutput, usage: { input_tokens: 100, output_tokens: 10 } });
+        const result = await runValidatedHistorianPass({ client: v1.client as never, db: v1.contextDb() as never, parentSessionId: parent, sessionDirectory: v1.opencode.env.workdir, prompt: calibrationPrompt, chunk: calibrationChunk, priorCompartments: [], sequenceOffset: 0, dumpLabelBase: "calibration", timeoutMs: 15000, model: "mock-anthropic/mock-sonnet" });
+        expect(result.ok).toBe(true);
+        const request = v1.mock.requests().filter(request => strings(request.body).includes(calibrationPrompt)).at(-1);
+        expect(request).toBeDefined();
+        metrics.v1 = { validator: result.ok, promptBytes: Buffer.byteLength(calibrationPrompt), systemBytes: Buffer.byteLength(strings(request!.body.system).join("\n")) };
+    } finally { await v1.dispose(); }
+    await proof(async (host, client, sessionID) => {
+        host.mock.setDefault({ text: calibrationOutput, usage: { input_tokens: 100, output_tokens: 10 } });
+        for (const arm of ["OWN", "SESSION"]) {
+            const before = host.mock.requests().length;
+            await trigger(client, sessionID, `S3_CALIBRATE_${arm}`);
+            expect(capture(host.cwd).ok).toBe(true);
+            expect(host.mock.requests().length - before).toBe(1);
+            const body = host.mock.requests().at(-1)!.body;
+            expect(strings(body)).toContain(calibrationPrompt);
+            const system = strings(body.instructions ?? body.system).join("\n");
+            if (arm === "OWN") expect(system).toBe(COMPARTMENT_AGENT_SYSTEM_PROMPT);
+            else expect(system).not.toContain(COMPARTMENT_AGENT_SYSTEM_PROMPT);
+            metrics[`v2_${arm.toLowerCase()}`] = { validator: capture(host.cwd).ok, promptBytes: Buffer.byteLength(calibrationPrompt), systemBytes: Buffer.byteLength(system) };
+        }
+    });
+    console.info("R33_CALIBRATION", JSON.stringify(metrics));
+}, 120000);

@@ -1,10 +1,13 @@
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
+import { getProtectedTokensTierOverrides } from "../../config/project-security";
+import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     getOrCreateSessionMeta,
     isDatabasePersisted,
     openDatabase,
+    updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
@@ -12,6 +15,7 @@ import {
     createChatMessageHook,
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
+import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
@@ -19,12 +23,15 @@ import { createTransform, type TransformDeps } from "../../hooks/magic-context/t
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
-import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
+import { FoldOwner, foldDigest } from "../fold/owner";
+import { restoreRow } from "../fold/restore";
+import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
-import { adaptPayload } from "./payload";
+import { startDreamTrigger } from "./dream-trigger";
+import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
 import type { SessionContext, V2Context } from "./types";
@@ -52,10 +59,11 @@ export function createHostSeams(
     };
 }
 
-export async function registerContext(context: V2Context): Promise<void> {
+export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
     if (!config.enabled || !isCompactionEnabled(config)) return;
+    const folds = new FoldOwner(context.storage);
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
@@ -68,6 +76,16 @@ export async function registerContext(context: V2Context): Promise<void> {
               (sessionID) => liveModels.get(sessionID) ?? null,
           )
         : undefined;
+    const dreamTrigger =
+        hiddenCompletionExecutor && config.dreamer && !config.dreamer.disable
+            ? startDreamTrigger(context, {
+                  config: config.dreamer,
+                  executor: hiddenCompletionExecutor,
+                  projectIdentity: () => resolveProjectIdentity(directory) ?? directory,
+                  language: config.language,
+                  mural: config.mural,
+              })
+            : undefined;
     const historianModels = resolveHistorianModel(config, "opencode");
     const usage: TransformDeps["contextUsageMap"] = new Map();
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
@@ -76,6 +94,7 @@ export async function registerContext(context: V2Context): Promise<void> {
     const historyRefreshSessions = new Set<string>();
     const pendingMaterializationSessions = new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
+    const rawProviders = new Map<string, () => void>();
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     await context.tool.hook("execute.before", (draft) => assertExecutableToolInput(draft.input));
@@ -111,7 +130,7 @@ export async function registerContext(context: V2Context): Promise<void> {
             gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
         );
         try {
-            return rawMessages(reader.window(sessionID));
+            return rawMessages(reader.history(sessionID));
         } finally {
             reader.close();
         }
@@ -136,7 +155,7 @@ export async function registerContext(context: V2Context): Promise<void> {
             );
             try {
                 const latest = reader
-                    .window(draft.sessionID)
+                    .history(draft.sessionID)
                     .filter((row) => row.type === "assistant")
                     .at(-1);
                 const tokens = latest?.data.tokens;
@@ -153,6 +172,9 @@ export async function registerContext(context: V2Context): Promise<void> {
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
                     unsafe = inputTokens / limit >= 0.95;
+                    const completed = latest?.data.time?.completed;
+                    if (typeof completed === "number")
+                        updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -168,22 +190,66 @@ export async function registerContext(context: V2Context): Promise<void> {
         if (unsafe) await interruptBeforeProvider(context.session, draft.sessionID);
         return unsafe;
     };
-    // Auto-compaction is dispatched before the primary context hook. Guard its
-    // provider request too until a fold owner can supply a materialized summary.
+    const materialize = (draft: SessionContext) => {
+        db ??= openDatabase();
+        if (!db || !isDatabasePersisted(db)) throw new Error("context storage is not durable");
+        const state = getOrCreateSessionMeta(db, draft.sessionID);
+        return materializeM0({
+            db,
+            sessionId: draft.sessionID,
+            state,
+            projectPath: resolveProjectIdentity(directory) ?? directory,
+            projectDirectory: directory,
+            memoryEnabled: config.memory.enabled,
+            memoryInjectionBudgetTokens: config.memory.injection_budget_tokens,
+            hardSignals: {
+                systemHash: foldDigest(JSON.stringify(draft.system)),
+                toolSetHash: "",
+                modelKey: `${draft.model.providerID}/${draft.model.id}`,
+                cacheExpired: false,
+                lastResponseTime: state.lastResponseTime,
+            },
+        }).m0Text;
+    };
     await context.session.hook("compaction", async (draft) => {
+        const reader = new V2StoreReader(
+            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+        );
         try {
-            await refuseIfUnsafe(draft);
-        } catch (error) {
-            if (error instanceof V2ContextRefusal) throw error;
-            console.warn("[magic-context] v2 compaction guard unavailable", error);
+            const rows = reader.history(draft.sessionID);
+            const ids = new Set(draft.messages.map((message) => message.id));
+            const watermark = Math.max(
+                -1,
+                ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+            );
+            const running = rows
+                .filter((row) => row.type === "compaction" && row.data.status === "running")
+                .at(-1);
+            const fold = await folds.supply({
+                sessionID: draft.sessionID,
+                watermark,
+                runningCut: running?.seq,
+                materialize: () => materialize(draft),
+            });
+            draft.result = { summary: fold.submitted };
+        } catch (cause) {
+            await interruptBeforeProvider(context.session, draft.sessionID);
+            throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
+                cause,
+            });
+        } finally {
+            reader.close();
         }
     });
     await context.session.hook("context", async (draft) => {
-        let release: (() => void) | undefined;
+        let postFold = false;
         try {
             if (await refuseIfUnsafe(draft)) return;
             if (!db) return;
             const storage = db;
+            updateSessionMeta(db, draft.sessionID, {
+                systemPromptHash: foldDigest(JSON.stringify(draft.system)),
+            });
             await preloadTokenizer();
             passDuties ??= createChatMessageHook({
                 db,
@@ -215,9 +281,15 @@ export async function registerContext(context: V2Context): Promise<void> {
                 variant: draft.model.variant,
                 model: { providerID: draft.model.providerID, modelID: draft.model.id },
             });
-            release = setRawMessageProvider(draft.sessionID, {
-                readMessages: () => read(draft.sessionID),
-            });
+            // Background historian reads outlive the context callback. Keep its source
+            // registered until plugin disposal, rather than falling back to the v1 store.
+            if (!rawProviders.has(draft.sessionID))
+                rawProviders.set(
+                    draft.sessionID,
+                    setRawMessageProvider(draft.sessionID, {
+                        readMessages: () => read(draft.sessionID),
+                    }),
+                );
             transform ??= createTransform({
                 db,
                 tagger: createTagger(),
@@ -225,6 +297,9 @@ export async function registerContext(context: V2Context): Promise<void> {
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
                 contextUsageMap: usage,
+                protectedTokens: config.protected_tokens,
+                protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
+                executeThresholdPercentage: config.execute_threshold_percentage,
                 liveModelBySession: liveModels,
                 channel1StateBySession: channel1,
                 historyRefreshSessions,
@@ -255,15 +330,106 @@ export async function registerContext(context: V2Context): Promise<void> {
                 if (message.id && (await isAdmittedSynthetic(context, draft.sessionID, message.id)))
                     admitted.add(message.id);
             }
+            const reader = new V2StoreReader(
+                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+            );
+            let checkpoint: SessionContext["messages"][number] | undefined;
+            let submitted: string | undefined;
+            try {
+                const cut = reader.latestCompaction(draft.sessionID);
+                const incoming = cut && draft.messages.find((message) => message.id === cut.id);
+                postFold = cut !== undefined;
+                if (cut && !incoming)
+                    throw new Error("The host checkpoint disappeared from the context draft");
+                if (cut && incoming) {
+                    const identity = await folds.observe({
+                        sessionID: draft.sessionID,
+                        cutSeq: cut.seq,
+                        summary: cut.data.summary ?? "",
+                        rendered: incoming,
+                        onHard: (reason) => {
+                            console.warn(
+                                `[magic-context] HARD reason=${reason} session=${draft.sessionID}`,
+                            );
+                            materialize(draft);
+                            pendingMaterializationSessions.add(draft.sessionID);
+                        },
+                    });
+                    checkpoint = structuredClone(identity.rendered ?? incoming);
+                    submitted = identity.rendered
+                        ? (identity.renderedSummary ?? identity.submitted)
+                        : (cut.data.summary ?? "");
+                    const all = reader.history(draft.sessionID);
+                    const boundaryID = (
+                        db
+                            .prepare(
+                                "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
+                            )
+                            .get(draft.sessionID) as { id: string | null } | null
+                    )?.id;
+                    const boundary = all.find((row) => row.id === boundaryID)?.seq ?? -1;
+                    const present = new Set(draft.messages.map((message) => message.id));
+                    const restored = all
+                        .filter(
+                            (row) =>
+                                row.seq > boundary && row.seq <= cut.seq && !present.has(row.id),
+                        )
+                        .flatMap((row) => restoreRow(row, draft.model));
+                    draft.messages.splice(
+                        0,
+                        draft.messages.length,
+                        ...restored,
+                        ...draft.messages.filter((message) => message !== incoming),
+                    );
+                }
+            } finally {
+                reader.close();
+            }
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);
             mapped.commit();
+            if (checkpoint && submitted !== undefined) {
+                const head = draft.messages.find((message) => message.id === HEAD_IDS[0]);
+                const baseline = head?.content.find((part) => part.type === "text")?.text;
+                if (typeof baseline === "string") {
+                    for (const part of checkpoint.content)
+                        if (part.type === "text" && typeof part.text === "string") {
+                            part.text = part.text.replace(
+                                `<summary>\n${submitted}\n</summary>`,
+                                `<summary>\n${baseline}\n</summary>`,
+                            );
+                        }
+                    const volatile = draft.messages.find((message) => message.id === HEAD_IDS[1]);
+                    if (volatile && head)
+                        volatile.content.push(
+                            ...head.content.filter((part) => part.type !== "text"),
+                        );
+                    draft.messages.splice(
+                        0,
+                        draft.messages.length,
+                        checkpoint,
+                        ...draft.messages.filter((message) => message !== head),
+                    );
+                }
+            }
         } catch (error) {
             if (error instanceof V2ContextRefusal) throw error;
+            if (postFold) {
+                await interruptBeforeProvider(context.session, draft.sessionID);
+                throw new V2ContextRefusal(
+                    "Magic Context could not restore the unarchived host history.",
+                    { cause: error },
+                );
+            }
             // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
             console.warn("[magic-context] v2 context unavailable", error);
-        } finally {
-            release?.();
         }
     });
+    return {
+        async dispose() {
+            await dreamTrigger?.dispose();
+            for (const release of rawProviders.values()) release();
+            rawProviders.clear();
+        },
+    };
 }

@@ -512,13 +512,6 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 );
             }
             if (config.task === "compress-cues") {
-                if (deps.hiddenCompletionExecutor?.capabilities.tools === false) {
-                    throw new HiddenCompletionRefusal(
-                        "unsupported_transport",
-                        "compress-cues is tool-free but its hidden completion transport is not yet connected on opencode2",
-                        true,
-                    );
-                }
                 if (deps.mural?.enabled !== true) {
                     // Config-gated no-op, but say so: a silent "completed" here
                     // reads as a successful run in /ctx-dream summaries and would
@@ -532,7 +525,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 // then default model settings.
                 const result = await runCompressCues({
                     db,
-                    client: requireDreamClient(deps.client),
+                    client: deps.client,
+                    hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
