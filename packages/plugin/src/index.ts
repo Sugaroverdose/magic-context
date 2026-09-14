@@ -38,7 +38,10 @@ import {
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./hooks/magic-context/compartment-prompt";
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
-import { SubcModuleTransport } from "./hooks/magic-context/module-transport";
+import {
+    getDefaultSubcConnectionFile,
+    SubcModuleTransport,
+} from "./hooks/magic-context/module-transport";
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
 import {
@@ -278,13 +281,18 @@ const server: Plugin = async (ctx) => {
     const liveSessionState = createLiveSessionState();
     const rustModeModuleTransport =
         pluginConfig.transform_mode === "rust"
-            ? new SubcModuleTransport(pluginConfig.subc?.connection_file)
+            ? new SubcModuleTransport(
+                  pluginConfig.subc?.connection_file ?? getDefaultSubcConnectionFile(),
+              )
             : undefined;
     const rustModeModuleClient: RustModeModuleClient | undefined = rustModeModuleTransport;
     // A durable Rust-deletion retry can outlive a config flip back to TypeScript,
     // so cleanup keeps a lazy transport even when new transforms no longer use Rust.
     const sessionCleanupModuleClient = pluginConfig.enabled
-        ? (rustModeModuleTransport ?? new SubcModuleTransport(pluginConfig.subc?.connection_file))
+        ? (rustModeModuleTransport ??
+          new SubcModuleTransport(
+              pluginConfig.subc?.connection_file ?? getDefaultSubcConnectionFile(),
+          ))
         : undefined;
 
     const hooksPhase = await runBootPhaseWithinBudget(
