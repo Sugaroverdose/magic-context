@@ -80,11 +80,11 @@ import {
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
+import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
-import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
@@ -104,7 +104,7 @@ import {
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassOutcome } from "./pass-outcome";
-import { estimateTokens } from './read-session-formatting';
+import { estimateTokens } from "./read-session-formatting";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
     applyFrozenTrailingBlankDecisions,

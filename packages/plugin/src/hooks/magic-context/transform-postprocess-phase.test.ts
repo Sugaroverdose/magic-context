@@ -59,8 +59,8 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import * as compartmentInjection from "./inject-compartments";
-import * as readSessionFormatting from "./read-session-formatting";
 import { injectM0M1, type M0HardSignals } from "./inject-compartments";
+import * as readSessionFormatting from "./read-session-formatting";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
 import {
@@ -2137,7 +2137,9 @@ describe("dropped-token telemetry", () => {
         );
         const deferHash = createHash("sha256").update(JSON.stringify(deferMessages)).digest("hex");
 
-        expect(executeHash).toBe("5ae4d6ca0f7871c9c7a0d7f15f342cc6221ca3374ab7c5de1e189d115c3102ae");
+        expect(executeHash).toBe(
+            "5ae4d6ca0f7871c9c7a0d7f15f342cc6221ca3374ab7c5de1e189d115c3102ae",
+        );
         expect(deferHash).toBe(executeHash);
         expect(deferResult.bustedThisPass).toBe(false);
         expect(deferResult.droppedTokens).toBe(0);

@@ -185,10 +185,7 @@ export function applyPendingOperations(
                         onTagReduced?.({
                             tagNumber: pendingOp.tagId,
                             mode: "partial",
-                            removedCharacters: Math.max(
-                                0,
-                                originalCharacters - replacement.length,
-                            ),
+                            removedCharacters: Math.max(0, originalCharacters - replacement.length),
                         });
                     }
                     shouldPersistDrop = true;
