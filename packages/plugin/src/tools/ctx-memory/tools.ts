@@ -2,6 +2,11 @@ import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import { getAuthorityManagedMarker } from "../../features/magic-context/context-authority";
 import {
+    curateCategoryForMemoryCategory,
+    getActiveCurateCategory,
+    getCurateCategoryScopeRefusal,
+} from "../../features/magic-context/dreamer/curate-category-rotation";
+import {
     assessCurateMutationSafety,
     recordCurateSafetyRefusal,
 } from "../../features/magic-context/dreamer/curate-memory-safety";
@@ -505,6 +510,28 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return "Error: Could not resolve project identity for memory action.";
             }
             await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
+            const activeCurateCategory =
+                toolContext.agent === DREAMER_AGENT
+                    ? getActiveCurateCategory(deps.db, projectPath)
+                    : null;
+            if (activeCurateCategory) {
+                const scopeRefusal = getCurateCategoryScopeRefusal({
+                    scope: activeCurateCategory,
+                    action: args.action,
+                    requestedCategory: args.category,
+                    ids: [
+                        ...(args.ids ?? []),
+                        ...(Number.isInteger(args.superseded_by)
+                            ? [args.superseded_by as number]
+                            : []),
+                    ],
+                    categoryForId: (id) => {
+                        const category = getMemoryById(deps.db, id)?.category;
+                        return category ? curateCategoryForMemoryCategory(category) : null;
+                    },
+                });
+                if (scopeRefusal) return scopeRefusal;
+            }
             const curatePreflight =
                 toolContext.agent === DREAMER_AGENT
                     ? preflightCurateMutation({
@@ -715,9 +742,15 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             if (args.action === "list") {
                 const limit = normalizeLimit(args.limit);
                 const category = normalizeCategory(args.category);
-                const memories = filterByCategory(
-                    getMemoriesByProject(deps.db, projectPath),
-                    category,
+                const allMemories = getMemoriesByProject(deps.db, projectPath);
+                const memories = (
+                    activeCurateCategory
+                        ? allMemories.filter(
+                              (memory) =>
+                                  curateCategoryForMemoryCategory(memory.category) ===
+                                  activeCurateCategory,
+                          )
+                        : filterByCategory(allMemories, category)
                 ).slice(0, limit);
 
                 return formatMemoryList(memories);

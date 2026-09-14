@@ -36,6 +36,12 @@ import { runCompressCues } from "../mural/compress-cues";
 import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { type ClassifyModuleClient, runClassify } from "./classify";
+import {
+    beginCurateCategoryRun,
+    type CurateMemoryCategory,
+    curateCategoryForMemoryCategory,
+    curateTaskStateAfterSuccess,
+} from "./curate-category-rotation";
 import { takeCurateSafetyRefusalCount } from "./curate-memory-safety";
 import { evaluateSmartNotes } from "./evaluate-smart-notes";
 import { archiveExpiredMemories } from "./expire-memories";
@@ -373,6 +379,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 processed: Math.max(0, processed),
                 total: backlogAtStart.pending,
                 startedAt,
+                ...(backlogAtStart.category ? { category: backlogAtStart.category } : {}),
                 ...(refused === undefined ? {} : { refused: Math.max(0, refused) }),
             });
         };
@@ -459,6 +466,9 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                                     pendingAtEnd: end.pending,
                                     totalAtEnd: end.total,
                                     processed,
+                                    ...(backlogAtStart.category
+                                        ? { category: backlogAtStart.category }
+                                        : {}),
                                 };
                                 return value;
                             })(),
@@ -1299,6 +1309,7 @@ async function runAgenticTask(
                 } | null;
                 progress?: string | null;
                 failure?: DreamRunFailureDetail;
+                backlogAfter?: { pending: number; total: number };
             },
         ) => void;
         computeMemoryDelta: (
@@ -1349,6 +1360,7 @@ async function runAgenticTask(
         // lease heartbeat starts and uses the same authority-specific archive path
         // as curate's ctx_memory operations.
         let curateMemories: ReturnType<typeof loadActiveMemoryPromptMemories> | undefined;
+        let curateCategory: CurateMemoryCategory | undefined;
         if (task === "curate") {
             expiredArchived = await archiveExpiredMemories({
                 db,
@@ -1359,12 +1371,21 @@ async function runAgenticTask(
                 moduleRoute: helpers.moduleRoute,
             });
             if (leaseLost) throw new Error("Dream lease lost during expired-memory archive");
-            curateMemories = loadActiveMemoryPromptMemories(db, projectIdentity);
-            log(
-                `[dreamer] curate pool: in_scope=${curateMemories.length} expired_archived=${expiredArchived}`,
+            const scope = beginCurateCategoryRun(
+                db,
+                projectIdentity,
+                loadActiveMemoryPromptMemories(db, projectIdentity),
             );
-            if (curateMemories.length === 0 && expiredArchived > 0) {
-                const progress = formatExpiredArchiveProgress(expiredArchived);
+            curateMemories = scope?.memories ?? [];
+            curateCategory = scope?.category;
+            log(
+                `[dreamer] curate pool: category=${curateCategory ?? "none"} in_scope=${curateMemories.length} expired_archived=${expiredArchived}`,
+            );
+            if (curateMemories.length === 0) {
+                const progress =
+                    expiredArchived > 0
+                        ? formatExpiredArchiveProgress(expiredArchived)
+                        : "curate: no populated project-memory category";
                 helpers.recordRun("completed", null, {
                     memoryChanges: helpers.computeMemoryDelta(memoryBefore),
                     progress,
@@ -1377,7 +1398,10 @@ async function runAgenticTask(
             projectPath: projectIdentity,
             lastDreamAt: lastRunAt ? String(lastRunAt) : null,
             existingDocs,
-            curate: curateMemories ? { memories: curateMemories } : undefined,
+            curate:
+                curateMemories && curateCategory
+                    ? { category: curateCategory, memories: curateMemories }
+                    : undefined,
         });
         const createResponse = await createChildSessionWithFence({
             client: requireDreamClient(deps.client),
@@ -1495,7 +1519,12 @@ async function runAgenticTask(
 
         const curateOutput =
             task === "curate" ? (run.validated as CurateValidatedOutput) : undefined;
+        const curateScopeProgress =
+            task === "curate" && curateCategory && curateMemories
+                ? `curate: ${curateCategory} (${curateMemories.length})`
+                : null;
         const progress = [
+            curateScopeProgress,
             expiredArchived > 0 ? formatExpiredArchiveProgress(expiredArchived) : null,
             curateOutput && curateOutput.memoryOperations.completedActions.length > 0
                 ? formatCurateMemoryOperations(curateOutput.memoryOperations.completedActions)
@@ -1504,11 +1533,42 @@ async function runAgenticTask(
         ]
             .filter((value): value is string => Boolean(value))
             .join("; ");
+        const curateCount =
+            task === "curate" && curateCategory
+                ? loadActiveMemoryPromptMemories(db, projectIdentity).filter(
+                      (memory) =>
+                          curateCategoryForMemoryCategory(memory.category) === curateCategory,
+                  ).length
+                : undefined;
+        const curateBacklog =
+            curateCount !== undefined && curateCategory
+                ? {
+                      pending: curateCount,
+                      total: curateCount,
+                      category: curateCategory,
+                  }
+                : undefined;
         helpers.recordRun("completed", null, {
             memoryChanges: helpers.computeMemoryDelta(memoryBefore),
             progress: progress || null,
+            backlogAfter: curateBacklog,
         });
-        return { status: "completed", ...(progress ? { detail: progress } : {}) };
+        return {
+            status: "completed",
+            ...(progress ? { detail: progress } : {}),
+            ...(curateBacklog ? { backlog: curateBacklog } : {}),
+            ...(curateCategory
+                ? {
+                      schedulePatch: {
+                          taskStateJson: curateTaskStateAfterSuccess(
+                              db,
+                              projectIdentity,
+                              curateCategory,
+                          ),
+                      },
+                  }
+                : {}),
+        };
     } finally {
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);
