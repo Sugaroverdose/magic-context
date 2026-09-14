@@ -169,7 +169,7 @@ export function applyHeuristicCleanup(
                         emergencyDroppedTools++;
                         droppedTokenReductions.push({
                             tagNumber: tag.tagNumber,
-                            mode: skeleton ? "truncated" : "full",
+                            mode: result === "removed" ? "full" : "truncated",
                         });
                         emergencyReclaimedTokens += estimateEmergencyDropReclaimTokens(tag);
                     }
@@ -297,7 +297,10 @@ export function applyHeuristicCleanup(
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
                     if (result === "removed" || result === "truncated") {
                         deduplicatedTools++;
-                        droppedTokenReductions.push({ tagNumber: tag.tagNumber, mode: "full" });
+                        droppedTokenReductions.push({
+                            tagNumber: tag.tagNumber,
+                            mode: result === "removed" ? "full" : "truncated",
+                        });
                     }
                 }
             }
