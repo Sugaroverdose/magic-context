@@ -337,6 +337,13 @@ enum LineageRequest {
         total_bytes: u64,
         total_chunks: u64,
         digest: String,
+        // Clause 3a option convention: None is omitted on the wire and a present
+        // `null` is rejected, matching ResolveRequest. `deserialize_with` refuses null.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "reject_null_option"
+        )]
         expected_open: Option<String>,
     },
     #[serde(rename = "capacity.put")]
@@ -566,6 +573,23 @@ enum SuccessorOverflow {
 enum ActualSource {
     McEstimate,
     Provider,
+}
+
+/// Clause 3a: an absent option is omitted; a present JSON `null` is a malformed request.
+fn reject_null_option<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Err(serde::de::Error::custom(
+            "expected_open must be omitted when absent; null is not accepted",
+        )),
+        Value::String(text) => Ok(Some(text)),
+        other => Err(serde::de::Error::custom(format!(
+            "expected_open must be a string, got {other}"
+        ))),
+    }
 }
 
 fn fixture_dir() -> PathBuf {
@@ -1147,7 +1171,7 @@ fn gateway_outcome(estimate: &CapacityEstimateV1, candidate_digest: &str) -> Gat
 fn d5_capacity_encodings_are_byte_exact() {
     let (fixture, _) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.capacity-estimate-vectors.v1");
-    assert_eq!(fixture.contract_version, "1.3.24");
+    assert_eq!(fixture.contract_version, "1.3.26");
     assert!(fixture
         .encoding_rule
         .lineage_request
@@ -2260,5 +2284,27 @@ fn d5_capacity_fixture_is_indexed() {
     assert_eq!(
         entry["generation_script"],
         "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    );
+}
+
+#[test]
+fn d5_capacity_begin_expected_open_follows_option_convention() {
+    let (fixture, _) = load_fixture();
+    for vector in &fixture.capacity_begin_vectors {
+        let bytes = wire_bytes(&vector.request_bytes_base64);
+        let text = std::str::from_utf8(&bytes).expect("utf8 request");
+        assert!(
+            !text.contains("\"expected_open\":null"),
+            "{} encodes an absent expected_open as null",
+            vector.id
+        );
+    }
+    let with_null = br#"{"op":"capacity.begin","P":"p","agent":"parent","incarnation":1,"total_bytes":1,"total_chunks":1,"digest":"00","expected_open":null}"#;
+    assert!(serde_json::from_slice::<LineageRequest>(with_null).is_err());
+    let omitted = br#"{"op":"capacity.begin","P":"p","agent":"parent","incarnation":1,"total_bytes":1,"total_chunks":1,"digest":"00"}"#;
+    let parsed = serde_json::from_slice::<LineageRequest>(omitted).expect("omitted parses");
+    assert_eq!(
+        serde_json::to_vec(&parsed).expect("serialize"),
+        omitted.to_vec()
     );
 }

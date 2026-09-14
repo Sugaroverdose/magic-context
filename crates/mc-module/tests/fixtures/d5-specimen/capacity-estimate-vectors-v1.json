@@ -1,8 +1,8 @@
 {
   "schema": "mc.d5.capacity-estimate-vectors.v1",
-  "contract_version": "1.3.24",
+  "contract_version": "1.3.26",
   "encoding_rule": {
-    "lineage_request": "Internally tagged JSON object with discriminator op; capacity.begin, capacity.put, capacity.finish, and capacity.check fields are siblings of op with no args wrapper.",
+    "lineage_request": "Internally tagged JSON object with discriminator op; capacity.begin, capacity.put, capacity.finish, and capacity.check fields are siblings of op with no args wrapper. capacity.begin.expected_open follows the clause-3a option convention: None omitted, present null rejected (v1.3.26).",
     "lineage_response": "Externally keyed operation object for capacity.begin, capacity.put, capacity.finish, or capacity.check, following the clause 2 response convention.",
     "nested_unions": "Internally tagged JSON objects retain discriminator kind; capacity.check upload carries ref:UploadRef; Known<T> is known{value}|unknown{reason}; nested DTO Option none is explicit null. CHECKED replay uses the complete canonical check_key, never digest alone.",
     "token_counts": "Every TokenCount and ByteCount is a checked nonnegative JSON integer; inline bytes are base64 and capped at 1048576 raw bytes.",
@@ -227,7 +227,7 @@
       "id": "B01_fresh",
       "name": "fresh declaration opens one ticketless capacity upload",
       "initial_records": [],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IkJFR1VOIiwidXBsb2FkX2lkIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLTAwMDEifX19",
       "state_after": [
         {
@@ -289,7 +289,7 @@
           "state": "open"
         }
       ],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAxLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAxLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImludmFsaWRfYXJndW1lbnRzIiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiZmllbGQiLCJmaWVsZCI6InRvdGFsX2J5dGVzIiwicmVhc29uIjoiZGVjbGFyYXRpb24gZGlmZmVycyBmcm9tIHRoZSBvcGVuIGNhcGFjaXR5IHVwbG9hZCJ9fX19fQ==",
       "state_after": [
         {
@@ -361,7 +361,7 @@
           "state": "consumed"
         }
       ],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IkJFR1VOIiwidXBsb2FkX2lkIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLTAwMDMifX19",
       "state_after": [
         {
@@ -391,7 +391,7 @@
       "id": "B07_max_bytes_refuses",
       "name": "capacity begin above the per-scope upload byte limit refuses",
       "initial_records": [],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjo2NzEwODg2NSwidG90YWxfY2h1bmtzIjo2NSwiZGlnZXN0IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImV4cGVjdGVkX29wZW4iOm51bGx9",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjo2NzEwODg2NSwidG90YWxfY2h1bmtzIjo2NSwiZGlnZXN0IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSJ9",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImJ5dGVfY2FwIiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiY2FwIiwiY2FwIjoiY2FwYWNpdHlfdXBsb2FkIiwiYWN0dWFsIjo2NzEwODg2NSwibGltaXQiOjY3MTA4ODY0LCJ1bml0cyI6ImJ5dGVzIn19fX19",
       "state_after": [],
       "replayed_finished_ref": null
@@ -421,7 +421,7 @@
           "state": "open"
         }
       ],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMiIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifX19fX0=",
       "state_after": [
         {
@@ -513,7 +513,7 @@
           "state": "open"
         }
       ],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMzAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMzAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMSIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifX19fX0=",
       "state_after": [
         {
@@ -573,7 +573,7 @@
           "state": "open"
         }
       ],
-      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMiIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifX19fX0=",
       "state_after": [
         {
