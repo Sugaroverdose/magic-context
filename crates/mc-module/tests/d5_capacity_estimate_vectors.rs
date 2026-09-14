@@ -231,11 +231,11 @@ struct CheckedCacheEntry {
 struct CapacitySupersessionVector {
     id: String,
     begin_vector_id: String,
-    older_after: BeginUploadRecord,
+    state_after_begin: Vec<BeginUploadRecord>,
     older_body_bytes_base64: Option<String>,
-    newer_before_check: BeginUploadRecord,
+    state_before_check: Vec<BeginUploadRecord>,
     newer_check_vector_id: String,
-    newer_after_check: BeginUploadRecord,
+    state_after_check: Vec<BeginUploadRecord>,
     newer_body_bytes_base64: Option<String>,
     late_operations: Vec<LateSupersededOperation>,
 }
@@ -882,63 +882,56 @@ fn evaluate_begin(
             },
         };
     }
-    let same_digest = vector.initial_records.iter().find(|record| {
+
+    let mut live = None;
+    let mut consumed_same_digest = Vec::new();
+    for record in vector.initial_records.iter().filter(|record| {
         record.predecessor_key == predecessor
             && record.agent == agent
             && record.incarnation == incarnation
-            && record.digest == digest
-    });
-    if let Some(record) = same_digest {
-        if record.state == UploadState::Consumed {
-            assert!(
-                expected_open.is_none(),
-                "consumed digest replacement requires expected_open none"
-            );
-            let replacement = vector
-                .state_after
-                .iter()
-                .find(|candidate| {
-                    candidate.predecessor_key == predecessor
-                        && candidate.agent == agent
-                        && candidate.incarnation == incarnation
-                        && candidate.digest == digest
-                        && candidate.upload_id != record.upload_id
-                        && candidate.state == UploadState::Open
-                })
-                .expect("consumed digest begin must allocate a new live upload");
-            return BeginResult::Begun {
-                upload_id: replacement.upload_id.clone(),
-            };
+    }) {
+        match record.state {
+            UploadState::Open | UploadState::Finished => {
+                assert!(
+                    live.replace(record).is_none(),
+                    "capacity scope must have at most one live upload"
+                );
+            }
+            UploadState::Consumed if record.digest == digest => {
+                consumed_same_digest.push(record);
+            }
+            UploadState::Consumed | UploadState::Superseded => {}
         }
-        if record.total_bytes != total_bytes || record.total_chunks != total_chunks {
-            let field = if record.total_bytes != total_bytes {
-                "total_bytes"
-            } else {
-                "total_chunks"
-            };
-            return BeginResult::Refused {
-                refusal: field_refusal(field, "declaration differs from the open capacity upload"),
-            };
-        }
-        return BeginResult::Begun {
-            upload_id: record.upload_id.clone(),
-        };
     }
-    let open = vector.initial_records.iter().find(|record| {
-        record.predecessor_key == predecessor
-            && record.agent == agent
-            && record.incarnation == incarnation
-            && record.state == UploadState::Open
-    });
-    if let Some(open) = open {
-        if expected_open.as_deref() != Some(open.upload_id.as_str()) {
+
+    if let Some(live) = live {
+        if live.digest == digest {
+            if live.total_bytes != total_bytes || live.total_chunks != total_chunks {
+                let field = if live.total_bytes != total_bytes {
+                    "total_bytes"
+                } else {
+                    "total_chunks"
+                };
+                return BeginResult::Refused {
+                    refusal: field_refusal(
+                        field,
+                        "declaration differs from the open capacity upload",
+                    ),
+                };
+            }
+            return BeginResult::Begun {
+                upload_id: live.upload_id.clone(),
+            };
+        }
+
+        if expected_open.as_deref() != Some(live.upload_id.as_str()) {
             return BeginResult::Refused {
                 refusal: Refusal {
                     reason: RefusalReason::UploadConflict,
                     receipt_id: None,
                     details: RefusalDetails::Live {
-                        upload_id: open.upload_id.clone(),
-                        digest: open.digest.clone(),
+                        upload_id: live.upload_id.clone(),
+                        digest: live.digest.clone(),
                     },
                 },
             };
@@ -951,22 +944,26 @@ fn evaluate_begin(
                     && record.agent == agent
                     && record.incarnation == incarnation
                     && record.digest == digest
+                    && record.total_bytes == total_bytes
+                    && record.total_chunks == total_chunks
                     && record.state == UploadState::Open
+                    && record.upload_id != live.upload_id
             })
             .expect("different digest must create a superseding live upload");
         assert!(vector.state_after.iter().any(|record| {
-            record.upload_id == open.upload_id && record.state == UploadState::Superseded
+            record.upload_id == live.upload_id && record.state == UploadState::Superseded
         }));
         return BeginResult::Begun {
             upload_id: replacement.upload_id.clone(),
         };
     }
+
     if expected_open.is_some() {
         return BeginResult::Refused {
             refusal: field_refusal("expected_open", "no open upload"),
         };
     }
-    let record = vector
+    let replacement = vector
         .state_after
         .iter()
         .find(|record| {
@@ -976,10 +973,17 @@ fn evaluate_begin(
                 && record.digest == digest
                 && record.total_bytes == total_bytes
                 && record.total_chunks == total_chunks
+                && record.state == UploadState::Open
         })
-        .expect("fresh begin must create its declared record");
+        .expect("fresh begin must create its declared live record");
+    assert!(
+        consumed_same_digest
+            .iter()
+            .all(|consumed| consumed.upload_id != replacement.upload_id),
+        "consumed digest begin must allocate a new live upload"
+    );
     BeginResult::Begun {
-        upload_id: record.upload_id.clone(),
+        upload_id: replacement.upload_id.clone(),
     }
 }
 
@@ -1255,6 +1259,8 @@ fn d5_capacity_begin_is_ticketless_idempotent_and_single_open() {
             "B09_a_expected_b_supersedes",
             "B10_b_none_refuses_live_a",
             "B11_expected_open_without_live_refuses",
+            "B12_consumed_a_none_refuses_live_b",
+            "B13_consumed_a_expected_b_supersedes",
         ]
     );
 
@@ -1355,7 +1361,12 @@ fn d5_capacity_begin_supersession_is_cas_guarded() {
         let vector = begin_vector(&fixture, id);
         let request = parse_exact::<LineageRequest>(&vector.request_bytes_base64, &vector.id);
         let (_, _, _, _, _, digest, expected_open) = request_begin(request);
-        assert_ne!(digest, vector.initial_records[0].digest);
+        let live = vector
+            .initial_records
+            .iter()
+            .find(|record| matches!(record.state, UploadState::Open | UploadState::Finished))
+            .expect("conflict vector must include its live upload");
+        assert_ne!(digest, live.digest);
         assert_eq!(expected_open, None);
         let result = response_begin(parse_exact::<LineageResponse>(
             &vector.expected_bytes_base64,
@@ -1369,8 +1380,8 @@ fn d5_capacity_begin_supersession_is_cas_guarded() {
         assert_eq!(
             refusal.details,
             RefusalDetails::Live {
-                upload_id: vector.initial_records[0].upload_id.clone(),
-                digest: vector.initial_records[0].digest.clone(),
+                upload_id: live.upload_id.clone(),
+                digest: live.digest.clone(),
             }
         );
         assert_eq!(vector.state_after, vector.initial_records);
@@ -1402,6 +1413,118 @@ fn d5_capacity_begin_supersession_is_cas_guarded() {
     );
     assert_eq!(return_to_a.state_after[0].state, UploadState::Superseded);
     assert_eq!(return_to_a.state_after[1].state, UploadState::Open);
+}
+
+#[test]
+fn d5_capacity_superseded_digest_never_replays_over_live_slot() {
+    let (fixture, _) = load_fixture();
+    let vector = begin_vector(&fixture, "B08_delayed_a_none_refuses_live_b");
+    assert_eq!(
+        vector.initial_records,
+        begin_vector(&fixture, "B04_different_digest_supersedes_open").state_after
+    );
+    assert_eq!(vector.state_after, vector.initial_records);
+
+    let superseded = vector
+        .initial_records
+        .iter()
+        .find(|record| record.state == UploadState::Superseded)
+        .expect("delayed begin must retain superseded A");
+    let live = vector
+        .initial_records
+        .iter()
+        .find(|record| matches!(record.state, UploadState::Open | UploadState::Finished))
+        .expect("delayed begin must retain live B");
+    let request = parse_exact::<LineageRequest>(&vector.request_bytes_base64, &vector.id);
+    let (_, _, _, _, _, digest, expected_open) = request_begin(request.clone());
+    assert_eq!(digest, superseded.digest);
+    assert_ne!(digest, live.digest);
+    assert_eq!(expected_open, None);
+
+    let expected = response_begin(parse_exact::<LineageResponse>(
+        &vector.expected_bytes_base64,
+        &vector.id,
+    ));
+    assert_eq!(evaluate_begin(&fixture, vector, &request), expected);
+    assert_eq!(
+        expected,
+        BeginResult::Refused {
+            refusal: Refusal {
+                reason: RefusalReason::UploadConflict,
+                receipt_id: None,
+                details: RefusalDetails::Live {
+                    upload_id: live.upload_id.clone(),
+                    digest: live.digest.clone(),
+                },
+            },
+        }
+    );
+}
+
+#[test]
+fn d5_capacity_consumed_digest_cannot_bypass_live_slot() {
+    let (fixture, _) = load_fixture();
+    for id in [
+        "B12_consumed_a_none_refuses_live_b",
+        "B10_b_none_refuses_live_a",
+    ] {
+        let vector = begin_vector(&fixture, id);
+        assert_eq!(vector.initial_records.len(), 2, "{id}");
+        let consumed = vector
+            .initial_records
+            .iter()
+            .find(|record| record.state == UploadState::Consumed)
+            .expect("consumed-digest conflict must retain its consumed row");
+        let live = vector
+            .initial_records
+            .iter()
+            .find(|record| matches!(record.state, UploadState::Open | UploadState::Finished))
+            .expect("consumed-digest conflict must retain its live row");
+        let request = parse_exact::<LineageRequest>(&vector.request_bytes_base64, &vector.id);
+        let (_, _, _, _, _, digest, expected_open) = request_begin(request.clone());
+        assert_eq!(digest, consumed.digest, "{id}");
+        assert_ne!(digest, live.digest, "{id}");
+        assert_eq!(expected_open, None, "{id}");
+        let expected = response_begin(parse_exact::<LineageResponse>(
+            &vector.expected_bytes_base64,
+            &vector.id,
+        ));
+        assert_eq!(evaluate_begin(&fixture, vector, &request), expected, "{id}");
+        assert_eq!(vector.state_after, vector.initial_records, "{id}");
+    }
+
+    let vector = begin_vector(&fixture, "B13_consumed_a_expected_b_supersedes");
+    let consumed = vector
+        .initial_records
+        .iter()
+        .find(|record| record.state == UploadState::Consumed)
+        .expect("consumed-digest supersession must retain consumed A");
+    let live = vector
+        .initial_records
+        .iter()
+        .find(|record| matches!(record.state, UploadState::Open | UploadState::Finished))
+        .expect("consumed-digest supersession must retain live B");
+    let request = parse_exact::<LineageRequest>(&vector.request_bytes_base64, &vector.id);
+    let (_, _, _, _, _, digest, expected_open) = request_begin(request.clone());
+    assert_eq!(digest, consumed.digest);
+    assert_eq!(expected_open.as_deref(), Some(live.upload_id.as_str()));
+    let expected = response_begin(parse_exact::<LineageResponse>(
+        &vector.expected_bytes_base64,
+        &vector.id,
+    ));
+    assert_eq!(evaluate_begin(&fixture, vector, &request), expected);
+
+    let replacement = vector
+        .state_after
+        .iter()
+        .find(|record| record.state == UploadState::Open)
+        .expect("consumed-digest supersession must allocate new A");
+    assert_eq!(replacement.digest, consumed.digest);
+    assert_ne!(replacement.upload_id, consumed.upload_id);
+    assert!(vector.state_after.iter().any(|record| {
+        record.upload_id == live.upload_id && record.state == UploadState::Superseded
+    }));
+    assert!(vector.state_after.contains(consumed));
 }
 
 #[test]
@@ -1896,20 +2019,55 @@ fn d5_capacity_different_digest_supersedes_without_wedging_scope() {
         vector.begin_vector_id,
         "B04_different_digest_supersedes_open"
     );
-    assert_eq!(vector.older_after.state, UploadState::Superseded);
-    assert_eq!(vector.newer_before_check.state, UploadState::Finished);
-    assert_eq!(vector.newer_after_check.state, UploadState::Consumed);
+    assert_eq!(
+        vector.state_after_begin,
+        begin_vector(&fixture, &vector.begin_vector_id).state_after
+    );
+    assert_eq!(vector.state_after_begin.len(), 2);
+    assert_eq!(vector.state_before_check.len(), 2);
+    assert_eq!(vector.state_after_check.len(), 2);
+
+    let older_after = vector
+        .state_after_begin
+        .iter()
+        .find(|record| record.state == UploadState::Superseded)
+        .expect("state after begin must retain the superseded upload");
+    let newer_after_begin = vector
+        .state_after_begin
+        .iter()
+        .find(|record| record.state == UploadState::Open)
+        .expect("state after begin must include the replacement upload");
+    let older_before_check = vector
+        .state_before_check
+        .iter()
+        .find(|record| record.upload_id == older_after.upload_id)
+        .expect("state before check must retain the superseded upload");
+    let newer_before_check = vector
+        .state_before_check
+        .iter()
+        .find(|record| record.upload_id == newer_after_begin.upload_id)
+        .expect("state before check must retain the replacement upload");
+    let older_after_check = vector
+        .state_after_check
+        .iter()
+        .find(|record| record.upload_id == older_after.upload_id)
+        .expect("state after check must retain the superseded upload");
+    let newer_after_check = vector
+        .state_after_check
+        .iter()
+        .find(|record| record.upload_id == newer_after_begin.upload_id)
+        .expect("state after check must retain the consumed upload");
+
+    assert_eq!(older_after.state, UploadState::Superseded);
+    assert_eq!(older_before_check, older_after);
+    assert_eq!(older_after_check, older_after);
+    assert_eq!(newer_before_check.state, UploadState::Finished);
+    assert_eq!(newer_after_check.state, UploadState::Consumed);
     assert_eq!(vector.older_body_bytes_base64, None);
     assert_eq!(vector.newer_body_bytes_base64, None);
-    assert_ne!(vector.older_after.digest, vector.newer_before_check.digest);
-    assert_eq!(
-        vector.newer_before_check.digest,
-        vector.newer_after_check.digest
-    );
-    assert_eq!(
-        vector.newer_before_check.upload_id,
-        vector.newer_after_check.upload_id
-    );
+    assert_ne!(older_after.digest, newer_before_check.digest);
+    assert_eq!(newer_before_check.digest, newer_after_check.digest);
+    assert_eq!(newer_before_check.upload_id, newer_after_check.upload_id);
 
     let operations = vector
         .late_operations
@@ -1921,7 +2079,7 @@ fn d5_capacity_different_digest_supersedes_without_wedging_scope() {
         BTreeSet::from(["capacity.put", "capacity.finish", "capacity.check"])
     );
     for operation in &vector.late_operations {
-        assert_eq!(operation.upload_id, vector.older_after.upload_id);
+        assert_eq!(operation.upload_id, older_after.upload_id);
         assert_eq!(operation.expected_refusal.receipt_id, None);
         assert_eq!(
             operation.expected_refusal.reason,
@@ -1970,7 +2128,7 @@ fn d5_capacity_different_digest_supersedes_without_wedging_scope() {
         }
     }
     let newer = checked_estimate(check_vector(&fixture, &vector.newer_check_vector_id));
-    assert_eq!(newer.body_sha256, vector.newer_before_check.digest);
+    assert_eq!(newer.body_sha256, newer_before_check.digest);
 }
 
 #[test]

@@ -404,6 +404,16 @@
           "P": "session-capacity-0001",
           "agent": "parent",
           "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
           "upload_id": "capacity-begin-upload-0002",
           "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
           "total_bytes": 1300000,
@@ -414,6 +424,16 @@
       "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMiIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifX19fX0=",
       "state_after": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
         {
           "P": "session-capacity-0001",
           "agent": "parent",
@@ -476,6 +496,16 @@
           "P": "session-capacity-0001",
           "agent": "parent",
           "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
           "upload_id": "capacity-begin-upload-0001",
           "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
           "total_bytes": 1200000,
@@ -486,6 +516,16 @@
       "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMzAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMSIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEifX19fX0=",
       "state_after": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
         {
           "P": "session-capacity-0001",
           "agent": "parent",
@@ -506,6 +546,118 @@
       "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLW9sZCJ9",
       "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6ImludmFsaWRfYXJndW1lbnRzIiwicmVjZWlwdF9pZCI6bnVsbCwiZGV0YWlscyI6eyJraW5kIjoiZmllbGQiLCJmaWVsZCI6ImV4cGVjdGVkX29wZW4iLCJyZWFzb24iOiJubyBvcGVuIHVwbG9hZCJ9fX19fQ==",
       "state_after": [],
+      "replayed_finished_ref": null
+    },
+    {
+      "id": "B12_consumed_a_none_refuses_live_b",
+      "name": "same-digest begin for consumed A with expected_open none refuses live B",
+      "initial_records": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "open"
+        }
+      ],
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjpudWxsfQ==",
+      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IlJFRlVTRUQiLCJyZWZ1c2FsIjp7InJlYXNvbiI6InVwbG9hZF9jb25mbGljdCIsInJlY2VpcHRfaWQiOm51bGwsImRldGFpbHMiOnsia2luZCI6ImxpdmUiLCJ1cGxvYWRfaWQiOiJjYXBhY2l0eS1iZWdpbi11cGxvYWQtMDAwMiIsImRpZ2VzdCI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmYifX19fX0=",
+      "state_after": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "open"
+        }
+      ],
+      "replayed_finished_ref": null
+    },
+    {
+      "id": "B13_consumed_a_expected_b_supersedes",
+      "name": "same-digest begin for consumed A naming live B supersedes B and allocates new A",
+      "initial_records": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "open"
+        }
+      ],
+      "request_bytes_base64": "eyJvcCI6ImNhcGFjaXR5LmJlZ2luIiwiUCI6InNlc3Npb24tY2FwYWNpdHktMDAwMSIsImFnZW50IjoicGFyZW50IiwiaW5jYXJuYXRpb24iOjksInRvdGFsX2J5dGVzIjoxMjAwMDAwLCJ0b3RhbF9jaHVua3MiOjIsImRpZ2VzdCI6IjA0Y2IzNGIwYzkwMmUwYmIyZjM5ZmIwMzg2MDk4NWNhZjcyNTliZWMyZmVmYTY2Y2RmZDg5ZGY5MWJmZjg1OTEiLCJleHBlY3RlZF9vcGVuIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLTAwMDIifQ==",
+      "expected_bytes_base64": "eyJjYXBhY2l0eS5iZWdpbiI6eyJyZXN1bHQiOnsia2luZCI6IkJFR1VOIiwidXBsb2FkX2lkIjoiY2FwYWNpdHktYmVnaW4tdXBsb2FkLTAwMDQifX19",
+      "state_after": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "consumed"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0004",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "open"
+        }
+      ],
       "replayed_finished_ref": null
     }
   ],
@@ -1244,38 +1396,74 @@
     {
       "id": "SUPERSEDE01_different_digest_replaces_live_upload",
       "begin_vector_id": "B04_different_digest_supersedes_open",
-      "older_after": {
-        "P": "session-capacity-0001",
-        "agent": "parent",
-        "incarnation": 9,
-        "upload_id": "capacity-begin-upload-0001",
-        "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
-        "total_bytes": 1200000,
-        "total_chunks": 2,
-        "state": "superseded"
-      },
+      "state_after_begin": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "open"
+        }
+      ],
       "older_body_bytes_base64": null,
-      "newer_before_check": {
-        "P": "session-capacity-0001",
-        "agent": "parent",
-        "incarnation": 9,
-        "upload_id": "capacity-begin-upload-0002",
-        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "total_bytes": 1300000,
-        "total_chunks": 2,
-        "state": "finished"
-      },
+      "state_before_check": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "finished"
+        }
+      ],
       "newer_check_vector_id": "C23_superseding_upload_checked",
-      "newer_after_check": {
-        "P": "session-capacity-0001",
-        "agent": "parent",
-        "incarnation": 9,
-        "upload_id": "capacity-begin-upload-0002",
-        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "total_bytes": 1300000,
-        "total_chunks": 2,
-        "state": "consumed"
-      },
+      "state_after_check": [
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0001",
+          "digest": "04cb34b0c902e0bb2f39fb03860985caf7259bec2fefa66cdfd89df91bff8591",
+          "total_bytes": 1200000,
+          "total_chunks": 2,
+          "state": "superseded"
+        },
+        {
+          "P": "session-capacity-0001",
+          "agent": "parent",
+          "incarnation": 9,
+          "upload_id": "capacity-begin-upload-0002",
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "total_bytes": 1300000,
+          "total_chunks": 2,
+          "state": "consumed"
+        }
+      ],
       "newer_body_bytes_base64": null,
       "late_operations": [
         {
