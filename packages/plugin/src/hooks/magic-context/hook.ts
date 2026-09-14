@@ -98,7 +98,10 @@ import { formatEmbedStatusText } from "./format-embed-status";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
-import { SubcModuleTransport } from "./module-transport";
+import {
+    getDefaultSubcConnectionFile,
+    SubcModuleTransport,
+} from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import {
@@ -790,7 +793,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const authorityRecoveryModuleClient =
         deps.rustModeModuleClient ??
         (() => {
-            const transport = new SubcModuleTransport(deps.config.subc?.connection_file);
+            const transport = new SubcModuleTransport(
+                deps.config.subc?.connection_file ?? getDefaultSubcConnectionFile(),
+            );
             const client: RustModeModuleClient = {
                 call: (args) => transport.call(args),
                 stateSyncCapabilities: (args) => transport.stateSyncCapabilities(args),
