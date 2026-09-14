@@ -826,7 +826,18 @@ export function clearPendingCompactionMarkerAfterSuccessfulDrain(args: {
     return "cas-lost-already-cleared";
 }
 
+export interface CompactionMarkerStrategy {
+    applyDeferred: typeof applyDeferredCompactionMarker;
+    reconcile: typeof reconcileMarkerRepresentation;
+}
+
+export const defaultCompactionMarkerStrategy: CompactionMarkerStrategy = {
+    applyDeferred: applyDeferredCompactionMarker,
+    reconcile: reconcileMarkerRepresentation,
+};
+
 interface RunPostTransformPhaseArgs {
+    compactionMarkerStrategy?: CompactionMarkerStrategy;
     sessionId: string;
     db: ContextDatabase;
     messages: MessageLike[];
@@ -2251,12 +2262,9 @@ export async function runPostTransformPhase(
                     `compaction-marker drain: pending ordinal ${pending.ordinal} is newer than consumed boundary ${args.pendingCompartmentInjection?.compartmentEndMessage ?? "<none>"}; preserving deferred history refresh signal`,
                 );
             } else {
-                const outcome = applyDeferredCompactionMarker(
-                    args.db,
-                    args.sessionId,
-                    pending,
-                    args.sessionDirectory,
-                );
+                const outcome = (
+                    args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy
+                ).applyDeferred(args.db, args.sessionId, pending, args.sessionDirectory);
                 switch (outcome.kind) {
                     case "applied":
                     case "already-current":
@@ -2298,13 +2306,17 @@ export async function runPostTransformPhase(
     // here has state to replay; leaving it live would re-insert a synthetic
     // summary into the wire of a mode that must stay additive-only.
     if (!compactionOff) {
-        reconcileMarkerRepresentation(args.messages, persistedCompactionMarkerState, {
-            db: args.db,
-            sessionId: args.sessionId,
-            tagger: args.tagger,
-            ctxReduceAvailability: args.ctxReduceAvailability,
-            isCacheBustingPass,
-        });
+        (args.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy).reconcile(
+            args.messages,
+            persistedCompactionMarkerState,
+            {
+                db: args.db,
+                sessionId: args.sessionId,
+                tagger: args.tagger,
+                ctxReduceAvailability: args.ctxReduceAvailability,
+                isCacheBustingPass,
+            },
+        );
     }
 
     const deferredHistoryDrainEligible =

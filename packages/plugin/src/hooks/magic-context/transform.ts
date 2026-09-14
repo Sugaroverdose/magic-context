@@ -144,6 +144,8 @@ import {
 } from "./transform-operations";
 import {
     abortSessionFailClosed,
+    type CompactionMarkerStrategy,
+    defaultCompactionMarkerStrategy,
     evaluateEmergencyFailClosed,
     runPostTransformPhase,
 } from "./transform-postprocess-phase";
@@ -525,6 +527,8 @@ export function scheduleTsAuthorityRecovery(args: {
 }
 
 export interface TransformDeps {
+    /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
+    compactionMarkerStrategy?: CompactionMarkerStrategy;
     /** Host storage and cancellation adapters; omitted callbacks retain OpenCode 1 behavior. */
     hostRawMessages?: typeof readRawSessionMessages;
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
@@ -2272,6 +2276,8 @@ export function createTransform(deps: TransformDeps) {
 
         const tPostProcess = performance.now();
         const postTransformResult = await runPostTransformPhase({
+            compactionMarkerStrategy:
+                deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
             sessionId,
             db,
             messages,

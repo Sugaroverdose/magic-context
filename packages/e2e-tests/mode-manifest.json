@@ -3,6 +3,13 @@
     "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/opencode2/adapters-s3-marker-policy.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "OpenCode 2 marker strategy and inverse-projection unit contracts run in the dedicated v2 lane",
+            "contract_refs": ["I10"]
+        },
+        {
             "path": "tests/opencode2/adapters-s2-contracts.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

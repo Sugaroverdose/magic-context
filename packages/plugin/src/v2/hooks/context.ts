@@ -19,6 +19,7 @@ import { createTransform, type TransformDeps } from "../../hooks/magic-context/t
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { getDataDir } from "../../shared/data-path";
 import { pushNotification } from "../../shared/rpc-notifications";
+import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { adaptPayload } from "./payload";
@@ -222,6 +223,7 @@ export async function registerContext(context: V2Context): Promise<void> {
                 directory,
                 projectPath: directory,
                 historianRunnable: false,
+                compactionMarkerStrategy: v2CompactionMarkerStrategy,
                 memoryConfig: {
                     enabled: config.memory.enabled,
                     injectionBudgetTokens: config.memory.injection_budget_tokens,
