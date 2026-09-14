@@ -32,7 +32,7 @@
 		"build:e2e-argv": "bun build src/subagent-runner.ts --outfile ../../tests/docker/.generated/subagent-runner-e2e.mjs --target node --format esm --external node:sqlite",
 		"typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit",
 		"test": "bun ../../scripts/check-bun.mjs && bun install --frozen-lockfile && bun test --parallel --timeout 30000",
-		"test:serial": "bun ../../scripts/check-bun.mjs && bun install --frozen-lockfile && bun test --timeout 30000",
+		"test:serial": "bun install --frozen-lockfile && bun test --timeout 30000",
 		"lint": "bun ../../scripts/check-bun.mjs && biome check src",
 		"lint:fix": "biome check --write src",
 		"format": "biome format --write src",

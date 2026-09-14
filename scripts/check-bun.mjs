@@ -18,6 +18,8 @@ const belowFloor =
 		foundPatch < floorPatch);
 
 if (belowFloor) {
-	console.error(`Bun ${found} is below the ${floor} floor`);
+	console.error(
+		`Bun ${found} is below the ${floor} floor; upgrade Bun, or use the serial test lane (bun run test:serial) which stays green on older releases`,
+	);
 	process.exit(1);
 }
