@@ -67,6 +67,7 @@ struct Sequence {
 #[serde(deny_unknown_fields)]
 struct RecreationObservation {
     prior_incarnation: u64,
+    pre_recreation_scope_row: ScopeRow,
     current_incarnation: u64,
     resolve_generation_transition: String,
 }
@@ -262,7 +263,7 @@ enum ScopeResult {
 #[serde(deny_unknown_fields)]
 struct Refusal {
     reason: RefusalReason,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     receipt_id: Option<String>,
     details: RefusalDetails,
 }
@@ -595,7 +596,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn d5_scope_open_encodings_are_byte_exact() {
     let (fixture, _) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.scope-open-vectors.v1");
-    assert_eq!(fixture.contract_version, "1.3.16");
+    assert_eq!(fixture.contract_version, "1.3.18");
     assert!(fixture
         .encoding_rule
         .lineage_request
@@ -615,7 +616,11 @@ fn d5_scope_open_encodings_are_byte_exact() {
     assert!(fixture
         .encoding_rule
         .nested_unions
-        .contains("Option none is omitted"));
+        .contains("operation Option fields are omitted"));
+    assert!(fixture
+        .encoding_rule
+        .nested_unions
+        .contains("nested DTO Option fields are emitted as explicit null"));
     assert!(fixture.encoding_rule.nested_unions.contains("base64"));
     assert!(fixture
         .encoding_rule
@@ -703,6 +708,16 @@ fn d5_scope_open_invalid_requests_are_total_and_field_specific() {
         );
         let request_bytes = wire_bytes(&vector.request_bytes_base64);
         let evaluated = invalid_request_refusal(&request_bytes);
+        let expected_bytes = wire_bytes(&vector.expected_bytes_base64);
+        let expected_value: Value =
+            serde_json::from_slice(&expected_bytes).expect("scope.open refusal response JSON");
+        assert!(
+            expected_value["scope.open"]["result"]["refusal"]
+                .as_object()
+                .is_some_and(|refusal| refusal.get("receipt_id").is_some_and(Value::is_null)),
+            "{} must emit absent nested DTO receipt_id as explicit null",
+            vector.id
+        );
         let expected = response_result(parse_exact::<ScopeResponse>(
             &vector.expected_bytes_base64,
             &vector.id,
@@ -724,7 +739,11 @@ fn d5_scope_open_invalid_requests_are_total_and_field_specific() {
             "{} details",
             vector.id
         );
-        assert_eq!(evaluated.receipt_id, None, "{} omits receipt_id", vector.id);
+        assert_eq!(
+            evaluated.receipt_id, None,
+            "{} absent receipt_id must decode from explicit null",
+            vector.id
+        );
     }
 
     let wrong_type_names = fixture
@@ -821,7 +840,7 @@ fn d5_scope_open_recreation_keeps_original_obligation() {
     );
     assert!(recreation
         .resolve_generation_transition
-        .contains("not specified"));
+        .contains("never resets"));
     assert_eq!(
         sequence.steps.len(),
         4,
@@ -893,6 +912,62 @@ fn d5_scope_open_recreation_keeps_original_obligation() {
         assert_eq!(
             step.state_after, sequence.initial_state,
             "recreation must preserve the old gateway record and obligation"
+        );
+    }
+}
+
+#[test]
+fn d5_scope_open_recreation_never_decreases_generation() {
+    let (fixture, _) = load_fixture();
+    let sequence = sequence(&fixture, "S03_recreation_with_outstanding_attempt");
+    let recreation = sequence
+        .recreation_observation
+        .as_ref()
+        .expect("recreation observation");
+    let before = &recreation.pre_recreation_scope_row;
+    let after = sequence
+        .initial_state
+        .scope_rows
+        .first()
+        .expect("post-recreation scope row");
+    let original = sequence
+        .initial_state
+        .gateway_attempts
+        .first()
+        .expect("original gateway attempt");
+
+    assert_eq!(before.incarnation, recreation.prior_incarnation);
+    assert_eq!(after.incarnation, recreation.current_incarnation);
+    assert_eq!(before.predecessor_key, after.predecessor_key);
+    assert_eq!(before.agent, after.agent);
+    assert_eq!(before.lineage_id, after.lineage_id);
+    assert_eq!(
+        original.admission_ticket.predecessor_key,
+        before.predecessor_key
+    );
+    assert_eq!(original.admission_ticket.agent, before.agent);
+    assert_eq!(original.admission_ticket.incarnation, before.incarnation);
+    assert_eq!(
+        original.admission_ticket.resolve_generation, before.resolve_generation,
+        "the original ticket must carry the generation sampled from the pre-recreation row"
+    );
+    assert!(
+        after.resolve_generation >= before.resolve_generation,
+        "resolve_generation must never decrease across recreation"
+    );
+    assert_eq!(
+        after.resolve_generation, before.resolve_generation,
+        "recreation without a seal or resolve must preserve resolve_generation"
+    );
+    for step in &sequence.steps {
+        let row = step
+            .state_after
+            .scope_rows
+            .first()
+            .expect("post-recreation scope row remains durable");
+        assert!(
+            row.resolve_generation >= before.resolve_generation,
+            "resolve_generation must remain monotonic after recreation"
         );
     }
 }

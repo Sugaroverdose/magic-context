@@ -1,10 +1,10 @@
 {
   "schema": "mc.d5.scope-open-vectors.v1",
-  "contract_version": "1.3.16",
+  "contract_version": "1.3.18",
   "encoding_rule": {
     "lineage_request": "Internally tagged JSON object with discriminator op; scope.open fields are siblings of op with no args wrapper.",
     "lineage_response": "Externally keyed operation object {\"scope.open\":{\"result\":...}}, following the clause 2 response convention.",
-    "nested_unions": "Internally tagged JSON objects retain discriminator kind; Option none is omitted; checked nonnegative integers use JSON integer tokens; byte strings are base64.",
+    "nested_unions": "Internally tagged JSON objects retain discriminator kind; operation Option fields are omitted when absent; nested DTO Option fields are emitted as explicit null; checked nonnegative integers use JSON integer tokens; byte strings are base64.",
     "unknown_keys": "Unknown top-level request keys are invalid_arguments and RefusalDetails.field names the rejected key.",
     "implementation_status": "No D5 lineage serializer exists at this baseline; this owner-authored fixture pins the shared MC-gateway contract."
   },
@@ -27,7 +27,7 @@
     {
       "id": "E04",
       "message": "refused-response",
-      "bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6InJlcXVpcmVkIGZpZWxkIGlzIG1pc3NpbmcifX19fX0="
+      "bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6InJlcXVpcmVkIGZpZWxkIGlzIG1pc3NpbmcifX19fX0="
     }
   ],
   "refusal_vectors": [
@@ -35,7 +35,7 @@
       "id": "R01",
       "name": "missing P",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJhZ2VudCI6ImFnZW50LW1haW4ifQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6InJlcXVpcmVkIGZpZWxkIGlzIG1pc3NpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6InJlcXVpcmVkIGZpZWxkIGlzIG1pc3NpbmcifX19fX0=",
       "field": "P",
       "reason": "required field is missing"
     },
@@ -43,7 +43,7 @@
       "id": "R02",
       "name": "missing agent",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEifQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJyZXF1aXJlZCBmaWVsZCBpcyBtaXNzaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJyZXF1aXJlZCBmaWVsZCBpcyBtaXNzaW5nIn19fX19",
       "field": "agent",
       "reason": "required field is missing"
     },
@@ -51,7 +51,7 @@
       "id": "R03",
       "name": "empty P",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoiIiwiYWdlbnQiOiJhZ2VudC1tYWluIn0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgbm9uLWVtcHR5In19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgbm9uLWVtcHR5In19fX19",
       "field": "P",
       "reason": "must be non-empty"
     },
@@ -59,7 +59,7 @@
       "id": "R04",
       "name": "empty agent",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6IiJ9",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIG5vbi1lbXB0eSJ9fX19fQ==",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIG5vbi1lbXB0eSJ9fX19fQ==",
       "field": "agent",
       "reason": "must be non-empty"
     },
@@ -67,7 +67,7 @@
       "id": "R05",
       "name": "P has wrong null type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjpudWxsLCJhZ2VudCI6ImFnZW50LW1haW4ifQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
       "field": "P",
       "reason": "must be a string"
     },
@@ -75,7 +75,7 @@
       "id": "R06",
       "name": "P has wrong boolean type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjp0cnVlLCJhZ2VudCI6ImFnZW50LW1haW4ifQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
       "field": "P",
       "reason": "must be a string"
     },
@@ -83,7 +83,7 @@
       "id": "R07",
       "name": "P has wrong integer type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjo3LCJhZ2VudCI6ImFnZW50LW1haW4ifQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
       "field": "P",
       "reason": "must be a string"
     },
@@ -91,7 +91,7 @@
       "id": "R08",
       "name": "P has wrong array type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjpbXSwiYWdlbnQiOiJhZ2VudC1tYWluIn0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
       "field": "P",
       "reason": "must be a string"
     },
@@ -99,7 +99,7 @@
       "id": "R09",
       "name": "P has wrong object type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjp7fSwiYWdlbnQiOiJhZ2VudC1tYWluIn0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiUCIsInJlYXNvbiI6Im11c3QgYmUgYSBzdHJpbmcifX19fX0=",
       "field": "P",
       "reason": "must be a string"
     },
@@ -107,7 +107,7 @@
       "id": "R10",
       "name": "agent has wrong null type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6bnVsbH0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
       "field": "agent",
       "reason": "must be a string"
     },
@@ -115,7 +115,7 @@
       "id": "R11",
       "name": "agent has wrong boolean type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6dHJ1ZX0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
       "field": "agent",
       "reason": "must be a string"
     },
@@ -123,7 +123,7 @@
       "id": "R12",
       "name": "agent has wrong integer type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6N30=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
       "field": "agent",
       "reason": "must be a string"
     },
@@ -131,7 +131,7 @@
       "id": "R13",
       "name": "agent has wrong array type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6W119",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
       "field": "agent",
       "reason": "must be a string"
     },
@@ -139,7 +139,7 @@
       "id": "R14",
       "name": "agent has wrong object type",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6e319",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYWdlbnQiLCJyZWFzb24iOiJtdXN0IGJlIGEgc3RyaW5nIn19fX19",
       "field": "agent",
       "reason": "must be a string"
     },
@@ -147,7 +147,7 @@
       "id": "R15",
       "name": "unknown top-level field incarnation",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6MX0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiaW5jYXJuYXRpb24iLCJyZWFzb24iOiJ1bmtub3duIGZpZWxkIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiaW5jYXJuYXRpb24iLCJyZWFzb24iOiJ1bmtub3duIGZpZWxkIn19fX19",
       "field": "incarnation",
       "reason": "unknown field"
     },
@@ -155,7 +155,7 @@
       "id": "R16",
       "name": "unknown top-level field lineage_id",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJsaW5lYWdlX2lkIjoxfQ==",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoibGluZWFnZV9pZCIsInJlYXNvbiI6InVua25vd24gZmllbGQifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoibGluZWFnZV9pZCIsInJlYXNvbiI6InVua25vd24gZmllbGQifX19fX0=",
       "field": "lineage_id",
       "reason": "unknown field"
     },
@@ -163,7 +163,7 @@
       "id": "R17",
       "name": "unknown top-level field args",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJhcmdzIjp7fX0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYXJncyIsInJlYXNvbiI6InVua25vd24gZmllbGQifX19fX0=",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiYXJncyIsInJlYXNvbiI6InVua25vd24gZmllbGQifX19fX0=",
       "field": "args",
       "reason": "unknown field"
     },
@@ -171,7 +171,7 @@
       "id": "R18",
       "name": "unknown top-level field schema_version",
       "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1pbnZhbGlkLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJzY2hlbWFfdmVyc2lvbiI6MX0=",
-      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoic2NoZW1hX3ZlcnNpb24iLCJyZWFzb24iOiJ1bmtub3duIGZpZWxkIn19fX19",
+      "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoiaW52YWxpZF9hcmd1bWVudHMiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoic2NoZW1hX3ZlcnNpb24iLCJyZWFzb24iOiJ1bmtub3duIGZpZWxkIn19fX19",
       "field": "schema_version",
       "reason": "unknown field"
     }
@@ -307,8 +307,15 @@
       "name": "recreation advances the scope while the original attempt remains bound and unresolved",
       "recreation_observation": {
         "prior_incarnation": 7,
+        "pre_recreation_scope_row": {
+          "P": "session-recreated-0001",
+          "agent": "agent-main",
+          "incarnation": 7,
+          "lineage_id": "30000000-0000-4000-8000-000000000003",
+          "resolve_generation": 6
+        },
         "current_incarnation": 8,
-        "resolve_generation_transition": "not specified by clause 3b; this vector starts from the durable post-recreation row"
+        "resolve_generation_transition": "unchanged from 6 to 6; resolve_generation persists across recreation and never resets"
       },
       "initial_state": {
         "owner_incarnation_counter": 8,
@@ -319,7 +326,7 @@
             "agent": "agent-main",
             "incarnation": 8,
             "lineage_id": "30000000-0000-4000-8000-000000000003",
-            "resolve_generation": 2
+            "resolve_generation": 6
           }
         ],
         "gateway_attempts": [
@@ -364,10 +371,10 @@
             "kind": "OPENED",
             "incarnation": 8,
             "lineage_id": "30000000-0000-4000-8000-000000000003",
-            "resolve_generation": 2,
+            "resolve_generation": 6,
             "created": false
           },
-          "response_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjgsImxpbmVhZ2VfaWQiOiIzMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDMiLCJyZXNvbHZlX2dlbmVyYXRpb24iOjIsImNyZWF0ZWQiOmZhbHNlfX19",
+          "response_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjgsImxpbmVhZ2VfaWQiOiIzMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDMiLCJyZXNvbHZlX2dlbmVyYXRpb24iOjYsImNyZWF0ZWQiOmZhbHNlfX19",
           "state_after": {
             "owner_incarnation_counter": 8,
             "owner_current_lineage": "30000000-0000-4000-8000-000000000003",
@@ -377,7 +384,7 @@
                 "agent": "agent-main",
                 "incarnation": 8,
                 "lineage_id": "30000000-0000-4000-8000-000000000003",
-                "resolve_generation": 2
+                "resolve_generation": 6
               }
             ],
             "gateway_attempts": [
@@ -434,7 +441,7 @@
                 "agent": "agent-main",
                 "incarnation": 8,
                 "lineage_id": "30000000-0000-4000-8000-000000000003",
-                "resolve_generation": 2
+                "resolve_generation": 6
               }
             ],
             "gateway_attempts": [
@@ -486,6 +493,7 @@
             "kind": "REFUSED",
             "refusal": {
               "reason": "stale_incarnation",
+              "receipt_id": null,
               "details": {
                 "kind": "field",
                 "field": "incarnation",
@@ -502,7 +510,7 @@
                 "agent": "agent-main",
                 "incarnation": 8,
                 "lineage_id": "30000000-0000-4000-8000-000000000003",
-                "resolve_generation": 2
+                "resolve_generation": 6
               }
             ],
             "gateway_attempts": [
@@ -556,6 +564,7 @@
             "kind": "REFUSED",
             "refusal": {
               "reason": "stale_incarnation",
+              "receipt_id": null,
               "details": {
                 "kind": "field",
                 "field": "incarnation",
@@ -572,7 +581,7 @@
                 "agent": "agent-main",
                 "incarnation": 8,
                 "lineage_id": "30000000-0000-4000-8000-000000000003",
-                "resolve_generation": 2
+                "resolve_generation": 6
               }
             ],
             "gateway_attempts": [
