@@ -8,6 +8,8 @@
  * concurrently while memory-mutating tasks serialize. See lease.ts + the A+B spec.
  */
 
+import type { CurateMemoryCategory } from "./curate-category-rotation";
+
 export const CANONICAL_DREAM_TASKS = [
     // map-memories runs BEFORE verify (it records the file mappings verify gates
     // on) and shares the memory lease, so it leads the canonical order.
@@ -52,6 +54,8 @@ export interface DreamTaskBacklog {
     pending: number;
     /** Total items in the task's candidate pool. */
     total: number;
+    /** Curate's one-category scope for this run/window. */
+    category?: CurateMemoryCategory;
 }
 
 /** Backlog counts keyed by canonical task name. */
@@ -66,6 +70,9 @@ export function formatDreamTaskBacklogs(
         .filter((task) => backlogs[task] !== undefined)
         .map((task) => {
             const backlog = backlogs[task];
+            if (task === "curate" && backlog?.category) {
+                return `- curate: ${backlog.category} (${backlog.pending})`;
+            }
             return `- ${task}: ${backlog?.pending ?? 0} pending / ${backlog?.total ?? 0} total`;
         })
         .join("\n");
@@ -77,6 +84,8 @@ export interface DreamTaskProgress {
     processed: number;
     total: number;
     startedAt: number;
+    /** Curate's one-category scope. */
+    category?: CurateMemoryCategory;
     /** Update/archive verdicts refused by host-side verification safety gates during the current run. */
     refused?: number;
 }
@@ -88,6 +97,7 @@ export interface DreamTaskRunBacklog {
     pendingAtEnd: number;
     totalAtEnd: number;
     processed: number;
+    category?: CurateMemoryCategory;
 }
 
 /** Use the decrease in the persisted backlog between the start and end snapshots as the per-run progress count, clamped to zero when the backlog does not decrease. */
