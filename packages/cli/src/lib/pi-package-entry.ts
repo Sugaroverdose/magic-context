@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { getPiAgentConfigDir } from "./paths";
 
 export const PI_MAGIC_CONTEXT_PACKAGE_NAME = "@cortexkit/pi-magic-context";
 
@@ -59,8 +60,18 @@ export function getPiMagicContextPackageSpecifier(entry: unknown): string | null
     return null;
 }
 
-export function hasPiMagicContextPackage(entries: unknown[]): boolean {
-    return entries.some(isPiMagicContextPackageEntry);
+/**
+ * True when Pi will load the magic-context plugin from packages[] by any
+ * identity: the npm specifier or a local checkout. Every registration check
+ * and every writer that adds the npm entry must use this, or a dev-path
+ * install is "repaired" into a second registration and then reported as a
+ * duplicate load.
+ */
+export function hasPiMagicContextPackage(
+    entries: unknown[],
+    agentDir: string = getPiAgentConfigDir(),
+): boolean {
+    return entries.some((entry) => isConfiguredPiMagicContextEntry(entry, agentDir));
 }
 
 /** True when the directory's package.json declares the magic-context Pi plugin. */
