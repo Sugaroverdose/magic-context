@@ -87,6 +87,7 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { reloadWindowOverlay } from "./shared/window-geometry";
+import { setup } from "./v2/server";
 
 const BOOT_SERVER_DEADLINE_MS = 15_000;
 const RESOLVED_CONFIG_TIMEOUT_MS = 2_000;
@@ -1014,9 +1015,10 @@ const server: Plugin = async (ctx) => {
 // plugin load (this caused the 2026-06 hidden-agent load incident). The object
 // shape bypasses that scan entirely, eliminating the footgun class. The `./tui`
 // entry already uses this same `{ id, tui }` shape.
-const plugin: PluginModule = {
+const plugin: PluginModule & { setup: typeof setup } = {
     id: "opencode-magic-context",
     server,
+    setup,
 };
 
 export default plugin;

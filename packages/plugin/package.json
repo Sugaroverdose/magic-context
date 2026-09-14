@@ -24,6 +24,7 @@
   },
   "files": [
     "dist",
+    "index.js",
     "src/tui",
     "src/tui-compiled",
     "src/shared",

@@ -525,6 +525,11 @@ export function scheduleTsAuthorityRecovery(args: {
 }
 
 export interface TransformDeps {
+    /** Host storage and cancellation adapters; omitted callbacks retain OpenCode 1 behavior. */
+    hostRawMessages?: typeof readRawSessionMessages;
+    hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
+    hostModelFallback?: typeof findLastAssistantModelFromOpenCodeDb;
+    hostRefuse?: typeof abortSessionFailClosed;
     tagger: Tagger;
     scheduler: Scheduler;
     contextUsageMap: Map<
@@ -713,7 +718,23 @@ export interface TransformDeps {
     rustMemorySyncRequestedSessions?: Set<string>;
 }
 
+export function resolveTransformHostSeams(
+    deps: Pick<
+        TransformDeps,
+        "hostRawMessages" | "hostProtectedTailBoundary" | "hostModelFallback" | "hostRefuse"
+    >,
+) {
+    return {
+        hostRawMessages: deps.hostRawMessages ?? readRawSessionMessages,
+        hostProtectedTailBoundary:
+            deps.hostProtectedTailBoundary ?? resolveOpenCodeProtectedTailBoundary,
+        hostModelFallback: deps.hostModelFallback ?? findLastAssistantModelFromOpenCodeDb,
+        hostRefuse: deps.hostRefuse ?? abortSessionFailClosed,
+    };
+}
+
 export function createTransform(deps: TransformDeps) {
+    const host = resolveTransformHostSeams(deps);
     const loadedSessions = new Set<string>();
     const rustModeTransform =
         deps.transformMode === "rust" && deps.rustModeModuleClient
@@ -766,7 +787,7 @@ export function createTransform(deps: TransformDeps) {
 
         const db = deps.db;
         if (deps.client !== undefined) {
-            scheduleReconciliation(db, sessionId, readRawSessionMessages);
+            scheduleReconciliation(db, sessionId, host.hostRawMessages);
         }
 
         const tUserMsg = performance.now();
@@ -1307,7 +1328,7 @@ export function createTransform(deps: TransformDeps) {
         // deliberately fall through to the live-usage path inside the resolver.
         let modelForBudget = deps.liveModelBySession?.get(sessionId);
         if (!modelForBudget) {
-            const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+            const recovered = host.hostModelFallback(sessionId);
             if (recovered) {
                 modelForBudget = recovered;
                 // Seed the live map so the scheduler / notification / sidebar
@@ -1457,7 +1478,7 @@ export function createTransform(deps: TransformDeps) {
         ): ProtectedTailBoundarySnapshot | null => {
             if (!canRunCompartments) return null;
             if (_boundarySnapshotCache === undefined || emergencyTailScale) {
-                const snapshot = resolveOpenCodeProtectedTailBoundary({
+                const snapshot = host.hostProtectedTailBoundary({
                     db,
                     sessionId: resolvedSessionId,
                     mode: "transform-force",
@@ -2445,7 +2466,7 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
                 try {
-                    await abortSessionFailClosed(deps.client, sessionId);
+                    await host.hostRefuse(deps.client, sessionId);
                 } catch (error) {
                     sessionLog(
                         sessionId,

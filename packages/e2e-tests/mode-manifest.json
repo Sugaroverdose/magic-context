@@ -3,6 +3,27 @@
     "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/opencode2/adapters-s2-contracts.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "OpenCode 2 context adapters have their own hermetic lane invocation",
+            "contract_refs": ["I5", "I6", "I9b", "I14"]
+        },
+        {
+            "path": "tests/opencode2/context-s2-lanes.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Real GA OpenCode 2 context-hook lane; invoked separately from v1 TS and Rust",
+            "contract_refs": ["I3", "I4", "I5", "I6", "I9b", "I14", "I15", "I16", "I16a", "I17"]
+        },
+        {
+            "path": "tests/opencode2/entry-s2-context.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Real OpenCode 2 directory-load proof for the dual-loader entry",
+            "contract_refs": ["I1"]
+        },
+        {
             "path": "tests/cache-invariants.test.ts",
             "tier": "both-modes",
             "invocation": {
