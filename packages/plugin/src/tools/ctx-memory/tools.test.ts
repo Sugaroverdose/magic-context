@@ -19,6 +19,7 @@ import {
     setMemoryClassification,
 } from "../../features/magic-context";
 import { takeCurateSafetyRefusalCount } from "../../features/magic-context/dreamer/curate-memory-safety";
+import { writeTaskStateJson } from "../../features/magic-context/dreamer/storage-task-schedule";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setTestProviderFactoryForProject,
@@ -1094,6 +1095,41 @@ describe("createCtxMemoryTools", () => {
         expect(result).toBe(`Error: Memory with ID ${foreignShared.id} was not found.`);
         expect(getMemoryById(db, own.id)?.status).toBe("active");
         expect(getMemoryById(db, foreignShared.id)?.status).toBe("active");
+    });
+
+    it("refuses a dreamer mutation outside the persisted curate category scope", async () => {
+        const projectRule = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "PROJECT_RULES",
+            content: "Keep category-scoped curation deterministic.",
+        });
+        const architecture = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE",
+            content: "The scheduler owns the dreamer task registry.",
+        });
+        writeTaskStateJson(
+            db,
+            "/repo/project",
+            "curate",
+            JSON.stringify({ curate: { cursor: 0, activeCategory: "PROJECT_RULES" } }),
+        );
+
+        const result = await tools.ctx_memory.execute(
+            {
+                action: "update",
+                ids: [architecture.id],
+                content: "The shared scheduler owns the dreamer task registry.",
+            },
+            dreamerToolContext("/repo/project"),
+        );
+
+        expect(result).toContain("memory ID");
+        expect(result).toContain("outside the scoped category");
+        expect(getMemoryById(db, architecture.id)?.content).toBe(
+            "The scheduler owns the dreamer task registry.",
+        );
+        expect(getMemoryById(db, projectRule.id)?.status).toBe("active");
     });
 
     it("REJECTS merging memories from DIFFERENT categories (structural guard)", async () => {
