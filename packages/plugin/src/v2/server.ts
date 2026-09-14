@@ -1,9 +1,11 @@
 import { loadPluginConfigDetailed } from "../config";
+import { setHarness } from "../shared/harness";
 import { registerContext } from "./hooks/context";
 import type { V2Context } from "./hooks/types";
 import { startUpdateChecks } from "./hooks/update-check";
 
 export async function setup(context: V2Context) {
+    setHarness("opencode2");
     await registerContext(context);
     // Historian and dream-task triggers belong to the generate-based executor;
     // never start the v1 child-session executor from this host's event stream.

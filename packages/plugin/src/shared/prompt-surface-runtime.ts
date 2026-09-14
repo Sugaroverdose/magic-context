@@ -105,7 +105,11 @@ function resolveUserConfigDirectory(options: CreatePromptSurfaceRuntimeOptions):
     if (options.harness) {
         const legacy = resolveLegacyConfigSourcesForHarness(
             options.directory ?? process.cwd(),
-            options.harness === "omp" ? "pi" : options.harness,
+            options.harness === "omp"
+                ? "pi"
+                : options.harness === "opencode2"
+                  ? "opencode"
+                  : options.harness,
         ).user.find((source) => existsSync(source.path));
         if (legacy) return dirname(legacy.path);
     }
