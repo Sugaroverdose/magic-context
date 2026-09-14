@@ -98,10 +98,7 @@ import { formatEmbedStatusText } from "./format-embed-status";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
-import {
-    getDefaultSubcConnectionFile,
-    SubcModuleTransport,
-} from "./module-transport";
+import { getDefaultSubcConnectionFile, SubcModuleTransport } from "./module-transport";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { ManagedRecompContext } from "./recomp-orchestrator";
 import {

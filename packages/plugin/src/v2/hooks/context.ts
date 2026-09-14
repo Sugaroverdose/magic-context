@@ -19,9 +19,9 @@ import { createTransform, type TransformDeps } from "../../hooks/magic-context/t
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
-import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
+import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { adaptPayload } from "./payload";
@@ -59,11 +59,14 @@ export async function registerContext(context: V2Context): Promise<void> {
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
-    const hiddenCompletionExecutor = context.session.generate
+    // Bind the host's generate once: the executor's closure runs after this
+    // presence check and must call the same method with the session as receiver.
+    const hostGenerate = context.session.generate?.bind(context.session);
+    const hiddenCompletionExecutor = hostGenerate
         ? await createV2HiddenCompletionExecutor(
               {
                   hook: (name, callback) => context.session.hook(name, callback),
-                  generate: (input, options) => context.session.generate!(input, options),
+                  generate: (input, options) => hostGenerate(input, options),
               },
               (sessionID) => liveModels.get(sessionID) ?? null,
           )

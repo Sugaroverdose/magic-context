@@ -12,6 +12,10 @@ import {
     getActiveCompartmentRun,
     startCompartmentAgent,
 } from "./compartment-runner";
+import type {
+    HiddenCompartmentRunnerDeps,
+    HiddenCompletionExecutor,
+} from "./compartment-runner-types";
 import { BLOCK_UNTIL_DONE_PERCENTAGE } from "./compartment-trigger";
 import {
     type PreparedCompartmentInjection,
@@ -26,10 +30,6 @@ import {
 import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
 import { sendStatusNotification } from "./send-session-notification";
 import type { MessageLike } from "./transform-operations";
-import type {
-    HiddenCompletionExecutor,
-    HiddenCompartmentRunnerDeps,
-} from "./compartment-runner-types";
 
 interface RunCompartmentPhaseArgs {
     hiddenCompletionExecutor?: HiddenCompletionExecutor;

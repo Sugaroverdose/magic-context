@@ -1,8 +1,8 @@
 import type { TokenTotals } from "../../features/magic-context/subagent-token-capture";
-import type { HarnessId } from "../../shared/harness";
-import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { PluginContext } from "../../plugin/types";
+import type { HarnessId } from "../../shared/harness";
 import type { ModelInput } from "../../shared/model-resolution";
+import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { Database } from "../../shared/sqlite";
 import type { ParsedEvent } from "./compartment-parser";
 import type {

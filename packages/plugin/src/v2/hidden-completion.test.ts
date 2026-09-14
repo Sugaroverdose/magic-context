@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
-import { Database } from "../shared/sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
 import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
+import { Database } from "../shared/sqlite";
 import { createV2HiddenCompletionExecutor } from "./hidden-completion";
 import type { SessionContext } from "./hooks/types";
 

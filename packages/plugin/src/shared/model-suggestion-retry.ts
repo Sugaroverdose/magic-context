@@ -236,7 +236,7 @@ async function promptWithTimeout(
             // independent SERVER-SIDE fiber — cancelling our client fetch alone
             // leaves it looping the LLM forever (issue #154). Force-stop it.
             if (!transport || transport.childSessionId) {
-                await abortChildRun(client, transport ? transport.childSessionId! : args.path.id);
+                await abortChildRun(client, transport?.childSessionId ?? args.path.id);
             }
             throw new Error("prompt aborted by external signal");
         }
@@ -245,7 +245,7 @@ async function promptWithTimeout(
             // just our fetch, or the child keeps re-calling the LLM past the
             // timeout (uncancellable by the user's ESC — issue #154).
             if (!transport || transport.childSessionId) {
-                await abortChildRun(client, transport ? transport.childSessionId! : args.path.id);
+                await abortChildRun(client, transport?.childSessionId ?? args.path.id);
             }
             throw new Error(`prompt timed out after ${timeoutMs}ms`);
         }
