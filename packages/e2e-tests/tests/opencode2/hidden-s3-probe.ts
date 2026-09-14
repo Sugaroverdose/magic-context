@@ -1,3 +1,5 @@
+import { calibrationChunk, calibrationPrompt } from "./calibration-s3-fixture";
+import { runValidatedHistorianPass } from "../../../plugin/src/hooks/magic-context/compartment-runner-historian";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireCompartmentLease, releaseCompartmentLease } from "../../../plugin/src/features/magic-context/compartment-lease";
@@ -5,6 +7,7 @@ import { getCompartments } from "../../../plugin/src/features/magic-context/comp
 import { createDreamTaskExecutor } from "../../../plugin/src/features/magic-context/dreamer/task-executor";
 import { getDreamRuns } from "../../../plugin/src/features/magic-context/dreamer/storage-dream-runs";
 import { leaseKeyFor } from "../../../plugin/src/features/magic-context/dreamer/task-registry";
+import { insertMemory } from "../../../plugin/src/features/magic-context/memory";
 import { openDatabase } from "../../../plugin/src/features/magic-context/storage";
 import { runCompartmentAgent } from "../../../plugin/src/hooks/magic-context/compartment-runner-incremental";
 import { resolveWrapupProtectedTailBoundary } from "../../../plugin/src/hooks/magic-context/protected-tail-boundary";
@@ -19,6 +22,7 @@ export default {
     id: "mc-hidden-s3-proof",
     async setup(context: any) {
         let warmingBefore: string | undefined;
+        let calibrationSystem: any[] | undefined;
         const text = (draft: any) => draft.messages.at(-1)?.content?.[0]?.text;
         const save = (value: unknown) => writeFileSync(join(context.location.directory, "s3-proof.json"), JSON.stringify(value));
         await context.session.hook("generate", async (draft: any) => {
@@ -30,14 +34,28 @@ export default {
         });
         await context.session.hook("generate", async (draft: any) => {
             const command = text(draft);
+            if (command === calibrationPrompt && calibrationSystem) { draft.system = structuredClone(calibrationSystem); return; }
             if (command === "S3_WARMING") { save({ before: warmingBefore, after: JSON.stringify(draft) }); return; }
-            if (command !== "S3_HISTORIAN" && command !== "S3_MODEL_REFUSE" && command !== "S3_TOOLS_REFUSE") return;
+            if (command !== "S3_HISTORIAN" && command !== "S3_MODEL_REFUSE" && command !== "S3_TOOLS_REFUSE" && command !== "S3_COMPRESS" && command !== "S3_CALIBRATE_OWN" && command !== "S3_CALIBRATE_SESSION") return;
             const db = openDatabase();
-            if (command === "S3_MODEL_REFUSE") {
+            if (!db) throw new Error("Proof database did not open");
+            if (command === "S3_CALIBRATE_OWN" || command === "S3_CALIBRATE_SESSION") {
+                calibrationSystem = command === "S3_CALIBRATE_SESSION" ? structuredClone(draft.system) : undefined;
+                try {
+                    const result = await runValidatedHistorianPass({ client: undefined, hiddenCompletionExecutor: executor, db, parentSessionId: draft.sessionID, sessionDirectory: context.location.directory, prompt: calibrationPrompt, chunk: calibrationChunk, priorCompartments: [], sequenceOffset: 0, dumpLabelBase: "calibration", timeoutMs: 10000 });
+                    save({ ok: result.ok, error: result.ok ? null : result.error });
+                } finally { calibrationSystem = undefined; }
+            } else if (command === "S3_MODEL_REFUSE") {
                 try {
                     await executor.open({ parentSessionId: draft.sessionID, agent: "historian", kind: "historian", system: "bounded system", model: "openai/cheap", configuredModels: ["openai/cheap"], timeoutMs: 5000, title: "proof", directory: context.location.directory });
                     save({ unexpected: "model accepted" });
                 } catch (error) { save({ error: String(error), code: (error as any).code }); }
+            } else if (command === "S3_COMPRESS") {
+                const project = context.location.directory;
+                const id = insertMemory(db, { projectPath: project, category: "ARCHITECTURE", content: "The fold uses stable source ordinals.", sourceSessionId: draft.sessionID });
+                const execute = createDreamTaskExecutor({ sessionDirectory: project, parentSessionId: draft.sessionID, hiddenCompletionExecutor: executor, openOpenCodeDb: () => null, mural: { enabled: true } });
+                const result = await execute({ task: "compress-cues", schedule: "0 4 * * *", timeoutMinutes: 5 }, { db, projectIdentity: project, holderId: "s3-cues", leaseKey: leaseKeyFor("compress-cues", project) });
+                save({ id, result, rows: getDreamRuns(db, project), cues: db.prepare("SELECT mural_cue FROM memories WHERE project_path = ?").all(project) });
             } else if (command === "S3_TOOLS_REFUSE") {
                 const project = context.location.directory;
                 let dispatches = 0;
@@ -47,7 +65,7 @@ export default {
                 save({ result, rows: getDreamRuns(db, project), dispatches });
             } else {
                 const reader = new V2StoreReader(gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"));
-                const source = rawMessages(reader.window(draft.sessionID));
+                const source = rawMessages(reader.history(draft.sessionID));
                 reader.close();
                 const release = setRawMessageProvider(draft.sessionID, { readMessages: () => source });
                 const holder = "s3-proof-historian";
