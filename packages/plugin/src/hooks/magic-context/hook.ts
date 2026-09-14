@@ -867,12 +867,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const rustToolBackends: RustToolBackends | undefined =
         deps.config.transform_mode === "rust" && rustModeModuleClient
             ? {
-                  authorityState: async ({ projectPath, projectRoot, domain }) => {
+                  authorityState: async ({ projectPath, projectRoot, sessionId, domain }) => {
                       if (!rustModeModuleClient.authorityStatus) return null;
                       const result = await rustModeModuleClient.authorityStatus({
                           context_store_uuid: ensureContextStoreUuid(db),
                           project: projectPath,
                           projectRoot,
+                          sessionId,
                           domain,
                       });
                       return result.authority?.state ?? null;
@@ -965,9 +966,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                       action,
                       content,
                       category,
-                      ids,
-                      reason,
-                  }) => {
+                       ids,
+                       reason,
+                       limit,
+                   }) => {
                       const response = await rustModeModuleClient.call({
                           sessionId,
                           projectRoot,
@@ -980,8 +982,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                   content,
                                   category,
                                   ids,
-                                  reason,
-                                  memory_project: memoryProject,
+                                   reason,
+                                   limit,
+                                   memory_project: memoryProject,
                               },
                           },
                       });

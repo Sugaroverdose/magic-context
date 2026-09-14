@@ -488,6 +488,36 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
+        it("reports a durable authority mismatch instead of a transient read or write retry", async () => {
+            db.prepare(
+                "INSERT INTO authority_managed(project_path, context_store_uuid, marked_at) VALUES (?, ?, ?)",
+            ).run("/repo/project", "store-1", Date.now());
+            for (const authorityState of [null, "TS"] as const) {
+                const moduleTools = createCtxMemoryTools({
+                    db,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: true,
+                    embeddingEnabled: false,
+                    rustToolBackends: {
+                        authorityState: async () => authorityState,
+                    },
+                });
+                const read = await moduleTools.ctx_memory.execute(
+                    { action: "get", ids: [1] },
+                    toolContext(),
+                );
+                const write = await moduleTools.ctx_memory.execute(
+                    { action: "write", category: "CONSTRAINTS", content: "must not write" },
+                    toolContext(),
+                );
+                expect(read).toBe(
+                    "Memory authority is inconsistent between the host and module. Run `ck doctor drain-authority` before changing Rust mode. (MC-M02)",
+                );
+                expect(write).toBe(read);
+            }
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+        });
+
         it("keeps module call details in logs and returns capability copy", async () => {
             const content = "module failure must preserve this content";
             const moduleError = "supervisor state: MODULE call failed";

@@ -735,12 +735,15 @@ export class SubcModuleTransport {
         context_store_uuid: string;
         project: string;
         projectRoot?: string;
+        sessionId?: string;
         domain: "memories" | "notes";
     }): Promise<{ authority: AuthorityStatus | null }> {
         this.authorityProjectRoot = args.project;
-        const { projectRoot, ...body } = args;
+        const { projectRoot, sessionId, ...body } = args;
         const response = await this.authorityRequest(
-            args.project,
+            // A tool call has a real session route already. A project identity is not an
+            // OpenCode session id, so resolving it can wait until the route deadline.
+            sessionId ?? args.project,
             projectRoot ?? this.bindRootForAuthority(),
             "authority.status",
             body,
