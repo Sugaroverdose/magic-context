@@ -1420,7 +1420,7 @@ Regenerate from the two private inputs:
 
 ```sh
 python3 {GENERATOR_PATH} \\
-  /path/to/d5-specimen.db \\
+  ~/.local/share/cortexkit/magic-context/specimens/d5-specimen.db \\
   /path/to/13610-req-body
 ```
 

@@ -1019,12 +1019,19 @@ fn d5_fixture_preserves_measured_tail_geometry_without_private_text() {
 
 #[test]
 fn d5_fixture_private_source_run_rejection_when_available() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("repository root");
-    let db_path =
-        repo_root.join(".cortexkit/alfonso/reviews/d5-uncovered-tail-2026-09-11/d5-specimen.db");
+    // The private source store lives outside the repository: `.cortexkit/` is hydrated into
+    // every worker worktree, and a 438 MB specimen copied per launch was measured as the
+    // dominant per-worktree cost. Override with MC_D5_SPECIMEN_DB; the default is the
+    // operator data directory.
+    let db_path = std::env::var_os("MC_D5_SPECIMEN_DB")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                PathBuf::from(home)
+                    .join(".local/share/cortexkit/magic-context/specimens/d5-specimen.db")
+            })
+        })
+        .expect("HOME or MC_D5_SPECIMEN_DB");
     if !db_path.is_file() {
         eprintln!(
             "SKIP d5_fixture_private_source_run_rejection_when_available: private source DB absent"
