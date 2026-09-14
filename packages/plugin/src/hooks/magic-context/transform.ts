@@ -527,8 +527,12 @@ export function scheduleTsAuthorityRecovery(args: {
 }
 
 export interface TransformDeps {
+    hiddenCompletionExecutor?: import("./compartment-runner-types").HiddenCompletionExecutor;
     /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
-    compactionMarkerStrategy?: CompactionMarkerStrategy;
+    compactionMarkerStrategy?: CompactionMarkerStrategy & {
+        setPending?: typeof import("../../features/magic-context/storage").setPendingCompactionMarkerState;
+        publish?: typeof import("./compaction-marker-manager").updateCompactionMarkerAfterPublication;
+    };
     /** Host storage and cancellation adapters; omitted callbacks retain OpenCode 1 behavior. */
     hostRawMessages?: typeof readRawSessionMessages;
     hostProtectedTailBoundary?: typeof resolveOpenCodeProtectedTailBoundary;
@@ -1026,7 +1030,7 @@ export function createTransform(deps: TransformDeps) {
             fullFeatureMode &&
             !compactionOff &&
             historianRunnable &&
-            deps.client !== undefined &&
+            (deps.client !== undefined || deps.hiddenCompletionExecutor !== undefined) &&
             compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
 
@@ -1528,7 +1532,7 @@ export function createTransform(deps: TransformDeps) {
             }
             if (
                 !canRunCompartments ||
-                !deps.client ||
+                (!deps.client && !deps.hiddenCompletionExecutor) ||
                 !boundarySnapshot ||
                 !hasRunnableCompartmentWindow(boundarySnapshot)
             ) {
@@ -1541,6 +1545,8 @@ export function createTransform(deps: TransformDeps) {
             updateSessionMeta(db, sessionId, { compartmentInProgress: true });
             startCompartmentAgent({
                 client: deps.client,
+                hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
+                compactionMarkerStrategy: deps.compactionMarkerStrategy,
                 db,
                 sessionId,
                 historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 20_000,
@@ -2105,6 +2111,8 @@ export function createTransform(deps: TransformDeps) {
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
+            hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
+            compactionMarkerStrategy: deps.compactionMarkerStrategy,
             canRunCompartments,
             fullFeatureMode,
             compactionOff,

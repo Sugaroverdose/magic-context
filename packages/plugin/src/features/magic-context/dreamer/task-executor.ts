@@ -9,6 +9,10 @@ import {
 import { withContentLanguageDirective } from "../../../agents/language-directive";
 import type { DreamingTask } from "../../../config/schema/magic-context";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
+import {
+    HiddenCompletionRefusal,
+    type HiddenCompletionExecutor,
+} from "../../../hooks/magic-context/compartment-runner-types";
 import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
@@ -88,6 +92,7 @@ import {
     type RetrospectivePromptEvent,
 } from "./task-prompts";
 import {
+    DREAM_TASK_CAPABILITIES,
     type DreamTaskName,
     type DreamTaskProgress,
     type DreamTaskRunBacklog,
@@ -102,7 +107,10 @@ import type {
 import { runVerify } from "./verify";
 
 export interface DreamTaskExecutorDeps {
-    client: PluginContext["client"];
+    client?: PluginContext["client"];
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
+    /** Existing user session used by a completion-only host. */
+    parentSessionId?: string;
     /** Filesystem directory of the project this drain owns (NOT the identity). */
     sessionDirectory: string;
     /** Opens the OpenCode DB read-only (for the key-files candidate scan). The
@@ -162,7 +170,8 @@ function dreamRunFailureDetail(error: unknown): DreamRunFailureDetail {
     const described = describeError(error);
     const message = described.brief;
     const providerFailure =
-        error instanceof Error && error.name === "DreamerProviderOutputFailureError";
+        error instanceof HiddenCompletionRefusal ||
+        (error instanceof Error && error.name === "DreamerProviderOutputFailureError");
     return {
         failure_class: providerFailure
             ? "provider_error"
@@ -295,8 +304,18 @@ function formatCurateMemoryOperations(actions: readonly string[]): string {
     return `curate: ${actions.length} memory ${noun} applied${actionDetail ? ` (${actionDetail})` : ""}`;
 }
 
+function requireDreamClient(client: PluginContext["client"] | undefined): PluginContext["client"] {
+    if (!client)
+        throw new HiddenCompletionRefusal(
+            "hidden_tools_unsupported",
+            "This dream task requires the child-session tool transport",
+            true,
+        );
+    return client;
+}
+
 /**
- * Build the TaskExecutor the v2 scheduler drives. The scheduler owns the keyed
+ * Build the TaskExecutor the shared task scheduler drives. The scheduler owns the keyed
  * domain lease + holderId and hands them in; this executor runs one task's actual
  * work (LLM loop / specialized runner), renews the lease during the run, aborts
  * if the lease is lost, and writes one per-task dream_runs telemetry row.
@@ -313,10 +332,11 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
     let parentSessionIdPromise: Promise<string | undefined> | undefined;
 
     const resolveParentSessionId = (): Promise<string | undefined> => {
+        if (deps.hiddenCompletionExecutor) return Promise.resolve(deps.parentSessionId);
         if (!parentSessionIdPromise) {
             parentSessionIdPromise = (async () => {
                 try {
-                    const listResponse = await deps.client.session.list({
+                    const listResponse = await requireDreamClient(deps.client).session.list({
                         query: { directory: deps.sessionDirectory },
                     });
                     const sessions = shared.normalizeSDKResponse(
@@ -481,7 +501,24 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
         }
 
         try {
+            if (
+                deps.hiddenCompletionExecutor?.capabilities.tools === false &&
+                DREAM_TASK_CAPABILITIES[config.task].requiresTools
+            ) {
+                throw new HiddenCompletionRefusal(
+                    "hidden_tools_unsupported",
+                    `${config.task} requires tools; opencode2 hidden completions have no tool loop`,
+                    true,
+                );
+            }
             if (config.task === "compress-cues") {
+                if (deps.hiddenCompletionExecutor?.capabilities.tools === false) {
+                    throw new HiddenCompletionRefusal(
+                        "unsupported_transport",
+                        "compress-cues is tool-free but its hidden completion transport is not yet connected on opencode2",
+                        true,
+                    );
+                }
                 if (deps.mural?.enabled !== true) {
                     // Config-gated no-op, but say so: a silent "completed" here
                     // reads as a successful run in /ctx-dream summaries and would
@@ -495,7 +532,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 // then default model settings.
                 const result = await runCompressCues({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -523,7 +560,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.task === "review-user-memories") {
                 const result = await reviewUserMemories({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
                     holderId,
@@ -545,7 +582,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.task === "map-memories") {
                 const result = await mapMemories({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -592,7 +629,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 const memoryBefore = getMemoryCountsByStatus(db, projectIdentity);
                 const result = await runVerify({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -675,6 +712,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 const result = await runClassify({
                     db,
                     client: deps.client,
+                    hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -703,7 +741,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.task === "promote-primers") {
                 const result = await promotePrimers({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     sessionDirectory: deps.sessionDirectory,
                     holderId,
@@ -723,7 +761,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.task === "refresh-primers") {
                 const result = await refreshPrimers({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -747,7 +785,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.task === "evaluate-smart-notes") {
                 const result = await evaluateSmartNotes({
                     db,
-                    client: deps.client,
+                    client: requireDreamClient(deps.client),
                     projectIdentity,
                     parentSessionId: parent,
                     sessionDirectory: deps.sessionDirectory,
@@ -1019,7 +1057,7 @@ async function runRetrospectiveTask(
     let promptSettled = false;
     try {
         const createResponse = await createChildSessionWithFence({
-            client: deps.client,
+            client: requireDreamClient(deps.client),
             db,
             parentSessionId: parent ?? undefined,
             title: "magic-context-dream-retrospective",
@@ -1043,7 +1081,7 @@ async function runRetrospectiveTask(
             const remainingMs = Math.max(0, deadline - Date.now());
             promptSettled = false;
             const run = await shared.promptSyncWithValidatedOutputRetry(
-                deps.client,
+                requireDreamClient(deps.client),
                 {
                     path: { id: sessionId },
                     query: { directory: deps.sessionDirectory },
@@ -1060,7 +1098,9 @@ async function runRetrospectiveTask(
                     fallbackModels: config.fallbackModels,
                     callContext: "dreamer:retrospective",
                     fetchOutput: async () => {
-                        const messagesResponse = await deps.client.session.messages({
+                        const messagesResponse = await requireDreamClient(
+                            deps.client,
+                        ).session.messages({
                             path: { id: sessionId },
                             query: { directory: deps.sessionDirectory, limit: 50 },
                         });
@@ -1233,7 +1273,7 @@ async function runRetrospectiveTask(
     } finally {
         heartbeat.stop();
         await teardownChildSession({
-            client: deps.client,
+            client: requireDreamClient(deps.client),
             sessionId: childSessionId,
             sessionDirectory: deps.sessionDirectory,
             promptSettled,
@@ -1346,7 +1386,7 @@ async function runAgenticTask(
             curate: curateMemories ? { memories: curateMemories } : undefined,
         });
         const createResponse = await createChildSessionWithFence({
-            client: deps.client,
+            client: requireDreamClient(deps.client),
             db,
             parentSessionId: parent ?? undefined,
             title: `magic-context-dream-${task}`,
@@ -1365,7 +1405,7 @@ async function runAgenticTask(
 
         const remainingMs = Math.max(0, deadline - Date.now());
         const run = await shared.promptSyncWithValidatedOutputRetry(
-            deps.client,
+            requireDreamClient(deps.client),
             {
                 path: { id: sessionId },
                 query: { directory: docsDir },
@@ -1393,15 +1433,17 @@ async function runAgenticTask(
                 fallbackModels: config.fallbackModels,
                 callContext: `dreamer:${task}`,
                 fetchOutput: async () => {
-                    const messagesResponse = await deps.client.session.messages({
-                        path: { id: sessionId },
-                        query: {
-                            directory: docsDir,
-                            // Curate can use up to 150 steps, so its applied-operation
-                            // count must not be truncated to the newest 50 messages.
-                            ...(task === "curate" ? {} : { limit: 50 }),
+                    const messagesResponse = await requireDreamClient(deps.client).session.messages(
+                        {
+                            path: { id: sessionId },
+                            query: {
+                                directory: docsDir,
+                                // Curate can use up to 150 steps, so its applied-operation
+                                // count must not be truncated to the newest 50 messages.
+                                ...(task === "curate" ? {} : { limit: 50 }),
+                            },
                         },
-                    });
+                    );
                     return shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                         preferResponseOnMissingData: true,
                     });
@@ -1477,7 +1519,7 @@ async function runAgenticTask(
         heartbeat.stop();
         if (childSessionId) takeCurateSafetyRefusalCount(childSessionId);
         await teardownChildSession({
-            client: deps.client,
+            client: requireDreamClient(deps.client),
             sessionId: childSessionId,
             sessionDirectory: docsDir,
             promptSettled,

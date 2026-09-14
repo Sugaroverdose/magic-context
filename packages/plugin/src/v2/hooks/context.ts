@@ -18,6 +18,8 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { getDataDir } from "../../shared/data-path";
+import { resolveHistorianModel } from "../../shared/model-resolution";
+import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
@@ -57,6 +59,16 @@ export async function registerContext(context: V2Context): Promise<void> {
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
+    const hiddenCompletionExecutor = context.session.generate
+        ? await createV2HiddenCompletionExecutor(
+              {
+                  hook: (name, callback) => context.session.hook(name, callback),
+                  generate: (input, options) => context.session.generate!(input, options),
+              },
+              (sessionID) => liveModels.get(sessionID) ?? null,
+          )
+        : undefined;
+    const historianModels = resolveHistorianModel(config, "opencode");
     const usage: TransformDeps["contextUsageMap"] = new Map();
     const channel1: NonNullable<TransformDeps["channel1StateBySession"]> = new Map();
     const variants = new Map<string, string | undefined>();
@@ -222,7 +234,14 @@ export async function registerContext(context: V2Context): Promise<void> {
                 clearReasoningAge: config.clear_reasoning_age,
                 directory,
                 projectPath: directory,
-                historianRunnable: false,
+                hiddenCompletionExecutor,
+                historianRunnable:
+                    hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
+                historianModel: historianModels.primary,
+                fallbackModels: historianModels.fallbacks,
+                historianTimeoutMs: config.historian_timeout_ms,
+                historianMaxOutputTokens: config.historian?.maxTokens,
+                historianTwoPass: config.historian?.two_pass,
                 compactionMarkerStrategy: v2CompactionMarkerStrategy,
                 memoryConfig: {
                     enabled: config.memory.enabled,

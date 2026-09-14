@@ -18,7 +18,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(78);
+        expect(validation.files.length).toBe(79);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -43,6 +43,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/entry-s2-context.test.ts",
             "tests/opencode2/harness-s3-identity.test.ts",
+            "tests/opencode2/hidden-s3-executor.test.ts",
             "tests/opencode2/pins.test.ts",
             "tests/opencode2/probes.test.ts",
             "tests/opencode2/runner.test.ts",

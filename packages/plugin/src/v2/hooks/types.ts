@@ -43,6 +43,10 @@ export interface V2Context {
         ): Promise<unknown>;
     };
     session: {
+        generate?: (
+            input: { sessionID: string; prompt: string },
+            options?: { signal?: AbortSignal },
+        ) => Promise<{ text: string }>;
         synthetic(input: {
             sessionID: string;
             id: string;
@@ -50,7 +54,7 @@ export interface V2Context {
             delivery: "steer";
         }): Promise<unknown>;
         hook(
-            name: "context" | "compaction",
+            name: "context" | "compaction" | "generate",
             callback: (draft: SessionContext) => Promise<void>,
         ): Promise<unknown>;
         interrupt(input: { sessionID: string }): Promise<{ interrupted: boolean }>;

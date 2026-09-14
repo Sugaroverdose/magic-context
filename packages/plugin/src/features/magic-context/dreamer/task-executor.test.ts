@@ -2037,3 +2037,45 @@ test("createDreamTaskExecutor surfaces host-refused verify counts", async () => 
     };
     expect(task.progress).toContain("refused 1");
 });
+
+for (const task of ["curate", "map-memories", "verify", "verify-broad"] as const) {
+    test(`tools:false refuses ${task} before dispatch and records a failed dream run`, async () => {
+        db = freshDb();
+        const project = `/repo/hidden-${task}`;
+        const open = mock(async () => {
+            throw new Error("unexpected hidden dispatch");
+        });
+        const executor = createDreamTaskExecutor({
+            sessionDirectory: project,
+            parentSessionId: "existing-user-session",
+            openOpenCodeDb: () => null,
+            hiddenCompletionExecutor: {
+                capabilities: { tools: false, harness: "opencode2" },
+                open,
+                async attempt() {
+                    throw new Error("unexpected prompt");
+                },
+                async collect() {
+                    throw new Error("unexpected read");
+                },
+                async close() {},
+            },
+        });
+        const result = await executor(
+            { task, schedule: "0 4 * * 0", timeoutMinutes: 20 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: `holder-${task}`,
+                leaseKey: leaseKeyFor(task, project),
+            },
+        );
+        expect(result).toMatchObject({ status: "failed", transient: false });
+        expect(open).toHaveBeenCalledTimes(0);
+        const rows = getDreamRuns(db, project);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.tasks_failed).toBe(1);
+        expect(rows[0]!.tasks_succeeded).toBe(0);
+        expect(JSON.stringify(rows[0])).toContain("requires tools");
+    });
+}

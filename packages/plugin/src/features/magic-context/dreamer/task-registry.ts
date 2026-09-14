@@ -27,6 +27,25 @@ export const CANONICAL_DREAM_TASKS = [
 
 export type DreamTaskName = (typeof CANONICAL_DREAM_TASKS)[number];
 
+export const DREAM_TASK_CAPABILITIES: Record<DreamTaskName, { requiresTools: boolean }> = {
+    // A single manifest is not a tool-free task: mapping and verification need
+    // read-only tools to inspect backing code before they can change memory state.
+    "map-memories": { requiresTools: true },
+    verify: { requiresTools: true },
+    "verify-broad": { requiresTools: true },
+    curate: { requiresTools: true },
+    // mural/compress-cues.ts is a zero-tool transform; its child transport
+    // still needs substitution before the generate executor can dispatch it.
+    "compress-cues": { requiresTools: false },
+    "classify-memories": { requiresTools: false },
+    retrospective: { requiresTools: true },
+    "maintain-docs": { requiresTools: true },
+    "evaluate-smart-notes": { requiresTools: true },
+    "review-user-memories": { requiresTools: true },
+    "promote-primers": { requiresTools: true },
+    "refresh-primers": { requiresTools: true },
+};
+
 /** Cheap, read-only work counts for one Dreamer task. */
 export interface DreamTaskBacklog {
     /** Items selected by the task's current backlog predicate. */
