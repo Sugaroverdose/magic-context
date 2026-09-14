@@ -3801,6 +3801,14 @@
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
+      "path": "capacity-estimate-vectors-v1.json",
+      "byte_size": 1951084,
+      "sha256": "fa04ceb453fb336482f1b0aed6f6ee27739130bb4942f34dc55e91ba330053fe",
+      "derived": false,
+      "source": "owner-authored D5 capacity contract vectors",
+      "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    },
+    {
       "path": "coverage-proof-vectors-v1.json",
       "byte_size": 501639,
       "sha256": "0272d949202f7ac68043189232b1df62278842f24454de0e9dd589e756fcc6d0",
