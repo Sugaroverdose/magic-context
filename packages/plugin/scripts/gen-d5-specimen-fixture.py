@@ -45,6 +45,7 @@ SOURCE_LABEL = f"VACUUM {DB_SHA256}"
 GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
 CANONICAL_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/canonical-json-vectors-v1.json"
 REDEEM_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/redeem-vectors-v1.json"
+SCOPE_OPEN_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/scope-open-vectors-v1.json"
 COVERAGE_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/coverage-proof-vectors-v1.json"
 AGGREGATE_PREIMAGES_PATH = "crates/mc-module/tests/fixtures/d5-specimen/aggregate-preimages-v1.json"
 AGGREGATE_PREIMAGES_SHA256 = "952938e6ea60b5d5a6c639b73931c901f8767e8d224961310991de5031e9f957"
@@ -1438,6 +1439,7 @@ def write_fixture(
     repository_root = Path(__file__).resolve().parents[3]
     canonical_vectors = (repository_root / CANONICAL_VECTORS_PATH).read_bytes()
     redeem_vectors = (repository_root / REDEEM_VECTORS_PATH).read_bytes()
+    scope_open_vectors = (repository_root / SCOPE_OPEN_VECTORS_PATH).read_bytes()
     coverage_vectors = (repository_root / COVERAGE_VECTORS_PATH).read_bytes()
     aggregate_preimages = (repository_root / AGGREGATE_PREIMAGES_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
@@ -1449,6 +1451,7 @@ def write_fixture(
         "expected-archive-v1.json": json_bytes(archive),
         "canonical-json-vectors-v1.json": canonical_vectors,
         "redeem-vectors-v1.json": redeem_vectors,
+        "scope-open-vectors-v1.json": scope_open_vectors,
         "coverage-proof-vectors-v1.json": coverage_vectors,
         "aggregate-preimages-v1.json": aggregate_preimages,
         "README.md": readme_text().encode(),
@@ -1465,12 +1468,14 @@ def write_fixture(
         if name in {
             "canonical-json-vectors-v1.json",
             "redeem-vectors-v1.json",
+            "scope-open-vectors-v1.json",
             "coverage-proof-vectors-v1.json",
             "aggregate-preimages-v1.json",
         }:
             source = {
                 "canonical-json-vectors-v1.json": "hand-written independent canonical-form vectors",
                 "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
+                "scope-open-vectors-v1.json": "owner-authored D5 scope.open contract vectors",
                 "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
                 "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
             }[name]
@@ -1532,6 +1537,7 @@ def refresh_fixture_index(output: Path) -> None:
     entries = {entry["path"]: entry for entry in index["files"]}
     owner_vectors = {
         "redeem-vectors-v1.json": "owner-authored D5 redeem contract vectors",
+        "scope-open-vectors-v1.json": "owner-authored D5 scope.open contract vectors",
         "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
         "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
     }
@@ -1551,6 +1557,7 @@ def refresh_fixture_index(output: Path) -> None:
         "expected-archive-v1.json",
         "canonical-json-vectors-v1.json",
         "redeem-vectors-v1.json",
+        "scope-open-vectors-v1.json",
         "coverage-proof-vectors-v1.json",
         "aggregate-preimages-v1.json",
         "README.md",

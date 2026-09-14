@@ -3793,6 +3793,14 @@
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
     },
     {
+      "path": "scope-open-vectors-v1.json",
+      "byte_size": 34244,
+      "sha256": "54ba4090208ed0bc85d189e7d65afcd135ce0b867af7ceb7cc5d63841bd5b10e",
+      "derived": false,
+      "source": "owner-authored D5 scope.open contract vectors",
+      "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
+    },
+    {
       "path": "coverage-proof-vectors-v1.json",
       "byte_size": 501639,
       "sha256": "0272d949202f7ac68043189232b1df62278842f24454de0e9dd589e756fcc6d0",
