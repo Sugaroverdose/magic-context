@@ -81,7 +81,9 @@ import {
     describePiPackageEntry,
     getPiMagicContextPackageSpecifier,
     hasPiMagicContextPackage,
+    isConfiguredPiMagicContextEntry as isConfiguredPiMagicContextEntryIn,
     isPiMagicContextPackageEntry,
+    localPiMagicContextPackageDir as resolveLocalPiMagicContextPackageDir,
 } from "../lib/pi-package-entry";
 import { type PromptIO, promptIO } from "../lib/prompts";
 import { sanitizeDiagnosticEndpoint, sanitizeDiagnosticText } from "../lib/redaction";
@@ -319,35 +321,12 @@ function packagesFrom(settings: Record<string, unknown>): unknown[] {
  * <cwd>/.pi/npm/node_modules/<pkg> (project). We collect every plausible dir
  * with a package.json; the resolver stays SILENT for any that don't exist.
  */
-/** True when the directory's package.json declares the magic-context Pi plugin. */
-function isPiMagicContextPackageDir(dir: string): boolean {
-    const packageJson = join(dir, "package.json");
-    if (!existsSync(packageJson)) return false;
-    try {
-        const pkg = JSON.parse(readFileSync(packageJson, "utf-8")) as {
-            name?: unknown;
-        };
-        return typeof pkg.name === "string" && pkg.name === PACKAGE_NAME;
-    } catch {
-        return false;
-    }
-}
-
 function localPiMagicContextPackageDir(entry: unknown): string | null {
-    const source =
-        typeof entry === "string"
-            ? entry
-            : entry && typeof entry === "object" && "source" in entry
-              ? entry.source
-              : null;
-    const spec = typeof source === "string" ? source.trim() : "";
-    if (!spec || spec.startsWith("npm:")) return null;
-    const dir = isAbsolute(spec) ? spec : join(getPiAgentConfigDir(), spec);
-    return isPiMagicContextPackageDir(dir) ? dir : null;
+    return resolveLocalPiMagicContextPackageDir(entry, getPiAgentConfigDir());
 }
 
 function isConfiguredPiMagicContextEntry(entry: unknown): boolean {
-    return isPiMagicContextPackageEntry(entry) || localPiMagicContextPackageDir(entry) !== null;
+    return isConfiguredPiMagicContextEntryIn(entry, getPiAgentConfigDir());
 }
 
 function piPluginDirCandidates(packages: unknown[], cwd: string): string[] {
