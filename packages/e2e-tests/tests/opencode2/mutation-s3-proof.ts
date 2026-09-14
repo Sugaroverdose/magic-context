@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, utimesSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Each mutant is staged only after restoration. The index always contains the live implementation.
+// The original implementation is staged in Git; each temporary mutation is restored from that staged baseline after its test.
 const root = resolve(import.meta.dir, "../../../..");
 const plugin = "packages/plugin/";
 const owner = `${plugin}src/v2/fold/owner.ts`;

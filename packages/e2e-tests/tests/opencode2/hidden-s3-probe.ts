@@ -38,11 +38,12 @@ export default {
             if (command === "S3_WARMING") { save({ before: warmingBefore, after: JSON.stringify(draft) }); return; }
             if (command !== "S3_HISTORIAN" && command !== "S3_MODEL_REFUSE" && command !== "S3_TOOLS_REFUSE" && command !== "S3_COMPRESS" && command !== "S3_CALIBRATE_OWN" && command !== "S3_CALIBRATE_SESSION") return;
             const db = openDatabase();
+            if (!db) throw new Error("Proof database did not open");
             if (command === "S3_CALIBRATE_OWN" || command === "S3_CALIBRATE_SESSION") {
                 calibrationSystem = command === "S3_CALIBRATE_SESSION" ? structuredClone(draft.system) : undefined;
                 try {
                     const result = await runValidatedHistorianPass({ client: undefined, hiddenCompletionExecutor: executor, db, parentSessionId: draft.sessionID, sessionDirectory: context.location.directory, prompt: calibrationPrompt, chunk: calibrationChunk, priorCompartments: [], sequenceOffset: 0, dumpLabelBase: "calibration", timeoutMs: 10000 });
-                    save({ ok: result.ok, error: result.error ?? null });
+                    save({ ok: result.ok, error: result.ok ? null : result.error });
                 } finally { calibrationSystem = undefined; }
             } else if (command === "S3_MODEL_REFUSE") {
                 try {

@@ -34,7 +34,7 @@ async function trigger(client: ReturnType<typeof OpenCode.make>, sessionID: stri
 
 test("R36 real GA historian publishes via generate without creating a session row", async () => {
     await proof(async (host, client, sessionID) => {
-        const sessionsBefore = await client.session.list({ location: { directory: host.cwd } });
+        const sessionsBefore = await client.session.list({ directory: host.cwd });
         const before = host.mock.requests().length;
         host.mock.setDefault({ text: '<compartment start="1" end="2" title="Real historian"><p1>First source turn and answer preserved.</p1></compartment>', usage: { input_tokens: 100, output_tokens: 10 } });
         await trigger(client, sessionID, "S3_HISTORIAN");
@@ -44,7 +44,7 @@ test("R36 real GA historian publishes via generate without creating a session ro
         expect(result.runs).toEqual([{ harness: "opencode2", status: "success" }]);
         expect(result.markers).toEqual([]);
         expect(host.mock.requests().length - before).toBe(1);
-        expect(await client.session.list({ location: { directory: host.cwd } })).toEqual(sessionsBefore);
+        expect(await client.session.list({ directory: host.cwd })).toEqual(sessionsBefore);
         const body = host.mock.requests().at(-1)!.body;
         expect(JSON.stringify(body)).toContain("Messages 1-2:");
         expect(JSON.stringify(body)).not.toContain("protected source turn");

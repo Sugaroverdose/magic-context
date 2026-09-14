@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import plugin from "../../../plugin/src/index";
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "../../../plugin/node_modules/@opencode-ai/plugin/dist/index.js";
 import { openDatabase } from "../../../plugin/src/features/magic-context/storage";
 import { acquireCompartmentLease, releaseCompartmentLease } from "../../../plugin/src/features/magic-context/compartment-lease";
 import { resolveWrapupProtectedTailBoundary } from "../../../plugin/src/hooks/magic-context/protected-tail-boundary";
