@@ -67,11 +67,14 @@ export async function registerContext(context: V2Context) {
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
-    const hiddenCompletionExecutor = context.session.generate
+    // Bind the host's generate once: the executor's closure runs after this
+    // presence check and must call the same method with the session as receiver.
+    const hostGenerate = context.session.generate?.bind(context.session);
+    const hiddenCompletionExecutor = hostGenerate
         ? await createV2HiddenCompletionExecutor(
               {
                   hook: (name, callback) => context.session.hook(name, callback),
-                  generate: (input, options) => context.session.generate!(input, options),
+                  generate: (input, options) => hostGenerate(input, options),
               },
               (sessionID) => liveModels.get(sessionID) ?? null,
           )

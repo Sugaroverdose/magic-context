@@ -10,8 +10,8 @@ import { withContentLanguageDirective } from "../../../agents/language-directive
 import type { DreamingTask } from "../../../config/schema/magic-context";
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
 import {
-    HiddenCompletionRefusal,
     type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
 } from "../../../hooks/magic-context/compartment-runner-types";
 import type { RawMessageProvider } from "../../../hooks/magic-context/read-session-chunk";
 import type { PluginContext } from "../../../plugin/types";

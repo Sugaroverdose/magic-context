@@ -1,7 +1,7 @@
 import {
-    HiddenCompletionRefusal,
     type HiddenCompletion,
     type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
     type HiddenRunHandle,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
@@ -130,7 +130,11 @@ export async function createV2HiddenCompletionExecutor(
         async attempt(handle, request) {
             const run = runs.get(handle);
             if (!run) throw new Error("Unknown hidden completion run");
-            const actual = await requireModel(run.identity.parentSessionId);
+            // requireModel refuses an absent session id, so after it returns the id
+            // is known; carry the narrowed value into the host call.
+            const sessionID = run.identity.parentSessionId;
+            const actual = await requireModel(sessionID);
+            if (sessionID === undefined) throw new Error("Hidden completion session id missing");
             const requested = request.body.model ?? actual;
             if (modelKey(requested) !== modelKey(actual))
                 refuseModel(modelKey(requested), modelKey(actual));
@@ -140,7 +144,7 @@ export async function createV2HiddenCompletionExecutor(
             pending.set(marker, state);
             try {
                 const generation = host.generate(
-                    { sessionID: run.identity.parentSessionId!, prompt: marker },
+                    { sessionID, prompt: marker },
                     { signal: request.signal },
                 );
                 // Keep the sentinel registered until the host settles even if our caller

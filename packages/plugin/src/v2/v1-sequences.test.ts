@@ -1,10 +1,10 @@
-import { expect, test, spyOn } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PluginContext } from "../plugin/types";
-import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
 import { closeDatabase, openDatabase } from "../features/magic-context/storage";
+import { runValidatedHistorianPass } from "../hooks/magic-context/compartment-runner-historian";
+import type { PluginContext } from "../plugin/types";
 import * as logger from "../shared/logger";
 
 const valid =

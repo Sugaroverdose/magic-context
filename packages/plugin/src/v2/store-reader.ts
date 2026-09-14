@@ -148,8 +148,8 @@ export class V2StoreReader {
         for (;;) {
             const page = this.page(sessionID, { after, type });
             rows.push(...page.rows);
-            if (page.rows.length < 100) return rows;
-            after = page.cursor!;
+            if (page.rows.length < 100 || page.cursor === undefined) return rows;
+            after = page.cursor;
         }
     }
 }

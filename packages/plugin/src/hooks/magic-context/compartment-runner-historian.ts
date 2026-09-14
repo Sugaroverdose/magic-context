@@ -31,7 +31,6 @@ import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
     HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "./compartment-prompt";
-import { HiddenCompletionRefusal } from "./compartment-runner-types";
 import type {
     HiddenCompletion,
     HiddenCompletionExecutor,
@@ -41,6 +40,7 @@ import type {
     StoredCompartmentRange,
     ValidatedHistorianPassResult,
 } from "./compartment-runner-types";
+import { HiddenCompletionRefusal } from "./compartment-runner-types";
 import {
     buildHistorianRepairPrompt,
     type HistorianValidationChunk,
@@ -475,6 +475,9 @@ async function runHistorianPrompt(args: {
             metadata: { dumpLabel, subagentKind },
         });
         agentSessionId = handle.id || null;
+        // The retry transport closes over the opened run; bind it once so the closure
+        // sees the resolved handle rather than the nullable slot it was assigned to.
+        const opened = handle;
 
         if (!agentSessionId) {
             recordInvocation({
@@ -510,8 +513,8 @@ async function runHistorianPrompt(args: {
                     {
                         transport: Object.assign(
                             (request: import("../../shared/model-suggestion-retry").PromptArgs) =>
-                                executor.attempt(handle!, request),
-                            { childSessionId: handle.childSessionId },
+                                executor.attempt(opened, request),
+                            { childSessionId: opened.childSessionId },
                         ),
                         timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
                         // When modelOverride is set we're already in the last-ditch retry

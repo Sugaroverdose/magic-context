@@ -4,9 +4,9 @@ import { DREAMER_CLASSIFIER_AGENT } from "../../../agents/dreamer";
 import { withContentLanguageDirective } from "../../../agents/language-directive";
 import { createV1HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-historian";
 import {
-    HiddenCompletionRefusal,
     type HiddenCompletion,
     type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
     type HiddenRunHandle,
 } from "../../../hooks/magic-context/compartment-runner-types";
 import { isRustAuthorityDrainingError } from "../../../plugin/rust-tool-backends";
@@ -367,6 +367,9 @@ async function classifyOneChunk(
         });
         agentSessionId = handle.id || null;
         if (!agentSessionId) throw new Error("Could not create classify session.");
+        // The retry callbacks close over the opened run; bind it once so the closures
+        // see the resolved handle rather than the nullable slot it was assigned to.
+        const opened = handle;
 
         const run = await shared.promptSyncWithValidatedOutputRetry(
             args.client,
@@ -383,14 +386,14 @@ async function classifyOneChunk(
             {
                 transport: Object.assign(
                     (request: import("../../../shared/model-suggestion-retry").PromptArgs) =>
-                        executor.attempt(handle!, request),
-                    { childSessionId: handle.childSessionId },
+                        executor.attempt(opened, request),
+                    { childSessionId: opened.childSessionId },
                 ),
                 timeoutMs: sliceMs,
                 signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:classify-memories",
-                fetchOutput: () => executor.collect(handle!, 50),
+                fetchOutput: () => executor.collect(opened, 50),
                 validateOutput: (completion) => {
                     const messages = completion.messages ?? [];
                     if (completion.lengthCapped) {
