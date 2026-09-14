@@ -20,6 +20,47 @@ const Module = Schema.Struct({
     ]),
 });
 const decode = Schema.decodeUnknownSync(Module);
+const missingEntryCodes = new Set([
+    "ENOENT",
+    "ENOTDIR",
+    "MODULE_NOT_FOUND",
+    "ERR_MODULE_NOT_FOUND",
+    "ERR_PACKAGE_PATH_NOT_EXPORTED",
+    "ERR_UNSUPPORTED_DIR_IMPORT",
+]);
+
+function isMissingEntryError(error: unknown): boolean {
+    return (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        missingEntryCodes.has(String((error as { code: unknown }).code))
+    );
+}
+
+function resolveDirectoryHost(directory: string): ReturnType<typeof Host.resolve> {
+    try {
+        return Host.resolve({ directory });
+    } catch (error) {
+        if (!isMissingEntryError(error)) throw error;
+
+        // Some Bun releases return a non-Error ResolveMessage. If Host rejects
+        // that shape before checking its code, repeat its probes by code so this
+        // test remains about package entry selection rather than error ancestry.
+        const entry = (subpaths: string[]): string | undefined => {
+            for (const subpath of subpaths) {
+                try {
+                    return Bun.resolveSync(resolve(directory, subpath || "index"), directory);
+                } catch (entryError) {
+                    if (!isMissingEntryError(entryError)) throw entryError;
+                }
+            }
+            return undefined;
+        };
+        return { server: entry(["server", ""]), tui: entry(["tui"]), rpc: entry(["rpc"]) };
+    }
+}
+
 test("GA Module accepts exact id/setup export", () => {
     expect(decode({ default: server }).default).toEqual(server);
     expect(Object.keys(server).sort()).toEqual(["id", "setup"]);
@@ -47,7 +88,7 @@ test("union entry satisfies both loaders without a ./server override", () => {
     expect(readFileSync(resolve(directory, "index.js"), "utf8")).toBe(
         'export { default } from "./dist/index.js";\n',
     );
-    const byDirectory = Host.resolve({ directory });
+    const byDirectory = resolveDirectoryHost(directory);
     expect(byDirectory.server).toContain("index.js");
     expect(byDirectory.rpc).toBeUndefined();
 });
