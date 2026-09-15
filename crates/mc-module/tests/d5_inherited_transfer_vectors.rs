@@ -254,6 +254,9 @@ struct UnitCarrier {
     role: String,
     ordinal: Option<u64>,
     synthetic: bool,
+    /// Why this carrier is stamped the way it is, for a reader who has only the file.
+    #[serde(default)]
+    carrier_note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -916,6 +919,38 @@ fn d5_unit_locators_and_constructed_carriers_obey_returned_view_structure() {
         Some(&absent.member.identity)
     );
     assert_eq!(evaluate_locator_control(absent), Verdict::Accept);
+
+    // An absent member's unit lives in a DIFFERENT message, and an ordinal is a source
+    // coordinate: two distinct mids carrying the same ordinal would claim to be the same
+    // source message. Stamping a carrier with the absent member's ordinal is the way that
+    // contradiction gets written down, so refuse it here rather than in prose.
+    for control in &fixture.unit_locator_controls {
+        // Refusal controls describe arrangements that are invalid by construction, so their
+        // internal coherence proves nothing; only an accepted arrangement must hold together.
+        if expected_verdict(&control.expected) != Verdict::Accept
+            || control.carrier.synthetic
+            || control.carrier.mid == control.member.identity.mid
+        {
+            continue;
+        }
+        assert_ne!(
+            control.carrier.ordinal,
+            Some(control.member.ordinal),
+            "{} carries a distinct mid, so its carrier needs its own ordinal",
+            control.id
+        );
+        // A carrier that is not the member's own message is the surprising case; make the
+        // file explain itself rather than leaving the next reader to re-derive the rule.
+        assert!(
+            control
+                .carrier
+                .carrier_note
+                .as_ref()
+                .is_some_and(|note| !note.trim().is_empty()),
+            "{} uses a carrier distinct from its member and must say why",
+            control.id
+        );
+    }
 }
 
 #[test]

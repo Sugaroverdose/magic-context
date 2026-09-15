@@ -1714,8 +1714,9 @@
         "input_class": "CONSTRUCTED",
         "mid": "mid-independent-52",
         "role": "assistant",
-        "ordinal": 52,
-        "synthetic": false
+        "ordinal": 53,
+        "synthetic": false,
+        "carrier_note": "Constructed carrier: a DIFFERENT message from the absent member. An ordinal is a source coordinate (R24a), so this carrier holds its own ordinal 53; reusing the absent member's 52 would claim two mids are the same source message."
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000e756e69742d616273656e742d3532000000000000000d0000000000000011616273656e7420726564756374696f6e0a",

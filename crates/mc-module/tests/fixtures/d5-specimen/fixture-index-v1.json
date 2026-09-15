@@ -3826,8 +3826,8 @@
     },
     {
       "path": "d5-inherited-transfer-vectors-v1.json",
-      "byte_size": 66225,
-      "sha256": "f3299813d09b1ad1d4dd32711a4ae9013de44259d28f9a272b39c7a2bbe456f1",
+      "byte_size": 66482,
+      "sha256": "5d28789f8f51e788788162ebcfc3e2adf8f90d857e6500fd631f7046978c8137",
       "derived": false,
       "source": "owner-authored D5 inherited-member transfer vectors",
       "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py"
