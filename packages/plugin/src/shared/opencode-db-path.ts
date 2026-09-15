@@ -220,14 +220,23 @@ function schemaTableNames(
     return new Set(rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])));
 }
 
-/** Detect the persisted host schema. A migrated v2 store wins when legacy tables remain beside session_message. */
+/**
+ * Detect the persisted host schema.
+ *
+ * `session_message` does NOT identify v2: OpenCode 1.18.x ships that table beside `message`
+ * and `part` (verified against a live 1.18.30 store, pinned in this module's tests). Only the
+ * ABSENCE of the v1 message tables identifies a v2 store, so a v1 host is never mistaken for
+ * a v2 one. A store carrying neither is a host that has not written its schema yet.
+ */
 export function detectOpenCodeStoreGeneration(
     db: OpenCodeStoreSchemaDatabase,
     schema: "main" | "oc_backfill" = "main",
 ): OpenCodeStoreGeneration {
     const tables = schemaTableNames(db, schema);
+    const hasV1Messages = tables.has("message") && tables.has("part");
+    if (hasV1Messages) return "v1";
     if (tables.has("session_message")) return "v2";
-    if (tables.has("message") || tables.has("session") || tables.has("project")) return "v1";
+    if (tables.has("session") || tables.has("project")) return "v1";
     return "unknown";
 }
 
@@ -240,6 +249,11 @@ export function assertOpenCodeStoreGeneration(
 ): void {
     const actual = detectOpenCodeStoreGeneration(db, schema);
     if (actual === expected) return;
+    // A store with none of these tables has no schema YET — a host that has not written its
+    // first row, or a fresh data directory. That is "nothing to read", not a conflicting host,
+    // and readers have always treated it as empty. Refusing here made every reader throw before
+    // OpenCode created its tables, which is how this guard took down 15 host e2e tests.
+    if (actual === "unknown") return;
     throw new Error(
         `OpenCode store generation mismatch at ${path}: expected ${expected}, found ${actual}; refusing generation-specific database access`,
     );

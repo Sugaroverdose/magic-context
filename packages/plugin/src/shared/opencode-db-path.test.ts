@@ -219,6 +219,56 @@ describe("resolveOpenCodeDbPath", () => {
         }
     });
 
+    it("reads a live OpenCode 1.18.x store as v1 even though it ships session_message", () => {
+        const { openCodeDir } = useDataHome();
+        const livePath = join(openCodeDir, "live-v1.db");
+        const live = new Database(livePath);
+        try {
+            // Captured from a running OpenCode 1.18.30 store. session_message exists in v1,
+            // so a detector keyed on its presence calls a v1 host v2 and every v1 reader
+            // (historian chunk, marker discovery, message index, tool-owner backfill) then
+            // refuses. Keep this table list as observed, not as remembered.
+            for (const table of [
+                "account",
+                "event",
+                "message",
+                "part",
+                "permission",
+                "project",
+                "session",
+                "session_message",
+                "session_run_lease",
+                "todo",
+                "workspace",
+            ]) {
+                live.exec(`CREATE TABLE ${table}(id TEXT)`);
+            }
+            expect(detectOpenCodeStoreGeneration(live)).toBe("v1");
+            expect(() => assertOpenCodeStoreGeneration(live, "v1", livePath)).not.toThrow();
+            expect(() => assertOpenCodeStoreGeneration(live, "v2", livePath)).toThrow(
+                "expected v2, found v1",
+            );
+        } finally {
+            live.close();
+        }
+    });
+
+    it("treats a store with no schema yet as empty rather than as a conflicting host", () => {
+        const { openCodeDir } = useDataHome();
+        const freshPath = join(openCodeDir, "fresh.db");
+        const fresh = new Database(freshPath);
+        try {
+            // A host that has not written its first row looks like this. Readers have always
+            // seen it as empty; refusing here throws inside the historian, marker and index
+            // readers on every fresh data directory.
+            expect(detectOpenCodeStoreGeneration(fresh)).toBe("unknown");
+            expect(() => assertOpenCodeStoreGeneration(fresh, "v1", freshPath)).not.toThrow();
+            expect(() => assertOpenCodeStoreGeneration(fresh, "v2", freshPath)).not.toThrow();
+        } finally {
+            fresh.close();
+        }
+    });
+
     it("formats the missing banner, status, and doctor lines by value", () => {
         const { openCodeDir } = useDataHome();
         const lookedFor = [
