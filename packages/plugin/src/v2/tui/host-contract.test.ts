@@ -8,7 +8,8 @@ import type { V2SidebarState, V2TuiContext } from "./types";
 
 const temporary: string[] = [];
 afterEach(() => {
-    for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
+    for (const directory of temporary.splice(0))
+        rmSync(directory, { recursive: true, force: true });
 });
 
 function v2Context() {
@@ -54,7 +55,9 @@ function v2Context() {
 }
 
 function v1Api(directory: string) {
-    let slot: { slots: { sidebar_content: (ctx: unknown, value: unknown) => unknown }; dispose(): void } | undefined;
+    let slot:
+        | { slots: { sidebar_content: (ctx: unknown, value: unknown) => unknown }; dispose(): void }
+        | undefined;
     const disposals: Array<() => void | Promise<void>> = [];
     const color = "#ffffff";
     const api = {
@@ -98,7 +101,11 @@ function v1Api(directory: string) {
             DialogSelect: () => null,
         },
     };
-    return { api, slot: () => slot, dispose: async () => Promise.all(disposals.map((cleanup) => cleanup())) };
+    return {
+        api,
+        slot: () => slot,
+        dispose: async () => Promise.all(disposals.map((cleanup) => cleanup())),
+    };
 }
 
 test("GA 2.0.3 resolves ./tui and executes the union setup contract", async () => {
@@ -109,7 +116,11 @@ test("GA 2.0.3 resolves ./tui and executes the union setup contract", async () =
     });
     expect(entrypoints.tui).toContain("src/tui/entry.mjs");
     const loaded = (await Host.load(entrypoints.tui!)) as {
-        default: { id: string; tui: unknown; setup: (context: V2TuiContext) => Promise<() => void> };
+        default: {
+            id: string;
+            tui: unknown;
+            setup: (context: V2TuiContext) => Promise<() => void>;
+        };
     };
     expect(typeof loaded.default.setup).toBe("function");
     const fixture = v2Context();
@@ -150,7 +161,12 @@ test("OpenCode 1.18.30 TUI loader projection executes unchanged sidebar registra
         directory: packageRoot,
     });
     const loaded = (await Host.load(entrypoints.tui!)) as {
-        default: { id: string; tui: (api: unknown, options?: unknown, meta?: unknown) => Promise<void>; setup: unknown; server?: unknown };
+        default: {
+            id: string;
+            tui: (api: unknown, options?: unknown, meta?: unknown) => Promise<void>;
+            setup: unknown;
+            server?: unknown;
+        };
     };
     const plugin = loaded.default;
     expect({ id: plugin.id, tui: plugin.tui }).toEqual({
@@ -174,7 +190,8 @@ test("OpenCode 1.18.30 TUI loader projection executes unchanged sidebar registra
             target: entrypoints.tui,
         });
     } finally {
-        if (previousCompactionOverride === undefined) delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+        if (previousCompactionOverride === undefined)
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
         else process.env.OPENCODE_DISABLE_AUTOCOMPACT = previousCompactionOverride;
     }
     const slot = fixture.slot();

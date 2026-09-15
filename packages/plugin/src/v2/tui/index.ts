@@ -1,4 +1,5 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
+import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 import {
     closeRpc,
     getCompartmentCount,
@@ -8,11 +9,10 @@ import {
     requestRecomp,
 } from "../../tui/data/context-db";
 import {
+    type SocketNotification,
     startNotificationSocket,
     stopNotificationSocket,
-    type SocketNotification,
 } from "../../tui/data/notification-socket";
-import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 import type { V2SidebarState, V2TuiContext } from "./types";
 
 const SIDEBAR_REFRESH_MS = 1_000;
@@ -83,10 +83,7 @@ function eventSessionID(event: unknown): string | undefined {
 
 type JsxFactory = (type: string, props: Record<string, unknown>) => unknown;
 
-export async function setupWithJsx(
-    context: V2TuiContext,
-    jsx: JsxFactory,
-): Promise<() => void> {
+export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Promise<() => void> {
     const directory = context.location?.directory ?? context.data.location.default().directory;
     initRpcClient(directory);
     const [sidebar, updateSidebar] = context.storage.memory<V2SidebarState>(
@@ -119,7 +116,10 @@ export async function setupWithJsx(
         const result = await loadStatusDetail(target, directory);
         if (currentSessionID(context) !== target) return false;
         if (!result.ok) {
-            context.ui.toast.show({ message: "Magic Context status is unavailable", variant: "warning" });
+            context.ui.toast.show({
+                message: "Magic Context status is unavailable",
+                variant: "warning",
+            });
             return false;
         }
         await context.ui.dialog.alert({
@@ -197,7 +197,8 @@ export async function setupWithJsx(
             ],
         }));
     } catch (error) {
-        if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing") throw error;
+        if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
+            throw error;
         console.warn(
             "[magic-context] OpenCode 2.0.3 keymap.layer is unavailable during plugin setup; /ctx-status and /ctx-recomp were not registered",
         );
@@ -210,7 +211,8 @@ export async function setupWithJsx(
 
     const handleNotification = async (notification: SocketNotification): Promise<boolean> => {
         const target = notification.sessionId ?? currentSessionID(context);
-        if (notification.sessionId && notification.sessionId !== currentSessionID(context)) return false;
+        if (notification.sessionId && notification.sessionId !== currentSessionID(context))
+            return false;
         if (notification.type === "toast") {
             const payload = notification.payload;
             context.ui.toast.show({
@@ -245,7 +247,10 @@ export async function setupWithJsx(
         return false;
     };
 
-    startNotificationSocket({ getSessionId: () => currentSessionID(context), onNotification: handleNotification });
+    startNotificationSocket({
+        getSessionId: () => currentSessionID(context),
+        onNotification: handleNotification,
+    });
     console.info("[magic-context] @cortexkit/opencode-magic-context v2 TUI setup");
 
     return () => {

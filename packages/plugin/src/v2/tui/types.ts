@@ -17,17 +17,19 @@ export interface V2TuiContext {
         readonly location: { default(): V2TuiLocation };
     };
     readonly keymap: {
-        readonly layer: (input: () => {
-            readonly mode?: string;
-            readonly commands: ReadonlyArray<{
-                readonly id: string;
-                readonly title: string;
-                readonly group: string;
-                readonly palette: true;
-                readonly slash: { readonly name: string; readonly arguments?: true };
-                readonly run: (input?: string) => void | Promise<void>;
-            }>;
-        }) => void;
+        readonly layer: (
+            input: () => {
+                readonly mode?: string;
+                readonly commands: ReadonlyArray<{
+                    readonly id: string;
+                    readonly title: string;
+                    readonly group: string;
+                    readonly palette: true;
+                    readonly slash: { readonly name: string; readonly arguments?: true };
+                    readonly run: (input?: string) => void | Promise<void>;
+                }>;
+            },
+        ) => void;
     };
     readonly storage: {
         readonly memory: <Value extends object>(
