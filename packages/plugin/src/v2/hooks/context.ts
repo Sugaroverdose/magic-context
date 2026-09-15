@@ -22,6 +22,7 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { getDataDir } from "../../shared/data-path";
+import { detectConflicts } from "../../shared/conflict-detector";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
@@ -63,6 +64,16 @@ export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
     if (!config.enabled || !isCompactionEnabled(config)) return;
+    const conflicts = detectConflicts(directory, {
+        compactionEnabled: true,
+        hostGeneration: "v2",
+    });
+    if (conflicts.hasConflict) {
+        console.warn(
+            `[magic-context] v2 setup disabled by conflicting context hooks: ${conflicts.reasons.join("; ")}`,
+        );
+        return;
+    }
     const folds = new FoldOwner(context.storage);
     const limits = new Map<string, number>();
     const queriedModels = new Set<string>();

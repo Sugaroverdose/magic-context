@@ -4,13 +4,17 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "./sqlite";
 import {
+    assertOpenCodeStoreGeneration,
+    detectOpenCodeStoreGeneration,
     formatOpenCodeDbDoctorLine,
     formatOpenCodeDbMissingBanner,
     formatOpenCodeDbMissingStatusLine,
     openCodeDbPathExists,
     resetOpenCodeDbPathStateForTesting,
     resolveOpenCodeDbPath,
+    sourceOpenCodeDatabaseFilename,
 } from "./opencode-db-path";
 
 const ORIGINAL_ENV = {
@@ -172,6 +176,51 @@ describe("resolveOpenCodeDbPath", () => {
             channel: null,
         });
     });
+
+    it("uses the verbatim v2 channel filename table without changing v1 defaults", () => {
+        const { dataHome, openCodeDir } = useDataHome();
+        for (const channel of ["latest", "dev", "beta", "next", "prod"]) {
+            expect(sourceOpenCodeDatabaseFilename("v2", channel, {})).toBe("opencode.db");
+        }
+        expect(sourceOpenCodeDatabaseFilename("v2", "a/b c!._-", {})).toBe(
+            "opencode-abc._-.db",
+        );
+        expect(
+            resolveOpenCodeDbPath("v2", {
+                dataHome,
+                channel: "local",
+                env: { OPENCODE_DB: "opencode2.db" },
+            }),
+        ).toEqual({
+            path: join(openCodeDir, "opencode2.db"),
+            source: "OPENCODE_DB",
+            channel: null,
+        });
+    });
+
+    it("detects store generations and refuses a mismatched schema before reading", () => {
+        const { openCodeDir } = useDataHome();
+        const v1Path = join(openCodeDir, "v1.db");
+        const v2Path = join(openCodeDir, "v2.db");
+        const v1 = new Database(v1Path);
+        const v2 = new Database(v2Path);
+        try {
+            v1.exec("CREATE TABLE message(id TEXT); CREATE TABLE part(id TEXT)");
+            v2.exec("CREATE TABLE session_message(id TEXT)");
+            expect(detectOpenCodeStoreGeneration(v1)).toBe("v1");
+            expect(detectOpenCodeStoreGeneration(v2)).toBe("v2");
+            expect(() => assertOpenCodeStoreGeneration(v2, "v1", v2Path)).toThrow(
+                "expected v1, found v2",
+            );
+            expect(() => assertOpenCodeStoreGeneration(v1, "v2", v1Path)).toThrow(
+                "expected v2, found v1",
+            );
+        } finally {
+            v1.close();
+            v2.close();
+        }
+    });
+
 
     it("formats the missing banner, status, and doctor lines by value", () => {
         const { openCodeDir } = useDataHome();

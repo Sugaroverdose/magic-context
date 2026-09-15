@@ -38,6 +38,7 @@ import {
     formatOpenCodeDbDoctorLine,
     type OpenCodeDbPathResolution,
     openCodeDbPathExists,
+    openCodeHostGenerationFromVersion,
     resolveOpenCodeDbPath,
 } from "@magic-context/core/shared/opencode-db-path";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
@@ -800,7 +801,10 @@ export async function runDoctor(
         );
     }
 
-    const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(resolveOpenCodeDbPath());
+    const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation.version);
+    const openCodeDbCheck = describeOpenCodeDatabaseDoctorCheck(
+        resolveOpenCodeDbPath(hostGeneration),
+    );
     if (openCodeDbCheck.ok) pass(openCodeDbCheck.message);
     else fail(openCodeDbCheck.message);
 

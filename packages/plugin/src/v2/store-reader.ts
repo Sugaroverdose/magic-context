@@ -1,32 +1,25 @@
-import { join } from "node:path";
+import {
+    assertOpenCodeStoreGeneration,
+    resolveOpenCodeDbPath,
+    sourceOpenCodeDatabaseFilename,
+} from "../shared/opencode-db-path";
 import { Database } from "../shared/sqlite";
 
-/** Source rule: oc-audit-7a31b5c0f7.md:186-202; sanitization follows owner R16.
- * The real GA CLI 2.0.3 placement probe confirms OPENCODE_DB is honoured.
- * Isolation must still use private XDG roots, not rely solely on the filename.
- */
+/** Compatibility export; shared/opencode-db-path.ts is the single filename authority. */
 export function sourceDatabaseFilename(
     channel: string,
     env: NodeJS.ProcessEnv = process.env,
 ): string {
-    return (
-        env.OPENCODE_DB ??
-        (["latest", "dev", "beta", "next", "prod"].includes(channel) ||
-        env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
-        env.OPENCODE_DISABLE_CHANNEL_DB === "true"
-            ? "opencode.db"
-            : `opencode-${channel.replace(/[^a-zA-Z0-9._-]/g, "")}.db`)
-    );
+    return sourceOpenCodeDatabaseFilename("v2", channel, env);
 }
 
-/** GA data root: aft-playbook-fe8d4871f.md:46-48, with the CLI filename rule. */
+/** GA data root resolved by the shared host-generation-aware resolver. */
 export function gaDatabasePath(
     dataHome: string,
     channel = "latest",
     env: NodeJS.ProcessEnv = process.env,
 ): string {
-    const filename = sourceDatabaseFilename(channel, env);
-    return filename === ":memory:" ? filename : join(dataHome, "opencode", filename);
+    return resolveOpenCodeDbPath("v2", { dataHome, channel, env }).path;
 }
 
 // GA core-session-message.excerpt.js and oc-audit-7a31b5c0f7.md:166-184.
@@ -92,6 +85,12 @@ export class V2StoreReader {
     private readonly db: Database;
     constructor(path: string) {
         this.db = new Database(path, { readonly: true, fileMustExist: true });
+        try {
+            assertOpenCodeStoreGeneration(this.db, "v2", path);
+        } catch (error) {
+            this.db.close();
+            throw error;
+        }
     }
     close(): void {
         this.db.close();
