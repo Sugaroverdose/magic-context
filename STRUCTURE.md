@@ -59,8 +59,8 @@ All paths below are relative to `packages/plugin/` — the published OpenCode np
 
 **`src/v2/`:**
 - Purpose: Adapt the shared transform core to the OpenCode 2 host (`setup` entry, `session.hook("context")` / `compaction`, `tool.hook`) without the v1 child-session historian/dream executors.
-- Contains: v2 server entry, payload projection, GA store reader, refusal guard, Channel 2 delivery, update checks, and the absence-pinning server test.
-- Key files: `src/v2/server.ts` (built to `dist/v2/server.js` via `build:v2`), `src/v2/hooks/context.ts`, `src/v2/hooks/payload.ts`, `src/v2/store-reader.ts`, `src/v2/hooks/store.ts`, `src/v2/hooks/types.ts`, `src/v2/hooks/refusal.ts`, `src/v2/hooks/channel2.ts`, `src/v2/hooks/update-check.ts`, `src/v2/server.test.ts`
+- Contains: v2 server entry, payload projection, GA store reader, refusal guard, Channel 2 delivery, update checks, hidden-completion executor seam over host `generate`, host-owned fold/checkpoint tracking with inert v1 markers, dream-trigger wakeups off execution events, and the absence-pinning server test.
+- Key files: `src/v2/server.ts` (built to `dist/v2/server.js` via `build:v2`), `src/v2/hooks/context.ts`, `src/v2/hooks/payload.ts`, `src/v2/store-reader.ts`, `src/v2/hooks/store.ts`, `src/v2/hooks/types.ts`, `src/v2/hooks/refusal.ts`, `src/v2/hooks/channel2.ts`, `src/v2/hooks/update-check.ts`, `src/v2/hooks/dream-trigger.ts`, `src/v2/hidden-completion.ts`, `src/v2/fold/owner.ts`, `src/v2/fold/restore.ts`, `src/v2/fold/markers.ts`, `src/v2/executor-seam-proof.md`, `src/v2/server.test.ts`
 
 **`src/hooks/`:**
 - Purpose: Hold hook implementations and hook-specific helpers.
