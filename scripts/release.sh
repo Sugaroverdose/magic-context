@@ -152,9 +152,10 @@ run_package_tests() {
   # echo is still writing the remaining lines, echo dies with SIGPIPE (141), and
   # the pipeline reports failure for a suite that printed "4851 pass" (v0.42.5 r1).
   # `grep -c` consumes the whole stream, so the counts carry no such race.
-  local any_fail
-  any_fail=$(printf '%s\n' "$output" | grep -cE "[1-9][0-9]* fail" || true)
-  if [ "$any_fail" -gt 0 ]; then
+  # The counts above are anchored to Bun's summary lines (`^ *N pass` / `^ *N fail`);
+  # an unanchored "N fail" also matches test names such as "keeps below-95 failures",
+  # which the old grep -q form only hid because of the SIGPIPE race.
+  if [ "$fail_lines" -gt 0 ]; then
     echo "Error: $label tests failed (fail count > 0)"
     exit 1
   fi
@@ -225,8 +226,8 @@ run_e2e_group() {
   echo "$output"
   # Same SIGPIPE-safe counting as run_package_tests (see the note there).
   local e2e_fail e2e_pass
-  e2e_fail=$(printf '%s\n' "$output" | grep -cE "[1-9][0-9]* fail" || true)
-  e2e_pass=$(printf '%s\n' "$output" | grep -cE "[1-9][0-9]* pass" || true)
+  e2e_fail=$(printf '%s\n' "$output" | grep -cE "^ *[1-9][0-9]* fail" || true)
+  e2e_pass=$(printf '%s\n' "$output" | grep -cE "^ *[1-9][0-9]* pass" || true)
   if [ "$e2e_fail" -gt 0 ]; then
     echo "Error: e2e ($mode/$label) failed (fail count > 0)"
     echo "  [e2e:$mode:$label:end] status=fail"
