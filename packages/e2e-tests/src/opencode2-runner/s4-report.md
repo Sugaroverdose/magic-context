@@ -65,4 +65,33 @@ The test constructs equivalent v1 `message`/`part` and v2 `session_message` stor
 
 ## Verification capture
 
-Pure replay differential and mutation captures are appended after the final verified run.
+### Pure replay differential
+
+Command: `bun packages/e2e-tests/scripts/pure-replay-differential.ts --ts-only master HEAD`
+
+The instrument compared `master` (`f3e438e626edbaaad952d963e0504b7d9b5b90e6`) with the implementation commit (`b5b7b50d6a7a48929713f763d8bab74ed9730176`) and printed `RESULT IDENTICAL defer_passes=4`:
+
+| pass | bytes | SHA-256 | result |
+| --- | ---: | --- | --- |
+| 1 | 262 | `165aed197ad1aa46c0684bd42be821ce39aba9c766afe42ff3e6b992f117c938` | IDENTICAL |
+| 2 | 428 | `05945f88a5aabd1dd6152301133488ce317d4b400485496a3d65a22b4a53be73` | IDENTICAL |
+| 3 | 594 | `d649359b66b444497d1e4d8be711382c23aefcccd2d19fd00a69d8d4c322eaed` | IDENTICAL |
+| 4 | 760 | `9e81ff690576752bb4c5d9b87f69ae93474f6c10dca4230b278617a2fc552ae2` | IDENTICAL |
+
+### Red-first mutation captures
+
+Before each mutation, all live implementation files were staged and `git diff --stat` was empty. Each mutation produced a non-empty one-file diff, the named test alone reddened, and `git checkout -- <path> && touch <path>` restored an empty diff.
+
+1. Neutralized `assertOpenCodeStoreGeneration` in `packages/plugin/src/shared/opencode-db-path.ts`. `host-aware dispatch refuses a v1 store before a v2 query` failed: `Received function did not throw`; 0 pass, 3 filtered, 1 fail.
+2. Changed the pinned v1 SHA in `packages/e2e-tests/src/opencode2-runner/reader-s4-golden.json`. `I11 v1/v2 readers feed the same transform core with pinned host differences` failed with expected `0d4d…` / received `6d4d…`; 0 pass, 3 filtered, 1 fail.
+3. Reversed the v2 auto-compaction ownership gate in `packages/plugin/src/shared/conflict-detector.ts`. `detectConflicts > OpenCode 2 compaction ownership > keeps MC enabled when host auto-compaction is on and never reads v1 prune` failed with expected `false` / received `true`; 0 pass, 49 filtered, 1 fail.
+
+### Passing gates
+
+- Plugin: 4,857 pass, 0 fail.
+- Pi: 1,154 pass, 1 intentional skip, 0 fail.
+- CLI: 384 pass, 2 platform skips, 0 fail; repair-db 5 pass; helper subprocess suites 16 pass.
+- OpenCode 2 lane after building Pi and plugin artifacts: 51 pass, 0 fail.
+- Root typecheck: plugin, Pi, CLI and retina TypeScript projects passed.
+- Pinned Biome 2.5.1 `lint`: plugin, Pi, CLI and retina passed (existing warnings only; no fixes applied). Dashboard/e2e were intentionally excluded from Biome.
+- Dashboard: `cargo fmt --check`, `cargo check`, targeted Rust tests and Vite production build passed.
