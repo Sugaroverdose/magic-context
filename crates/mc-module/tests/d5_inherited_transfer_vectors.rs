@@ -16,10 +16,23 @@ struct Fixture {
     schema: String,
     contract_version: String,
     ruling_tip: String,
+    specimen_class: SpecimenClass,
     predicate_rule: PredicateRule,
     twice_inherited_ordinal_resolution: OrdinalResolution,
     vectors: Vec<Vector>,
     generation: Generation,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpecimenClass {
+    classification: String,
+    payload_note: String,
+    algebra_payload_example: String,
+    canonical_text_block_example: String,
+    establishes: Vec<String>,
+    does_not_establish: Vec<String>,
+    follow_up: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -629,6 +642,9 @@ fn d5_inherited_transfer_oracle_matches_owner_expectations() {
         "V05_missing_current_unit",
         "V06_source_substitution",
         "V07_frozen_changed_served",
+        "V08_origin_uses_predecessor_identity",
+        "V09_predecessor_uses_serving_identity",
+        "V10_per_hop_mid_reallocation",
     ]);
     assert_eq!(
         fixture
@@ -735,6 +751,142 @@ fn d5_inherited_digest_domains_bind_through_bytes_without_meeting() {
 }
 
 #[test]
+fn d5_inherited_origin_identity_must_name_the_cited_manifest_member() {
+    let (fixture, _) = load_fixture();
+    let vector = vector(&fixture, "V08_origin_uses_predecessor_identity");
+    let expected_manifest_identity = BlockIdentity {
+        mid: vector.held_m1.message.native_mid.clone(),
+        index: vector.held_m1.block.index,
+        ordinal: vector.held_m1.message.ordinal,
+    };
+    let Provenance::InheritedFrom {
+        origin_identity, ..
+    } = &vector.successor_m2.block.provenance
+    else {
+        panic!("successor must cite inherited provenance")
+    };
+
+    assert_eq!(origin_identity, &vector.held_m1.block.predecessor_identity);
+    assert_ne!(origin_identity, &expected_manifest_identity);
+    assert_eq!(
+        vector.held_m1.block.predecessor_identity,
+        vector.successor_m2.block.predecessor_identity
+    );
+    assert_eq!(vector.expected.outcome, ExpectedOutcome::Refuse);
+    assert_vector(&fixture, &vector.id);
+}
+
+#[test]
+fn d5_inherited_predecessor_identity_must_still_name_the_source_block() {
+    let (fixture, _) = load_fixture();
+    let vector = vector(&fixture, "V09_predecessor_uses_serving_identity");
+    let serving_identity = BlockIdentity {
+        mid: vector.held_m1.message.native_mid.clone(),
+        index: vector.held_m1.block.index,
+        ordinal: vector.held_m1.message.ordinal,
+    };
+    let Provenance::InheritedFrom {
+        origin_identity, ..
+    } = &vector.successor_m2.block.provenance
+    else {
+        panic!("successor must cite inherited provenance")
+    };
+
+    assert_eq!(origin_identity, &serving_identity);
+    assert_eq!(
+        vector.successor_m2.block.predecessor_identity,
+        serving_identity
+    );
+    assert_ne!(
+        vector.successor_m2.block.predecessor_identity,
+        vector.held_m1.block.predecessor_identity
+    );
+    assert_eq!(vector.expected.outcome, ExpectedOutcome::Refuse);
+    assert_vector(&fixture, &vector.id);
+}
+
+#[test]
+fn d5_inherited_per_hop_mid_reallocation_preserves_source_coordinates() {
+    let (fixture, _) = load_fixture();
+    let vector = vector(&fixture, "V10_per_hop_mid_reallocation");
+    let expected_manifest_identity = BlockIdentity {
+        mid: vector.held_m1.message.native_mid.clone(),
+        index: vector.held_m1.block.index,
+        ordinal: vector.held_m1.message.ordinal,
+    };
+    let Provenance::InheritedFrom {
+        origin_identity, ..
+    } = &vector.successor_m2.block.provenance
+    else {
+        panic!("successor must cite inherited provenance")
+    };
+
+    assert_eq!(origin_identity, &expected_manifest_identity);
+    assert_eq!(
+        vector.held_m1.block.predecessor_identity,
+        vector.successor_m2.block.predecessor_identity
+    );
+    assert_eq!(
+        vector.held_m1.message.ordinal,
+        vector.successor_m2.message.ordinal
+    );
+    assert_eq!(
+        BTreeSet::from([
+            vector.held_m1.block.predecessor_identity.mid.as_str(),
+            vector.held_m1.message.native_mid.as_str(),
+            vector.successor_m2.message.native_mid.as_str(),
+        ])
+        .len(),
+        3
+    );
+    assert_eq!(vector.expected.outcome, ExpectedOutcome::Accept);
+    assert_vector(&fixture, &vector.id);
+}
+
+#[test]
+fn d5_inherited_specimen_class_is_algebra_only() {
+    let (fixture, _) = load_fixture();
+    let specimen = &fixture.specimen_class;
+
+    assert_eq!(specimen.classification, "ALGEBRA");
+    assert_eq!(
+        specimen.payload_note,
+        "Byte payloads are plain text; canonical text blocks are normalizer-produced JSON."
+    );
+    assert_eq!(specimen.algebra_payload_example, "late reduction\n");
+    assert_eq!(
+        specimen.canonical_text_block_example,
+        r#"{"text":"late reduction\n"}"#
+    );
+    assert_eq!(specimen.establishes.len(), 4);
+    assert!(specimen.establishes.iter().any(|claim| {
+        claim.contains("origin_identity")
+            && claim.contains("native_mid")
+            && claim.contains("block index")
+            && claim.contains("source ordinal")
+    }));
+    assert!(specimen
+        .establishes
+        .iter()
+        .any(|claim| claim.contains("predecessor_identity independently")));
+    assert!(specimen.establishes.iter().any(|claim| {
+        claim.contains("mc.d5.block.source.v1") && claim.contains("mc.d5.block.served.v1")
+    }));
+    assert!(specimen.establishes.iter().any(|claim| {
+        claim.contains("mc.d5.unit-projection.v1") && claim.contains("never compared")
+    }));
+    assert_eq!(
+        specimen.does_not_establish,
+        [
+            "normalized provider-block integration",
+            "the returned-view path from real normalized provider blocks",
+        ]
+    );
+    assert!(specimen.follow_up.contains("real normalizer"));
+    assert!(specimen.follow_up.contains("returned-view path"));
+}
+
+#[test]
 fn d5_twice_inherited_ordinal_names_the_original_source_space() {
     let (fixture, _) = load_fixture();
     let resolution = &fixture.twice_inherited_ordinal_resolution;
@@ -778,7 +930,7 @@ fn d5_inherited_fixture_contract_and_index_are_pinned() {
     let (fixture, fixture_bytes) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.inherited-transfer-vectors.v1");
     assert_eq!(fixture.contract_version, "1.3.38");
-    assert_eq!(fixture.ruling_tip, "R46e(i)");
+    assert_eq!(fixture.ruling_tip, "R46f(i)");
     assert!(fixture
         .predicate_rule
         .unit_validation_order
@@ -789,12 +941,20 @@ fn d5_inherited_fixture_contract_and_index_are_pinned() {
         .contains("origin_identity"));
     assert!(fixture
         .predicate_rule
+        .member_join
+        .contains("receipt's manifest"));
+    assert!(fixture
+        .predicate_rule
         .must_match
         .contains(&"source.sha256".to_owned()));
     assert!(fixture
         .predicate_rule
         .must_match
         .contains(&"ordinal".to_owned()));
+    assert!(fixture
+        .predicate_rule
+        .must_match
+        .contains(&"predecessor_identity".to_owned()));
     assert!(fixture
         .predicate_rule
         .may_change

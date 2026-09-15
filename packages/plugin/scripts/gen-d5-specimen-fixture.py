@@ -1302,7 +1302,47 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
     if document.get("schema") != "mc.d5.inherited-transfer-vectors.v1":
         raise SystemExit("inherited-transfer schema drift")
     if document.get("contract_version") != "1.3.38":
+        raise SystemExit("inherited-transfer contract-version drift")
+    if document.get("ruling_tip") != "R46f(i)":
         raise SystemExit("inherited-transfer ruling-tip drift")
+
+    specimen = document.get("specimen_class", {})
+    if specimen.get("classification") != "ALGEBRA":
+        raise SystemExit("inherited-transfer specimen classification drift")
+    if specimen.get("algebra_payload_example") != "late reduction\n":
+        raise SystemExit("inherited-transfer algebra payload drift")
+    if specimen.get("canonical_text_block_example") != '{"text":"late reduction\\n"}':
+        raise SystemExit("inherited-transfer canonical payload drift")
+    establishes = specimen.get("establishes", [])
+    if not any(
+        "origin_identity" in claim
+        and "native_mid" in claim
+        and "block index" in claim
+        and "source ordinal" in claim
+        for claim in establishes
+    ):
+        raise SystemExit("inherited-transfer manifest-address claim drift")
+    if not any("predecessor_identity independently" in claim for claim in establishes):
+        raise SystemExit("inherited-transfer source-identity claim drift")
+    if not any(
+        "mc.d5.block.source.v1" in claim and "mc.d5.block.served.v1" in claim
+        for claim in establishes
+    ):
+        raise SystemExit("inherited-transfer material digest-domain claim drift")
+    if not any(
+        "mc.d5.unit-projection.v1" in claim and "never compared" in claim
+        for claim in establishes
+    ):
+        raise SystemExit("inherited-transfer projection digest-domain claim drift")
+    if specimen.get("does_not_establish") != [
+        "normalized provider-block integration",
+        "the returned-view path from real normalized provider blocks",
+    ]:
+        raise SystemExit("inherited-transfer non-readiness claim drift")
+    follow_up = specimen.get("follow_up", "")
+    if "real normalizer" not in follow_up or "returned-view path" not in follow_up:
+        raise SystemExit("inherited-transfer follow-up purpose drift")
+
     vectors = document.get("vectors", [])
     expected_ids = {
         "V01_frozen_twice_inherited",
@@ -1312,6 +1352,9 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         "V05_missing_current_unit",
         "V06_source_substitution",
         "V07_frozen_changed_served",
+        "V08_origin_uses_predecessor_identity",
+        "V09_predecessor_uses_serving_identity",
+        "V10_per_hop_mid_reallocation",
     }
     if {vector.get("id") for vector in vectors} != expected_ids:
         raise SystemExit("inherited-transfer vector inventory drift")
