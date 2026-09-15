@@ -411,6 +411,10 @@ git add -- packages/plugin/package.json packages/pi-plugin/package.json packages
 if [ -n "$(git status --porcelain --untracked-files=no | grep -v '^[MARC] ')" ]; then
   echo "Error: unrelated modified files present at bump time; refusing to fold them into the release commit:"
   git status --porcelain --untracked-files=no | grep -v '^[MARC] '
+  # Cargo.lock is the common one: the rust e2e lane resolves the sibling subc
+  # checkout, so a sibling release since the last reconciliation shows up here as
+  # real drift. Commit it on its own (the artifact's dependency set must be the
+  # committed lock), then re-run this script.
   git reset -q
   exit 1
 fi
