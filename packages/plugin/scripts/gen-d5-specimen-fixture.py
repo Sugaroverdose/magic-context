@@ -1454,6 +1454,7 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         "L03_absent_reduction_independent_location",
         "L04_compartment_synthetic_head",
         "L05_compartment_manifest_location",
+        "L06_absent_reduction_same_source_reallocated",
     }
     controls = document.get("unit_locator_controls", [])
     if {control.get("id") for control in controls} != expected_controls:

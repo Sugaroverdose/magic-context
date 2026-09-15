@@ -894,6 +894,7 @@ fn d5_unit_locators_and_constructed_carriers_obey_returned_view_structure() {
         "L03_absent_reduction_independent_location",
         "L04_compartment_synthetic_head",
         "L05_compartment_manifest_location",
+        "L06_absent_reduction_same_source_reallocated",
     ]);
     assert_eq!(
         fixture

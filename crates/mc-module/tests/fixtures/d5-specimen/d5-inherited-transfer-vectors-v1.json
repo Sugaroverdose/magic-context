@@ -1665,9 +1665,10 @@
         "input_class": "CONSTRUCTED",
         "mid": "mid-independent-51",
         "role": "assistant",
-        "ordinal": 51,
+        "ordinal": 61,
         "synthetic": false,
-        "source_relation": "independent_source"
+        "source_relation": "independent_source",
+        "carrier_note": "Constructed INDEPENDENT-SOURCE carrier with its own ordinal 61, so the ONLY defect in this control is the one under test: a PRESENT member whose committed unit sits somewhere other than its own location. Leaving the member's ordinal here would have added a second, unrelated invalidity."
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000f756e69742d70726573656e742d3531000000000000000c000000000000001270726573656e7420726564756374696f6e0a",
@@ -1848,6 +1849,63 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "absent"
+      },
+      "row_version": 14
+    },
+    {
+      "id": "L06_absent_reduction_same_source_reallocated",
+      "name": "absent reduced member accepts a reallocated serving mid that keeps its source ordinal",
+      "member": {
+        "identity": {
+          "mid": "mid-absent-54",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 54
+      },
+      "record": {
+        "unit": "unit-absent-realloc-54",
+        "kind": {
+          "kind": "reduction"
+        },
+        "coverage": {
+          "start": 54,
+          "end": 54
+        },
+        "locator": {
+          "mid": "mid-realloc-54",
+          "index": 0
+        },
+        "sha256": "2199eebd3e90fec16ef759a9c041507a06afa011b32fed5b593010c91c7f4f18"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mid-realloc-54",
+          "index": 0
+        },
+        "bytes_base64": "cmVhbGxvY2F0ZWQgYWJzZW50IHJlZHVjdGlvbgo="
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mid-realloc-54",
+        "role": "assistant",
+        "ordinal": 54,
+        "synthetic": false,
+        "carrier_note": "Constructed SAME-SOURCE carrier under a reallocated serving mid (R24a/V10): the mid differs from the member's while the source ordinal 54 is unchanged, because a serving identity is allocated per hop and an ordinal is a source coordinate. This control exists so no rule may read unequal mid as implying unequal source.",
+        "source_relation": "same_source_reallocated"
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e7631000000010000000000000016756e69742d616273656e742d7265616c6c6f632d3534000000000000000e000000000000001d7265616c6c6f636174656420616273656e7420726564756374696f6e0a",
+        "sha256": "2199eebd3e90fec16ef759a9c041507a06afa011b32fed5b593010c91c7f4f18"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "http_status": null,
+        "error_code": null
       },
       "member_presence": {
         "input_class": "CONSTRUCTED",
