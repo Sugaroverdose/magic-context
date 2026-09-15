@@ -1303,7 +1303,7 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         raise SystemExit("inherited-transfer schema drift")
     if document.get("contract_version") != "1.3.38":
         raise SystemExit("inherited-transfer contract-version drift")
-    if document.get("ruling_tip") != "R46f(i)":
+    if document.get("ruling_tip") != "R46g":
         raise SystemExit("inherited-transfer ruling-tip drift")
 
     specimen = document.get("specimen_class", {})
@@ -1313,6 +1313,9 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         raise SystemExit("inherited-transfer algebra payload drift")
     if specimen.get("canonical_text_block_example") != '{"text":"late reduction\\n"}':
         raise SystemExit("inherited-transfer canonical payload drift")
+    presence_note = specimen.get("presence_note", "")
+    if "CONSTRUCTED" not in presence_note or "do not claim observed presence" not in presence_note:
+        raise SystemExit("inherited-transfer constructed-presence boundary drift")
     establishes = specimen.get("establishes", [])
     if not any(
         "origin_identity" in claim
@@ -1336,7 +1339,7 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         raise SystemExit("inherited-transfer projection digest-domain claim drift")
     if specimen.get("does_not_establish") != [
         "normalized provider-block integration",
-        "the returned-view path from real normalized provider blocks",
+        "locator resolution against a real returned view",
     ]:
         raise SystemExit("inherited-transfer non-readiness claim drift")
     follow_up = specimen.get("follow_up", "")
@@ -1360,6 +1363,13 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
         raise SystemExit("inherited-transfer vector inventory drift")
 
     for vector in vectors:
+        if vector.get("member_presence") != {
+            "input_class": "CONSTRUCTED",
+            "state": "present",
+        }:
+            raise SystemExit(
+                f"inherited-transfer member-presence drift: {vector['id']}"
+            )
         for side in ("held_m1", "successor_m2"):
             member = vector[side]
             source_derivation = vector["source_derivation"][side]
@@ -1395,6 +1405,25 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
                 raise SystemExit(
                     f"inherited-transfer locator drift: {vector['id']} {record['unit']}"
                 )
+            member = vector[evidence["member_side"]]
+            expected_locator = {
+                "mid": member["message"]["native_mid"],
+                "index": member["block"]["index"],
+            }
+            if record["kind"] != {"kind": "reduction"} or record["locator"] != expected_locator:
+                raise SystemExit(
+                    f"inherited-transfer present reduction location drift: {vector['id']} {record['unit']}"
+                )
+            if evidence.get("carrier") != {
+                "input_class": "CONSTRUCTED",
+                "mid": expected_locator["mid"],
+                "role": member["message"]["role"],
+                "ordinal": member["message"]["ordinal"],
+                "synthetic": False,
+            }:
+                raise SystemExit(
+                    f"inherited-transfer reduction carrier drift: {vector['id']} {record['unit']}"
+                )
             source = base64.b64decode(projection["bytes_base64"], validate=True)
             derivation = evidence["digest_derivation"]
             served_preimage = d5_served_preimage(source)
@@ -1415,6 +1444,61 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
                 raise SystemExit(f"inherited-transfer UnitRecordV1 digest drift: {vector['id']}")
             if derivation["served"]["sha256"] == derivation["unit_projection"]["sha256"]:
                 raise SystemExit(f"inherited-transfer digest domains met: {vector['id']}")
+
+    expected_controls = {
+        "L01_present_reduction_own_location",
+        "L02_present_reduction_distinct_location",
+        "L03_absent_reduction_independent_location",
+        "L04_compartment_synthetic_head",
+        "L05_compartment_manifest_location",
+    }
+    controls = document.get("unit_locator_controls", [])
+    if {control.get("id") for control in controls} != expected_controls:
+        raise SystemExit("inherited-transfer unit-locator control inventory drift")
+    for control in controls:
+        record = control["record"]
+        locator = record["locator"]
+        projection = control["projection"]
+        carrier = control["carrier"]
+        presence = control["member_presence"]
+        member = control["member"]
+        source = base64.b64decode(projection["bytes_base64"], validate=True)
+        preimage = d5_unit_preimage(record["unit"], control["row_version"], source)
+        if locator != projection["locator"] or carrier.get("mid") != locator["mid"]:
+            raise SystemExit(f"inherited-transfer control locator drift: {control['id']}")
+        if carrier.get("input_class") != "CONSTRUCTED" or presence.get("input_class") != "CONSTRUCTED":
+            raise SystemExit(f"inherited-transfer control classification drift: {control['id']}")
+        if control["digest_derivation"] != {
+            "preimage_hex": preimage.hex(),
+            "sha256": sha256(preimage),
+        } or record["sha256"] != sha256(preimage):
+            raise SystemExit(f"inherited-transfer control digest drift: {control['id']}")
+
+        member_location = member["identity"]
+        if record["kind"]["kind"] == "reduction":
+            accepted = (
+                carrier.get("synthetic") is False
+                and carrier.get("ordinal") is not None
+                and (
+                    presence["state"] == "absent"
+                    or (
+                        locator == member_location
+                        and carrier.get("role") == member["role"]
+                        and carrier.get("ordinal") == member["ordinal"]
+                    )
+                )
+            )
+        else:
+            accepted = (
+                presence["state"] == "absent"
+                and locator != member_location
+                and carrier.get("role") == "user"
+                and carrier.get("ordinal") is None
+                and carrier.get("synthetic") is True
+            )
+        expected_outcome = "ACCEPT" if accepted else "REFUSE"
+        if control["expected"]["outcome"] != expected_outcome:
+            raise SystemExit(f"inherited-transfer control expectation drift: {control['id']}")
 
 
 def validate_aggregate_preimages(aggregate_preimages: bytes) -> None:

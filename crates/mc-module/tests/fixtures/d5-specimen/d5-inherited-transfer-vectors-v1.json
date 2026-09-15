@@ -1,7 +1,7 @@
 {
   "schema": "mc.d5.inherited-transfer-vectors.v1",
   "contract_version": "1.3.38",
-  "ruling_tip": "R46f(i)",
+  "ruling_tip": "R46g",
   "specimen_class": {
     "classification": "ALGEBRA",
     "payload_note": "Byte payloads are plain text; canonical text blocks are normalizer-produced JSON.",
@@ -11,13 +11,16 @@
       "inherited_from.receipt_id selects the cited receipt manifest and origin_identity binds the member address in that manifest: native_mid, block index, and source ordinal.",
       "predecessor_identity independently names the source block and must match between the held and successor members.",
       "source.sha256 is computed in mc.d5.block.source.v1 and served.sha256 is computed in mc.d5.block.served.v1 over their explicit byte payloads.",
-      "UnitRecordV1.sha256 is computed in mc.d5.unit-projection.v1 over unit, row_version, and the explicit projection bytes; served and unit-projection digests bind through bytes and are never compared."
+      "UnitRecordV1.sha256 is computed in mc.d5.unit-projection.v1 over unit, row_version, and the explicit projection bytes; served and unit-projection digests bind through bytes and are never compared.",
+      "Constructed carrier metadata makes reduction and compartment unit locator resolution representable against a returned-message shape.",
+      "Present reduced members locate committed units at their own native_mid and block index; absent reduced members may use independently located validated units."
     ],
     "does_not_establish": [
       "normalized provider-block integration",
-      "the returned-view path from real normalized provider blocks"
+      "locator resolution against a real returned view"
     ],
-    "follow_up": "Exercise canonical normalized provider-block bytes through the real normalizer and returned-view path."
+    "follow_up": "Exercise canonical normalized provider-block bytes and constructed locator carriers through the real normalizer and returned-view path.",
+    "presence_note": "Every member_presence value and carrier is a CONSTRUCTED input. These algebra vectors make locator resolution representable but do not claim observed presence in a real returned array."
   },
   "predicate_rule": {
     "unit_validation_order": "Clause 21a: validate UnitRecordV1 from returned bytes at its locator and derive VALIDATED(this pass) before evaluating any member transfer proof.",
@@ -45,7 +48,8 @@
     ],
     "digest_domains": "R46e(i): served.sha256 is H(mc.d5.block.served.v1, B); UnitRecordV1.sha256 is H(mc.d5.unit-projection.v1, {unit,row_version,B}); binding is through B and the digests are never compared.",
     "refusal_transport": "Any failed inherited-member transfer predicate is HTTP 503 with error.code d5_carry_proof_mismatch.",
-    "expectations": "Expected outcomes are owner-authored fixture data; the Rust oracle evaluates the predicate independently and compares its verdict to these literals."
+    "expectations": "Expected outcomes are owner-authored fixture data; the Rust oracle evaluates the predicate independently and compares its verdict to these literals.",
+    "unit_locator_rule": "Clause 21a: a present reduced member locates its committed unit at its own native_mid and block index; an absent reduced member may cite an independently located validated unit; a compartment carrier never names a manifest member."
   },
   "twice_inherited_ordinal_resolution": {
     "status": "settled",
@@ -182,6 +186,10 @@
         "outcome": "ACCEPT",
         "http_status": null,
         "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -330,14 +338,14 @@
               "end": 42
             },
             "locator": {
-              "mid": "mid-unit-late-42",
+              "mid": "mid-t-r2-42",
               "index": 0
             },
             "sha256": "151a3ca3b7a951f024b7f9657792b915c03c2874bff190931ed74dc9ba99cba0"
           },
           "projection": {
             "locator": {
-              "mid": "mid-unit-late-42",
+              "mid": "mid-t-r2-42",
               "index": 0
             },
             "bytes_base64": "bGF0ZSByZWR1Y3Rpb24K"
@@ -356,6 +364,13 @@
               "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000c756e69742d6c6174652d34320000000000000007000000000000000f6c61746520726564756374696f6e0a",
               "sha256": "151a3ca3b7a951f024b7f9657792b915c03c2874bff190931ed74dc9ba99cba0"
             }
+          },
+          "carrier": {
+            "input_class": "CONSTRUCTED",
+            "mid": "mid-t-r2-42",
+            "role": "assistant",
+            "ordinal": 42,
+            "synthetic": false
           }
         }
       ],
@@ -363,6 +378,10 @@
         "outcome": "ACCEPT",
         "http_status": null,
         "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -491,14 +510,14 @@
               "end": 43
             },
             "locator": {
-              "mid": "mid-unit-first-43",
+              "mid": "mid-s-r1-43",
               "index": 0
             },
             "sha256": "a528b30933f91937d09faed8630694eb823edc29047a47d64faa0828d6121e68"
           },
           "projection": {
             "locator": {
-              "mid": "mid-unit-first-43",
+              "mid": "mid-s-r1-43",
               "index": 0
             },
             "bytes_base64": "Zmlyc3QgcmVkdWN0aW9uCg=="
@@ -517,6 +536,13 @@
               "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000d756e69742d66697273742d343300000000000000080000000000000010666972737420726564756374696f6e0a",
               "sha256": "a528b30933f91937d09faed8630694eb823edc29047a47d64faa0828d6121e68"
             }
+          },
+          "carrier": {
+            "input_class": "CONSTRUCTED",
+            "mid": "mid-s-r1-43",
+            "role": "assistant",
+            "ordinal": 43,
+            "synthetic": false
           }
         },
         {
@@ -533,14 +559,14 @@
               "end": 43
             },
             "locator": {
-              "mid": "mid-unit-second-43",
+              "mid": "mid-t-r2-43",
               "index": 0
             },
             "sha256": "543e1a43b23a98e997642f81c9074cd99693ae4e275c28e52e2940c374cdc6bf"
           },
           "projection": {
             "locator": {
-              "mid": "mid-unit-second-43",
+              "mid": "mid-t-r2-43",
               "index": 0
             },
             "bytes_base64": "c2Vjb25kIHJlZHVjdGlvbgo="
@@ -559,6 +585,13 @@
               "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000e756e69742d7365636f6e642d3433000000000000000900000000000000117365636f6e6420726564756374696f6e0a",
               "sha256": "543e1a43b23a98e997642f81c9074cd99693ae4e275c28e52e2940c374cdc6bf"
             }
+          },
+          "carrier": {
+            "input_class": "CONSTRUCTED",
+            "mid": "mid-t-r2-43",
+            "role": "assistant",
+            "ordinal": 43,
+            "synthetic": false
           }
         }
       ],
@@ -566,6 +599,10 @@
         "outcome": "ACCEPT",
         "http_status": null,
         "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -694,14 +731,14 @@
               "end": 44
             },
             "locator": {
-              "mid": "mid-unit-held-44",
+              "mid": "mid-s-r1-44",
               "index": 0
             },
             "sha256": "49731595297c6d0f903e1e903d49c3e7ad5b38fbee980f508028b750e238595f"
           },
           "projection": {
             "locator": {
-              "mid": "mid-unit-held-44",
+              "mid": "mid-s-r1-44",
               "index": 0
             },
             "bytes_base64": "aGVsZCByZWR1Y3Rpb24K"
@@ -720,6 +757,13 @@
               "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000c756e69742d68656c642d3434000000000000000a000000000000000f68656c6420726564756374696f6e0a",
               "sha256": "49731595297c6d0f903e1e903d49c3e7ad5b38fbee980f508028b750e238595f"
             }
+          },
+          "carrier": {
+            "input_class": "CONSTRUCTED",
+            "mid": "mid-s-r1-44",
+            "role": "assistant",
+            "ordinal": 44,
+            "synthetic": false
           }
         }
       ],
@@ -727,6 +771,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -855,14 +903,14 @@
               "end": 45
             },
             "locator": {
-              "mid": "mid-unit-prior-45",
+              "mid": "mid-t-r2-45",
               "index": 0
             },
             "sha256": "8de32c0895833b4e7faad08190f77bee13a65e86378bb63aeb32c92457a2693c"
           },
           "projection": {
             "locator": {
-              "mid": "mid-unit-prior-45",
+              "mid": "mid-t-r2-45",
               "index": 0
             },
             "bytes_base64": "cHJpb3IgcHJvamVjdGlvbgo="
@@ -881,6 +929,13 @@
               "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000d756e69742d7072696f722d3435000000000000000b00000000000000117072696f722070726f6a656374696f6e0a",
               "sha256": "8de32c0895833b4e7faad08190f77bee13a65e86378bb63aeb32c92457a2693c"
             }
+          },
+          "carrier": {
+            "input_class": "CONSTRUCTED",
+            "mid": "mid-t-r2-45",
+            "role": "assistant",
+            "ordinal": 45,
+            "synthetic": false
           }
         }
       ],
@@ -888,6 +943,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -1006,6 +1065,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -1124,6 +1187,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -1242,6 +1309,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -1360,6 +1431,10 @@
         "outcome": "REFUSE",
         "http_status": 503,
         "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     },
     {
@@ -1478,6 +1553,10 @@
         "outcome": "ACCEPT",
         "http_status": null,
         "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
       }
     }
   ],
@@ -1486,5 +1565,284 @@
     "index_source": "owner-authored D5 inherited-member transfer vectors",
     "generation_script": "packages/plugin/scripts/gen-d5-specimen-fixture.py",
     "digest_values": "Derived from explicit bytes and exact CE1 preimages; the generator reproduces every source, served, and unit-projection digest."
-  }
+  },
+  "unit_locator_controls": [
+    {
+      "id": "L01_present_reduction_own_location",
+      "name": "present reduced member owns its committed unit location",
+      "member": {
+        "identity": {
+          "mid": "mid-present-51",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 51
+      },
+      "record": {
+        "unit": "unit-present-51",
+        "kind": {
+          "kind": "reduction"
+        },
+        "coverage": {
+          "start": 51,
+          "end": 51
+        },
+        "locator": {
+          "mid": "mid-present-51",
+          "index": 0
+        },
+        "sha256": "8f77d99708fd62069b723e6eae31a217310fc57706d3838920b5058cd41460bb"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mid-present-51",
+          "index": 0
+        },
+        "bytes_base64": "cHJlc2VudCByZWR1Y3Rpb24K"
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mid-present-51",
+        "role": "assistant",
+        "ordinal": 51,
+        "synthetic": false
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000f756e69742d70726573656e742d3531000000000000000c000000000000001270726573656e7420726564756374696f6e0a",
+        "sha256": "8f77d99708fd62069b723e6eae31a217310fc57706d3838920b5058cd41460bb"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "http_status": null,
+        "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
+      },
+      "row_version": 12
+    },
+    {
+      "id": "L02_present_reduction_distinct_location",
+      "name": "present reduced member refuses a distinct committed unit location",
+      "member": {
+        "identity": {
+          "mid": "mid-present-51",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 51
+      },
+      "record": {
+        "unit": "unit-present-51",
+        "kind": {
+          "kind": "reduction"
+        },
+        "coverage": {
+          "start": 51,
+          "end": 51
+        },
+        "locator": {
+          "mid": "mid-independent-51",
+          "index": 0
+        },
+        "sha256": "8f77d99708fd62069b723e6eae31a217310fc57706d3838920b5058cd41460bb"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mid-independent-51",
+          "index": 0
+        },
+        "bytes_base64": "cHJlc2VudCByZWR1Y3Rpb24K"
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mid-independent-51",
+        "role": "assistant",
+        "ordinal": 51,
+        "synthetic": false
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000f756e69742d70726573656e742d3531000000000000000c000000000000001270726573656e7420726564756374696f6e0a",
+        "sha256": "8f77d99708fd62069b723e6eae31a217310fc57706d3838920b5058cd41460bb"
+      },
+      "expected": {
+        "outcome": "REFUSE",
+        "http_status": 503,
+        "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "present"
+      },
+      "row_version": 12
+    },
+    {
+      "id": "L03_absent_reduction_independent_location",
+      "name": "absent reduced member accepts an independently located validated unit",
+      "member": {
+        "identity": {
+          "mid": "mid-absent-52",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 52
+      },
+      "record": {
+        "unit": "unit-absent-52",
+        "kind": {
+          "kind": "reduction"
+        },
+        "coverage": {
+          "start": 52,
+          "end": 52
+        },
+        "locator": {
+          "mid": "mid-independent-52",
+          "index": 1
+        },
+        "sha256": "6e99cbe8b568941c52966ed9d74dad76835cc0c779c0ff98d02e635140aec2fa"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mid-independent-52",
+          "index": 1
+        },
+        "bytes_base64": "YWJzZW50IHJlZHVjdGlvbgo="
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mid-independent-52",
+        "role": "assistant",
+        "ordinal": 52,
+        "synthetic": false
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000e756e69742d616273656e742d3532000000000000000d0000000000000011616273656e7420726564756374696f6e0a",
+        "sha256": "6e99cbe8b568941c52966ed9d74dad76835cc0c779c0ff98d02e635140aec2fa"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "http_status": null,
+        "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "absent"
+      },
+      "row_version": 13
+    },
+    {
+      "id": "L04_compartment_synthetic_head",
+      "name": "compartment unit resolves in a synthetic m0 carrier",
+      "member": {
+        "identity": {
+          "mid": "mid-folded-60",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 60
+      },
+      "record": {
+        "unit": "unit-compartment-60",
+        "kind": {
+          "kind": "compartment",
+          "compartment_sequence": 60
+        },
+        "coverage": {
+          "start": 60,
+          "end": 60
+        },
+        "locator": {
+          "mid": "mc_m0",
+          "index": 2
+        },
+        "sha256": "704c201f8b513304635e582058c52bfb7fbb3949aceb36f73d2d75c4747a4685"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mc_m0",
+          "index": 2
+        },
+        "bytes_base64": "Zm9sZGVkIGNvbXBhcnRtZW50Cg=="
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mc_m0",
+        "role": "user",
+        "ordinal": null,
+        "synthetic": true
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e7631000000010000000000000013756e69742d636f6d706172746d656e742d3630000000000000000e0000000000000013666f6c64656420636f6d706172746d656e740a",
+        "sha256": "704c201f8b513304635e582058c52bfb7fbb3949aceb36f73d2d75c4747a4685"
+      },
+      "expected": {
+        "outcome": "ACCEPT",
+        "http_status": null,
+        "error_code": null
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "absent"
+      },
+      "row_version": 14
+    },
+    {
+      "id": "L05_compartment_manifest_location",
+      "name": "compartment unit refuses a locator naming a manifest member",
+      "member": {
+        "identity": {
+          "mid": "mid-folded-60",
+          "index": 0
+        },
+        "role": "assistant",
+        "ordinal": 60
+      },
+      "record": {
+        "unit": "unit-compartment-60",
+        "kind": {
+          "kind": "compartment",
+          "compartment_sequence": 60
+        },
+        "coverage": {
+          "start": 60,
+          "end": 60
+        },
+        "locator": {
+          "mid": "mid-folded-60",
+          "index": 0
+        },
+        "sha256": "704c201f8b513304635e582058c52bfb7fbb3949aceb36f73d2d75c4747a4685"
+      },
+      "projection": {
+        "locator": {
+          "mid": "mid-folded-60",
+          "index": 0
+        },
+        "bytes_base64": "Zm9sZGVkIGNvbXBhcnRtZW50Cg=="
+      },
+      "carrier": {
+        "input_class": "CONSTRUCTED",
+        "mid": "mid-folded-60",
+        "role": "user",
+        "ordinal": null,
+        "synthetic": true
+      },
+      "digest_derivation": {
+        "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e7631000000010000000000000013756e69742d636f6d706172746d656e742d3630000000000000000e0000000000000013666f6c64656420636f6d706172746d656e740a",
+        "sha256": "704c201f8b513304635e582058c52bfb7fbb3949aceb36f73d2d75c4747a4685"
+      },
+      "expected": {
+        "outcome": "REFUSE",
+        "http_status": 503,
+        "error_code": "d5_carry_proof_mismatch"
+      },
+      "member_presence": {
+        "input_class": "CONSTRUCTED",
+        "state": "absent"
+      },
+      "row_version": 14
+    }
+  ]
 }

@@ -20,6 +20,7 @@ struct Fixture {
     predicate_rule: PredicateRule,
     twice_inherited_ordinal_resolution: OrdinalResolution,
     vectors: Vec<Vector>,
+    unit_locator_controls: Vec<UnitLocatorControl>,
     generation: Generation,
 }
 
@@ -30,6 +31,7 @@ struct SpecimenClass {
     payload_note: String,
     algebra_payload_example: String,
     canonical_text_block_example: String,
+    presence_note: String,
     establishes: Vec<String>,
     does_not_establish: Vec<String>,
     follow_up: String,
@@ -44,6 +46,7 @@ struct PredicateRule {
     may_change: Vec<String>,
     forbidden: Vec<String>,
     digest_domains: String,
+    unit_locator_rule: String,
     refusal_transport: String,
     expectations: String,
 }
@@ -77,6 +80,7 @@ struct Vector {
     name: String,
     origin_receipt_id: String,
     lineage: Lineage,
+    member_presence: ConstructedPresence,
     held_m1: ManifestMember,
     successor_m2: ManifestMember,
     source_derivation: MemberDerivations,
@@ -185,6 +189,7 @@ struct UnitEvidence {
     row_version: u64,
     record: UnitRecordV1,
     projection: LocatedProjection,
+    carrier: UnitCarrier,
     digest_derivation: UnitDigestDerivation,
 }
 
@@ -239,6 +244,60 @@ struct Locator {
 struct LocatedProjection {
     locator: Locator,
     bytes_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnitCarrier {
+    input_class: String,
+    mid: String,
+    role: String,
+    ordinal: Option<u64>,
+    synthetic: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnitLocatorControl {
+    id: String,
+    name: String,
+    member: LocatorControlMember,
+    member_presence: ConstructedPresence,
+    row_version: u64,
+    record: UnitRecordV1,
+    projection: LocatedProjection,
+    carrier: UnitCarrier,
+    digest_derivation: LocatorDigestDerivation,
+    expected: Expected,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocatorControlMember {
+    identity: Locator,
+    role: String,
+    ordinal: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConstructedPresence {
+    input_class: String,
+    state: MemberPresence,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MemberPresence {
+    Present,
+    Absent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocatorDigestDerivation {
+    preimage_hex: String,
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -520,6 +579,72 @@ fn refuse() -> Verdict {
     }
 }
 
+fn evidence_member<'a>(vector: &'a Vector, evidence: &UnitEvidence) -> &'a ManifestMember {
+    match evidence.member_side {
+        MemberSide::HeldM1 => &vector.held_m1,
+        MemberSide::SuccessorM2 => &vector.successor_m2,
+    }
+}
+
+fn carrier_names_locator(carrier: &UnitCarrier, locator: &Locator) -> bool {
+    carrier.input_class == "CONSTRUCTED" && carrier.mid == locator.mid
+}
+
+fn present_reduction_evidence_is_structural(vector: &Vector, evidence: &UnitEvidence) -> bool {
+    let Some(locator) = evidence.record.locator.as_ref() else {
+        return false;
+    };
+    let member = evidence_member(vector, evidence);
+    vector.member_presence.input_class == "CONSTRUCTED"
+        && vector.member_presence.state == MemberPresence::Present
+        && evidence.record.kind == UnitKind::Reduction
+        && locator == &evidence.projection.locator
+        && locator.mid == member.message.native_mid
+        && locator.index == member.block.index
+        && carrier_names_locator(&evidence.carrier, locator)
+        && evidence.carrier.role == member.message.role
+        && evidence.carrier.ordinal == Some(member.message.ordinal)
+        && !evidence.carrier.synthetic
+}
+
+fn evaluate_locator_control(control: &UnitLocatorControl) -> Verdict {
+    let Some(locator) = control.record.locator.as_ref() else {
+        return refuse();
+    };
+    if locator != &control.projection.locator
+        || !carrier_names_locator(&control.carrier, locator)
+        || control.member_presence.input_class != "CONSTRUCTED"
+    {
+        return refuse();
+    }
+
+    match &control.record.kind {
+        UnitKind::Reduction => {
+            if control.carrier.synthetic || control.carrier.ordinal.is_none() {
+                return refuse();
+            }
+            if control.member_presence.state == MemberPresence::Present
+                && (locator != &control.member.identity
+                    || control.carrier.role != control.member.role
+                    || control.carrier.ordinal != Some(control.member.ordinal))
+            {
+                return refuse();
+            }
+        }
+        UnitKind::Compartment { .. } => {
+            if control.member_presence.state != MemberPresence::Absent
+                || locator == &control.member.identity
+                || control.carrier.role != "user"
+                || control.carrier.ordinal.is_some()
+                || !control.carrier.synthetic
+            {
+                return refuse();
+            }
+        }
+    }
+    Verdict::Accept
+}
+
 fn current_validated_units(vector: &Vector) -> Option<BTreeMap<&str, &UnitEvidence>> {
     let mut validated = BTreeMap::new();
     for evidence in vector
@@ -718,6 +843,82 @@ fn d5_inherited_some_to_none_never_resurrects() {
 }
 
 #[test]
+fn d5_unit_locators_and_constructed_carriers_obey_returned_view_structure() {
+    let (fixture, _) = load_fixture();
+
+    for vector in &fixture.vectors {
+        assert_eq!(
+            vector.member_presence.input_class, "CONSTRUCTED",
+            "{}",
+            vector.id
+        );
+        assert_eq!(
+            vector.member_presence.state,
+            MemberPresence::Present,
+            "{}",
+            vector.id
+        );
+        for evidence in &vector.unit_evidence {
+            assert!(
+                present_reduction_evidence_is_structural(vector, evidence),
+                "{} {}",
+                vector.id,
+                evidence.record.unit
+            );
+        }
+    }
+
+    let expected_ids = BTreeSet::from([
+        "L01_present_reduction_own_location",
+        "L02_present_reduction_distinct_location",
+        "L03_absent_reduction_independent_location",
+        "L04_compartment_synthetic_head",
+        "L05_compartment_manifest_location",
+    ]);
+    assert_eq!(
+        fixture
+            .unit_locator_controls
+            .iter()
+            .map(|control| control.id.as_str())
+            .collect::<BTreeSet<_>>(),
+        expected_ids
+    );
+    for control in &fixture.unit_locator_controls {
+        assert!(!control.name.is_empty());
+        let bytes = decode_base64(&control.projection.bytes_base64);
+        assert_eq!(
+            control.digest_derivation.preimage_hex,
+            hex(&unit_preimage(
+                &control.record.unit,
+                control.row_version,
+                &bytes,
+            )),
+            "{} records an independently reproducible preimage",
+            control.id
+        );
+        assert_eq!(control.record.sha256, control.digest_derivation.sha256);
+        assert_eq!(
+            evaluate_locator_control(control),
+            expected_verdict(&control.expected),
+            "{}",
+            control.id
+        );
+    }
+
+    let absent = fixture
+        .unit_locator_controls
+        .iter()
+        .find(|control| control.id == "L03_absent_reduction_independent_location")
+        .expect("absent-member positive control");
+    assert_eq!(absent.member_presence.state, MemberPresence::Absent);
+    assert_ne!(
+        absent.record.locator.as_ref(),
+        Some(&absent.member.identity)
+    );
+    assert_eq!(evaluate_locator_control(absent), Verdict::Accept);
+}
+
+#[test]
 fn d5_inherited_units_must_be_validated_this_pass() {
     let (fixture, _) = load_fixture();
     let vector = vector(&fixture, "V05_missing_current_unit");
@@ -858,7 +1059,11 @@ fn d5_inherited_specimen_class_is_algebra_only() {
         specimen.canonical_text_block_example,
         r#"{"text":"late reduction\n"}"#
     );
-    assert_eq!(specimen.establishes.len(), 4);
+    assert_eq!(specimen.establishes.len(), 6);
+    assert!(specimen.presence_note.contains("CONSTRUCTED"));
+    assert!(specimen
+        .presence_note
+        .contains("do not claim observed presence"));
     assert!(specimen.establishes.iter().any(|claim| {
         claim.contains("origin_identity")
             && claim.contains("native_mid")
@@ -879,7 +1084,7 @@ fn d5_inherited_specimen_class_is_algebra_only() {
         specimen.does_not_establish,
         [
             "normalized provider-block integration",
-            "the returned-view path from real normalized provider blocks",
+            "locator resolution against a real returned view",
         ]
     );
     assert!(specimen.follow_up.contains("real normalizer"));
@@ -930,7 +1135,7 @@ fn d5_inherited_fixture_contract_and_index_are_pinned() {
     let (fixture, fixture_bytes) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.inherited-transfer-vectors.v1");
     assert_eq!(fixture.contract_version, "1.3.38");
-    assert_eq!(fixture.ruling_tip, "R46f(i)");
+    assert_eq!(fixture.ruling_tip, "R46g");
     assert!(fixture
         .predicate_rule
         .unit_validation_order
@@ -972,6 +1177,18 @@ fn d5_inherited_fixture_contract_and_index_are_pinned() {
         .predicate_rule
         .digest_domains
         .contains("never compared"));
+    assert!(fixture
+        .predicate_rule
+        .unit_locator_rule
+        .contains("present reduced member"));
+    assert!(fixture
+        .predicate_rule
+        .unit_locator_rule
+        .contains("absent reduced member"));
+    assert!(fixture
+        .predicate_rule
+        .unit_locator_rule
+        .contains("compartment carrier"));
     assert!(fixture
         .predicate_rule
         .refusal_transport
