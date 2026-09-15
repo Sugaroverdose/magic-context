@@ -1,5 +1,6 @@
 import { log } from "../../shared/logger";
 import {
+    assertOpenCodeStoreGeneration,
     claimOpenCodeDbDiagnosticOnce,
     clearOpenCodeDbReadFailure,
     type OpenCodeDbPathResolution,
@@ -63,6 +64,12 @@ function getReadOnlySessionDb(): Database {
 
     closeCachedReadOnlyDb();
     const db = new Database(dbPath, { readonly: true });
+    try {
+        assertOpenCodeStoreGeneration(db, "v1", dbPath);
+    } catch (error) {
+        closeQuietly(db);
+        throw error;
+    }
     cachedReadOnlyDb = { path: dbPath, db };
     clearOpenCodeDbReadFailure();
     return db;
