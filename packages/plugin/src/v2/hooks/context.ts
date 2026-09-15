@@ -21,8 +21,8 @@ import { setRawMessageProvider } from "../../hooks/magic-context/read-session-ch
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
-import { getDataDir } from "../../shared/data-path";
 import { detectConflicts } from "../../shared/conflict-detector";
+import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { pushNotification } from "../../shared/rpc-notifications";
 import { v2CompactionMarkerStrategy } from "../fold/markers";

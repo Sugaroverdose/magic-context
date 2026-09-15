@@ -404,7 +404,8 @@ function readUserCompaction(
             if (
                 c.auto !== undefined ||
                 (hostGeneration === "v1" && c.prune !== undefined) ||
-                (hostGeneration === "v2" && (c.keep?.tokens !== undefined || c.buffer !== undefined))
+                (hostGeneration === "v2" &&
+                    (c.keep?.tokens !== undefined || c.buffer !== undefined))
             ) {
                 return resolvedCompactionBlock(c, hostGeneration);
             }

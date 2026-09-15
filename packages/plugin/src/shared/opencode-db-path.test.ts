@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "./sqlite";
 import {
     assertOpenCodeStoreGeneration,
     detectOpenCodeStoreGeneration,
@@ -16,6 +15,7 @@ import {
     resolveOpenCodeDbPath,
     sourceOpenCodeDatabaseFilename,
 } from "./opencode-db-path";
+import { Database } from "./sqlite";
 
 const ORIGINAL_ENV = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
@@ -182,9 +182,7 @@ describe("resolveOpenCodeDbPath", () => {
         for (const channel of ["latest", "dev", "beta", "next", "prod"]) {
             expect(sourceOpenCodeDatabaseFilename("v2", channel, {})).toBe("opencode.db");
         }
-        expect(sourceOpenCodeDatabaseFilename("v2", "a/b c!._-", {})).toBe(
-            "opencode-abc._-.db",
-        );
+        expect(sourceOpenCodeDatabaseFilename("v2", "a/b c!._-", {})).toBe("opencode-abc._-.db");
         expect(
             resolveOpenCodeDbPath("v2", {
                 dataHome,
@@ -220,7 +218,6 @@ describe("resolveOpenCodeDbPath", () => {
             v2.close();
         }
     });
-
 
     it("formats the missing banner, status, and doctor lines by value", () => {
         const { openCodeDir } = useDataHome();

@@ -12,7 +12,9 @@ export interface ResolveOpenCodeDbPathOptions {
     env?: NodeJS.ProcessEnv;
 }
 
-export function openCodeHostGenerationFromVersion(version: string | null | undefined): OpenCodeHostGeneration {
+export function openCodeHostGenerationFromVersion(
+    version: string | null | undefined,
+): OpenCodeHostGeneration {
     const major = Number.parseInt(version?.match(/\d+/)?.[0] ?? "", 10);
     return Number.isFinite(major) && major >= 2 ? "v2" : "v1";
 }
@@ -142,10 +144,7 @@ export function sourceOpenCodeDatabaseFilename(
     if (hostGeneration === "v1") {
         const explicit = env.OPENCODE_DB;
         if (explicit !== undefined && explicit.length > 0) return explicit;
-        if (
-            env.OPENCODE_DISABLE_CHANNEL_DB === "1" ||
-            env.OPENCODE_DISABLE_CHANNEL_DB === "true"
-        ) {
+        if (env.OPENCODE_DISABLE_CHANNEL_DB === "1" || env.OPENCODE_DISABLE_CHANNEL_DB === "true") {
             return "opencode.db";
         }
         return ["latest", "beta", "prod"].includes(channel)

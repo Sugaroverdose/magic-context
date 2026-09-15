@@ -19,13 +19,13 @@ import {
     getProjectMagicContextHistorianDir,
 } from "@magic-context/core/shared/data-path";
 import {
+    assertOpenCodeStoreGeneration,
     formatOpenCodeDbDoctorLine,
     type OpenCodeDbPathResolution,
-    assertOpenCodeStoreGeneration,
+    type OpenCodeHostGeneration,
     openCodeDbPathExists,
     openCodeHostGenerationFromVersion,
     resolveOpenCodeDbPath,
-    type OpenCodeHostGeneration,
 } from "@magic-context/core/shared/opencode-db-path";
 import { parse as parseJsonc } from "comment-json";
 import { inspectMagicContextLogs, type LogFileInspection } from "./log-lines";
