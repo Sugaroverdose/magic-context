@@ -49,6 +49,9 @@ SCOPE_OPEN_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/scope-ope
 CAPACITY_ESTIMATE_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/capacity-estimate-vectors-v1.json"
 OUTPUT_IDENTITY_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/output-identity-vectors-v1.json"
 COVERAGE_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/coverage-proof-vectors-v1.json"
+INHERITED_TRANSFER_VECTORS_PATH = (
+    "crates/mc-module/tests/fixtures/d5-specimen/d5-inherited-transfer-vectors-v1.json"
+)
 AGGREGATE_PREIMAGES_PATH = "crates/mc-module/tests/fixtures/d5-specimen/aggregate-preimages-v1.json"
 AGGREGATE_PREIMAGES_SHA256 = "952938e6ea60b5d5a6c639b73931c901f8767e8d224961310991de5031e9f957"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
@@ -1230,20 +1233,35 @@ def d5_text(value: str) -> bytes:
     return d5_blob(value.encode())
 
 
-def d5_digest(tag: str, payload: bytes) -> str:
+def d5_digest_preimage(tag: str, payload: bytes) -> bytes:
     encoded_tag = tag.encode("ascii")
-    preimage = (
+    return (
         len(encoded_tag).to_bytes(4, "big")
         + encoded_tag
         + (1).to_bytes(4, "big")
         + payload
     )
-    return sha256(preimage)
+
+
+def d5_digest(tag: str, payload: bytes) -> str:
+    return sha256(d5_digest_preimage(tag, payload))
+
+
+def d5_source_preimage(source: bytes) -> bytes:
+    return d5_digest_preimage("mc.d5.block.source.v1", d5_blob(source))
+
+
+def d5_served_preimage(source: bytes) -> bytes:
+    return d5_digest_preimage("mc.d5.block.served.v1", d5_blob(source))
+
+
+def d5_unit_preimage(unit: str, row_version: int, source: bytes) -> bytes:
+    payload = d5_text(unit) + row_version.to_bytes(8, "big") + d5_blob(source)
+    return d5_digest_preimage("mc.d5.unit-projection.v1", payload)
 
 
 def d5_unit_digest(unit: str, row_version: int, source: bytes) -> str:
-    payload = d5_text(unit) + row_version.to_bytes(8, "big") + d5_blob(source)
-    return d5_digest("mc.d5.unit-projection.v1", payload)
+    return sha256(d5_unit_preimage(unit, row_version, source))
 
 
 def d5_projection_digest(row_version: int, units: list[dict[str, Any]]) -> str:
@@ -1277,6 +1295,83 @@ def refresh_coverage_projection_digests(path: Path) -> int:
             moved += 1
     path.write_bytes(json_bytes(document))
     return moved
+
+
+def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
+    document = load_json(inherited_vectors)
+    if document.get("schema") != "mc.d5.inherited-transfer-vectors.v1":
+        raise SystemExit("inherited-transfer schema drift")
+    if document.get("contract_version") != "1.3.38":
+        raise SystemExit("inherited-transfer ruling-tip drift")
+    vectors = document.get("vectors", [])
+    expected_ids = {
+        "V01_frozen_twice_inherited",
+        "V02_none_to_some",
+        "V03_some_to_some",
+        "V04_some_to_none",
+        "V05_missing_current_unit",
+        "V06_source_substitution",
+        "V07_frozen_changed_served",
+    }
+    if {vector.get("id") for vector in vectors} != expected_ids:
+        raise SystemExit("inherited-transfer vector inventory drift")
+
+    for vector in vectors:
+        for side in ("held_m1", "successor_m2"):
+            member = vector[side]
+            source_derivation = vector["source_derivation"][side]
+            source = base64.b64decode(source_derivation["bytes_base64"], validate=True)
+            source_preimage = d5_source_preimage(source)
+            if source_derivation["preimage_hex"] != source_preimage.hex():
+                raise SystemExit(f"inherited-transfer source preimage drift: {vector['id']}")
+            if source_derivation["sha256"] != sha256(source_preimage):
+                raise SystemExit(f"inherited-transfer source digest drift: {vector['id']}")
+            if member["block"]["source"] != {
+                "len": len(source),
+                "sha256": source_derivation["sha256"],
+            }:
+                raise SystemExit(f"inherited-transfer source member drift: {vector['id']}")
+
+            served_derivation = vector["served_derivation"][side]
+            served = base64.b64decode(served_derivation["bytes_base64"], validate=True)
+            served_preimage = d5_served_preimage(served)
+            if served_derivation["preimage_hex"] != served_preimage.hex():
+                raise SystemExit(f"inherited-transfer served preimage drift: {vector['id']}")
+            if served_derivation["sha256"] != sha256(served_preimage):
+                raise SystemExit(f"inherited-transfer member served digest drift: {vector['id']}")
+            if member["block"]["served"] != {
+                "len": len(served),
+                "sha256": served_derivation["sha256"],
+            }:
+                raise SystemExit(f"inherited-transfer served member drift: {vector['id']}")
+
+        for evidence in vector["unit_evidence"]:
+            record = evidence["record"]
+            projection = evidence["projection"]
+            if record["locator"] != projection["locator"]:
+                raise SystemExit(
+                    f"inherited-transfer locator drift: {vector['id']} {record['unit']}"
+                )
+            source = base64.b64decode(projection["bytes_base64"], validate=True)
+            derivation = evidence["digest_derivation"]
+            served_preimage = d5_served_preimage(source)
+            unit_preimage = d5_unit_preimage(
+                record["unit"], evidence["row_version"], source
+            )
+            if derivation["bytes_base64"] != projection["bytes_base64"]:
+                raise SystemExit(f"inherited-transfer byte binding drift: {vector['id']}")
+            if derivation["served"]["preimage_hex"] != served_preimage.hex():
+                raise SystemExit(f"inherited-transfer served preimage drift: {vector['id']}")
+            if derivation["served"]["sha256"] != sha256(served_preimage):
+                raise SystemExit(f"inherited-transfer served digest drift: {vector['id']}")
+            if derivation["unit_projection"]["preimage_hex"] != unit_preimage.hex():
+                raise SystemExit(f"inherited-transfer unit preimage drift: {vector['id']}")
+            if derivation["unit_projection"]["sha256"] != sha256(unit_preimage):
+                raise SystemExit(f"inherited-transfer unit digest drift: {vector['id']}")
+            if record["sha256"] != derivation["unit_projection"]["sha256"]:
+                raise SystemExit(f"inherited-transfer UnitRecordV1 digest drift: {vector['id']}")
+            if derivation["served"]["sha256"] == derivation["unit_projection"]["sha256"]:
+                raise SystemExit(f"inherited-transfer digest domains met: {vector['id']}")
 
 
 def validate_aggregate_preimages(aggregate_preimages: bytes) -> None:
@@ -1445,9 +1540,13 @@ def write_fixture(
     capacity_estimate_vectors = (repository_root / CAPACITY_ESTIMATE_VECTORS_PATH).read_bytes()
     output_identity_vectors = (repository_root / OUTPUT_IDENTITY_VECTORS_PATH).read_bytes()
     coverage_vectors = (repository_root / COVERAGE_VECTORS_PATH).read_bytes()
+    inherited_transfer_vectors = (
+        repository_root / INHERITED_TRANSFER_VECTORS_PATH
+    ).read_bytes()
     aggregate_preimages = (repository_root / AGGREGATE_PREIMAGES_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
     validate_coverage_contract(coverage_vectors)
+    validate_inherited_transfer_contract(inherited_transfer_vectors)
     validate_aggregate_preimages(aggregate_preimages)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
@@ -1459,6 +1558,7 @@ def write_fixture(
         "capacity-estimate-vectors-v1.json": capacity_estimate_vectors,
         "output-identity-vectors-v1.json": output_identity_vectors,
         "coverage-proof-vectors-v1.json": coverage_vectors,
+        "d5-inherited-transfer-vectors-v1.json": inherited_transfer_vectors,
         "aggregate-preimages-v1.json": aggregate_preimages,
         "README.md": readme_text().encode(),
     }
@@ -1478,6 +1578,7 @@ def write_fixture(
             "capacity-estimate-vectors-v1.json",
             "output-identity-vectors-v1.json",
             "coverage-proof-vectors-v1.json",
+            "d5-inherited-transfer-vectors-v1.json",
             "aggregate-preimages-v1.json",
         }:
             source = {
@@ -1487,6 +1588,7 @@ def write_fixture(
                 "capacity-estimate-vectors-v1.json": "owner-authored D5 capacity contract vectors",
                 "output-identity-vectors-v1.json": "owner-authored D5 returned-message output identity vectors",
                 "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
+                "d5-inherited-transfer-vectors-v1.json": "owner-authored D5 inherited-member transfer vectors",
                 "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
             }[name]
             entries.append(
@@ -1542,6 +1644,9 @@ def refresh_fixture_index(output: Path) -> None:
     index_path = output / "fixture-index-v1.json"
     moved = refresh_coverage_projection_digests(output / "coverage-proof-vectors-v1.json")
     validate_coverage_contract((output / "coverage-proof-vectors-v1.json").read_bytes())
+    validate_inherited_transfer_contract(
+        (output / "d5-inherited-transfer-vectors-v1.json").read_bytes()
+    )
     validate_aggregate_preimages((output / "aggregate-preimages-v1.json").read_bytes())
     index = load_json(index_path.read_bytes())
     entries = {entry["path"]: entry for entry in index["files"]}
@@ -1551,6 +1656,7 @@ def refresh_fixture_index(output: Path) -> None:
         "capacity-estimate-vectors-v1.json": "owner-authored D5 capacity contract vectors",
         "output-identity-vectors-v1.json": "owner-authored D5 returned-message output identity vectors",
         "coverage-proof-vectors-v1.json": "owner-authored D5 coverage-proof contract vectors",
+        "d5-inherited-transfer-vectors-v1.json": "owner-authored D5 inherited-member transfer vectors",
         "aggregate-preimages-v1.json": "independently derived R17.4 CE1 aggregate preimages",
     }
     for name, source in owner_vectors.items():
@@ -1573,6 +1679,7 @@ def refresh_fixture_index(output: Path) -> None:
         "capacity-estimate-vectors-v1.json",
         "output-identity-vectors-v1.json",
         "coverage-proof-vectors-v1.json",
+        "d5-inherited-transfer-vectors-v1.json",
         "aggregate-preimages-v1.json",
         "README.md",
     ]
