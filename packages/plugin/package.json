@@ -27,6 +27,7 @@
     "index.js",
     "src/tui",
     "src/tui-compiled",
+    "src/v2/tui",
     "src/shared",
     "src/config",
     "src/agents",
