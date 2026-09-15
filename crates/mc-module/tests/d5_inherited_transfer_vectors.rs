@@ -254,9 +254,26 @@ struct UnitCarrier {
     role: String,
     ordinal: Option<u64>,
     synthetic: bool,
+    /// How this carrier relates to the member's source message. DECLARED, never inferred:
+    /// a different serving mid does not imply a different source, because R24a permits a
+    /// fresh mid for the same source block with its ordinal unchanged.
+    source_relation: CarrierSourceRelation,
     /// Why this carrier is stamped the way it is, for a reader who has only the file.
     #[serde(default)]
     carrier_note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CarrierSourceRelation {
+    /// The member's own message carries its committed unit.
+    SameMessage,
+    /// The same source block under a freshly allocated serving mid (R24a); the ordinal holds.
+    SameSourceReallocated,
+    /// A different source message entirely; it carries its own ordinal.
+    IndependentSource,
+    /// The MC-injected head (m0/m1): synthetic, with no source coordinate.
+    SyntheticHead,
 }
 
 #[derive(Debug, Deserialize)]
@@ -927,29 +944,64 @@ fn d5_unit_locators_and_constructed_carriers_obey_returned_view_structure() {
     for control in &fixture.unit_locator_controls {
         // Refusal controls describe arrangements that are invalid by construction, so their
         // internal coherence proves nothing; only an accepted arrangement must hold together.
-        if expected_verdict(&control.expected) != Verdict::Accept
-            || control.carrier.synthetic
-            || control.carrier.mid == control.member.identity.mid
-        {
+        if expected_verdict(&control.expected) != Verdict::Accept {
             continue;
         }
-        assert_ne!(
-            control.carrier.ordinal,
-            Some(control.member.ordinal),
-            "{} carries a distinct mid, so its carrier needs its own ordinal",
-            control.id
-        );
-        // A carrier that is not the member's own message is the surprising case; make the
-        // file explain itself rather than leaving the next reader to re-derive the rule.
-        assert!(
-            control
-                .carrier
-                .carrier_note
-                .as_ref()
-                .is_some_and(|note| !note.trim().is_empty()),
-            "{} uses a carrier distinct from its member and must say why",
-            control.id
-        );
+        match control.carrier.source_relation {
+            // The member's own message: same mid, same ordinal, by definition.
+            CarrierSourceRelation::SameMessage => {
+                assert_eq!(
+                    control.carrier.mid, control.member.identity.mid,
+                    "{}",
+                    control.id
+                );
+                assert_eq!(
+                    control.carrier.ordinal,
+                    Some(control.member.ordinal),
+                    "{}",
+                    control.id
+                );
+            }
+            // R24a: a fresh serving mid for the SAME source block keeps its ordinal. This arm
+            // exists so the independent-source rule below can never be read as "a different
+            // mid means a different source".
+            CarrierSourceRelation::SameSourceReallocated => {
+                assert_ne!(
+                    control.carrier.mid, control.member.identity.mid,
+                    "{}",
+                    control.id
+                );
+                assert_eq!(
+                    control.carrier.ordinal,
+                    Some(control.member.ordinal),
+                    "{} reallocates the mid for one source block, so the ordinal holds",
+                    control.id
+                );
+            }
+            // A different source message, and the file must say so rather than leave the next
+            // reader to infer independence from mid inequality.
+            CarrierSourceRelation::IndependentSource => {
+                assert_ne!(
+                    control.carrier.ordinal,
+                    Some(control.member.ordinal),
+                    "{} declares an independent source, so it needs its own ordinal",
+                    control.id
+                );
+                assert!(
+                    control
+                        .carrier
+                        .carrier_note
+                        .as_ref()
+                        .is_some_and(|note| !note.trim().is_empty()),
+                    "{} declares an independent source and must say why",
+                    control.id
+                );
+            }
+            CarrierSourceRelation::SyntheticHead => {
+                assert!(control.carrier.synthetic, "{}", control.id);
+                assert_eq!(control.carrier.ordinal, None, "{}", control.id);
+            }
+        }
     }
 }
 

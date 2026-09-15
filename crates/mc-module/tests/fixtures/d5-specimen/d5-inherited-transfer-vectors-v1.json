@@ -370,7 +370,8 @@
             "mid": "mid-t-r2-42",
             "role": "assistant",
             "ordinal": 42,
-            "synthetic": false
+            "synthetic": false,
+            "source_relation": "same_message"
           }
         }
       ],
@@ -542,7 +543,8 @@
             "mid": "mid-s-r1-43",
             "role": "assistant",
             "ordinal": 43,
-            "synthetic": false
+            "synthetic": false,
+            "source_relation": "same_message"
           }
         },
         {
@@ -591,7 +593,8 @@
             "mid": "mid-t-r2-43",
             "role": "assistant",
             "ordinal": 43,
-            "synthetic": false
+            "synthetic": false,
+            "source_relation": "same_message"
           }
         }
       ],
@@ -763,7 +766,8 @@
             "mid": "mid-s-r1-44",
             "role": "assistant",
             "ordinal": 44,
-            "synthetic": false
+            "synthetic": false,
+            "source_relation": "same_message"
           }
         }
       ],
@@ -935,7 +939,8 @@
             "mid": "mid-t-r2-45",
             "role": "assistant",
             "ordinal": 45,
-            "synthetic": false
+            "synthetic": false,
+            "source_relation": "same_message"
           }
         }
       ],
@@ -1605,7 +1610,8 @@
         "mid": "mid-present-51",
         "role": "assistant",
         "ordinal": 51,
-        "synthetic": false
+        "synthetic": false,
+        "source_relation": "same_message"
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000f756e69742d70726573656e742d3531000000000000000c000000000000001270726573656e7420726564756374696f6e0a",
@@ -1660,7 +1666,8 @@
         "mid": "mid-independent-51",
         "role": "assistant",
         "ordinal": 51,
-        "synthetic": false
+        "synthetic": false,
+        "source_relation": "independent_source"
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000f756e69742d70726573656e742d3531000000000000000c000000000000001270726573656e7420726564756374696f6e0a",
@@ -1716,7 +1723,8 @@
         "role": "assistant",
         "ordinal": 53,
         "synthetic": false,
-        "carrier_note": "Constructed carrier: a DIFFERENT message from the absent member. An ordinal is a source coordinate (R24a), so this carrier holds its own ordinal 53; reusing the absent member's 52 would claim two mids are the same source message."
+        "carrier_note": "Constructed INDEPENDENT-SOURCE carrier: a different source message from the absent member, so it holds its own ordinal 53. A different serving mid alone would NOT imply a different source (R24a/V10 permit mid reallocation with the source ordinal unchanged); the independence is declared here, never inferred from mid inequality.",
+        "source_relation": "independent_source"
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e763100000001000000000000000e756e69742d616273656e742d3532000000000000000d0000000000000011616273656e7420726564756374696f6e0a",
@@ -1772,7 +1780,8 @@
         "mid": "mc_m0",
         "role": "user",
         "ordinal": null,
-        "synthetic": true
+        "synthetic": true,
+        "source_relation": "synthetic_head"
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e7631000000010000000000000013756e69742d636f6d706172746d656e742d3630000000000000000e0000000000000013666f6c64656420636f6d706172746d656e740a",
@@ -1828,7 +1837,8 @@
         "mid": "mid-folded-60",
         "role": "user",
         "ordinal": null,
-        "synthetic": true
+        "synthetic": true,
+        "source_relation": "synthetic_head"
       },
       "digest_derivation": {
         "preimage_hex": "000000186d632e64352e756e69742d70726f6a656374696f6e2e7631000000010000000000000013756e69742d636f6d706172746d656e742d3630000000000000000e0000000000000013666f6c64656420636f6d706172746d656e740a",

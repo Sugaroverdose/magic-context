@@ -1414,12 +1414,15 @@ def validate_inherited_transfer_contract(inherited_vectors: bytes) -> None:
                 raise SystemExit(
                     f"inherited-transfer present reduction location drift: {vector['id']} {record['unit']}"
                 )
+            # source_relation is DECLARED on every carrier (a fresh serving mid does not imply
+            # a different source, R24a), so a present reduction's carrier is its own message.
             if evidence.get("carrier") != {
                 "input_class": "CONSTRUCTED",
                 "mid": expected_locator["mid"],
                 "role": member["message"]["role"],
                 "ordinal": member["message"]["ordinal"],
                 "synthetic": False,
+                "source_relation": "same_message",
             }:
                 raise SystemExit(
                     f"inherited-transfer reduction carrier drift: {vector['id']} {record['unit']}"
