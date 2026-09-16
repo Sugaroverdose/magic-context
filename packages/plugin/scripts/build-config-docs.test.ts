@@ -43,5 +43,9 @@ describeRender("generated reference table cell escaping", () => {
         expectRender(cells).toHaveLength(6);
         expectRender(cells[2]).toContain("map<string, string>");
         expectRender(cells[4]).toContain("cached prefix stays valid");
+        // Two asterisks in one prose cell would pair into emphasis and vanish;
+        // the generator escapes them so the wildcard reads as written.
+        expectRender(cells[4]).toContain("provider/\\*");
+        expectRender(cells[4]).not.toMatch(/provider\/\*[^\\]/);
     });
 });

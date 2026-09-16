@@ -67,8 +67,11 @@ function defaultLabel(s: JsonSchema): string {
     return `\`${JSON.stringify(s.default)}\``;
 }
 
+// Descriptions are prose, not code spans, so a pair of asterisks (two
+// `provider/*` mentions in one sentence) renders as emphasis and the
+// asterisks vanish from the published table.
 function escapeCell(text: string): string {
-    return text.replaceAll("|", "\\|").replaceAll("\n", " ").trim();
+    return text.replaceAll("|", "\\|").replaceAll("*", "\\*").replaceAll("\n", " ").trim();
 }
 
 /** Flattens nested object properties into dotted-path leaf rows. */

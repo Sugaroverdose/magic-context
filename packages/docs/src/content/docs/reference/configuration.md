@@ -50,11 +50,11 @@ Select the full or light built-in prompt preset. Model routes use the same progr
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `prompt_surface` | object | — | Prompt-surface presets: default is full; models use bare model IDs, provider/model, or provider/* routing keys. Guidance and tool-description overrides are user-level only. On OpenCode and Pi, per-model routing applies to the guidance block only: tool descriptions are registered once per process, so they follow the default preset (a v1 plugin-surface limitation; per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes). |
+| `prompt_surface` | object | — | Prompt-surface presets: default is full; models use bare model IDs, provider/model, or provider/\* routing keys. Guidance and tool-description overrides are user-level only. On OpenCode and Pi, per-model routing applies to the guidance block only: tool descriptions are registered once per process, so they follow the default preset (a v1 plugin-surface limitation; per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes). |
 | `prompt_surface.default` | `"full"` \| `"light"` | `"full"` | Fallback prompt-surface preset ("full" or "light"). |
-| `prompt_surface.models` | map<string, `"full"` \| `"light"`> | — | Literal per-model routing. Keys are bare model IDs, provider/model, or provider/*; matching is case-sensitive and preserves additional slashes in model IDs. |
+| `prompt_surface.models` | map<string, `"full"` \| `"light"`> | — | Literal per-model routing. Keys are bare model IDs, provider/model, or provider/\*; matching is case-sensitive and preserves additional slashes in model IDs. |
 | `prompt_surface.guidance_override_path` | string | — | USER-LEVEL ONLY path to a complete primary guidance section. Relative paths resolve from the user config file. |
-| `prompt_surface.tool_descriptions` | map<string, string> | — | USER-LEVEL ONLY top-level description overrides keyed by ctx_* tool ID; parameter schemas and descriptions are unchanged. |
+| `prompt_surface.tool_descriptions` | map<string, string> | — | USER-LEVEL ONLY top-level description overrides keyed by ctx_\* tool ID; parameter schemas and descriptions are unchanged. |
 
 ## Context management
 
@@ -62,7 +62,7 @@ When and how aggressively Magic Context manages the session's context window. Pe
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `cache_ttl` | string \| map<string, string> | `"5m"` | How long Magic Context assumes the provider's cached prefix stays valid. This is MC's own deferral gate — it does not change the provider's actual cache lifetime. String (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "provider/model": "1h", "provider/*": "never" }); keys resolve most-specific first (exact provider/model, bare model ID, shorter dash-prefixes, then the provider/* wildcard, then default). Set to "never" to mean MC never assumes expiry (for lanes kept warm externally by a cache-keep tool) — disables the idle-TTL heuristic so MC never initiates a rebuild based on elapsed time. Provider-side extended TTL is a separate request-level concern (cache_control: { ttl } in the request body). |
+| `cache_ttl` | string \| map<string, string> | `"5m"` | How long Magic Context assumes the provider's cached prefix stays valid. This is MC's own deferral gate — it does not change the provider's actual cache lifetime. String (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "provider/model": "1h", "provider/\*": "never" }); keys resolve most-specific first (exact provider/model, bare model ID, shorter dash-prefixes, then the provider/\* wildcard, then default). Set to "never" to mean MC never assumes expiry (for lanes kept warm externally by a cache-keep tool) — disables the idle-TTL heuristic so MC never initiates a rebuild based on elapsed time. Provider-side extended TTL is a separate request-level concern (cache_control: { ttl } in the request body). |
 | `output_reserve` | number (0–) \| map<string, number (0–)> | — | User-only output-token reservation override. Number or per-model object ({ default: 16384, "provider/model": 8192 }); 0 disables reservation. Takes precedence over every derived source: an explicit value here always wins against catalog output limits, provider window-geometry facts, and the 25%-of-context fallback (usable window = context window minus this reserve). When unset, Magic Context reserves the catalog output limit (capped at 25% of context) for shared-window providers and keeps proven separate-quota Google/Gemini windows unchanged. |
 | `execute_threshold_percentage` | number (20–90) \| map<string, number (20–90)> | `65` | Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Values above 90 are rejected because the runtime caps at 90% of the output-reserved safe window (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE |
 | `execute_threshold_tokens` | object | — | Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 90% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000. |
@@ -117,7 +117,7 @@ The background agent that condenses old conversation into compact history.
 | `historian.omp.fallback_models` | string \| object[] | — | Ordered fallback OMP entries. |
 | `historian.omp.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
 | `historian.two_pass` | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
-| `historian.disallowed_tools` | `"*"` \| `"read"` \| `"aft_outline"` \| `"aft_zoom"` \| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
+| `historian.disallowed_tools` | `"\*"` \| `"read"` \| `"aft_outline"` \| `"aft_zoom"` \| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["\*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
 | `historian_timeout_ms` | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
 | `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
 | `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
@@ -196,20 +196,20 @@ Off-hours maintenance through Dreamer.
 | `dreamer.omp.thinking_level` | `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` \| `"inherit"` \| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
 | `dreamer.omp.tasks` | map<string, object> | — | OMP task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes. |
 | `dreamer.tasks` | object | — | Harness-independent task metadata. schedule, promotion_threshold, and other task metadata remain here; execution settings live under dreamer.opencode.tasks, dreamer.pi.tasks, or dreamer.omp.tasks. |
-| `dreamer.tasks.map-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.verify-broad.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.curate.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.compress-cues.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.classify-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.retrospective.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
-| `dreamer.tasks.review-user-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.map-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.verify.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.verify-broad.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.curate.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.compress-cues.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.classify-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.retrospective.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.maintain-docs.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.evaluate-smart-notes.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
+| `dreamer.tasks.review-user-memories.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.review-user-memories.promotion_threshold` | number (2–20) | — | review-user-memories: min candidate observations before promotion is considered (default: 3) |
-| `dreamer.tasks.promote-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.promote-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.tasks.promote-primers.promotion_threshold` | number (2–20) | — | promote-primers: min recurring source days before promotion is considered (default: 2) |
-| `dreamer.tasks.refresh-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.refresh-primers.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 \* \* \*"), or "" to disable this task. |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true) |
 
 ## Advanced
