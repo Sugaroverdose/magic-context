@@ -521,7 +521,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(sha256sum Cargo.lock ../commons/Cargo.lock ../subconscious/Cargo.lock | sha256sum | awk '{print $1}')"
+          # commons is a library workspace with no committed Cargo.lock; key on its
+          # Cargo.toml instead (release.yml does the same).
+          digest="$(sha256sum Cargo.lock ../commons/Cargo.toml ../subconscious/Cargo.lock | sha256sum | awk '{print $1}')"
           echo "key=rust-hermetic-${RUNNER_OS}-${RUNNER_ARCH}-${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Restore ck-subc and ckdev-mc-e2e Cargo target cache
