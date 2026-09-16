@@ -89,13 +89,19 @@
         "metadata": [
           "consistent",
           "inconsistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
         "observation_class",
         "candidate",
         "delivery_evidence",
-        "metadata"
+        "metadata",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "resolved_absent"
@@ -118,9 +124,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REDEEMED",
       "expected_reason_or_cause": null
     },
@@ -151,10 +164,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
-        "candidate"
+        "candidate",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
@@ -180,9 +199,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
     },
@@ -215,12 +241,18 @@
         "metadata": [
           "consistent",
           "inconsistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
         "observation_class",
         "candidate",
-        "metadata"
+        "metadata",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
@@ -253,11 +285,17 @@
         ],
         "metadata": [
           "inconsistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
         "observation_class",
-        "candidate"
+        "candidate",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
@@ -284,10 +322,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
-        "candidate"
+        "candidate",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "seal_material_mismatch"
@@ -317,9 +361,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
@@ -341,9 +392,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
@@ -365,9 +423,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
@@ -389,9 +454,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "no_candidate_block"
     },
@@ -413,9 +485,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "no_marker"
     },
@@ -437,9 +516,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "malformed_marker"
     },
@@ -461,9 +547,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "duplicate_marker"
     },
@@ -485,9 +578,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "foreign_marker"
     },
@@ -509,6 +609,10 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder"
         ]
       },
       "applies_regardless_of": [],
@@ -533,9 +637,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
@@ -557,9 +668,16 @@
         ],
         "metadata": [
           "consistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
-      "applies_regardless_of": [],
+      "applies_regardless_of": [
+        "candidate_scope"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
@@ -592,12 +710,18 @@
         "metadata": [
           "consistent",
           "inconsistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
         "observation_class",
         "candidate",
-        "metadata"
+        "metadata",
+        "candidate_scope"
       ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
@@ -630,12 +754,45 @@
         ],
         "metadata": [
           "inconsistent"
+        ],
+        "candidate_scope": [
+          "absent",
+          "placeholder",
+          "occupied"
         ]
       },
       "applies_regardless_of": [
         "observation_class",
-        "candidate"
+        "candidate",
+        "candidate_scope"
       ],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P20_sealed_candidate_scope_occupied",
+      "priority": 21,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "observation_consistent"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ],
+        "candidate_scope": [
+          "occupied"
+        ]
+      },
+      "applies_regardless_of": [],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     }
@@ -2679,6 +2836,914 @@
         }
       },
       "precedence_row": "P17_sealed_marker_other_candidate"
+    },
+    {
+      "id": "V35",
+      "name": "placeholder candidate scope is adopted and reported",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": false,
+            "fence_generation": 12,
+            "lineage_adopted_from": "33333333-4444-4555-8666-777777777777"
+          }
+        }
+      },
+      "precedence_row": "P15_sealed_positive",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 0,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjpmYWxzZSwiZmVuY2VfZ2VuZXJhdGlvbiI6MTIsImxpbmVhZ2VfYWRvcHRlZF9mcm9tIjoiMzMzMzMzMzMtNDQ0NC00NTU1LTg2NjYtNzc3Nzc3Nzc3Nzc3In19fQ==",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 7,
+        "placeholder_retired": "33333333-4444-4555-8666-777777777777",
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V36",
+      "name": "same-lineage zero-occupancy candidate proceeds without adoption",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": false,
+            "fence_generation": 12
+          }
+        }
+      },
+      "precedence_row": "P15_sealed_positive",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "L_P",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 0,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjpmYWxzZSwiZmVuY2VfZ2VuZXJhdGlvbiI6MTJ9fX0=",
+      "transition": {
+        "lineage_id_before": "22222222-3333-4444-8555-666666666666",
+        "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V37",
+      "name": "candidate scope with a sealed attempt toward T refuses",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate scope has its own attempts or descent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P20_sealed_candidate_scope_occupied",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 1,
+        "in_edges": 0,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHNjb3BlIGhhcyBpdHMgb3duIGF0dGVtcHRzIG9yIGRlc2NlbnQifX19fX0=",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "33333333-4444-4555-8666-777777777777",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 1,
+        "positive_custody_after": 1,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V38",
+      "name": "candidate lineage with descent and no candidate-scope attempt refuses",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate scope has its own attempts or descent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P20_sealed_candidate_scope_occupied",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 0,
+        "out_edges": 1,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHNjb3BlIGhhcyBpdHMgb3duIGF0dGVtcHRzIG9yIGRlc2NlbnQifX19fX0=",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "33333333-4444-4555-8666-777777777777",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V39",
+      "name": "exact E1 replay wins before occupied candidate scope",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "replay successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": true,
+            "fence_generation": 12
+          }
+        }
+      },
+      "precedence_row": "P02_redeemed_matching_candidate_and_marker",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "L_P",
+        "attempts_prepared_or_later": 1,
+        "in_edges": 1,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJiNmNmYTBkZWZjYzA3MTk2MmVjOGNjZmUwYWNiNGVlNjU0MWFmNjcxZWYwZGM4YzM5OTEzMGY2Yjg5OWE1NzYyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjp0cnVlLCJmZW5jZV9nZW5lcmF0aW9uIjoxMn19fQ==",
+      "transition": {
+        "lineage_id_before": "22222222-3333-4444-8555-666666666666",
+        "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 7,
+        "resolve_generation_after": 7,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 4,
+        "predecessor_counter_after": 4,
+        "positive_custody_before": 1,
+        "positive_custody_after": 1,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V40",
+      "name": "same-lineage candidate with another incoming edge refuses",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate scope has its own attempts or descent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P20_sealed_candidate_scope_occupied",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "L_P",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 1,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHNjb3BlIGhhcyBpdHMgb3duIGF0dGVtcHRzIG9yIGRlc2NlbnQifX19fX0=",
+      "transition": {
+        "lineage_id_before": "22222222-3333-4444-8555-666666666666",
+        "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V41",
+      "name": "candidate scope with a live source-segment upload refuses",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate scope has its own attempts or descent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P20_sealed_candidate_scope_occupied",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 0,
+        "out_edges": 0,
+        "source_uploads_live": 1
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHNjb3BlIGhhcyBpdHMgb3duIGF0dGVtcHRzIG9yIGRlc2NlbnQifX19fX0=",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "33333333-4444-4555-8666-777777777777",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
+    },
+    {
+      "id": "V42",
+      "name": "live capacity upload is non-occupancy and survives placeholder adoption",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": false,
+            "fence_generation": 12,
+            "lineage_adopted_from": "33333333-4444-4555-8666-777777777777"
+          }
+        }
+      },
+      "precedence_row": "P15_sealed_positive",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 0,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjpmYWxzZSwiZmVuY2VfZ2VuZXJhdGlvbiI6MTIsImxpbmVhZ2VfYWRvcHRlZF9mcm9tIjoiMzMzMzMzMzMtNDQ0NC00NTU1LTg2NjYtNzc3Nzc3Nzc3Nzc3In19fQ==",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 7,
+        "placeholder_retired": "33333333-4444-4555-8666-777777777777",
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 1,
+        "capacity_uploads_after": 1
+      }
+    },
+    {
+      "id": "V43",
+      "name": "candidate lineage with an incoming edge and no candidate-scope attempt refuses",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate scope has its own attempts or descent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P20_sealed_candidate_scope_occupied",
+      "candidate_scope": {
+        "row": "present",
+        "lineage_relation": "other",
+        "attempts_prepared_or_later": 0,
+        "in_edges": 1,
+        "out_edges": 0,
+        "source_uploads_live": 0
+      },
+      "request_bytes_base64": "eyJvcCI6InJlZGVlbSIsIlAiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6Nywib2JzZXJ2YXRpb24iOnsic2Nhbm5lZF9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfSwic2Nhbm5lZF9ieXRlc19zaGEyNTYiOiJjMmNjOGZlZWIxMWMxODkyZmE3ZTg3ZDc4ODM1NWI2MjQ0Y2VkNDQ3NTJjY2FkOTE3ZjQ2NzNhMmYwODBkMDcyIiwic2Nhbm5lZF9yb2xlIjoidXNlciIsInNjYW5uZWRfa2luZCI6InRleHQiLCJuYXRpdmVfdXNlcl9pbmRleCI6MCwic2Nhbl9zb3VyY2UiOnsia2luZCI6ImRpcmVjdF9zY2FsYXIifSwib2JzZXJ2ZWRfbWFya2VycyI6W3sia2luZCI6InZhbGlkIiwiaWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX1dLCJtYXlfaGF2ZV9yZXBsaWVkIjp0cnVlLCJhY2siOm51bGx9LCJjYW5kaWRhdGUiOnsic3VjY2Vzc29yX2tleSI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJuYXRpdmVfY29udGludWF0aW9uX2lkZW50aXR5Ijp7Im1pZCI6Im1pZC1zdWNjZXNzb3ItdXNlci0wMDAxIiwiaW5kZXgiOjAsIm9yZGluYWwiOjE5NDB9LCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifX19",
+      "expected_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHNjb3BlIGhhcyBpdHMgb3duIGF0dGVtcHRzIG9yIGRlc2NlbnQifX19fX0=",
+      "transition": {
+        "lineage_id_before": "33333333-4444-4555-8666-777777777777",
+        "lineage_id_after": "33333333-4444-4555-8666-777777777777",
+        "incarnation_before": 3,
+        "incarnation_after": 3,
+        "resolve_generation_before": 6,
+        "resolve_generation_after": 6,
+        "placeholder_retired": null,
+        "predecessor_counter_before": 0,
+        "predecessor_counter_after": 0,
+        "positive_custody_before": 0,
+        "positive_custody_after": 0,
+        "capacity_uploads_before": 0,
+        "capacity_uploads_after": 0
+      }
     }
   ],
   "precondition_space": {
@@ -2687,7 +3752,8 @@
       "delivery_evidence",
       "metadata",
       "observation_class",
-      "candidate"
+      "candidate",
+      "candidate_scope"
     ],
     "dimensions": {
       "scope_state": [
@@ -2731,9 +3797,249 @@
       "metadata": [
         "consistent",
         "inconsistent"
+      ],
+      "candidate_scope": [
+        "absent",
+        "placeholder",
+        "occupied"
       ]
     },
     "delivery_evidence_rule": "missing exactly when may_have_replied is false and ack is null; every other schema-valid pair is ok",
-    "metadata_rule": "consistent no_candidate_block uses null identity, digest, and kind; empty markers; and either user/rank-0 or all-null role/rank. Consistent direct_scalar or text_block uses a non-null identity and digest, user role, text kind, and rank 0. All other schema-valid metadata is inconsistent."
-  }
+    "metadata_rule": "consistent no_candidate_block uses null identity, digest, and kind; empty markers; and either user/rank-0 or all-null role/rank. Consistent direct_scalar or text_block uses a non-null identity and digest, user role, text kind, and rank 0. All other schema-valid metadata is inconsistent.",
+    "candidate_scope_rule": "derive absent from row=absent; derive placeholder from row=present and all occupancy counts zero regardless of lineage_relation; derive occupied when any of source_uploads_live, attempts_prepared_or_later, in_edges, or out_edges is nonzero"
+  },
+  "legacy_expected_bytes": [
+    {
+      "vector_id": "V01",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJub19jYW5kaWRhdGVfYmxvY2sifX19"
+    },
+    {
+      "vector_id": "V02",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJub19jYW5kaWRhdGVfYmxvY2sifX19"
+    },
+    {
+      "vector_id": "V03",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJub19tYXJrZXIifX19"
+    },
+    {
+      "vector_id": "V04",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJtYWxmb3JtZWRfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V05",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJtYWxmb3JtZWRfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V06",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJtYWxmb3JtZWRfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V07",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJtYWxmb3JtZWRfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V08",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJtYWxmb3JtZWRfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V09",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJkdXBsaWNhdGVfbWFya2VyIn19fQ=="
+    },
+    {
+      "vector_id": "V10",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJVTlJFQ09HTklaRUQiLCJyZWNlaXB0X2lkIjoiMGY1YzJkN2UtMTIzNC00YWJjLThkZWYtMDEyMzQ1Njc4OWFiIiwiY2F1c2UiOiJmb3JlaWduX21hcmtlciJ9fX0="
+    },
+    {
+      "vector_id": "V11",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJzZWFsX21hdGVyaWFsX21pc21hdGNoIiwicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsImRldGFpbHMiOnsia2luZCI6ImZpZWxkIiwiZmllbGQiOiJyZWNvZ25pdGlvbl90b2tlbiIsInJlYXNvbiI6Im1hcmtlciB0b2tlbiBkb2VzIG5vdCBtYXRjaCBzZWFsZWQgcmVjZWlwdCJ9fX19fQ=="
+    },
+    {
+      "vector_id": "V12",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlIiwicmVhc29uIjoiY2FuZGlkYXRlIHJlcXVpcmVzIG9uZSB2YWxpZCBzY29wZWQgbWFya2VyIn19fX19"
+    },
+    {
+      "vector_id": "V13",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlLmNvbnRpbnVhdGlvbl9pZGVudGl0eSIsInJlYXNvbiI6ImNhbmRpZGF0ZSBtYXJrZXIgaWRlbnRpdHkgZGlmZmVycyBmcm9tIG9ic2VydmF0aW9uIn19fX19"
+    },
+    {
+      "vector_id": "V14",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJpbnZhbGlkX2FyZ3VtZW50cyIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJkZXRhaWxzIjp7ImtpbmQiOiJmaWVsZCIsImZpZWxkIjoiY2FuZGlkYXRlLm5hdGl2ZV9jb250aW51YXRpb25faWRlbnRpdHkiLCJyZWFzb24iOiJjYW5kaWRhdGUgbmF0aXZlIGlkZW50aXR5IGRpZmZlcnMgZnJvbSBzY2FubmVkIGlkZW50aXR5In19fX19"
+    },
+    {
+      "vector_id": "V15",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjpmYWxzZSwiZmVuY2VfZ2VuZXJhdGlvbiI6MTJ9fX0="
+    },
+    {
+      "vector_id": "V16",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjp0cnVlLCJmZW5jZV9nZW5lcmF0aW9uIjoxMn19fQ=="
+    },
+    {
+      "vector_id": "V17",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJhbHJlYWR5X3JlZGVlbWVkIiwicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsImRldGFpbHMiOnsia2luZCI6Indpbm5lciIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIifX19fX0="
+    },
+    {
+      "vector_id": "V18",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJhbHJlYWR5X3JlZGVlbWVkIiwicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsImRldGFpbHMiOnsia2luZCI6Indpbm5lciIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIifX19fX0="
+    },
+    {
+      "vector_id": "V19",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJhbHJlYWR5X3JlZGVlbWVkIiwicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsImRldGFpbHMiOnsia2luZCI6Indpbm5lciIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIifX19fX0="
+    },
+    {
+      "vector_id": "V20",
+      "bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRUZVU0VEIiwicmVmdXNhbCI6eyJyZWFzb24iOiJyZXNvbHZlZF9hYnNlbnQiLCJyZWNlaXB0X2lkIjpudWxsLCJkZXRhaWxzIjp7ImtpbmQiOiJyZXNvbHZlZF9hYnNlbnQiLCJhdHRlbXB0X2lkIjoicmVkZWVtLXNjb3BlLWxvb2t1cCIsImluY2FybmF0aW9uIjo3fX19fX0="
+    }
+  ],
+  "r47_sequences": [
+    {
+      "id": "S01_adoption_replay",
+      "name": "adoption followed by exact E1 replay returns the stored edge without a second adoption or counter effect",
+      "steps": [
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V35"
+        },
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V39"
+        }
+      ]
+    },
+    {
+      "id": "S02_adoption_then_scope_open",
+      "name": "scope.open after adoption returns the existing DTO with the predecessor lineage and created false",
+      "steps": [
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V35"
+        },
+        {
+          "kind": "scope.open",
+          "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiJ9",
+          "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjMsImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJyZXNvbHZlX2dlbmVyYXRpb24iOjcsImNyZWF0ZWQiOmZhbHNlfX19"
+        }
+      ]
+    },
+    {
+      "id": "S03_generation_fence",
+      "name": "pre-adoption ticket is a gateway-local fact and remote prepare plus resolve return the stable generation fence",
+      "steps": [
+        {
+          "kind": "scope.open",
+          "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiJ9",
+          "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjMsImxpbmVhZ2VfaWQiOiIzMzMzMzMzMy00NDQ0LTQ1NTUtODY2Ni03Nzc3Nzc3Nzc3NzciLCJyZXNvbHZlX2dlbmVyYXRpb24iOjYsImNyZWF0ZWQiOmZhbHNlfX19"
+        },
+        {
+          "kind": "gateway.local_ticket_sample",
+          "opaque_local_fact": true,
+          "admission_ticket": {
+            "P": "session-successor-0001",
+            "agent": "agent-main",
+            "incarnation": 3,
+            "resolve_generation": 6
+          }
+        },
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V35"
+        },
+        {
+          "kind": "prepare",
+          "request_bytes_base64": "eyJvcCI6InByZXBhcmUiLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozLCJhZG1pc3Npb25fdGlja2V0Ijp7IlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjMsInJlc29sdmVfZ2VuZXJhdGlvbiI6Nn0sImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtc3RhbGUtMDAwMSJ9",
+          "expected_bytes_base64": "eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoicmVzb2x2ZWRfYWJzZW50IiwicmVjZWlwdF9pZCI6bnVsbH0sIm5lZ2F0aXZlIjp7ImtpbmQiOiJnZW5lcmF0aW9uX2ZlbmNlIiwiaW5jYXJuYXRpb24iOjMsImludmFsaWRhdGVkX3RpY2tldF9nZW5lcmF0aW9uIjo2LCJmZW5jZWRfYnkiOjd9fQ==",
+          "original_attempt_reexecuted": true
+        },
+        {
+          "kind": "lineage.begin",
+          "request_bytes_base64": "eyJvcCI6ImxpbmVhZ2UuYmVnaW4iLCJhdHRlbXB0Ijp7IlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjMsImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtc3RhbGUtMDAwMSJ9LCJ0aWNrZXQiOnsiUCI6InNlc3Npb24tc3VjY2Vzc29yLTAwMDEiLCJhZ2VudCI6ImFnZW50LW1haW4iLCJpbmNhcm5hdGlvbiI6MywicmVzb2x2ZV9nZW5lcmF0aW9uIjo2fSwia2luZCI6InNvdXJjZV9zZWdtZW50IiwidG90YWxfYnl0ZXMiOjEyOCwidG90YWxfY2h1bmtzIjoxLCJkaWdlc3QiOiJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiIn0=",
+          "expected_bytes_base64": "eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoicmVzb2x2ZWRfYWJzZW50IiwicmVjZWlwdF9pZCI6bnVsbH0sIm5lZ2F0aXZlIjp7ImtpbmQiOiJnZW5lcmF0aW9uX2ZlbmNlIiwiaW5jYXJuYXRpb24iOjMsImludmFsaWRhdGVkX3RpY2tldF9nZW5lcmF0aW9uIjo2LCJmZW5jZWRfYnkiOjd9fQ=="
+        },
+        {
+          "kind": "attempt.resolve",
+          "request_bytes_base64": "eyJvcCI6ImF0dGVtcHQucmVzb2x2ZSIsIlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjMsImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtc3RhbGUtMDAwMSJ9",
+          "expected_bytes_base64": "eyJraW5kIjoiUkVGVVNFRCIsInJlZnVzYWwiOnsicmVhc29uIjoicmVzb2x2ZWRfYWJzZW50IiwicmVjZWlwdF9pZCI6bnVsbH0sIm5lZ2F0aXZlIjp7ImtpbmQiOiJnZW5lcmF0aW9uX2ZlbmNlIiwiaW5jYXJuYXRpb24iOjMsImludmFsaWRhdGVkX3RpY2tldF9nZW5lcmF0aW9uIjo2LCJmZW5jZWRfYnkiOjd9fQ==",
+          "terminal": true,
+          "gateway_may_retire": true,
+          "original_attempt_reexecuted": true
+        },
+        {
+          "kind": "prepare_after_adoption",
+          "request_bytes_base64": "eyJvcCI6InByZXBhcmUiLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsImluY2FybmF0aW9uIjozLCJhZG1pc3Npb25fdGlja2V0Ijp7IlAiOiJzZXNzaW9uLXN1Y2Nlc3Nvci0wMDAxIiwiYWdlbnQiOiJhZ2VudC1tYWluIiwiaW5jYXJuYXRpb24iOjMsInJlc29sdmVfZ2VuZXJhdGlvbiI6N30sImF0dGVtcHRfaWQiOiJhdHRlbXB0LXMtZnJlc2gtMDAwMiJ9",
+          "expected": {
+            "kind": "PREPARED",
+            "lineage_id": "22222222-3333-4444-8555-666666666666",
+            "resolve_generation": 7
+          },
+          "new_attempt": true,
+          "never_retickets_attempt_id": "attempt-s-stale-0001"
+        }
+      ]
+    },
+    {
+      "id": "S04_concurrent_open_pre_adoption",
+      "name": "concurrent scope.open linearizes before adoption and returns the complete old row",
+      "steps": [
+        {
+          "kind": "scope.open",
+          "linearization": "before_adoption",
+          "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiJ9",
+          "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjMsImxpbmVhZ2VfaWQiOiIzMzMzMzMzMy00NDQ0LTQ1NTUtODY2Ni03Nzc3Nzc3Nzc3NzciLCJyZXNvbHZlX2dlbmVyYXRpb24iOjYsImNyZWF0ZWQiOmZhbHNlfX19"
+        },
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V35"
+        }
+      ]
+    },
+    {
+      "id": "S05_concurrent_open_post_adoption",
+      "name": "concurrent scope.open linearizes after adoption and returns the complete rebound row",
+      "steps": [
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V35"
+        },
+        {
+          "kind": "scope.open",
+          "linearization": "after_adoption",
+          "request_bytes_base64": "eyJvcCI6InNjb3BlLm9wZW4iLCJQIjoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiJ9",
+          "expected_bytes_base64": "eyJzY29wZS5vcGVuIjp7InJlc3VsdCI6eyJraW5kIjoiT1BFTkVEIiwiaW5jYXJuYXRpb24iOjMsImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJyZXNvbHZlX2dlbmVyYXRpb24iOjcsImNyZWF0ZWQiOmZhbHNlfX19"
+        }
+      ]
+    },
+    {
+      "id": "S06_capacity_upload_survives_adoption",
+      "name": "scope-keyed capacity upload neither occupies the placeholder nor loses usability after adoption",
+      "steps": [
+        {
+          "kind": "capacity.begin",
+          "state": "live",
+          "scope_key": {
+            "P": "session-successor-0001",
+            "agent": "agent-main",
+            "incarnation": 3
+          },
+          "ticket": null
+        },
+        {
+          "kind": "redeem_vector",
+          "vector_id": "V42"
+        },
+        {
+          "kind": "capacity.check",
+          "expected": "CHECKED",
+          "lineage_id_after": "22222222-3333-4444-8555-666666666666",
+          "upload_still_usable": true
+        }
+      ]
+    }
+  ],
+  "negative_vectors": [
+    {
+      "id": "N01_lineage_adopted_from_null",
+      "name": "present null lineage_adopted_from is malformed",
+      "response_bytes_base64": "eyJyZWRlZW0iOnsicmVzdWx0Ijp7ImtpbmQiOiJSRURFRU1FRCIsInJlY2VpcHRfaWQiOiIwZjVjMmQ3ZS0xMjM0LTRhYmMtOGRlZi0wMTIzNDU2Nzg5YWIiLCJlZGdlIjp7ImVkZ2VfaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJwcmVkZWNlc3Nvcl9rZXkiOiJzZXNzaW9uLXByZWRlY2Vzc29yLTAwMDEiLCJzdWNjZXNzb3Jfa2V5Ijoic2Vzc2lvbi1zdWNjZXNzb3ItMDAwMSIsImFnZW50IjoiYWdlbnQtbWFpbiIsIkYiOnsiZGlnZXN0IjoiODI3M2RkNTAwMTI3NWUwNzE5OTdmODJhNGQ0Njc0NGQ2NDNiNWFlNTg3NDhiNTg1MmQzZDA1ZTIwNDE4OTEwMyIsIm5vcm1hbGl6YXRpb25fdmVyc2lvbiI6MSwiZXhjbHVkZWRfYWRkaXRpb25zIjpbXX0sImxpbmVhZ2VfaWQiOiIyMjIyMjIyMi0zMzMzLTQ0NDQtODU1NS02NjY2NjY2NjY2NjYiLCJjb250aW51YXRpb25faWRlbnRpdHkiOnsicmVjZWlwdF9pZCI6IjBmNWMyZDdlLTEyMzQtNGFiYy04ZGVmLTAxMjM0NTY3ODlhYiIsInJlY29nbml0aW9uX3Rva2VuIjoiYWFpc2VtMmVrdnRocGNlenZrNXEifSwibmF0aXZlX2NvbnRpbnVhdGlvbl9pZGVudGl0eSI6eyJtaWQiOiJtaWQtc3VjY2Vzc29yLXVzZXItMDAwMSIsImluZGV4IjowLCJvcmRpbmFsIjoxOTQwfX0sImV4aXN0aW5nIjpmYWxzZSwiZmVuY2VfZ2VuZXJhdGlvbiI6MTIsImxpbmVhZ2VfYWRvcHRlZF9mcm9tIjpudWxsfX19",
+      "rejected_field": "lineage_adopted_from"
+    }
+  ]
 }
