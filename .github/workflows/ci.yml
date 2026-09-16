@@ -474,12 +474,16 @@ jobs:
           owner: cortexkit
           repositories: subconscious,commons
 
+      # actions/checkout refuses a path outside $GITHUB_WORKSPACE (the scheduled drift
+      # run failed on exactly that), so the siblings land inside the workspace and are
+      # linked to the ../ paths the Rust workspace and the hermetic harness expect.
+      # Same shape as release.yml.
       - name: Check out commons
         uses: actions/checkout@v5
         with:
           repository: cortexkit/commons
           token: ${{ steps.cortexkit-ci-token.outputs.token }}
-          path: ../commons
+          path: .siblings/commons
           persist-credentials: false
 
       - name: Check out subconscious
@@ -487,8 +491,17 @@ jobs:
         with:
           repository: cortexkit/subconscious
           token: ${{ steps.cortexkit-ci-token.outputs.token }}
-          path: ../subconscious
+          path: .siblings/subconscious
           persist-credentials: false
+
+      - name: Link siblings at the expected relative paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -sfn "$GITHUB_WORKSPACE/.siblings/commons" "$GITHUB_WORKSPACE/../commons"
+          ln -sfn "$GITHUB_WORKSPACE/.siblings/subconscious" "$GITHUB_WORKSPACE/../subconscious"
+          test -f "$GITHUB_WORKSPACE/../commons/Cargo.toml"
+          test -f "$GITHUB_WORKSPACE/../subconscious/Cargo.lock"
 
       - name: Record private sibling revisions
         shell: bash
