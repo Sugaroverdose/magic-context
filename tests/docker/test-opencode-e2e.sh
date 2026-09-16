@@ -232,6 +232,11 @@ if [[ -f "$DB_PATH" ]]; then
     # Empty tables mean the turn died before persist (qemu timeout). When any
     # row exists, the set of labels must be exactly opencode — opencode2 here
     # is the v1 setup() lock that shipped in 0.42.4/5.
+    # Native CI runners finish the turn; only the qemu-emulated local run may
+    # legitimately stop before persist, so in CI an empty table is a failure.
+    if [[ -n "${CI:-}" ]]; then
+        check "session_meta persisted at least one row" "test \"$SESSION_META_ANY\" -gt 0"
+    fi
     if [[ "$SESSION_META_ANY" -gt 0 ]]; then
         check "session_meta DISTINCT harness is exactly opencode" \
             "test \"$SESSION_META_HARNESSES\" = \"opencode\""

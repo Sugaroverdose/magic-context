@@ -10,12 +10,17 @@ import { startUpdateChecks } from "./hooks/update-check";
  * v1 host that finds `setup` on it must not run the v2 lane: locking the
  * harness to "opencode2" there mis-tags every row that seat writes.
  *
- * Proven against the shipped OpenCode 1.18.30 binary: the host calls
- * `server()` first, then `setup(context)` with keys
- * `[options, agent, aisdk, catalog, command, integration, plugin, reference,
- * skill]` and no `session`. `registerContext` then throws on
- * `context.session.hook` and the host swallows it, leaving the harness
- * locked to "opencode2" for the rest of the v1 process.
+ * Proven against the shipped OpenCode 1.18.30 binary and traced to source at
+ * tag v1.18.31: the v1 loader (`packages/opencode/src/plugin/index.ts`) calls
+ * `server()`, and independently the bundled core external-plugin layer
+ * (`packages/core/src/plugin/promise.ts:90`) adopts any module whose default
+ * export matches `{ id, setup }` (`core/src/config/plugin/external.ts:15-30`)
+ * and calls `setup(context)` with the 1.18-era v2 host surface
+ * (`core/src/plugin/host.ts:30-208`): keys `[options, agent, aisdk, catalog,
+ * command, integration, plugin, reference, skill]`, no `session`.
+ * `registerContext` then throws on `context.session.hook`; that layer discards
+ * the failure with `Effect.ignoreCause`, so nothing surfaced while the harness
+ * stayed locked to "opencode2" for the rest of the v1 process.
  */
 export function isOpenCode2HostContext(context: unknown): context is V2Context {
     if (typeof context !== "object" || context === null) return false;
