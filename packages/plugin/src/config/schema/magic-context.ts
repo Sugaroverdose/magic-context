@@ -18,6 +18,11 @@ export const EXECUTE_THRESHOLD_CAP_MESSAGE =
 export const DEFAULT_HISTORIAN_TIMEOUT_MS = 600_000;
 export const DEFAULT_HISTORY_BUDGET_PERCENTAGE = 0.15;
 
+// Minimum absolute token floor for protected_tokens. Kept as a named constant so
+// the schema's `.min()` and the loader's below-minimum warning share ONE source
+// of truth — the loader must not duplicate the literal 4000.
+export const PROTECTED_TOKENS_MIN = 4000;
+
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 
 // Re-exported from the (DB-free) task registry so the schema and the runtime
@@ -1160,7 +1165,7 @@ export const MagicContextConfigSchema = z
         protected_tokens: z
             .number()
             .int()
-            .min(4000)
+            .min(PROTECTED_TOKENS_MIN)
             .max(1_000_000)
             .optional()
             .describe(
