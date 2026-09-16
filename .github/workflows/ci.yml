@@ -546,5 +546,12 @@ jobs:
       - name: Build OpenCode plugin
         run: bun run --cwd packages/plugin build
 
+      # The hermetic manifest includes Pi-mode suites that load the Pi dist;
+      # local checkouts always carry it from build:dists, fresh CI checkouts
+      # never do (release.yml learned this on its first live run; this leg
+      # learned it on its first manual dispatch).
+      - name: Build Pi plugin
+        run: bun run --cwd packages/pi-plugin build
+
       - name: Build ck-subc and ckdev-mc-e2e, then run Rust hermetic e2e
         run: scripts/run-rust-hermetic-e2e.sh
