@@ -522,7 +522,9 @@ pub enum ModelRequest {
         predecessor_key: String,
         agent: String,
     },
-    #[serde(rename = "attempt.ticket")]
+    // R48: the nine original lineage operations are tagged on the wire by their
+    // short names; `attempt.ticket` is the clause-3 label of this one.
+    #[serde(rename = "ticket")]
     AttemptTicket {
         #[serde(rename = "P")]
         predecessor_key: String,
@@ -552,7 +554,7 @@ pub enum ModelRequest {
         ingress: IngressEvidence,
         budget: Box<PrepareBudgetEvidence>,
     },
-    #[serde(rename = "attempt.resolve")]
+    #[serde(rename = "resolve")]
     AttemptResolve {
         #[serde(rename = "P")]
         predecessor_key: String,
@@ -567,7 +569,7 @@ pub enum ModelRequest {
         #[serde(default)]
         admission_ticket: Option<AdmissionTicket>,
     },
-    #[serde(rename = "lineage.begin")]
+    #[serde(rename = "begin")]
     LineageBegin {
         attempt: AttemptKey,
         ticket: AdmissionTicket,
@@ -609,8 +611,34 @@ pub enum ModelRequest {
 }
 
 impl ModelRequest {
-    /// The operation name this request carries, which is also the key of the
-    /// clause-3a response envelope.
+    /// Decode one request envelope from its wire bytes.
+    ///
+    /// The wire grammar carries the nine original lineage operations under short
+    /// discriminators (`ticket`, `prepare`, `resolve`, `redeem`, `release`,
+    /// `cancel`, `begin`, `put`, `finish`). The dotted `attempt.ticket`,
+    /// `attempt.resolve` and `lineage.begin` spellings are operation LABELS and
+    /// are refused on the wire, with no alias and no dual acceptance. The
+    /// capacity family and `scope.open` were pinned with dotted discriminators
+    /// and keep them. Ruling R48.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice::<Self>(bytes).map_err(|error| {
+            let reason = error.to_string();
+            if reason.starts_with("unknown variant") {
+                format!(
+                    "{reason}; R48: the nine original lineage operations travel under their short \
+                     wire discriminators, while capacity.* and scope.open keep the dotted \
+                     discriminators they were pinned with"
+                )
+            } else {
+                reason
+            }
+        })
+    }
+
+    /// The clause-3 operation LABEL this request carries, which is also the key
+    /// of the clause-3a response envelope. For the nine original operations the
+    /// label and the wire discriminator differ: a request decoded from
+    /// `{"op":"begin"}` is labelled `lineage.begin` (R48).
     pub fn op(&self) -> &'static str {
         match self {
             Self::ScopeOpen { .. } => "scope.open",

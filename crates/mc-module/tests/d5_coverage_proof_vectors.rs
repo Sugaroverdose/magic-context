@@ -2160,13 +2160,13 @@ fn d5_coverage_vectors_agree_with_owner_authored_table() {
         ),
         (
             "redeem-vectors-v1.json",
-            193_657,
-            "375269db9386eb302e48866d79232f553ccd30e5b10aed729236e99158648ed2",
+            193_597,
+            "db275c52ad7d89d36350a0387061fba688d024ab31e7a1c73f9ba2b70c6e3f00",
         ),
         (
             "README.md",
-            14_030,
-            "beda6e38444ccdbdf757ea05b4ae147c118a07a659040a8e159d22297a6d339a",
+            14_623,
+            "31a79d3ce9fa23479a03b0e498a770111b0612a2101c834faf53e11906e9ba5a",
         ),
     ];
     for (path, size, digest) in expected_unchanged {
