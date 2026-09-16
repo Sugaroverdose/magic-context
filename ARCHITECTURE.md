@@ -161,7 +161,7 @@ Timestamp columns in the fresh-install schema (`storage-db.ts`) are stamped in *
 | session_facts | updated_at | epoch ms | `Date.now()` (`compartment-storage.ts`) | ✅ |
 | primer_candidates | created_at | epoch ms | `Date.now()` default; caller `candidate.createdAt` honored (`storage-primers.ts`) | ✅ |
 | primers | created_at | epoch ms | `Date.now()` default; caller `input.now` honored (`storage-primers.ts`) | ✅ |
-| primers | updated_at | epoch ms | `Date.now()` default; caller `input.now` honored (`storage-primers.ts`) | ✅ |
+| primers | updated_at | epoch ms | `Date.now()` default; caller `input.now` / `refreshedAt` honored (`storage-primers.ts`) | ✅ |
 | synapse_batch_ledger | created_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
 | synapse_batch_ledger | updated_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
 | embedding_measurement_corpus | created_at | epoch ms | `Date.now()` (`storage-embedding-measurements.ts`) | ✅ |
