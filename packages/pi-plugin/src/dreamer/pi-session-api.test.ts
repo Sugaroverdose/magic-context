@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
@@ -136,21 +137,25 @@ describe("loadDefaultPiSessionApi", () => {
 			]);
 		});
 
-		it("loads the OMP package through the final bare-import fallback", async () => {
-			mock.module(OMP_SPEC, () => ({
-				SessionManager: { listAll: async () => ["omp-bare-import"] },
-			}));
-			try {
-				const ompLoader = defaultLoaders.find(
+		it("loads the OMP package through the final bare-import fallback", () => {
+			const resolverUrl = new URL("./pi-session-api.ts", import.meta.url).href;
+			const script = `
+				import { mock } from "bun:test";
+				mock.module(${JSON.stringify(OMP_SPEC)}, () => ({
+					SessionManager: { listAll: async () => ["omp-bare-import"] },
+				}));
+				const resolver = await import(${JSON.stringify(resolverUrl)});
+				const ompLoader = resolver.defaultLoaders.find(
 					(loader) => loader.name === "Bare import (OMP)",
 				);
 				if (!ompLoader) throw new Error("OMP bare-import loader missing");
-				const api = await loadDefaultPiSessionApi([ompLoader]);
-				expect(await api.listSessions()).toEqual(["omp-bare-import"]);
-			} finally {
-				mock.restore();
-				clearCachedModule();
-			}
+				const api = await resolver.loadDefaultPiSessionApi([ompLoader]);
+				process.stdout.write(JSON.stringify(await api.listSessions()));
+			`;
+			const output = execFileSync(process.execPath, ["-e", script], {
+				encoding: "utf8",
+			});
+			expect(JSON.parse(output)).toEqual(["omp-bare-import"]);
 		});
 
 		it("resolves through a bin-shim symlink when argv[1] is the shim path", async () => {
@@ -251,6 +256,28 @@ describe("loadDefaultPiSessionApi", () => {
 				clearCachedModule();
 				const api = await loadDefaultPiSessionApi([defaultLoaders[0]]);
 				expect(await api.listSessions()).toEqual(["running-omp-source"]);
+			});
+		}, 30000);
+
+		it("maps a TypeScript dist export to its source counterpart before importing", async () => {
+			const dir = createTestTempDir("omp-typescript-dist-").dir;
+			const pkgRoot = join(dir, "pi-coding-agent");
+			writeFixturePackage(pkgRoot, {
+				manifest: {
+					name: OMP_SPEC,
+					exports: { ".": { import: "./dist/index.mts" } },
+				},
+				files: {
+					"src/cli.ts": "// OMP source entry\n",
+					"src/index.mts": fixtureModule("fresh-typescript-source"),
+					"dist/index.mts": fixtureModule("stale-typescript-dist"),
+				},
+			});
+
+			await withArgv1(join(pkgRoot, "src", "cli.ts"), async () => {
+				clearCachedModule();
+				const api = await loadDefaultPiSessionApi([defaultLoaders[0]]);
+				expect(await api.listSessions()).toEqual(["fresh-typescript-source"]);
 			});
 		}, 30000);
 

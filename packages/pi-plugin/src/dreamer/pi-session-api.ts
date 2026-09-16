@@ -274,12 +274,16 @@ export const defaultLoaders: ModuleLoader[] = [
 			// stale build output and fall through to the next loader.
 			if (TS_ENTRY_PATTERN.test(entry)) {
 				// Some source-distributed hosts (notably OMP) declare a TypeScript
-				// export directly. That entry already matches the running source tree;
-				// only build-output targets need the dist-to-src mapping below.
-				if (TS_ENTRY_PATTERN.test(entryPath) && existsSync(entryPath)) {
+				// export directly. Build-output targets still map to their source
+				// counterpart first so stale dist files can never win.
+				const srcEntry = toSourceEntry(entryPath, found.dir);
+				if (
+					!srcEntry &&
+					TS_ENTRY_PATTERN.test(entryPath) &&
+					existsSync(entryPath)
+				) {
 					return await import(pathToFileURL(entryPath).href);
 				}
-				const srcEntry = toSourceEntry(entryPath, found.dir);
 				if (srcEntry && existsSync(srcEntry)) {
 					return await import(pathToFileURL(srcEntry).href);
 				}
